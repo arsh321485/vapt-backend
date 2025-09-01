@@ -15,8 +15,8 @@
 # python-dotenv>=1.0.0
 
 # Core Django packages
-Django==3.2.25
-djongo==1.3.6
+Django==4.2.16
+djongo==1.3.7.dev
 
 # Database
 pymongo==3.12.3
