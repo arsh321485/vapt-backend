@@ -15,8 +15,12 @@ RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 DEBUG = os.getenv("DEBUG", "True") == "True"
+<<<<<<< HEAD
 ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 DEBUG = False  # Make sure this is True for local dev
+=======
+ALLOWED_HOSTS = ['.onrender.com', 'localhost', '127.0.0.1']
+>>>>>>> 9f06ac14d7884333042d562098d17a7c3d580a7c
 
 # Optional: separate flag for reCAPTCHA testing
 RECAPTCHA_SKIP = DEBUG
@@ -159,5 +163,8 @@ LOGGING = {
         },
     },
 }
+<<<<<<< HEAD
 
 
+=======
+>>>>>>> 9f06ac14d7884333042d562098d17a7c3d580a7c
