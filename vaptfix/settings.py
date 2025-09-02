@@ -7,10 +7,19 @@ from dotenv import load_dotenv
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# MongoDB URL
+MONGO_DB_URL = os.getenv("MONGO_DB_URL")
+
+
+RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
+
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 DEBUG = os.getenv("DEBUG", "True") == "True"
 ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+DEBUG = False  # Make sure this is True for local dev
 
+# Optional: separate flag for reCAPTCHA testing
+RECAPTCHA_SKIP = DEBUG
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -20,11 +29,12 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework_simplejwt",
-    # "rest_framework_simplejwt.token_blacklist",
+
     "corsheaders",
     "users",
     "location",
     "users_details",
+    "risk_criteria"
 ]
 
 MIDDLEWARE = [
@@ -63,11 +73,8 @@ DATABASES = {
         'ENGINE': 'djongo',
         'NAME': 'vaptfix',
         'CLIENT': {
+            # 'host': MONGO_DB_URL,
             'host': 'mongodb+srv://arshmittal740:ARSHMITTAL12@cluster0.9cj3n.mongodb.net/',
-            # Add authentication if needed
-            # 'username': 'your_username',
-            # 'password': 'your_password',
-            # 'authSource': 'admin',
         }
     }
 }
@@ -85,8 +92,8 @@ AUTH_PASSWORD_VALIDATORS = [
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
+    "ROTATE_REFRESH_TOKENS": False,
+    "BLACKLIST_AFTER_ROTATION": False,
     "ALGORITHM": "HS256",
     "SIGNING_KEY": SECRET_KEY,
     "AUTH_HEADER_TYPES": ("Bearer",),
@@ -130,6 +137,7 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+
 # Logging configuration
 LOGGING = {
     'version': 1,
@@ -151,3 +159,5 @@ LOGGING = {
         },
     },
 }
+
+

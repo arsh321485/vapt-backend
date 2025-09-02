@@ -10,6 +10,7 @@ from .views import (
     SendPasswordResetEmailView,
     UserPasswordResetView,
     logout_view,
+    SetPasswordView,
 )
 
 app_name = 'users'
@@ -28,6 +29,7 @@ urlpatterns = [
     path('change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('forgot-password/', SendPasswordResetEmailView.as_view(), name='forgot-password'),
     path('reset-password/<uid>/<token>/', UserPasswordResetView.as_view(), name='reset-password'),
+    path("set-password/", SetPasswordView.as_view(), name="set-password"),
     
     # Token Management
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
