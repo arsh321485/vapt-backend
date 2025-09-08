@@ -16,7 +16,10 @@ RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 DEBUG = os.getenv("DEBUG", "True") == "True"
 ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com']
-DEBUG = False  # Make sure this is True for local dev
+# Google OAuth Settings
+GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "727499952932-0v6984jl4eg37ak60d4851vkbkf0itb7.apps.googleusercontent.com")
+GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "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")
+# DEBUG = False  # Make sure this is True for local dev
 
 # Optional: separate flag for reCAPTCHA testing
 RECAPTCHA_SKIP = DEBUG
