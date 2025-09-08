@@ -59,15 +59,6 @@ class UserDetailUpdateView(generics.UpdateAPIView):
         return get_object_or_404(UserDetail, _id=obj_id)
 
 
-# class UserDetailDeleteView(generics.DestroyAPIView):
-#     permission_classes = [permissions.IsAuthenticated]
-
-#     def get_object(self):
-#         detail_id = self.kwargs.get("detail_id")
-#         obj_id = ObjectId(detail_id)
-#         return get_object_or_404(UserDetail, _id=obj_id)
-
-
 class UserDetailDeleteView(generics.DestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 

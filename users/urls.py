@@ -11,6 +11,7 @@ from .views import (
     UserPasswordResetView,
     logout_view,
     SetPasswordView,
+    GoogleOAuthView,
 )
 
 app_name = 'users'
@@ -19,6 +20,7 @@ urlpatterns = [
     # Authentication
     path('signup/', UserRegistrationView.as_view(), name='signup'),
     path('login/', UserLoginView.as_view(), name='login'),
+    path('google-oauth/', GoogleOAuthView.as_view(), name='google-oauth'),
     path('logout/', logout_view, name='logout'),
     
     # Profile Management
