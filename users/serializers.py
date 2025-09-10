@@ -7,6 +7,7 @@ from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.forms import ValidationError
 from .models import User
 from .utils import Util, verify_recaptcha
+from typing import Optional
 import logging
 logger = logging.getLogger(__name__)
 from django.contrib.auth import get_user_model
