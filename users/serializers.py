@@ -318,7 +318,7 @@ class GoogleOAuthSerializer(serializers.Serializer):
             raise serializers.ValidationError("Provide either access_token or id_token")
         return attrs
 
-    def get_google_user_data(self, *, access_token: str | None = None, id_token: str | None = None):
+    def get_google_user_data(self, *, access_token: Optional[str] = None, id_token: Optional[str] = None):
         """
         Retrieve Google user info using either an OAuth access_token or an ID token.
         - access_token: calls Google UserInfo endpoint
