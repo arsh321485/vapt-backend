@@ -38,7 +38,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             "email",
             "password",
             "confirm_password",
-            "recaptcha"  
+            "recaptcha"  # <-- must include it here!
         ]
         extra_kwargs = {
             "password": {"write_only": True},
