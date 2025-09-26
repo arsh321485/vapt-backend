@@ -74,3 +74,5 @@ def verify_recaptcha(recaptcha_response):
         logger.error(f"reCAPTCHA verification error: {str(e)}")
         return False, "reCAPTCHA verification failed"
     
+
+
