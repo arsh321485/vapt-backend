@@ -21,6 +21,11 @@ GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "727499952932-0v6
 GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "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")
 # DEBUG = False  # Make sure this is True for local dev
 
+# Microsoft Teams OAuth Settings (Add these after Google OAuth settings)
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "your-microsoft-client-id")
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "your-microsoft-client-secret")
+MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common") 
+
 # Optional: separate flag for reCAPTCHA testing
 RECAPTCHA_SKIP = DEBUG
 INSTALLED_APPS = [
@@ -116,12 +121,61 @@ DEFAULT_FROM_EMAIL = "arshmittal740@gmail.com"
 # Expose API key for utils.py
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
-FRONTEND_URL = "http://localhost:3000"
+FRONTEND_URL = "http://localhost:3000",
+
+
+# Microsoft OAuth URLs (tenant-specific)
+MICROSOFT_AUTH_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
+MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
+
+# Required scopes
+MICROSOFT_SCOPES = [
+    'https://graph.microsoft.com/User.Read',
+    'https://graph.microsoft.com/User.ReadBasic.All',       
+    'https://graph.microsoft.com/Team.ReadBasic.All',
+    'https://graph.microsoft.com/Team.Create',             
+    'https://graph.microsoft.com/Channel.Create',           
+    'https://graph.microsoft.com/Channel.ReadWrite.All',    
+    'https://graph.microsoft.com/Channel.Delete.All',      
+    'https://graph.microsoft.com/ChannelMessage.Send',      
+    'https://graph.microsoft.com/Group.ReadWrite.All',     
+    'https://graph.microsoft.com/TeamMember.ReadWrite.All', 
+    'https://graph.microsoft.com/ChannelMember.ReadWrite.All',
+    'https://graph.microsoft.com/Directory.ReadWrite.All',  
+    'offline_access'
+]
+# Slack OAuth Settings
+SLACK_CLIENT_ID = os.getenv("SLACK_CLIENT_ID", "your-slack-client-id")
+SLACK_CLIENT_SECRET = os.getenv("SLACK_CLIENT_SECRET", "your-slack-client-secret")
+SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "your-slack-signing-secret")
+
+# Slack OAuth URLs
+SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
+SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+# Slack API scopes
+SLACK_SCOPES = [
+    'channels:read',           # View basic information about public channels
+    'channels:write',          # Create and manage channels
+    'chat:write',             # Send messages as your app
+    'users:read',             # View people in a workspace
+    'users:read.email',       # View email addresses of people
+    'groups:read',            # View basic information about private channels
+    'groups:write',           # Create and manage private channels
+    'im:read',                # View basic information about direct messages
+    'im:write',               # Start direct messages with people
+    'mpim:read',              # View basic information about group direct messages
+    'mpim:write',             # Start group direct messages
+    'team:read',              # View the name, email domain, and icon for workspaces
+]
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://vapt-backend.onrender.com",
+    "https://login.microsoftonline.com",
+    "https://graph.microsoft.com",
+    "https://slack.com",              # Add Slack
+    "https://api.slack.com",  
 ]
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # Allow all origins in development

@@ -7,6 +7,7 @@ from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.forms import ValidationError
 from .models import User
 from .utils import Util, verify_recaptcha
+import re
 import logging
 logger = logging.getLogger(__name__)
 from django.contrib.auth import get_user_model
@@ -37,7 +38,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             "email",
             "password",
             "confirm_password",
-            "recaptcha"  # <-- must include it here!
+            "recaptcha"  
         ]
         extra_kwargs = {
             "password": {"write_only": True},
@@ -399,3 +400,372 @@ class GoogleOAuthSerializer(serializers.Serializer):
 
             logger.info(f"New user created via Google OAuth: {email}")
             return user
+        
+        
+        
+class MicrosoftTeamsOAuthSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    
+    def validate_access_token(self, value):
+        """Validate Microsoft access token"""
+        if not value:
+            raise serializers.ValidationError("Access token is required")
+        return value
+
+    def get_microsoft_user_data(self, access_token):
+        """Retrieve Microsoft user info using access token via Microsoft Graph API"""
+        try:
+            graph_url = "https://graph.microsoft.com/v1.0/me"
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            response = requests.get(graph_url, headers=headers, timeout=10)
+            
+            if response.status_code != 200:
+                logger.error(f"Microsoft Graph API error: {response.status_code} - {response.text}")
+                raise serializers.ValidationError("Invalid Microsoft access token")
+            
+            user_data = response.json()
+            logger.info(f"Microsoft user data received: {user_data.get('mail', 'No email')}")
+            
+            # Map Microsoft Graph response to our format
+            mapped_data = {
+                "email": user_data.get("mail") or user_data.get("userPrincipalName"),
+                "given_name": user_data.get("givenName", ""),
+                "family_name": user_data.get("surname", ""),
+                "display_name": user_data.get("displayName", ""),
+                "id": user_data.get("id", ""),
+            }
+            
+            if not mapped_data["email"]:
+                raise serializers.ValidationError("Email not found in Microsoft profile")
+                
+            return mapped_data
+            
+        except requests.RequestException as e:
+            logger.error(f"Microsoft Graph API request failed: {str(e)}")
+            raise serializers.ValidationError("Failed to validate Microsoft token")
+        except serializers.ValidationError:
+            raise
+        except Exception as e:
+            logger.error(f"Microsoft token validation error: {str(e)}")
+            raise serializers.ValidationError("Invalid Microsoft token")
+
+    def create_or_get_user(self, microsoft_user_data):
+        """Create or get user from Microsoft data"""
+        email = microsoft_user_data['email']
+        
+        try:
+            user = User.objects.get(email=email)
+            logger.info(f"Existing user found: {email}")
+            return user
+            
+        except User.DoesNotExist:
+            user = User.objects.create_user(
+                email=email,
+                firstname=microsoft_user_data.get('given_name', ''),
+                lastname=microsoft_user_data.get('family_name', ''),
+                password=None
+            )
+            user.set_unusable_password()
+            user.save()
+            
+            logger.info(f"New user created via Microsoft OAuth: {email}")
+            return user
+
+# Other serializers remain the same...
+class CreateChannelSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_id = serializers.CharField(required=True)
+    channel_name = serializers.CharField(required=True, max_length=50)
+    description = serializers.CharField(required=False, allow_blank=True, max_length=1024)
+    
+    def validate_channel_name(self, value):
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError("Channel name must be at least 2 characters long")
+        return value.strip()
+    
+class UpdateChannelSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_id = serializers.CharField(required=True)
+    channel_id = serializers.CharField(required=True)
+    channel_name = serializers.CharField(required=False, max_length=50)
+    description = serializers.CharField(required=False, allow_blank=True, max_length=1024)
+    
+    def validate(self, data):
+        if not data.get('channel_name') and not data.get('description'):
+            raise serializers.ValidationError("At least one field (channel_name or description) must be provided for update")
+        return data
+    
+    def validate_channel_name(self, value):
+        if value and len(value.strip()) < 2:
+            raise serializers.ValidationError("Channel name must be at least 2 characters long")
+        return value.strip() if value else value
+
+class DeleteChannelSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_id = serializers.CharField(required=True)
+    channel_id = serializers.CharField(required=True)
+
+class SendMessageSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_id = serializers.CharField(required=True)
+    channel_id = serializers.CharField(required=True)
+    message = serializers.CharField(required=True, max_length=4000)
+    
+    def validate_message(self, value):
+        if len(value.strip()) < 1:
+            raise serializers.ValidationError("Message cannot be empty")
+        return value.strip()
+
+class ListTeamsSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+
+class ListChannelsSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_id = serializers.CharField(required=True)
+    
+class CreateTeamSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_name = serializers.CharField(required=True, max_length=100)
+    description = serializers.CharField(required=False, allow_blank=True, max_length=1024)
+    visibility = serializers.ChoiceField(choices=['Private', 'Public'], default='Private')
+    
+    def validate_team_name(self, value):
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError("Team name must be at least 2 characters long")
+        return value.strip()
+    
+
+class UpdateTeamSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_id = serializers.CharField(required=True)
+    team_name = serializers.CharField(required=False, max_length=100)
+    description = serializers.CharField(required=False, allow_blank=True, max_length=1024)
+    visibility = serializers.ChoiceField(choices=['Private', 'Public'], required=False)
+    
+    def validate(self, data):
+        if not any([data.get('team_name'), data.get('description'), data.get('visibility')]):
+            raise serializers.ValidationError("At least one field must be provided for update")
+        return data
+    
+    def validate_team_name(self, value):
+        if value and len(value.strip()) < 2:
+            raise serializers.ValidationError("Team name must be at least 2 characters long")
+        return value.strip() if value else value
+
+class DeleteTeamSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_id = serializers.CharField(required=True)
+
+class AddUserToChannelSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    team_id = serializers.CharField(required=True)
+    channel_id = serializers.CharField(required=True)
+    user_email = serializers.EmailField(required=True)
+    user_role = serializers.ChoiceField(choices=['owner', 'member'], default='member')
+    
+    def validate_user_email(self, value):
+        if not value:
+            raise serializers.ValidationError("User email is required")
+        return value.lower()
+    
+
+class SlackTokenValidationSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True, help_text="Slack access token to validate")
+class SlackMessageSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True, help_text="Slack access token")
+    channel = serializers.CharField(required=True, help_text="Channel ID or name (e.g., #general, C1234567890)")
+    text = serializers.CharField(required=True, help_text="Message text content")
+    blocks = serializers.JSONField(
+        required=False, 
+        help_text="Slack Block Kit blocks for rich formatting"
+    )
+
+
+class SlackOAuthSerializer(serializers.Serializer):
+    code = serializers.CharField(required=True, help_text="Authorization code from Slack")
+    redirect_uri = serializers.URLField(
+        required=False, 
+        default="http://localhost:3000/slack/callback",
+        help_text="Redirect URI used in OAuth flow"
+    )
+
+
+class SlackTokenValidationSerializer(serializers.Serializer):
+    access_token = serializers.CharField(
+        required=True, 
+        help_text="Slack access token to validate",
+        min_length=10
+    )
+    
+    def validate_access_token(self, value):
+        """Validate Slack token format"""
+        if not value.startswith(('xoxb-', 'xoxp-', 'xoxa-')):
+            raise serializers.ValidationError(
+                "Invalid Slack token format. Token should start with xoxb-, xoxp-, or xoxa-"
+            )
+        return value
+
+
+class SlackUserLoginResponseSerializer(serializers.Serializer):
+    """Serializer for documenting the login response structure"""
+    access_token = serializers.CharField()
+    token_type = serializers.CharField(default="Bearer")
+    scope = serializers.CharField()
+    team = serializers.DictField()
+    user = serializers.DictField()
+
+class SlackOperationSerializer(serializers.Serializer):
+    access_token = serializers.CharField(
+        required=True, 
+        help_text="Slack access token"
+    )
+    
+    def validate_access_token(self, value):
+        """Validate Slack token format"""
+        if not value.startswith(('xoxb-', 'xoxp-', 'xoxa-')):
+            raise serializers.ValidationError(
+                "Invalid Slack token format"
+            )
+        return value
+
+class SlackLoginSerializer(serializers.Serializer):
+    code = serializers.CharField(
+        required=True, 
+        help_text="Authorization code received from Slack OAuth callback",
+        min_length=10
+    )
+    redirect_uri = serializers.URLField(
+        required=False, 
+        default="http://localhost:3000/slack/callback",
+        help_text="Redirect URI that was used in the OAuth flow"
+    )
+    
+    def validate_code(self, value):
+        """Basic validation for OAuth code format"""
+        if len(value) < 10:
+            raise serializers.ValidationError(
+                "Invalid authorization code format"
+            )
+        return value
+
+
+class SlackChannelListSerializer(serializers.Serializer):
+    access_token = serializers.CharField(
+        required=True, 
+        help_text="Slack access token"
+    )
+    exclude_archived = serializers.BooleanField(
+        default=True,
+        help_text="Whether to exclude archived channels"
+    )
+    types = serializers.CharField(
+        default="public_channel,private_channel",
+        help_text="Comma-separated list of channel types to include"
+    )
+    limit = serializers.IntegerField(
+        default=100,
+        min_value=1,
+        max_value=1000,
+        help_text="Maximum number of channels to return"
+    )
+    
+    def validate_access_token(self, value):
+        if not value.startswith(('xoxb-', 'xoxp-', 'xoxa-')):
+            raise serializers.ValidationError("Invalid Slack token format")
+        return value
+    
+    def validate_types(self, value):
+        """Validate channel types"""
+        valid_types = [
+            'public_channel', 'private_channel', 'mpim', 'im'
+        ]
+        types_list = [t.strip() for t in value.split(',')]
+        for channel_type in types_list:
+            if channel_type not in valid_types:
+                raise serializers.ValidationError(
+                    f"Invalid channel type: {channel_type}. "
+                    f"Valid types are: {', '.join(valid_types)}"
+                )
+        return value
+
+
+class CreateSlackChannelSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    name = serializers.CharField(required=True)
+    is_private = serializers.BooleanField(required=False, default=False)
+
+
+
+class UpdateSlackChannelSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True, help_text="Slack access token")
+    channel_id = serializers.CharField(required=True, help_text="Slack channel ID")
+    name = serializers.CharField(required=True, help_text="New channel name")
+
+
+
+class DeleteSlackChannelSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True)
+    channel_id = serializers.CharField(required=True)
+
+
+
+class SlackInteractiveMessageSerializer(serializers.Serializer):
+    access_token = serializers.CharField(
+        required=True, 
+        help_text="Slack access token"
+    )
+    channel = serializers.CharField(
+        required=True, 
+        help_text="Channel ID or name"
+    )
+    text = serializers.CharField(
+        default="Interactive message",
+        help_text="Fallback text for the message"
+    )
+    blocks = serializers.JSONField(
+        required=True,
+        help_text="Slack Block Kit blocks for interactive elements"
+    )
+    
+    def validate_access_token(self, value):
+        if not value.startswith(('xoxb-', 'xoxp-', 'xoxa-')):
+            raise serializers.ValidationError("Invalid Slack token format")
+        return value
+    
+    def validate_blocks(self, value):
+        """Basic validation for blocks structure"""
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Blocks must be a list")
+        if len(value) == 0:
+            raise serializers.ValidationError("At least one block is required")
+        return value
+
+
+
+class AddUserToSlackChannelSerializer(serializers.Serializer):
+    access_token = serializers.CharField(
+        required=True,
+        help_text="Slack access token (Bot User OAuth Token, e.g., xoxb-...)"
+    )
+    channel = serializers.CharField(
+        required=True,
+        help_text="Slack channel ID (e.g., C1234567890)"
+    )
+    user_id = serializers.CharField(
+        required=True,
+        help_text="Slack user ID to invite (e.g., U1234567890)"
+    )
+    
+
+class SlackInviteUserSerializer(serializers.Serializer):
+    access_token = serializers.CharField(required=True, help_text="Slack Bot/User token")
+    channel = serializers.CharField(required=True, help_text="Slack channel ID (e.g., C1234567890)")
+    users = serializers.ListField(
+        child=serializers.CharField(),
+        required=True,
+        help_text="List of Slack User IDs (e.g., ['U12345', 'U67890'])"
+    )
