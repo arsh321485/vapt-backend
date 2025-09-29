@@ -6,6 +6,7 @@ from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.forms import ValidationError
 from .models import User
+from typing import Optional
 from .utils import Util, verify_recaptcha
 import re
 import logging
@@ -318,8 +319,10 @@ class GoogleOAuthSerializer(serializers.Serializer):
         if not attrs.get("access_token") and not attrs.get("id_token"):
             raise serializers.ValidationError("Provide either access_token or id_token")
         return attrs
+    # def get_google_user_data(self, *, access_token: Optional[str] = None, id_token: Optional[str] = None):
+    def get_google_user_data(self, *, access_token: Optional[str] = None, id_token: Optional[str] = None):
 
-    def get_google_user_data(self, *, access_token: str | None = None, id_token: str | None = None):
+    # def get_google_user_data(self, *, access_token: str | None = None, id_token: str | None = None):
         """
         Retrieve Google user info using either an OAuth access_token or an ID token.
         - access_token: calls Google UserInfo endpoint
