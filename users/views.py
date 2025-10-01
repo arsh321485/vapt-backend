@@ -256,7 +256,7 @@ class SendPasswordResetEmailView(generics.GenericAPIView):
             uid = urlsafe_base64_encode(force_bytes(user.pk))  # This will use the UUID id
             token = PasswordResetTokenGenerator().make_token(user)
 
-            reset_link = f"https://vapt-frontend-liart.vercel.app/reset-password/{uid}/{token}/"
+            reset_link = f"https://vapt-frontend-liart.vercel.app/set-password/{uid}/{token}/"
 
             data = {
                 "to_email": user_email,
