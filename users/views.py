@@ -382,6 +382,7 @@ class GoogleOAuthView(generics.GenericAPIView):
             
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class MicrosoftTeamsOAuthView(generics.GenericAPIView):
     serializer_class = MicrosoftTeamsOAuthSerializer
     permission_classes = [AllowAny]
@@ -418,6 +419,7 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                 "error": "Microsoft Teams authentication failed. Please try again."
             }, status=status.HTTP_400_BAD_REQUEST)
 
+@method_decorator(csrf_exempt, name='dispatch')
 class CreateTeamsChannelView(generics.GenericAPIView):
     serializer_class = CreateChannelSerializer
     permission_classes = [IsAuthenticated]
@@ -535,6 +537,7 @@ class CreateTeamsChannelView(generics.GenericAPIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # Other views remain similar with enhanced error handling...
+@method_decorator(csrf_exempt, name='dispatch')
 class SendTeamsMessageView(generics.GenericAPIView):
     serializer_class = SendMessageSerializer
     permission_classes = [IsAuthenticated]
@@ -598,6 +601,7 @@ class SendTeamsMessageView(generics.GenericAPIView):
                 "error": "Failed to send message. Please try again."
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@method_decorator(csrf_exempt, name='dispatch')
 class ListTeamsView(generics.GenericAPIView):
     serializer_class = ListTeamsSerializer
     permission_classes = [IsAuthenticated]
@@ -652,6 +656,7 @@ class ListTeamsView(generics.GenericAPIView):
                 "error": "Failed to fetch teams. Please try again."
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@method_decorator(csrf_exempt, name='dispatch')
 class ListChannelsView(generics.GenericAPIView):
     serializer_class = ListChannelsSerializer
     permission_classes = [IsAuthenticated]
@@ -707,6 +712,7 @@ class ListChannelsView(generics.GenericAPIView):
                 "error": "Failed to fetch channels. Please try again."
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
+@method_decorator(csrf_exempt, name='dispatch')
 class CreateTeamView(generics.GenericAPIView):
     serializer_class = CreateTeamSerializer
     permission_classes = [IsAuthenticated]
@@ -961,6 +967,7 @@ class CreateTeamView(generics.GenericAPIView):
             return Response({
                 "error": f"Failed to create team: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+@method_decorator(csrf_exempt, name='dispatch')
 class AddUserToChannelView(generics.GenericAPIView):
     serializer_class = AddUserToChannelSerializer
     permission_classes = [IsAuthenticated]
@@ -1117,6 +1124,7 @@ class AddUserToChannelView(generics.GenericAPIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
             
+@method_decorator(csrf_exempt, name='dispatch')
 class UpdateChannelView(generics.GenericAPIView):
     serializer_class = UpdateChannelSerializer
     permission_classes = [IsAuthenticated]
@@ -1188,6 +1196,7 @@ class UpdateChannelView(generics.GenericAPIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class DeleteChannelView(generics.GenericAPIView):
     serializer_class = DeleteChannelSerializer
     permission_classes = [IsAuthenticated]
@@ -1261,6 +1270,7 @@ class DeleteChannelView(generics.GenericAPIView):
                 "error": f"Failed to delete channel: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@method_decorator(csrf_exempt, name='dispatch')
 class UpdateTeamView(generics.GenericAPIView):
     serializer_class = UpdateTeamSerializer
     permission_classes = [IsAuthenticated]
@@ -1500,6 +1510,7 @@ class UpdateTeamView(generics.GenericAPIView):
             return Response({
                 "error": f"Failed to update team: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+@method_decorator(csrf_exempt, name='dispatch')
 class DeleteTeamView(generics.GenericAPIView):
     serializer_class = DeleteTeamSerializer
     permission_classes = [IsAuthenticated]
