@@ -22,8 +22,8 @@ class LocationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Location
-        fields = ['_id', 'admin_id', 'firstname', 'location_name', 'created_at', 'updated_at']
-        read_only_fields = ['_id', 'admin_id', 'firstname', 'created_at', 'updated_at']
+        fields = ['_id', 'admin_id', 'admin_name', 'location_name', 'created_at', 'updated_at']
+        read_only_fields = ['_id', 'admin_id', 'admin_name', 'created_at', 'updated_at']
 class LocationCreateSerializer(serializers.ModelSerializer):
     admin_id = serializers.CharField(write_only=True)
     
