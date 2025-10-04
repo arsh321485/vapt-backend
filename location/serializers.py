@@ -7,15 +7,23 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
-class LocationSerializer(serializers.ModelSerializer):
-    admin_id = serializers.CharField(source='admin.id', read_only=True)
+# class LocationSerializer(serializers.ModelSerializer):
+#     admin_id = serializers.CharField(source='admin.id', read_only=True)
     
+#     class Meta:
+#         model = Location
+#         fields = ['_id', 'admin_id', 'location_name', 'created_at', 'updated_at']
+#         read_only_fields = ['_id', 'admin_id', 'created_at', 'updated_at']
+
+class LocationSerializer(serializers.ModelSerializer):
+    """Serializer for listing locations"""
+    admin_id = serializers.CharField(source='admin.id', read_only=True)
+    admin_name = serializers.CharField(source='admin.username', read_only=True)  # optional: show admin name
+
     class Meta:
         model = Location
-        fields = ['_id', 'admin_id', 'location_name', 'created_at', 'updated_at']
-        read_only_fields = ['_id', 'admin_id', 'created_at', 'updated_at']
-
-
+        fields = ['_id', 'admin_id', 'firstname', 'location_name', 'created_at', 'updated_at']
+        read_only_fields = ['_id', 'admin_id', 'firstname', 'created_at', 'updated_at']
 class LocationCreateSerializer(serializers.ModelSerializer):
     admin_id = serializers.CharField(write_only=True)
     

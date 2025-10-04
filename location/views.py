@@ -141,3 +141,30 @@ class LocationDeleteView(generics.DestroyAPIView):
             "message": "Location deleted successfully"
         }, status=status.HTTP_200_OK)
         
+        
+class LocationListByAdminView(generics.ListAPIView):
+    """List all locations for a specific admin"""
+    serializer_class = LocationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        admin_id = self.kwargs.get('admin_id')  # get admin_id from URL
+        return Location.objects.filter(admin__id=admin_id).order_by('-created_at')
+
+    def list(self, request, *args, **kwargs):
+        try:
+            queryset = self.get_queryset()
+            serializer = self.get_serializer(queryset, many=True)
+
+            return Response({
+                "message": "Locations retrieved successfully",
+                "count": len(serializer.data),
+                "locations": serializer.data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Location list error: {str(e)}")
+            return Response({
+                "error": "Failed to retrieve locations"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
