@@ -5,6 +5,7 @@ from .views import (
     LocationDetailView,
     LocationUpdateView,
     LocationDeleteView,
+    LocationListByAdminView,
 )
 
 app_name = 'location'
@@ -16,5 +17,6 @@ urlpatterns = [
     path('locations/<str:location_id>/', LocationDetailView.as_view(), name='location-detail'),
     path('locations/<str:location_id>/update/', LocationUpdateView.as_view(), name='location-update'),
     path('locations/<str:location_id>/delete/', LocationDeleteView.as_view(), name='location-delete'),
+    path('locations/admin/<str:admin_id>/', LocationListByAdminView.as_view(), name='location-list-by-admin'),
 ]
 
