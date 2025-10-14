@@ -15,7 +15,7 @@ RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 DEBUG = os.getenv("DEBUG", "True") == "True"
-ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com','808d3a4404a9.ngrok-free.app']
 # Google OAuth Settings
 GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "727499952932-0v6984jl4eg37ak60d4851vkbkf0itb7.apps.googleusercontent.com")
 GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "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")
@@ -25,6 +25,12 @@ GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "GOCSPX-N
 MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "your-microsoft-client-id")
 MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "your-microsoft-client-secret")
 MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common") 
+# MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:3000")
+MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+
+
+
 
 # Optional: separate flag for reCAPTCHA testing
 RECAPTCHA_SKIP = DEBUG
@@ -125,8 +131,8 @@ FRONTEND_URL = "http://localhost:3000",
 
 
 # Microsoft OAuth URLs (tenant-specific)
-MICROSOFT_AUTH_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
-MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
+# MICROSOFT_AUTH_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
+# MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
 
 # Required scopes
 MICROSOFT_SCOPES = [
@@ -168,14 +174,41 @@ SLACK_SCOPES = [
     'team:read',              # View the name, email domain, and icon for workspaces
 ]
 
+# JIRA OAuth Settings
+JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "your-jira-client-id")
+JIRA_CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET", "your-jira-client-secret")
+JIRA_REDIRECT_URI = os.getenv("JIRA_REDIRECT_URI", "http://localhost:8000/api/admin/users/jira/callback/")
+
+# JIRA OAuth URLs
+JIRA_AUTH_URL = "https://auth.atlassian.com/authorize"
+JIRA_TOKEN_URL = "https://auth.atlassian.com/oauth/token"
+JIRA_API_URL = "https://api.atlassian.com"
+
+# JIRA OAuth Scopes
+JIRA_SCOPES = [
+    'read:jira-user',
+    'read:jira-work',
+    'write:jira-work',
+    'manage:jira-project',
+    'manage:jira-configuration',
+    'read:me'
+    
+]
+
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://vapt-backend.onrender.com",
     "https://login.microsoftonline.com",
     "https://graph.microsoft.com",
-    "https://slack.com",              # Add Slack
+    "https://slack.com",              
     "https://api.slack.com",  
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:5502",
+    "http://127.0.0.1:5502",
+    "https://auth.atlassian.com",  
+    "https://api.atlassian.com",
 ]
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # Allow all origins in development

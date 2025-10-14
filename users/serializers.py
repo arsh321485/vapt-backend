@@ -7,12 +7,16 @@ from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.forms import ValidationError
 from .models import User
 from typing import Optional
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status, permissions
 from .utils import Util, verify_recaptcha
 import re
 import logging
 logger = logging.getLogger(__name__)
 from django.contrib.auth import get_user_model
 import requests
+import secrets
 from django.conf import settings
 from .utils import verify_recaptcha
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -404,8 +408,7 @@ class GoogleOAuthSerializer(serializers.Serializer):
             logger.info(f"New user created via Google OAuth: {email}")
             return user
         
-        
-        
+
 class MicrosoftTeamsOAuthSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=True)
     
@@ -772,3 +775,118 @@ class SlackInviteUserSerializer(serializers.Serializer):
         required=True,
         help_text="List of Slack User IDs (e.g., ['U12345', 'U67890'])"
     )
+    
+
+
+class JiraOAuthSerializer(serializers.Serializer):
+    code = serializers.CharField(required=True)
+    state = serializers.CharField(required=False)
+
+class JiraOAuthUrlSerializer(serializers.Serializer):
+    auth_url = serializers.URLField()
+    state = serializers.CharField()
+
+class JiraTokenSerializer(serializers.Serializer):
+    access_token = serializers.CharField()
+    refresh_token = serializers.CharField()
+    expires_in = serializers.IntegerField()
+    scope = serializers.CharField()
+
+class JiraUserSerializer(serializers.Serializer):
+    account_id = serializers.CharField()
+    email = serializers.EmailField()
+    name = serializers.CharField()
+    picture = serializers.URLField(required=False)
+
+class JiraIssueSerializer(serializers.Serializer):
+    project_key = serializers.CharField(required=True)
+    summary = serializers.CharField(required=True)
+    description = serializers.CharField(required=False, allow_blank=True)
+    issue_type = serializers.CharField(default="Task")
+    priority = serializers.CharField(required=False, default="Medium")
+
+class JiraProjectSerializer(serializers.Serializer):
+    id = serializers.CharField()
+    key = serializers.CharField()
+    name = serializers.CharField()
+    project_type = serializers.CharField()
+
+class JiraCommentSerializer(serializers.Serializer):
+    issue_key = serializers.CharField(required=True)
+    comment = serializers.CharField(required=True)
+    
+
+
+# -----------------------------------------------
+# 🧱 ISSUE CRUD SERIALIZERS
+# -----------------------------------------------
+class JiraIssueCreateSerializer(serializers.Serializer):
+    project_key = serializers.CharField(max_length=10)
+    summary = serializers.CharField(max_length=255)
+    description = serializers.CharField(allow_blank=True, required=False)
+    issue_type = serializers.CharField(default="Task")
+
+    def validate_project_key(self, value):
+        if not value.isupper():
+            raise serializers.ValidationError("Project key must be uppercase, e.g. 'PROJ'")
+        return value
+
+
+class JiraIssueUpdateSerializer(serializers.Serializer):
+    summary = serializers.CharField(required=False, max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True)
+    issue_type = serializers.CharField(required=False)
+    project_key = serializers.CharField(required=False)
+
+
+class JiraIssueSearchSerializer(serializers.Serializer):
+    jql = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Optional JQL string. Default: 'order by created DESC'"
+    )
+
+
+class JiraAssignIssueSerializer(serializers.Serializer):
+    account_id = serializers.CharField(required=True, help_text="Jira Account ID of user to assign issue to")
+
+
+# -----------------------------------------------
+# 🧱 PROJECT CRUD SERIALIZERS
+# -----------------------------------------------
+class JiraProjectCreateSerializer(serializers.Serializer):
+    key = serializers.CharField(max_length=10)
+    name = serializers.CharField(max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True)
+    projectTypeKey = serializers.CharField(default="software")
+    projectTemplateKey = serializers.CharField(
+        required=False,
+        default="com.pyxis.greenhopper.jira:gh-simplified-agility-scrum"
+    )
+    leadAccountId = serializers.CharField(required=True)
+    assigneeType = serializers.CharField(default="PROJECT_LEAD")
+
+    def validate_key(self, value):
+        if not value.isupper():
+            raise serializers.ValidationError("Project key must be uppercase letters only.")
+        if len(value) > 10:
+            raise serializers.ValidationError("Project key must be 10 characters or fewer.")
+        return value
+
+
+class JiraProjectUpdateSerializer(serializers.Serializer):
+    name = serializers.CharField(required=False, max_length=255)
+    description = serializers.CharField(required=False, allow_blank=True)
+    leadAccountId = serializers.CharField(required=False)
+
+
+class JiraProjectDeleteSerializer(serializers.Serializer):
+    confirm = serializers.BooleanField(default=True, help_text="Confirmation flag for deletion")
+
+
+# -----------------------------------------------
+# 🧱 COMMON SERIALIZER RESPONSE WRAPPERS
+# -----------------------------------------------
+class JiraResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    detail = serializers.JSONField(required=False)
