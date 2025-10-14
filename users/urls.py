@@ -12,6 +12,8 @@ from .views import (
     logout_view,
     SetPasswordView,
     GoogleOAuthView,
+    MicrosoftTeamsOAuthUrlView,
+    MicrosoftTeamsCallbackView,
     MicrosoftTeamsOAuthView, 
     CreateTeamsChannelView,
     SendTeamsMessageView,
@@ -39,6 +41,24 @@ from .views import (
     AddUserToSlackChannelView,
     SlackUserListView,
     SlackInviteUserView,
+    JiraOAuthUrlView,
+    JiraOAuthCallbackView,
+    JiraOAuthView,
+    JiraValidateTokenView,
+    JiraGetUserView,
+    JiraGetResourcesView,
+    JiraAddCommentView,
+    JiraCreateIssueView, 
+    JiraGetIssueView, 
+    JiraUpdateIssueView,
+    JiraDeleteIssueView,  
+    JiraSearchIssuesView,
+    JiraAssignIssueView,
+    JiraListProjectsView,
+    JiraCreateProjectView
+    # JiraGetProjectView,
+    # JiraUpdateProjectView,
+    # JiraDeleteProjectView,
 )
 
 app_name = 'users'
@@ -48,7 +68,7 @@ urlpatterns = [
     path('signup/', UserRegistrationView.as_view(), name='signup'),
     path('login/', UserLoginView.as_view(), name='login'),
     path('google-oauth/', GoogleOAuthView.as_view(), name='google-oauth'),
-    path('microsoft-teams-oauth/', MicrosoftTeamsOAuthView.as_view(), name='microsoft-teams-oauth'),  # Add this line
+    # path('microsoft-teams-oauth/', MicrosoftTeamsOAuthView.as_view(), name='microsoft-teams-oauth'),
     path('logout/', logout_view, name='logout'),
     
     # Profile Management
@@ -65,7 +85,10 @@ urlpatterns = [
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     
     
-    # Microsoft  APIs    
+    # Microsoft  APIs   
+    path('microsoft-teams/oauth-url/', MicrosoftTeamsOAuthUrlView.as_view(), name='microsoft-teams-oauth-url'),
+    path('microsoft-teams/callback/', MicrosoftTeamsCallbackView.as_view(), name='microsoft-teams-callback'),
+    path('microsoft-teams-oauth/', MicrosoftTeamsOAuthView.as_view(), name='microsoft-teams-oauth'), #login
     path('teams/create/', CreateTeamView.as_view(), name='create-team'),
     path('teams/update/', UpdateTeamView.as_view(), name='update-team'),              
     path('teams/delete/', DeleteTeamView.as_view(), name='delete-team'),              
@@ -101,4 +124,28 @@ urlpatterns = [
     path('slack/channel/add-user/', AddUserToSlackChannelView.as_view(), name='slack-add-user'),
     path("slack/users/list/", SlackUserListView.as_view(), name="slack-users-list"),
     path("slack/channel/invite/", SlackInviteUserView.as_view(), name="slack-invite-user"),
+    
+    
+    path('jira/oauth-url/', JiraOAuthUrlView.as_view(), name='jira-oauth-url'),
+    path('jira/callback/', JiraOAuthCallbackView.as_view(), name='jira-callback'),
+    path('jira/oauth/', JiraOAuthView.as_view(), name='jira-oauth'),
+    path('jira/validate-token/', JiraValidateTokenView.as_view(), name='jira-validate-token'),
+    path('jira/user/', JiraGetUserView.as_view(), name='jira-get-user'),
+    path('jira/resources/', JiraGetResourcesView.as_view(), name='jira-resources'),
+    path('jira/projects/', JiraListProjectsView.as_view(), name='jira-list-projects'),
+    path('jira/issues/comment/', JiraAddCommentView.as_view(), name='jira-add-comment'),
+    
+    path('jira/issues/create/', JiraCreateIssueView.as_view()),
+    path('jira/issues/<str:issue_key>/', JiraGetIssueView.as_view()),
+    path('jira/issues/<str:issue_key>/update/', JiraUpdateIssueView.as_view()),
+    path('jira/issues/<str:issue_key>/delete/', JiraDeleteIssueView.as_view()),
+    path('jira/issues/search/', JiraSearchIssuesView.as_view()),
+    path('jira/issues/<str:issue_key>/assign/', JiraAssignIssueView.as_view()),
+    
+    path('jira/projects/', JiraListProjectsView.as_view(), name='jira_list_projects'),
+    path('jira/projects/create/', JiraCreateProjectView.as_view(), name='jira_create_project'),
+    # path('jira/projects/<str:project_key>/', JiraGetProjectView.as_view(), name='jira_get_project'),
+    # path('jira/projects/<str:project_key>/update/', JiraUpdateProjectView.as_view(), name='jira_update_project'),
+    # path('jira/projects/<str:project_key>/delete/', JiraDeleteProjectView.as_view(), name='jira_delete_project'),
 ]
+

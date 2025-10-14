@@ -1,11 +1,13 @@
+from datetime import timedelta
 import logging
+from time import timezone
 import requests
 import sendgrid
 from sendgrid.helpers.mail import Mail
 from django.conf import settings
+from users.models import User
 
 logger = logging.getLogger(__name__)
-
 
 class Util:
     @staticmethod
@@ -74,5 +76,67 @@ def verify_recaptcha(recaptcha_response):
         logger.error(f"reCAPTCHA verification error: {str(e)}")
         return False, "reCAPTCHA verification failed"
     
+    
+class JiraTokenManager:
+    """Manage Jira OAuth tokens stored in User model"""
 
+    @staticmethod
+    def save_token(user, access_token, refresh_token, expires_in, cloud_id, site_url, site_name, scopes):
+        """Save or update Jira token for a user"""
+        user.jira_access_token = access_token
+        user.jira_refresh_token = refresh_token
+        user.jira_token_expires_at = timezone.now() + timedelta(seconds=expires_in)
+        user.jira_cloud_id = cloud_id
+        user.jira_site_url = site_url
+        user.jira_site_name = site_name
+        user.jira_scopes = scopes
+        user.save(update_fields=[
+            'jira_access_token',
+            'jira_refresh_token',
+            'jira_token_expires_at',
+            'jira_cloud_id',
+            'jira_site_url',
+            'jira_site_name',
+            'jira_scopes'
+        ])
+        return user
 
+    @staticmethod
+    def get_token(user):
+        """Get Jira token for a user"""
+        return {
+            'access_token': user.jira_access_token,
+            'refresh_token': user.jira_refresh_token,
+            'expires_at': user.jira_token_expires_at,
+            'cloud_id': user.jira_cloud_id,
+            'site_url': user.jira_site_url,
+            'site_name': user.jira_site_name,
+            'scopes': user.jira_scopes
+        }
+
+    @staticmethod
+    def delete_token(user):
+        """Delete Jira token for a user"""
+        user.jira_access_token = None
+        user.jira_refresh_token = None
+        user.jira_token_expires_at = None
+        user.jira_cloud_id = None
+        user.jira_site_url = None
+        user.jira_site_name = None
+        user.jira_scopes = None
+        user.save(update_fields=[
+            'jira_access_token',
+            'jira_refresh_token',
+            'jira_token_expires_at',
+            'jira_cloud_id',
+            'jira_site_url',
+            'jira_site_name',
+            'jira_scopes'
+        ])
+
+    @staticmethod
+    def is_token_expired(user):
+        """Check if user's Jira token is expired"""
+        if not user.jira_token_expires_at:
+            return True
+        return timezone.now() >= user.jira_token_expires_at

@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from django.contrib.auth import login
 from .models import User
 import requests
+import secrets
 import json
 import logging
 from django.conf import settings
@@ -40,7 +41,15 @@ from .serializers import (
     DeleteSlackChannelSerializer,
     AddUserToSlackChannelSerializer,
     SlackInviteUserSerializer,
+    JiraOAuthSerializer,
+    JiraOAuthUrlSerializer,
+    JiraTokenSerializer,
+    JiraUserSerializer,
+    JiraIssueSerializer,
+    JiraProjectSerializer,
+    JiraCommentSerializer
 )
+from .utils import JiraTokenManager
 import requests
 import logging
 from django.utils.decorators import method_decorator
@@ -380,6 +389,126 @@ class GoogleOAuthView(generics.GenericAPIView):
                 "error": "Google authentication failed. Please try again."
             }, status=status.HTTP_400_BAD_REQUEST)
             
+class MicrosoftTeamsOAuthUrlView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        try:
+            # ✅ Step 1: Get redirect_uri dynamically from frontend
+            redirect_uri = request.GET.get("redirect_uri")
+            if not redirect_uri:
+                return Response(
+                    {"error": "Missing redirect_uri parameter"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # ✅ Step 2: Save redirect_uri in session (used later in callback)
+            request.session['microsoft_redirect_uri'] = redirect_uri
+
+            # ✅ Step 3: Generate OAuth state token
+            state = secrets.token_urlsafe(16)
+            request.session['microsoft_state'] = state
+
+            # ✅ Step 4: Generate Microsoft login URL dynamically
+            client_id = settings.MICROSOFT_CLIENT_ID
+            scope = (
+                "https://graph.microsoft.com/User.Read "
+                "https://graph.microsoft.com/Group.ReadWrite.All "
+                "https://graph.microsoft.com/ChannelMessage.Send "
+                "offline_access openid email profile"
+            )
+
+            auth_url = (
+                f"{settings.MICROSOFT_AUTH_URL}?"
+                f"client_id={client_id}"
+                f"&response_type=code"
+                f"&redirect_uri={redirect_uri}"
+                f"&response_mode=query"
+                f"&scope={scope}"
+                f"&state={state}"
+            )
+
+            return Response({"auth_url": auth_url}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to generate Microsoft OAuth URL: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class MicrosoftTeamsCallbackView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        try:
+            code = request.GET.get("code")
+            state = request.GET.get("state")
+
+            if not code:
+                return Response(
+                    {"error": "Authorization code not provided"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # 1️⃣ Retrieve redirect_uri dynamically from session
+            redirect_uri = request.session.get('microsoft_redirect_uri')
+            if not redirect_uri:
+                return Response(
+                    {"error": "Missing redirect_uri in session"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # 2️⃣ Validate state
+            saved_state = request.session.get('microsoft_state')
+            if saved_state and saved_state != state:
+                return Response(
+                    {"error": "Invalid state parameter"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # 3️⃣ Exchange code for access token
+            token_url = settings.MICROSOFT_TOKEN_URL
+            data = {
+                "grant_type": "authorization_code",
+                "client_id": settings.MICROSOFT_CLIENT_ID,
+                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": redirect_uri,  # 👈 dynamic URI
+            }
+
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            response = requests.post(token_url, data=data, headers=headers)
+
+            if response.status_code != 200:
+                return Response(
+                    {"error": "Failed to exchange code for token", "details": response.json()},
+                    status=response.status_code
+                )
+
+            token_data = response.json()
+            access_token = token_data.get("access_token")
+
+            # 4️⃣ Fetch Microsoft Graph user info
+            user_info = requests.get(
+                "https://graph.microsoft.com/v1.0/me",
+                headers={"Authorization": f"Bearer {access_token}"}
+            ).json()
+
+            return Response(
+                {
+                    "message": "Microsoft Teams login successful",
+                    "redirect_uri_used": redirect_uri,
+                    "user_info": user_info,
+                    "token_data": token_data
+                },
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            return Response(
+                {"error": f"Microsoft OAuth callback failed: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -2542,3 +2671,593 @@ class SlackInviteUserView(APIView):
             return Response({"success": False, "error": data.get("error")}, status=400)
 
         return Response({"success": True, "data": data}, status=200)
+    
+
+# -------------------- JIRA OAUTH CALLBACK --------------------
+class JiraOAuthCallbackView(APIView):
+    """Handle JIRA OAuth callback - exchanges authorization code for access token."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            code = request.GET.get('code')
+            state = request.GET.get('state')
+
+            if not code:
+                return Response({'error': 'Authorization code not provided'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            # Verify state (optional in dev)
+            stored_state = request.session.get('jira_oauth_state')
+            if stored_state and state != stored_state:
+                logger.warning(f"State mismatch: stored={stored_state}, received={state}")
+                # In production, enforce this check
+                # return Response({'error': 'Invalid state parameter'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Exchange code for token
+            token_data = {
+                'grant_type': 'authorization_code',
+                'client_id': settings.JIRA_CLIENT_ID,
+                'client_secret': settings.JIRA_CLIENT_SECRET,
+                'code': code,
+                'redirect_uri': settings.JIRA_REDIRECT_URI
+            }
+
+            logger.info(f"Exchanging code for token at {settings.JIRA_TOKEN_URL}")
+
+            token_response = requests.post(
+                settings.JIRA_TOKEN_URL,
+                json=token_data,
+                headers={'Content-Type': 'application/json'}
+            )
+
+            if token_response.status_code != 200:
+                logger.error(f"Token exchange failed: {token_response.text}")
+                return Response({
+                    'error': 'Failed to exchange code for token',
+                    'detail': token_response.text
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            tokens = token_response.json()
+
+            # Clean up session
+            if 'jira_oauth_state' in request.session:
+                del request.session['jira_oauth_state']
+
+            return Response({
+                'message': 'JIRA OAuth successful',
+                'access_token': tokens.get('access_token'),
+                'refresh_token': tokens.get('refresh_token', ''),
+                'expires_in': tokens.get('expires_in'),
+                'token_type': tokens.get('token_type'),
+                'scope': tokens.get('scope', '')
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("JIRA OAuth callback failed")
+            return Response({'error': 'OAuth callback failed', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- JIRA OAUTH URL --------------------
+class JiraOAuthUrlView(APIView):
+    """Generate JIRA OAuth URL"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            # Generate secure state
+            state = secrets.token_urlsafe(32)
+
+            # Store in session
+            request.session['jira_oauth_state'] = state
+            request.session.save()
+
+            params = {
+                'audience': 'api.atlassian.com',
+                'client_id': settings.JIRA_CLIENT_ID,
+                'scope': ' '.join(settings.JIRA_SCOPES),
+                'redirect_uri': settings.JIRA_REDIRECT_URI,
+                'state': state,
+                'response_type': 'code',
+                'prompt': 'consent'
+            }
+
+            auth_url = f"{settings.JIRA_AUTH_URL}?{urlencode(params)}"
+            logger.info(f"Generated JIRA OAuth URL: {auth_url}")
+
+            return Response({
+                'auth_url': auth_url,
+                'state': state,
+                'redirect_uri': settings.JIRA_REDIRECT_URI
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Failed to generate JIRA OAuth URL")
+            return Response({'error': 'Failed to generate OAuth URL', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- JIRA OAUTH EXCHANGE --------------------
+class JiraOAuthView(APIView):
+    """Exchange authorization code for access token"""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            serializer = JiraOAuthSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            code = serializer.validated_data['code']
+
+            token_data = {
+                'grant_type': 'authorization_code',
+                'client_id': settings.JIRA_CLIENT_ID,
+                'client_secret': settings.JIRA_CLIENT_SECRET,
+                'code': code,
+                'redirect_uri': settings.JIRA_REDIRECT_URI
+            }
+
+            token_response = requests.post(
+                settings.JIRA_TOKEN_URL,
+                json=token_data,
+                headers={'Content-Type': 'application/json'}
+            )
+
+            if token_response.status_code != 200:
+                return Response({
+                    'error': 'Failed to exchange code for token',
+                    'detail': token_response.text
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            tokens = token_response.json()
+
+            # Fetch user info
+            user_response = requests.get(
+                'https://api.atlassian.com/me',
+                headers={'Authorization': f"Bearer {tokens['access_token']}"}
+            )
+
+            if user_response.status_code != 200:
+                return Response({'error': 'Failed to fetch user info'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            user_data = user_response.json()
+
+            # Create or update user
+            from .models import User
+            user, created = User.objects.get_or_create(
+                email=user_data['email'],
+                defaults={
+                    'username': user_data['email'],
+                    'full_name': user_data.get('name', ''),
+                    'is_active': True,
+                    'jira_access_token': tokens['access_token'],
+                    'jira_refresh_token': tokens.get('refresh_token', '')
+                }
+            )
+
+            if not created:
+                user.jira_access_token = tokens['access_token']
+                user.jira_refresh_token = tokens.get('refresh_token', '')
+                user.save()
+
+            # Generate JWT
+            refresh = RefreshToken.for_user(user)
+
+            return Response({
+                'message': 'JIRA OAuth successful',
+                'user': {
+                    'id': str(user.id),
+                    'email': user.email,
+                    'name': user.full_name,
+                    'account_id': user_data.get('account_id', '')
+                },
+                'jira_tokens': tokens,
+                'jwt_tokens': {
+                    'refresh': str(refresh),
+                    'access': str(refresh.access_token),
+                }
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("JIRA OAuth exchange failed")
+            return Response({'error': 'OAuth failed', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- VALIDATE TOKEN --------------------
+class JiraValidateTokenView(APIView):
+    """Validate JIRA access token"""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            access_token = request.data.get('access_token')
+            if not access_token:
+                return Response({'error': 'Access token is required'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            response = requests.get(
+                'https://api.atlassian.com/me',
+                headers={'Authorization': f'Bearer {access_token}'}
+            )
+
+            if response.status_code == 200:
+                return Response({'valid': True, 'user': response.json()},
+                                status=status.HTTP_200_OK)
+            return Response({'valid': False, 'error': 'Invalid or expired token'},
+                            status=status.HTTP_401_UNAUTHORIZED)
+
+        except Exception as e:
+            logger.exception("Token validation failed")
+            return Response({'error': 'Token validation failed', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- GET JIRA USER --------------------
+class JiraGetUserView(APIView):
+    """Fetch JIRA user profile"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            if not access_token:
+                return Response({'error': 'JIRA access token is required'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            response = requests.get(
+                'https://api.atlassian.com/me',
+                headers={'Authorization': f'Bearer {access_token}'}
+            )
+
+            if response.status_code != 200:
+                return Response({'error': 'Failed to fetch user info'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({'user': response.json()}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Failed to get JIRA user info")
+            return Response({'error': 'Failed to get user info', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- LIST PROJECTS --------------------
+class JiraListProjectsView(APIView):
+    """List accessible JIRA projects"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            response = requests.get(
+                f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Accept': 'application/json'
+                }
+            )
+
+            if response.status_code != 200:
+                return Response({'error': 'Failed to fetch projects'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({'projects': response.json()}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Error listing JIRA projects")
+            return Response({'error': 'Failed to list projects', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class JiraCreateProjectView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            project_data = request.data
+            payload = {
+                "key": project_data["key"],           # 2-10 uppercase letters
+                "name": project_data["name"],
+                "projectTypeKey": project_data.get("projectTypeKey", "software"),
+                "projectTemplateKey": project_data.get(
+                    "projectTemplateKey",
+                    "com.pyxis.greenhopper.jira:gh-simplified-agility-scrum"
+                ),
+                "description": project_data.get("description", "Created via API"),
+                "leadAccountId": project_data["leadAccountId"],  # required
+                "assigneeType": "PROJECT_LEAD"
+            }
+
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project"
+            response = requests.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            return Response(response.json(), status=response.status_code)
+        except Exception as e:
+            logger.error(f"Project create failed: {str(e)}")
+            return Response({'error': str(e)}, status=500)
+
+
+# -------------------- CREATE UPDATE DELETE LIST ISSUE --------------------
+class JiraCreateIssueView(APIView):
+    """Create a JIRA issue"""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            serializer = JiraIssueSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            issue_data = {
+                'fields': {
+                    'project': {'key': serializer.validated_data['project_key']},
+                    'summary': serializer.validated_data['summary'],
+                    'description': {
+                        'type': 'doc',
+                        'version': 1,
+                        'content': [{
+                            'type': 'paragraph',
+                            'content': [{
+                                'type': 'text',
+                                'text': serializer.validated_data.get('description', '')
+                            }]
+                        }]
+                    },
+                    'issuetype': {'name': serializer.validated_data.get('issue_type', 'Task')}
+                }
+            }
+
+            response = requests.post(
+                f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue',
+                json=issue_data,
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                }
+            )
+
+            if response.status_code not in [200, 201]:
+                return Response({'error': 'Failed to create issue', 'detail': response.text},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({'message': 'Issue created', 'issue': response.json()},
+                            status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            logger.exception("Failed to create JIRA issue")
+            return Response({'error': 'Failed to create issue', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class JiraGetIssueView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, issue_key):
+        access_token = request.headers.get('Jira-Access-Token')
+        cloud_id = request.headers.get('Jira-Cloud-Id')
+
+        url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}"
+        response = requests.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json"
+            }
+        )
+
+        return Response(response.json(), status=response.status_code)
+    
+
+class JiraUpdateIssueView(APIView):
+    permission_classes = [AllowAny]
+
+    def patch(self, request, issue_key):
+        access_token = request.headers.get('Jira-Access-Token')
+        cloud_id = request.headers.get('Jira-Cloud-Id')
+        payload = {"fields": request.data}
+
+        url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}"
+        response = requests.put(
+            url,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }
+        )
+
+        return Response(
+            {"message": " Issue Update successfully" if response.status_code == 204 else response.json()},
+            status=response.status_code
+        )
+
+class JiraDeleteIssueView(APIView):
+    permission_classes = [AllowAny]
+
+    def delete(self, request, issue_key):
+        access_token = request.headers.get('Jira-Access-Token')
+        cloud_id = request.headers.get('Jira-Cloud-Id')
+
+        url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}"
+        response = requests.delete(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+
+        return Response(
+            {"message": "Issue Delete successfully" if response.status_code == 204 else response.json()},
+            status=response.status_code
+        )
+
+class JiraSearchIssuesView(APIView):
+    """Search issues via JQL"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+            jql = request.GET.get('jql', 'order by created DESC')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Missing Jira headers'}, status=400)
+
+            response = requests.get(
+                f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Accept': 'application/json'
+                },
+                params={'jql': jql}
+            )
+
+            if response.status_code != 200:
+                return Response({'error': 'Failed to search issues', 'detail': response.text}, status=400)
+
+            return Response(response.json(), status=200)
+
+        except Exception as e:
+            return Response({'error': 'Search failed', 'detail': str(e)}, status=500)
+
+
+class JiraAssignIssueView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, issue_key):
+        access_token = request.headers.get('Jira-Access-Token')
+        cloud_id = request.headers.get('Jira-Cloud-Id')
+        account_id = request.data.get('account_id')
+
+        url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/assignee"
+        payload = {"accountId": account_id}
+
+        response = requests.put(
+            url,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }
+        )
+
+        return Response(
+            {"message": "Assign successfully" if response.status_code == 204 else response.json()},
+            status=response.status_code
+        )
+
+
+# -------------------- GET RESOURCES --------------------
+class JiraGetResourcesView(APIView):
+    """Fetch accessible JIRA resources (cloud IDs)"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            if not access_token:
+                return Response({'error': 'Access token is required'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            response = requests.get(
+                'https://api.atlassian.com/oauth/token/accessible-resources',
+                headers={'Authorization': f'Bearer {access_token}'}
+            )
+
+            if response.status_code != 200:
+                return Response({'error': 'Failed to get resources'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({'resources': response.json()}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Failed to get resources")
+            return Response({'error': 'Failed to get resources', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- ADD COMMENT --------------------
+class JiraAddCommentView(APIView):
+    """Add a comment to JIRA issue"""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            serializer = JiraCommentSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            issue_key = serializer.validated_data['issue_key']
+            comment_text = serializer.validated_data['comment']
+
+            comment_data = {
+                'body': {
+                    'type': 'doc',
+                    'version': 1,
+                    'content': [{
+                        'type': 'paragraph',
+                        'content': [{
+                            'type': 'text',
+                            'text': comment_text
+                        }]
+                    }]
+                }
+            }
+
+            response = requests.post(
+                f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/comment',
+                json=comment_data,
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                }
+            )
+
+            if response.status_code not in [200, 201]:
+                return Response({'error': 'Failed to add comment', 'detail': response.text},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({'message': 'Comment added', 'comment': response.json()},
+                            status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            logger.exception("Failed to add JIRA comment")
+            return Response({'error': 'Failed to add comment', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
