@@ -1760,85 +1760,6 @@ class SlackOAuthUrlView(APIView):
             "auth_url": slack_url
         }, status=status.HTTP_200_OK)
                   
-# class SlackOAuthView(APIView):
-#     """Handle Slack OAuth authentication"""
-#     permission_classes = []
-    
-#     def post(self, request):
-#         try:
-#             auth_code = request.data.get('code')
-#             redirect_uri = request.data.get('redirect_uri', 'http://localhost:3000/slack/callback')
-            
-#             if not auth_code:
-#                 return Response({
-#                     'success': False,
-#                     'message': 'Authorization code is required'
-#                 }, status=status.HTTP_400_BAD_REQUEST)
-            
-#             # Exchange code for access token
-#             token_url = 'https://slack.com/api/oauth.v2.access'
-#             token_data = {
-#                 'client_id': settings.SLACK_CLIENT_ID,
-#                 'client_secret': settings.SLACK_CLIENT_SECRET,
-#                 'code': auth_code,
-#                 'redirect_uri': redirect_uri
-#             }
-            
-#             token_response = requests.post(token_url, data=token_data)
-#             token_result = token_response.json()
-            
-#             if not token_result.get('ok'):
-#                 logger.error(f"Slack OAuth error: {token_result}")
-#                 return Response({
-#                     'success': False,
-#                     'message': f"Slack OAuth failed: {token_result.get('error', 'Unknown error')}"
-#                 }, status=status.HTTP_400_BAD_REQUEST)
-            
-#             access_token = token_result.get('access_token')
-#             team_info = token_result.get('team', {})
-#             authed_user = token_result.get('authed_user', {})
-            
-#             # Get user info from Slack
-#             user_info_url = 'https://slack.com/api/users.identity'
-#             headers = {'Authorization': f'Bearer {access_token}'}
-#             user_response = requests.get(user_info_url, headers=headers)
-#             user_data = user_response.json()
-            
-#             if not user_data.get('ok'):
-#                 logger.error(f"Failed to get Slack user info: {user_data}")
-#                 return Response({
-#                     'success': False,
-#                     'message': 'Failed to retrieve user information from Slack'
-#                 }, status=status.HTTP_400_BAD_REQUEST)
-            
-#             # Store Slack tokens in user model or session
-#             if request.user.is_authenticated:
-#                 # Update existing user's Slack info
-#                 request.user.slack_access_token = access_token
-#                 request.user.slack_team_id = team_info.get('id')
-#                 request.user.slack_team_name = team_info.get('name')
-#                 request.user.slack_user_id = authed_user.get('id')
-#                 request.user.save()
-            
-#             return Response({
-#                 'success': True,
-#                 'message': 'Slack authentication successful',
-#                 'data': {
-#                     'access_token': access_token,
-#                     'team_name': team_info.get('name'),
-#                     'team_id': team_info.get('id'),
-#                     'user_id': authed_user.get('id'),
-#                     'user_info': user_data.get('user', {})
-#                 }
-#             }, status=status.HTTP_200_OK)
-            
-#         except Exception as e:
-#             logger.error(f"Slack OAuth error: {str(e)}")
-#             return Response({
-#                 'success': False,
-#                 'message': f'An error occurred during Slack authentication: {str(e)}'
-#             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 @method_decorator(csrf_exempt, name="dispatch")
 class SlackOAuthView(generics.GenericAPIView):
@@ -1846,6 +1767,9 @@ class SlackOAuthView(generics.GenericAPIView):
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
+        """
+        Handle Slack OAuth and dynamic redirect URI for integrations (e.g. Vue.js apps).
+        """
         try:
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
@@ -1853,14 +1777,17 @@ class SlackOAuthView(generics.GenericAPIView):
             code = serializer.validated_data.get("code")
             redirect_uri = serializer.validated_data.get("redirect_uri")
 
-            slack_user_data = serializer.get_slack_user_data(code, redirect_uri)
-            user, is_new_user = serializer.create_or_get_user(slack_user_data)
+            # Step 1: Get Slack data (tokens, user, team)
+            slack_data = serializer.get_slack_user_data(code, redirect_uri)
 
+            # Step 2: Create/get user
+            user, is_new_user = serializer.create_or_get_user(slack_data)
+
+            # Step 3: Log user in
             login(request, user)
             refresh = RefreshToken.for_user(user)
 
-            logger.info(f"Slack OAuth login successful: {user.email}")
-
+            # Step 4: Response
             return Response({
                 "message": "Slack login successful",
                 "user": UserProfileSerializer(user).data,
@@ -1868,18 +1795,32 @@ class SlackOAuthView(generics.GenericAPIView):
                     "refresh": str(refresh),
                     "access": str(refresh.access_token),
                 },
-                "access_token": code,  # Slack authorization code
+                "slack_data": {
+                    "bot_access_token": slack_data.get("bot_access_token"),
+                    "bot_user_id": slack_data.get("bot_user_id"),
+                    "team": {
+                        "id": slack_data.get("team_id"),
+                        "name": slack_data.get("team_name")
+                    },
+                    "user_access_token": slack_data.get("user_access_token"),
+                    "user_profile": {
+                        "id": slack_data.get("user_id"),
+                        "display_name": slack_data.get("display_name"),
+                        "email": slack_data.get("email"),
+                        "image": slack_data.get("image")
+                    },
+                    "redirect_uri": slack_data.get("redirect_uri")
+                },
                 "is_new_user": is_new_user
             }, status=status.HTTP_200_OK)
 
         except serializers.ValidationError as e:
-            return Response({
-                "error": str(e.detail)
-            }, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e.detail)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Slack OAuth error: {str(e)}")
             return Response({
-                "error": "Slack authentication failed. Please try again."
+                "error": "Slack authentication failed. Please try again.",
+                "details": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
 class SlackUserLoginView(APIView):
