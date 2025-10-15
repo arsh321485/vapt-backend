@@ -40,6 +40,7 @@ from .views import (
     JoinSlackChannelView,
     AddUserToSlackChannelView,
     SlackUserListView,
+    SlackUserLoginView,
     SlackInviteUserView,
     JiraOAuthUrlView,
     JiraOAuthCallbackView,

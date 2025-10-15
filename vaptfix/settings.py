@@ -25,7 +25,7 @@ GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "GOCSPX-N
 MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "your-microsoft-client-id")
 MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "your-microsoft-client-secret")
 MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common") 
-# MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:3000")
+MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:3000")
 MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 
@@ -154,6 +154,7 @@ MICROSOFT_SCOPES = [
 SLACK_CLIENT_ID = os.getenv("SLACK_CLIENT_ID", "your-slack-client-id")
 SLACK_CLIENT_SECRET = os.getenv("SLACK_CLIENT_SECRET", "your-slack-client-secret")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "your-slack-signing-secret")
+SLACK_REDIRECT_URI = os.getenv("SLACK_REDIRECT_URI", "http://localhost:3000/slack/callback")
 
 # Slack OAuth URLs
 SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
