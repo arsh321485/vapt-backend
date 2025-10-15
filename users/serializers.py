@@ -591,13 +591,107 @@ class SlackMessageSerializer(serializers.Serializer):
     )
 
 
+# class SlackOAuthSerializer(serializers.Serializer):
+#     code = serializers.CharField(required=True, help_text="Authorization code from Slack")
+#     redirect_uri = serializers.URLField(
+#         required=False, 
+#         default="http://localhost:3000/slack/callback",
+#         help_text="Redirect URI used in OAuth flow"
+#     )
+
 class SlackOAuthSerializer(serializers.Serializer):
-    code = serializers.CharField(required=True, help_text="Authorization code from Slack")
-    redirect_uri = serializers.URLField(
-        required=False, 
-        default="http://localhost:3000/slack/callback",
-        help_text="Redirect URI used in OAuth flow"
-    )
+    code = serializers.CharField(required=True)
+    redirect_uri = serializers.CharField(required=False)
+
+    def validate_code(self, value):
+        """Validate Slack authorization code"""
+        if not value:
+            raise serializers.ValidationError("Slack authorization code is required.")
+        return value
+
+    def get_slack_user_data(self, code, redirect_uri):
+        """Exchange code for tokens and fetch Slack user data"""
+        try:
+            token_url = "https://slack.com/api/oauth.v2.access"
+            token_data = {
+                "client_id": settings.SLACK_CLIENT_ID,
+                "client_secret": settings.SLACK_CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": redirect_uri or "http://localhost:3000/slack/callback"
+            }
+
+            token_response = requests.post(token_url, data=token_data)
+            token_result = token_response.json()
+
+            if not token_result.get("ok"):
+                logger.error(f"Slack OAuth failed: {token_result}")
+                raise serializers.ValidationError(f"Slack OAuth failed: {token_result.get('error', 'Unknown error')}")
+
+            # Extract user info
+            authed_user = token_result.get("authed_user", {})
+            user_token = authed_user.get("access_token")
+
+            if not user_token:
+                raise serializers.ValidationError("User access token not found in Slack response.")
+
+            # Fetch user identity
+            user_info_response = requests.get(
+                "https://slack.com/api/users.identity",
+                headers={"Authorization": f"Bearer {user_token}"},
+                timeout=10
+            )
+            user_info_data = user_info_response.json()
+
+            if not user_info_data.get("ok"):
+                raise serializers.ValidationError(f"Slack user info fetch failed: {user_info_data.get('error')}")
+
+            user = user_info_data.get("user", {})
+            email = user.get("email")
+            name = user.get("name", "")
+            image = user.get("image_192", "")
+
+            if not email:
+                raise serializers.ValidationError("Email not found in Slack user profile.")
+
+            mapped_data = {
+                "email": email,
+                "firstname": name.split(" ")[0] if name else "",
+                "lastname": " ".join(name.split(" ")[1:]) if len(name.split(" ")) > 1 else "",
+                "display_name": name,
+                "image": image,
+                "user_id": user.get("id", "")
+            }
+
+            logger.info(f"Slack user data mapped for {email}")
+            return mapped_data
+
+        except requests.RequestException as e:
+            logger.error(f"Slack API request failed: {str(e)}")
+            raise serializers.ValidationError("Failed to connect to Slack API.")
+        except Exception as e:
+            logger.error(f"Slack user fetch error: {str(e)}")
+            raise serializers.ValidationError("Slack login failed.")
+
+    def create_or_get_user(self, slack_user_data):
+        """Create or get user from Slack user data"""
+        email = slack_user_data["email"]
+
+        try:
+            user = User.objects.get(email=email)
+            logger.info(f"Existing Slack user found: {email}")
+            return user, False  # existing user
+
+        except User.DoesNotExist:
+            user = User.objects.create_user(
+                email=email,
+                firstname=slack_user_data.get("firstname", ""),
+                lastname=slack_user_data.get("lastname", ""),
+                password=None
+            )
+            user.set_unusable_password()
+            user.save()
+            logger.info(f"New user created via Slack OAuth: {email}")
+            return user, True  # new user
 
 
 class SlackTokenValidationSerializer(serializers.Serializer):
