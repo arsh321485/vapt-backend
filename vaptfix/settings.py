@@ -17,14 +17,14 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 DEBUG = os.getenv("DEBUG", "True") == "True"
 ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com','808d3a4404a9.ngrok-free.app']
 # Google OAuth Settings
-GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "727499952932-0v6984jl4eg37ak60d4851vkbkf0itb7.apps.googleusercontent.com")
-GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "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")
+GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "")
+GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "")
 # DEBUG = False  # Make sure this is True for local dev
 
 # Microsoft Teams OAuth Settings (Add these after Google OAuth settings)
-MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "cd35fdf0-6f75-41e9-8b58-a713dd7b9aeb")
-MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "AbZ8Q~RZ1Jc5xvItBptt2j1kWmpsyPm1Xt3atbyR")
-MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "d8d3c1d1-f608-4781-9aa2-3d85c0b3c24b") 
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "")
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "") 
 MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:3000")
 # MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 # MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -153,9 +153,9 @@ MICROSOFT_SCOPES = [
     'offline_access'
 ]
 # Slack OAuth Settings
-SLACK_CLIENT_ID = os.getenv("SLACK_CLIENT_ID", "9441923811621.9515115381619")
-SLACK_CLIENT_SECRET = os.getenv("SLACK_CLIENT_SECRET", "734d1eea744acfacead53e14d4038e22")
-SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "ca4d2a8f4c6d4a918a835072ca728d2a")
+SLACK_CLIENT_ID = os.getenv("SLACK_CLIENT_ID", "")
+SLACK_CLIENT_SECRET = os.getenv("SLACK_CLIENT_SECRET", "")
+SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 SLACK_REDIRECT_URI = os.getenv("SLACK_REDIRECT_URI", "http://localhost:3000/slack/callback")
 
 # Slack OAuth URLs
@@ -178,8 +178,8 @@ SLACK_SCOPES = [
 ]
 
 # JIRA OAuth Settings
-JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "2srmUAZ3OgjODEXAQmXBitsN45NsvPOZ")
-JIRA_CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET", "ATOAGxzPs24egk1o719HFK92r8eJ9FWefre6EkrXA-MxytjML4B0EcfsKk3TVi4twpjNA6EA93C7")
+JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "")
+JIRA_CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET", "")
 JIRA_REDIRECT_URI = os.getenv("JIRA_REDIRECT_URI", "http://localhost:8000/api/admin/users/jira/callback/")
 
 # JIRA OAuth URLs
