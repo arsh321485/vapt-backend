@@ -1,5 +1,6 @@
 from django.forms import ValidationError
 from .renderers import UserRenderer
+from django.http import HttpResponse, JsonResponse
 from rest_framework import status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
