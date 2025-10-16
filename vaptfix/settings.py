@@ -3,11 +3,10 @@ from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# MongoDB URL
+
 MONGO_DB_URL = os.getenv("MONGO_DB_URL")
 
 
@@ -15,26 +14,30 @@ RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 DEBUG = os.getenv("DEBUG", "True") == "True"
-ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com','808d3a4404a9.ngrok-free.app']
-# Google OAuth Settings
+
+ALLOWED_HOSTS = [host.strip() for host in """
+localhost,
+127.0.0.1,
+vapt-backend.onrender.com,
+808d3a4404a9.ngrok-free.app,
+localhost:5173
+""".split(",")]
+
+
+# ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com','808d3a4404a9.ngrok-free.app','http://localhost:5173']
+
 GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "")
 GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "")
-# DEBUG = False  # Make sure this is True for local dev
 
-# Microsoft Teams OAuth Settings (Add these after Google OAuth settings)
 MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "")
 MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "")
 MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "") 
 MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:3000")
-# MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-# MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 MICROSOFT_AUTH_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
 MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
 
 
 
-
-# Optional: separate flag for reCAPTCHA testing
 RECAPTCHA_SKIP = DEBUG
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -89,7 +92,6 @@ DATABASES = {
         'ENGINE': 'djongo',
         'NAME': 'vaptfix',
         'CLIENT': {
-            # 'host': MONGO_DB_URL,
             'host': 'mongodb+srv://arshmittal740:ARSHMITTAL12@cluster0.9cj3n.mongodb.net/',
         }
     }
@@ -104,7 +106,7 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-# Updated JWT configuration for UUID primary key
+
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
@@ -113,11 +115,11 @@ SIMPLE_JWT = {
     "ALGORITHM": "HS256",
     "SIGNING_KEY": SECRET_KEY,
     "AUTH_HEADER_TYPES": ("Bearer",),
-    "USER_ID_FIELD": "id",        # Changed from "_id" to "id"
+    "USER_ID_FIELD": "id",      
     "USER_ID_CLAIM": "user_id",
 }
 
-# EMAIL CONFIG (SendGrid)
+
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = "smtp.sendgrid.net"
 EMAIL_PORT = 587
@@ -126,17 +128,11 @@ EMAIL_HOST_USER = "apikey"
 EMAIL_HOST_PASSWORD = os.getenv("SENDGRID_API_KEY") 
 DEFAULT_FROM_EMAIL = "arshmittal740@gmail.com"
 
-# Expose API key for utils.py
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 FRONTEND_URL = "http://localhost:3000",
 
 
-# Microsoft OAuth URLs (tenant-specific)
-# MICROSOFT_AUTH_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
-# MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
-
-# Required scopes
 MICROSOFT_SCOPES = [
     'https://graph.microsoft.com/User.Read',
     'https://graph.microsoft.com/User.ReadBasic.All',       
@@ -152,42 +148,40 @@ MICROSOFT_SCOPES = [
     'https://graph.microsoft.com/Directory.ReadWrite.All',  
     'offline_access'
 ]
-# Slack OAuth Settings
+
 SLACK_CLIENT_ID = os.getenv("SLACK_CLIENT_ID", "")
 SLACK_CLIENT_SECRET = os.getenv("SLACK_CLIENT_SECRET", "")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 SLACK_REDIRECT_URI = os.getenv("SLACK_REDIRECT_URI", "http://localhost:3000/slack/callback")
 
-# Slack OAuth URLs
 SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
-# Slack API scopes
+
 SLACK_SCOPES = [
-    'channels:read',           # View basic information about public channels
-    'channels:write',          # Create and manage channels
-    'chat:write',             # Send messages as your app
-    'users:read',             # View people in a workspace
-    'users:read.email',       # View email addresses of people
-    'groups:read',            # View basic information about private channels
-    'groups:write',           # Create and manage private channels
-    'im:read',                # View basic information about direct messages
-    'im:write',               # Start direct messages with people
-    'mpim:read',              # View basic information about group direct messages
-    'mpim:write',             # Start group direct messages
-    'team:read',              # View the name, email domain, and icon for workspaces
+    'channels:read',           
+    'channels:write',       
+    'chat:write',             
+    'users:read',            
+    'users:read.email',     
+    'groups:read',            
+    'groups:write',           
+    'im:read',                
+    'im:write',               
+    'mpim:read',             
+    'mpim:write',           
+    'team:read',              
 ]
 
-# JIRA OAuth Settings
 JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "")
 JIRA_CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET", "")
 JIRA_REDIRECT_URI = os.getenv("JIRA_REDIRECT_URI", "http://localhost:8000/api/admin/users/jira/callback/")
 
-# JIRA OAuth URLs
+
 JIRA_AUTH_URL = "https://auth.atlassian.com/authorize"
 JIRA_TOKEN_URL = "https://auth.atlassian.com/oauth/token"
 JIRA_API_URL = "https://api.atlassian.com"
 
-# JIRA OAuth Scopes
+
 JIRA_SCOPES = [
     'read:jira-user',
     'read:jira-work',
@@ -198,23 +192,42 @@ JIRA_SCOPES = [
     
 ]
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://vapt-backend.onrender.com",
-    "https://login.microsoftonline.com",
-    "https://graph.microsoft.com",
-    "https://slack.com",              
-    "https://api.slack.com",  
-    "http://localhost:8000",
-    "http://127.0.0.1:8000",
-    "http://localhost:5502",
-    "http://127.0.0.1:5502",
-    "https://auth.atlassian.com",  
-    "https://api.atlassian.com",
-]
+# CORS_ALLOWED_ORIGINS = [
+#     "http://localhost:3000",
+#     "http://127.0.0.1:3000",
+#     "https://vapt-backend.onrender.com",
+#     "https://login.microsoftonline.com",
+#     "https://graph.microsoft.com",
+#     "https://slack.com",              
+#     "https://api.slack.com",  
+#     "http://localhost:8000",
+#     "http://127.0.0.1:8000",
+#     "http://localhost:5502",
+#     "http://127.0.0.1:5502",
+#     "https://auth.atlassian.com",  
+#     "https://api.atlassian.com",
+#     "http://localhost:5173",
+# ]
 
-CORS_ALLOW_ALL_ORIGINS = DEBUG  # Allow all origins in development
+CORS_ALLOWED_ORIGINS = [origin.strip() for origin in """
+http://localhost:3000,
+http://127.0.0.1:3000,
+https://vapt-backend.onrender.com,
+https://login.microsoftonline.com,
+https://graph.microsoft.com,
+https://slack.com,
+https://api.slack.com,
+http://localhost:8000,
+http://127.0.0.1:8000,
+http://localhost:5502,
+http://127.0.0.1:5502,
+https://auth.atlassian.com,
+https://api.atlassian.com,
+http://localhost:5173
+""".split(",")]
+
+
+CORS_ALLOW_ALL_ORIGINS = DEBUG  
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -232,7 +245,6 @@ MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
-# Logging configuration
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
