@@ -390,27 +390,25 @@ class GoogleOAuthView(generics.GenericAPIView):
                 "error": "Google authentication failed. Please try again."
             }, status=status.HTTP_400_BAD_REQUEST)
             
+import base64
+import json
+
 class MicrosoftTeamsOAuthUrlView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
         try:
-            # ✅ Step 1: Get redirect_uri dynamically from frontend
             redirect_uri = request.GET.get("redirect_uri")
             if not redirect_uri:
-                return Response(
-                    {"error": "Missing redirect_uri parameter"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({"error": "Missing redirect_uri parameter"}, status=400)
 
-            # ✅ Step 2: Save redirect_uri in session (used later in callback)
-            request.session['microsoft_redirect_uri'] = redirect_uri
+            # ✅ Combine state + redirect_uri into one base64-encoded value
+            state_data = {
+                "redirect_uri": redirect_uri,
+                "nonce": secrets.token_urlsafe(8),
+            }
+            state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
 
-            # ✅ Step 3: Generate OAuth state token
-            state = secrets.token_urlsafe(16)
-            request.session['microsoft_state'] = state
-
-            # ✅ Step 4: Generate Microsoft login URL dynamically
             client_id = settings.MICROSOFT_CLIENT_ID
             scope = (
                 "https://graph.microsoft.com/User.Read "
@@ -429,13 +427,10 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 f"&state={state}"
             )
 
-            return Response({"auth_url": auth_url}, status=status.HTTP_200_OK)
-
+            return Response({"auth_url": auth_url})
         except Exception as e:
-            return Response(
-                {"error": f"Failed to generate Microsoft OAuth URL: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response({"error": str(e)}, status=500)
+
 
 class MicrosoftTeamsCallbackView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -446,70 +441,58 @@ class MicrosoftTeamsCallbackView(APIView):
             state = request.GET.get("state")
 
             if not code:
-                return Response(
-                    {"error": "Authorization code not provided"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({"error": "Authorization code not provided"}, status=400)
 
-            # 1️⃣ Retrieve redirect_uri dynamically from session
-            redirect_uri = request.session.get('microsoft_redirect_uri')
+            if not state:
+                return Response({"error": "Missing state parameter"}, status=400)
+
+            # ✅ Decode redirect_uri from state
+            import base64, json
+            try:
+                state_json = json.loads(base64.urlsafe_b64decode(state + "==").decode())
+                redirect_uri = state_json.get("redirect_uri")
+            except Exception:
+                redirect_uri = None
+
             if not redirect_uri:
-                return Response(
-                    {"error": "Missing redirect_uri in session"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({"error": "Missing redirect_uri in state"}, status=400)
 
-            # 2️⃣ Validate state
-            saved_state = request.session.get('microsoft_state')
-            if saved_state and saved_state != state:
-                return Response(
-                    {"error": "Invalid state parameter"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # 3️⃣ Exchange code for access token
+            # 🔁 Exchange code for token
             token_url = settings.MICROSOFT_TOKEN_URL
             data = {
                 "grant_type": "authorization_code",
                 "client_id": settings.MICROSOFT_CLIENT_ID,
                 "client_secret": settings.MICROSOFT_CLIENT_SECRET,
                 "code": code,
-                "redirect_uri": redirect_uri,  # 👈 dynamic URI
+                "redirect_uri": redirect_uri,
             }
-
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
             response = requests.post(token_url, data=data, headers=headers)
 
             if response.status_code != 200:
                 return Response(
-                    {"error": "Failed to exchange code for token", "details": response.json()},
-                    status=response.status_code
+                    {"error": "Token exchange failed", "details": response.json()},
+                    status=response.status_code,
                 )
 
             token_data = response.json()
             access_token = token_data.get("access_token")
 
-            # 4️⃣ Fetch Microsoft Graph user info
             user_info = requests.get(
                 "https://graph.microsoft.com/v1.0/me",
                 headers={"Authorization": f"Bearer {access_token}"}
             ).json()
 
-            return Response(
-                {
-                    "message": "Microsoft Teams login successful",
-                    "redirect_uri_used": redirect_uri,
-                    "user_info": user_info,
-                    "token_data": token_data
-                },
-                status=status.HTTP_200_OK
-            )
+            return Response({
+                "message": "Microsoft Teams login successful",
+                "user_info": user_info,
+                "token_data": token_data,
+                "redirect_uri_used": redirect_uri
+            })
 
         except Exception as e:
-            return Response(
-                {"error": f"Microsoft OAuth callback failed: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response({"error": f"Callback failed: {str(e)}"}, status=500)
+
 
 
 @method_decorator(csrf_exempt, name='dispatch')
