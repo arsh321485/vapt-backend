@@ -1848,7 +1848,7 @@ class SlackOAuthUrlView(APIView):
             except Exception:
                 base_url = request.build_absolute_uri("/").rstrip("/")
 
-        redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback"
+        redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback/"
         client_id = settings.SLACK_CLIENT_ID
 
         slack_url = (
