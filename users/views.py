@@ -1,6 +1,5 @@
 from django.forms import ValidationError
 from .renderers import UserRenderer
-from django.http import HttpResponse, JsonResponse
 from rest_framework import status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
@@ -18,7 +17,7 @@ from urllib.parse import urljoin
 import logging
 import uuid
 from django.conf import settings
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from urllib.parse import urlencode
 class SlackAccessTokenSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=True)
@@ -45,8 +44,8 @@ from .serializers import (
     UpdateChannelSerializer,
     SlackOAuthUrlSerializer,
     SlackCallbackSerializer,
-    SlackLoginSerializer,
     SlackOAuthSerializer,
+    SlackLoginSerializer,
     UpdateSlackChannelSerializer,
     DeleteSlackChannelSerializer,
     AddUserToSlackChannelSerializer,
@@ -402,6 +401,106 @@ class GoogleOAuthView(generics.GenericAPIView):
 import base64
 import json
 
+# class MicrosoftTeamsOAuthUrlView(APIView):
+#     permission_classes = [permissions.AllowAny]
+
+#     def get(self, request):
+#         try:
+#             redirect_uri = request.GET.get("redirect_uri")
+#             if not redirect_uri:
+#                 return Response({"error": "Missing redirect_uri parameter"}, status=400)
+
+#             # ✅ Combine state + redirect_uri into one base64-encoded value
+#             state_data = {
+#                 "redirect_uri": redirect_uri,
+#                 "nonce": secrets.token_urlsafe(8),
+#             }
+#             state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+
+#             client_id = settings.MICROSOFT_CLIENT_ID
+#             scope = (
+#                 "https://graph.microsoft.com/User.Read "
+#                 "https://graph.microsoft.com/Group.ReadWrite.All "
+#                 "https://graph.microsoft.com/ChannelMessage.Send "
+#                 "offline_access openid email profile"
+#             )
+
+#             auth_url = (
+#                 f"{settings.MICROSOFT_AUTH_URL}?"
+#                 f"client_id={client_id}"
+#                 f"&response_type=code"
+#                 f"&redirect_uri={redirect_uri}"
+#                 f"&response_mode=query"
+#                 f"&scope={scope}"
+#                 f"&state={state}"
+#             )
+
+#             return Response({"auth_url": auth_url})
+#         except Exception as e:
+#             return Response({"error": str(e)}, status=500)
+
+
+# class MicrosoftTeamsCallbackView(APIView):
+#     permission_classes = [permissions.AllowAny]
+
+#     def get(self, request):
+#         try:
+#             code = request.GET.get("code")
+#             state = request.GET.get("state")
+
+#             if not code:
+#                 return Response({"error": "Authorization code not provided"}, status=400)
+
+#             if not state:
+#                 return Response({"error": "Missing state parameter"}, status=400)
+
+#             # ✅ Decode redirect_uri from state
+#             import base64, json
+#             try:
+#                 state_json = json.loads(base64.urlsafe_b64decode(state + "==").decode())
+#                 redirect_uri = state_json.get("redirect_uri")
+#             except Exception:
+#                 redirect_uri = None
+
+#             if not redirect_uri:
+#                 return Response({"error": "Missing redirect_uri in state"}, status=400)
+
+#             # 🔁 Exchange code for token
+#             token_url = settings.MICROSOFT_TOKEN_URL
+#             data = {
+#                 "grant_type": "authorization_code",
+#                 "client_id": settings.MICROSOFT_CLIENT_ID,
+#                 "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+#                 "code": code,
+#                 "redirect_uri": redirect_uri,
+#             }
+#             headers = {"Content-Type": "application/x-www-form-urlencoded"}
+#             response = requests.post(token_url, data=data, headers=headers)
+
+#             if response.status_code != 200:
+#                 return Response(
+#                     {"error": "Token exchange failed", "details": response.json()},
+#                     status=response.status_code,
+#                 )
+
+#             token_data = response.json()
+#             access_token = token_data.get("access_token")
+
+#             user_info = requests.get(
+#                 "https://graph.microsoft.com/v1.0/me",
+#                 headers={"Authorization": f"Bearer {access_token}"}
+#             ).json()
+
+#             return Response({
+#                 "message": "Microsoft Teams login successful",
+#                 "user_info": user_info,
+#                 "token_data": token_data,
+#                 "redirect_uri_used": redirect_uri
+#             })
+
+#         except Exception as e:
+#             return Response({"error": f"Callback failed: {str(e)}"}, status=500)
+
 class MicrosoftTeamsOAuthUrlView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -439,8 +538,8 @@ class MicrosoftTeamsOAuthUrlView(APIView):
             return Response({"auth_url": auth_url})
         except Exception as e:
             return Response({"error": str(e)}, status=500)
-
-
+        
+        
 class MicrosoftTeamsCallbackView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -523,8 +622,6 @@ class MicrosoftTeamsCallbackView(APIView):
 
         except Exception as e:
             return JsonResponse({"error": f"Callback failed: {str(e)}"}, status=500)
-
-
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MicrosoftTeamsOAuthView(generics.GenericAPIView):
@@ -2016,6 +2113,11 @@ class SlackValidateTokenView(APIView):
             
 
 class SlackLoginView(APIView):
+    """
+    Slack Login API
+    Logs in the user using bot and user access tokens.
+    Fetches all Slack user info and stores user locally.
+    """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -2023,7 +2125,7 @@ class SlackLoginView(APIView):
         if not serializer.is_valid():
             return Response(
                 {"success": False, "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         validated_data = serializer.validated_data
@@ -2035,23 +2137,32 @@ class SlackLoginView(APIView):
         response_data = {
             "success": True,
             "message": "Slack user login successful",
-            "bot_data": validated_data["bot_auth"],
+            "bot_data": {
+                "ok": validated_data["bot_auth"].get("ok"),
+                "bot_user_id": validated_data["bot_auth"].get("user_id"),
+                "team_id": validated_data["bot_auth"].get("team_id"),
+                "team": validated_data["bot_auth"].get("team"),
+            },
             "user_data": {
+                "ok": validated_data["user_auth"].get("ok"),
                 "user_id": validated_data["user_auth"].get("user_id"),
                 "team_id": validated_data["user_auth"].get("team_id"),
-                "name": validated_data.get("name"),
+                "user_name": validated_data.get("name"),
                 "email": validated_data.get("email"),
                 "image_512": profile.get("image_512"),
                 "title": profile.get("title"),
                 "phone": profile.get("phone"),
             },
-            "team_info": team,
+            "team_info": {
+                "ok": validated_data["team_info"].get("ok"),
+                "team": team,
+            },
             "local_user": {
                 "id": user.id,
                 "email": user.email,
                 "name": user.first_name,
                 "created": created,
-            }
+            },
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
