@@ -6,6 +6,9 @@ from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.forms import ValidationError
 from .models import User
+
+
+
 from typing import Optional
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -607,47 +610,118 @@ class SlackTokenValidationSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=True, help_text="Slack access token to validate")
     
 
-class SlackLoginView(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def post(self, request):
-        serializer = SlackLoginSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(
-                {"success": False, "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        validated_data = serializer.validated_data
-        user, created = serializer.create_or_update_user(validated_data)
-
-        profile = validated_data["user_info"].get("user", {}).get("profile", {})
-        team = validated_data["team_info"].get("team", {})
-
-        response_data = {
-            "success": True,
-            "message": "Slack user login successful",
-            "bot_data": validated_data["bot_auth"],
-            "user_data": {
-                "user_id": validated_data["user_auth"].get("user_id"),
-                "team_id": validated_data["user_auth"].get("team_id"),
-                "name": validated_data.get("name"),
-                "email": validated_data.get("email"),
-                "image_512": profile.get("image_512"),
-            },
-            "team_info": team,
-            "local_user": {
-                "id": user.id,
-                "email": user.email,
-                "name": user.first_name,
-                "created": created,
-            }
-        }
-
-        return Response(response_data, status=status.HTTP_200_OK)
+# class SlackLoginSerializer(serializers.Serializer):
+#     """Serializer for Slack login - expects tokens from callback"""
+#     bot_access_token = serializers.CharField(required=True)
+#     user_access_token = serializers.CharField(required=True)
+#     bot_refresh_token = serializers.CharField(required=False, allow_blank=True)
+#     user_refresh_token = serializers.CharField(required=False, allow_blank=True)
     
+#     def validate(self, attrs):
+#         user_token = attrs.get('user_access_token')
+#         bot_token = attrs.get('bot_access_token')
+        
+#         # Fetch user identity using user access token
+#         try:
+#             identity_response = requests.get(
+#                 "https://slack.com/api/users.identity",
+#                 headers={"Authorization": f"Bearer {user_token}"},
+#                 timeout=10
+#             )
+#             identity_data = identity_response.json()
+            
+#             if not identity_data.get("ok"):
+#                 raise serializers.ValidationError({
+#                     "user_access_token": f"Invalid token: {identity_data.get('error', 'Unknown error')}"
+#                 })
+            
+#             # Extract user info from identity
+#             user_info = identity_data.get("user", {})
+#             team_info = identity_data.get("team", {})
+            
+#             attrs['slack_user_id'] = user_info.get("id")
+#             attrs['slack_team_id'] = team_info.get("id")
+#             attrs['email'] = user_info.get("email")
+#             attrs['name'] = user_info.get("name")
+#             attrs['image'] = user_info.get("image_512") or user_info.get("image_192")
+#             attrs['team_name'] = team_info.get("name")
+            
+#             # Fetch additional user details using bot token
+#             user_details_response = requests.get(
+#                 "https://slack.com/api/users.info",
+#                 params={"user": attrs['slack_user_id']},
+#                 headers={"Authorization": f"Bearer {bot_token}"},
+#                 timeout=10
+#             )
+#             user_details = user_details_response.json()
+            
+#             if user_details.get("ok"):
+#                 profile = user_details.get("user", {}).get("profile", {})
+#                 attrs['phone'] = profile.get("phone", "")
+#                 attrs['title'] = profile.get("title", "")
+#                 attrs['real_name'] = profile.get("real_name", "")
+#                 attrs['display_name'] = profile.get("display_name", "")
+            
+#             return attrs
+            
+#         except requests.RequestException as e:
+#             logger.error(f"Slack API request failed: {str(e)}")
+#             raise serializers.ValidationError("Failed to verify Slack credentials")
     
-    
+#     def create_or_update_user(self, validated_data):
+#         """Create or update user in database"""
+#         email = validated_data.get('email')
+#         slack_user_id = validated_data.get('slack_user_id')
+        
+#         if not email:
+#             raise serializers.ValidationError("Email is required from Slack")
+        
+#         # Try to find existing user by email
+#         try:
+#             user = User.objects.get(email=email)
+#             created = False
+#             logger.info(f"Existing user found: {email}")
+#         except User.DoesNotExist:
+#             # Create new user with your custom User model fields
+#             name_parts = validated_data.get('real_name', validated_data.get('name', '')).split()
+#             firstname = name_parts[0] if name_parts else ''
+#             lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+            
+#             user = User.objects.create(
+#                 email=email,
+#                 firstname=firstname,  # Your model uses 'firstname'
+#                 lastname=lastname,    # Your model uses 'lastname'
+#                 is_active=True
+#             )
+#             # Set unusable password since user is logging in via Slack
+#             user.set_unusable_password()
+#             user.save()
+#             created = True
+#             logger.info(f"New user created: {email}")
+        
+#         # Update or create SlackIntegration
+#         slack_integration, integration_created = SlackIntegration.objects.update_or_create(
+#             user=user,
+#             defaults={
+#                 'slack_user_id': slack_user_id,
+#                 'slack_team_id': validated_data.get('slack_team_id'),
+#                 'bot_access_token': validated_data.get('bot_access_token'),
+#                 'user_access_token': validated_data.get('user_access_token'),
+#                 'bot_refresh_token': validated_data.get('bot_refresh_token', ''),
+#                 'user_refresh_token': validated_data.get('user_refresh_token', ''),
+#                 'team_name': validated_data.get('team_name', ''),
+#                 'display_name': validated_data.get('display_name') or validated_data.get('name'),
+#                 'real_name': validated_data.get('real_name'),
+#                 'image_url': validated_data.get('image'),
+#                 'phone': validated_data.get('phone', ''),
+#                 'title': validated_data.get('title', ''),
+#                 'is_active': True
+#             }
+#         )
+        
+#         logger.info(f"Slack integration {'created' if integration_created else 'updated'} for user: {email}")
+        
+#         return user, created, validated_data   
     
     
 class SlackMessageSerializer(serializers.Serializer):

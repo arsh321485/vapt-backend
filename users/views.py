@@ -1897,7 +1897,7 @@ class SlackOAuthCallbackView(APIView):
             except Exception:
                 base_url = request.build_absolute_uri("/").rstrip("/")
 
-            redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback"
+            redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback/"
 
             # Exchange code for token
             token_url = "https://slack.com/api/oauth.v2.access"
@@ -1970,7 +1970,142 @@ class SlackOAuthCallbackView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
             
-   
+ 
+# class SlackLoginView(APIView):
+#     """
+#     Login user via Slack OAuth tokens and store in database
+#     Call this endpoint after receiving tokens from callback
+#     """
+#     permission_classes = [permissions.AllowAny]
+
+#     def post(self, request):
+#         serializer = SlackLoginSerializer(data=request.data)
+        
+#         if not serializer.is_valid():
+#             return Response(
+#                 {
+#                     "success": False,
+#                     "errors": serializer.errors
+#                 },
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         try:
+#             validated_data = serializer.validated_data
+#             user, created, user_details = serializer.create_or_update_user(validated_data)
+            
+#             # Generate JWT tokens for authentication
+#             refresh = RefreshToken.for_user(user)
+            
+#             response_data = {
+#                 "success": True,
+#                 "message": "Slack login successful",
+#                 "user_created": created,
+#                 "tokens": {
+#                     "access": str(refresh.access_token),
+#                     "refresh": str(refresh),
+#                 },
+#                 "user": {
+#                     "id": user.id,
+#                     "email": user.email,
+#                     "firstname": user.firstname,
+#                     "lastname": user.lastname,
+#                     "full_name": user.full_name,  # Uses your @property method
+#                 },
+#                 "slack_data": {
+#                     "slack_user_id": user_details.get('slack_user_id'),
+#                     "slack_team_id": user_details.get('slack_team_id'),
+#                     "team_name": user_details.get('team_name'),
+#                     "display_name": user_details.get('display_name'),
+#                     "real_name": user_details.get('real_name'),
+#                     "image": user_details.get('image'),
+#                     "title": user_details.get('title'),
+#                     "phone": user_details.get('phone'),
+#                 }
+#             }
+            
+#             logger.info(f"Slack login successful for user: {user.email} (Created: {created})")
+#             return Response(response_data, status=status.HTTP_200_OK)
+            
+#         except Exception as e:
+#             logger.error(f"Slack login error: {str(e)}", exc_info=True)
+#             return Response(
+#                 {
+#                     "success": False,
+#                     "error": "An error occurred during Slack login",
+#                     "detail": str(e)
+#                 },
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
+            
+            
+            
+class SlackLoginView(APIView):
+    """
+    Login user via Slack OAuth tokens and store in database
+    Call this endpoint after receiving tokens from callback
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = SlackLoginSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "success": False,
+                    "errors": serializer.errors
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            validated_data = serializer.validated_data
+            user, created, user_details = serializer.create_or_update_user(validated_data)
+            
+            # Generate JWT tokens for authentication
+            refresh = RefreshToken.for_user(user)
+            
+            response_data = {
+                "success": True,
+                "message": "Slack login successful",
+                "user_created": created,
+                "tokens": {
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                },
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "firstname": user.firstname,
+                    "lastname": user.lastname,
+                    "full_name": user.full_name,  # Uses your @property method
+                },
+                "slack_data": {
+                    "slack_user_id": user_details.get('slack_user_id'),
+                    "slack_team_id": user_details.get('slack_team_id'),
+                    "team_name": user_details.get('team_name'),
+                    "display_name": user_details.get('display_name'),
+                    "real_name": user_details.get('real_name'),
+                    "image": user_details.get('image'),
+                    "title": user_details.get('title'),
+                    "phone": user_details.get('phone'),
+                }
+            }
+            
+            logger.info(f"Slack login successful for user: {user.email} (Created: {created})")
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Slack login error: {str(e)}", exc_info=True)
+            return Response(
+                {
+                    "success": False,
+                    "error": "An error occurred during Slack login",
+                    "detail": str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 class SlackOAuthView(APIView):
     """
     Verifies a Slack bot access token and returns bot/team/user info.
