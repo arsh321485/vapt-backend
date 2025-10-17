@@ -579,8 +579,77 @@ class AddUserToChannelSerializer(serializers.Serializer):
         return value.lower()
     
 
+class SlackOAuthUrlSerializer(serializers.Serializer):
+    base_url = serializers.URLField(
+        required=True,
+        help_text="Your current ngrok or production base URL (e.g. https://92f335c03179.ngrok-free.app)"
+    )
+    state = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Optional custom state string (external system identifier or token)"
+    )
+
+
+class SlackCallbackSerializer(serializers.Serializer):
+    code = serializers.CharField(required=True, help_text="Authorization code from Slack")
+    state = serializers.CharField(required=False, allow_blank=True, help_text="Optional state value")
+    
+    
+class SlackOAuthSerializer(serializers.Serializer):
+    access_token = serializers.CharField(
+        required=True,
+        help_text="Slack bot access token returned from OAuth callback"
+    )
+    
+       
 class SlackTokenValidationSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=True, help_text="Slack access token to validate")
+    
+
+class SlackLoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = SlackLoginSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"success": False, "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        validated_data = serializer.validated_data
+        user, created = serializer.create_or_update_user(validated_data)
+
+        profile = validated_data["user_info"].get("user", {}).get("profile", {})
+        team = validated_data["team_info"].get("team", {})
+
+        response_data = {
+            "success": True,
+            "message": "Slack user login successful",
+            "bot_data": validated_data["bot_auth"],
+            "user_data": {
+                "user_id": validated_data["user_auth"].get("user_id"),
+                "team_id": validated_data["user_auth"].get("team_id"),
+                "name": validated_data.get("name"),
+                "email": validated_data.get("email"),
+                "image_512": profile.get("image_512"),
+            },
+            "team_info": team,
+            "local_user": {
+                "id": user.id,
+                "email": user.email,
+                "name": user.first_name,
+                "created": created,
+            }
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
+    
+    
+    
+    
+    
 class SlackMessageSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=True, help_text="Slack access token")
     channel = serializers.CharField(required=True, help_text="Channel ID or name (e.g., #general, C1234567890)")

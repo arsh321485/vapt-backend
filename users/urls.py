@@ -25,22 +25,24 @@ from .views import (
     DeleteTeamView,
     UpdateChannelView,
     DeleteChannelView,
+    
     SlackOAuthUrlView,
+    SlackOAuthCallbackView,
+    SlackValidateTokenView,
     SlackOAuthView,
+    SlackLoginView,
     SendSlackMessageView,
     CreateSlackChannelView,
     ListSlackChannelsView,
     # SendInteractiveSlackMessageView,
-    SlackOAuthCallbackView,
+  
     slack_oauth_url,
-    SlackUserLoginView,
-    SlackValidateTokenView,
+   
     UpdateSlackChannelView,
     DeleteSlackChannelView,
     JoinSlackChannelView,
     AddUserToSlackChannelView,
     SlackUserListView,
-    SlackUserLoginView,
     SlackInviteUserView,
     JiraOAuthUrlView,
     JiraOAuthCallbackView,
@@ -107,10 +109,12 @@ urlpatterns = [
     # Slack APIs 
     path('slack/oauth-url/', SlackOAuthUrlView.as_view(), name='slack-oauth-url'),
     path('slack/callback/', SlackOAuthCallbackView.as_view(), name='slack-callback'),
-    path('slack-oauth/', SlackOAuthView.as_view(), name='slack-oauth'),
-    
-    path('slack/login/', SlackUserLoginView.as_view(), name='slack-login'),
     path('slack/validate-token/', SlackValidateTokenView.as_view(), name='slack-validate-token'),
+    path('slack/login/', SlackLoginView.as_view(), name='slack-login'),
+
+    path('slack-oauth/', SlackOAuthView.as_view(), name='slack-oauth'),
+ 
+    
     
     # Slack Channel Management
     path('slack/channels/list/', ListSlackChannelsView.as_view(), name='slack-list-channels'),
