@@ -1973,23 +1973,148 @@ class SlackOAuthUrlView(APIView):
             
  
  
+# class SlackOAuthCallbackView(APIView):
+#     """
+#     Handles Slack OAuth callback (GET).
+#     Exchanges code for token and returns both bot + user info cleanly.
+#     Also saves Slack user in database (no model change).
+#     """
+#     permission_classes = [AllowAny]
+
+#     def get(self, request):
+#         serializer = SlackCallbackSerializer(data=request.query_params)
+#         serializer.is_valid(raise_exception=True)
+
+#         code = serializer.validated_data.get("code")
+#         state = serializer.validated_data.get("state", "")
+
+#         try:
+#             # ✅ Auto-detect base URL (for ngrok / local / production)
+#             try:
+#                 ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
+#                 https_tunnel = next(
+#                     (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
+#                     None
+#                 )
+#                 base_url = https_tunnel["public_url"] if https_tunnel else request.build_absolute_uri("/").rstrip("/")
+#             except Exception:
+#                 base_url = request.build_absolute_uri("/").rstrip("/")
+
+#             redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback/"
+
+#             # ✅ Exchange code for token
+#             token_url = "https://slack.com/api/oauth.v2.access"
+#             token_data = {
+#                 "client_id": settings.SLACK_CLIENT_ID,
+#                 "client_secret": settings.SLACK_CLIENT_SECRET,
+#                 "code": code,
+#                 "redirect_uri": redirect_uri,
+#             }
+
+#             token_response = requests.post(token_url, data=token_data)
+#             token_json = token_response.json()
+
+#             # ❌ Handle failure
+#             if not token_json.get("ok"):
+#                 logger.error(f"Slack OAuth token exchange failed: {token_json}")
+#                 return Response(
+#                     {"success": False, "error": token_json.get("error", "OAuth failed")},
+#                     status=status.HTTP_400_BAD_REQUEST,
+#                 )
+
+#             # ✅ Extract tokens & info
+#             bot_access_token = token_json.get("access_token")
+#             bot_refresh_token = token_json.get("refresh_token")
+#             team_info = token_json.get("team", {})
+#             authed_user = token_json.get("authed_user", {})
+
+#             # ✅ Fetch Slack user info
+#             user_info_response = requests.get(
+#                 "https://slack.com/api/users.info",
+#                 params={"user": authed_user.get("id")},
+#                 headers={"Authorization": f"Bearer {bot_access_token}"}
+#             )
+#             user_info_json = user_info_response.json()
+#             user_data = user_info_json.get("user", {}) if user_info_json.get("ok") else {}
+
+#             # ✅ Extract local user info
+#             email = user_data.get("profile", {}).get("email")
+#             name = user_data.get("real_name") or user_data.get("name") or "Slack User"
+#             firstname = name.split()[0]
+#             lastname = " ".join(name.split()[1:]) if len(name.split()) > 1 else ""
+
+#             # ✅ Create or update local user (no model modification)
+#             user, created = User.objects.get_or_create(
+#                 email=email,
+#                 defaults={
+#                     "firstname": firstname,
+#                     "lastname": lastname,
+#                     "password": ""  # OAuth user - no password needed
+#                 }
+#             )
+
+#             # ✅ (Optional) Log for debugging
+#             logger.info(f"Slack user {'created' if created else 'found'}: {email}")
+
+#             # ✅ Return the SAME response structure you asked for
+#             response_data = {
+#                 "success": True,
+#                 "message": "Slack Login successful",
+#                 "data": {
+#                     "team": {
+#                         "id": team_info.get("id"),
+#                         "name": team_info.get("name"),
+#                     },
+#                     "bot": {
+#                         "access_token": bot_access_token,
+#                         "refresh_token": bot_refresh_token,
+#                         "expires_in": token_json.get("expires_in"),
+#                         "bot_user_id": token_json.get("bot_user_id"),
+#                     },
+#                     "authed_user": {
+#                         "id": authed_user.get("id"),
+#                         "access_token": authed_user.get("access_token"),
+#                         "refresh_token": authed_user.get("refresh_token"),
+#                         "expires_in": authed_user.get("expires_in"),
+#                         "email": user_data.get("profile", {}).get("email"),
+#                         "name": user_data.get("name"),
+#                     },
+#                     "local_user": {  # ✅ Added for clarity
+#                         "id": user.id,
+#                         "email": user.email,
+#                         "firstname": user.firstname,
+#                         "lastname": user.lastname,
+#                         "created": created,
+#                     },
+#                     "state": state,
+#                 },
+#             }
+
+#             return Response(response_data, status=status.HTTP_200_OK)
+
+#         except Exception as e:
+#             logger.error(f"Slack OAuth callback exception: {str(e)}")
+#             return Response(
+#                 {"success": False, "error": str(e)},
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             )
+            
+
 class SlackOAuthCallbackView(APIView):
     """
     Handles Slack OAuth callback (GET).
-    Exchanges code for token and returns both bot + user info cleanly.
-    Also saves Slack user in database (no model change).
+    Exchanges code for tokens, saves Slack user in DB,
+    and returns a small HTML that closes the popup window
+    and notifies the main frontend (via window.postMessage).
     """
     permission_classes = [AllowAny]
 
     def get(self, request):
-        serializer = SlackCallbackSerializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
-
-        code = serializer.validated_data.get("code")
-        state = serializer.validated_data.get("state", "")
-
         try:
-            # ✅ Auto-detect base URL (for ngrok / local / production)
+            code = request.GET.get("code")
+            state = request.GET.get("state", "")
+
+            # ✅ Auto-detect base URL (ngrok / production safe)
             try:
                 ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
                 https_tunnel = next(
@@ -2000,9 +2125,9 @@ class SlackOAuthCallbackView(APIView):
             except Exception:
                 base_url = request.build_absolute_uri("/").rstrip("/")
 
-            redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback/"
+            redirect_uri = f"{base_url}/api/admin/users/slack/callback/"
 
-            # ✅ Exchange code for token
+            # ✅ Step 1: Exchange code for access tokens
             token_url = "https://slack.com/api/oauth.v2.access"
             token_data = {
                 "client_id": settings.SLACK_CLIENT_ID,
@@ -2011,94 +2136,96 @@ class SlackOAuthCallbackView(APIView):
                 "redirect_uri": redirect_uri,
             }
 
-            token_response = requests.post(token_url, data=token_data)
-            token_json = token_response.json()
+            token_res = requests.post(token_url, data=token_data)
+            token_json = token_res.json()
 
-            # ❌ Handle failure
             if not token_json.get("ok"):
-                logger.error(f"Slack OAuth token exchange failed: {token_json}")
-                return Response(
-                    {"success": False, "error": token_json.get("error", "OAuth failed")},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                error = token_json.get("error", "OAuth failed")
+                logger.error(f"Slack OAuth error: {error}")
+                return self._html_response(success=False, error=error)
 
-            # ✅ Extract tokens & info
-            bot_access_token = token_json.get("access_token")
-            bot_refresh_token = token_json.get("refresh_token")
+            # ✅ Step 2: Extract Slack tokens
+            bot_token = token_json.get("access_token")
             team_info = token_json.get("team", {})
             authed_user = token_json.get("authed_user", {})
 
-            # ✅ Fetch Slack user info
-            user_info_response = requests.get(
+            # ✅ Step 3: Fetch user profile from Slack
+            user_info = requests.get(
                 "https://slack.com/api/users.info",
                 params={"user": authed_user.get("id")},
-                headers={"Authorization": f"Bearer {bot_access_token}"}
-            )
-            user_info_json = user_info_response.json()
-            user_data = user_info_json.get("user", {}) if user_info_json.get("ok") else {}
+                headers={"Authorization": f"Bearer {bot_token}"},
+            ).json()
 
-            # ✅ Extract local user info
+            user_data = user_info.get("user", {}) if user_info.get("ok") else {}
             email = user_data.get("profile", {}).get("email")
             name = user_data.get("real_name") or user_data.get("name") or "Slack User"
             firstname = name.split()[0]
             lastname = " ".join(name.split()[1:]) if len(name.split()) > 1 else ""
 
-            # ✅ Create or update local user (no model modification)
+            # ✅ Step 4: Create or update local user (no model change)
             user, created = User.objects.get_or_create(
                 email=email,
-                defaults={
-                    "firstname": firstname,
-                    "lastname": lastname,
-                    "password": ""  # OAuth user - no password needed
-                }
+                defaults={"firstname": firstname, "lastname": lastname, "password": ""},
             )
 
-            # ✅ (Optional) Log for debugging
-            logger.info(f"Slack user {'created' if created else 'found'}: {email}")
-
-            # ✅ Return the SAME response structure you asked for
-            response_data = {
+            # ✅ Step 5: Prepare data to send to frontend
+            data = {
                 "success": True,
-                "message": "Slack Login successful",
-                "data": {
-                    "team": {
-                        "id": team_info.get("id"),
-                        "name": team_info.get("name"),
-                    },
-                    "bot": {
-                        "access_token": bot_access_token,
-                        "refresh_token": bot_refresh_token,
-                        "expires_in": token_json.get("expires_in"),
-                        "bot_user_id": token_json.get("bot_user_id"),
-                    },
-                    "authed_user": {
-                        "id": authed_user.get("id"),
-                        "access_token": authed_user.get("access_token"),
-                        "refresh_token": authed_user.get("refresh_token"),
-                        "expires_in": authed_user.get("expires_in"),
-                        "email": user_data.get("profile", {}).get("email"),
-                        "name": user_data.get("name"),
-                    },
-                    "local_user": {  # ✅ Added for clarity
-                        "id": user.id,
-                        "email": user.email,
-                        "firstname": user.firstname,
-                        "lastname": user.lastname,
-                        "created": created,
-                    },
-                    "state": state,
-                },
+                "message": "Slack login successful",
+                "user_email": email,
+                "user_name": name,
+                "team": team_info.get("name"),
+                "team_id": team_info.get("id"),
+                "bot_access_token": bot_token,
+                "user_access_token": authed_user.get("access_token"),
             }
 
-            return Response(response_data, status=status.HTTP_200_OK)
+            # ✅ Step 6: Return HTML to close popup and send data
+            return self._html_response(success=True, data=data)
 
         except Exception as e:
-            logger.error(f"Slack OAuth callback exception: {str(e)}")
-            return Response(
-                {"success": False, "error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-            
+            logger.exception("Slack OAuth callback exception")
+            return self._html_response(success=False, error=str(e))
+
+    def _html_response(self, success=True, data=None, error=None):
+        """
+        Returns a small HTML that:
+          - Sends result to the main window via postMessage
+          - Closes the popup automatically
+        """
+        payload = {"success": success}
+        if success:
+            payload.update(data or {})
+        else:
+            payload.update({"error": error})
+
+        html = f"""
+        <html>
+        <head>
+            <title>Slack OAuth</title>
+            <script>
+                (function() {{
+                    var payload = {json.dumps(payload)};
+                    console.log("Slack OAuth finished:", payload);
+                    if (window.opener) {{
+                        window.opener.postMessage({{
+                            type: "slack-auth-complete",
+                            payload: payload
+                        }}, "*");
+                    }}
+                    window.close();
+                }})();
+            </script>
+        </head>
+        <body style="background: #fff; font-family: sans-serif; text-align:center; padding-top:40px;">
+            <h2>Slack login successful 🎉</h2>
+            <p>You can close this window.</p>
+        </body>
+        </html>
+        """
+        return HttpResponse(html)
+      
+  
             
 class SlackLoginView(APIView):
     """
@@ -2178,74 +2305,7 @@ class SlackLoginView(APIView):
         }, status=status.HTTP_200_OK)
         
                         
-# class SlackLoginView(APIView):
-#     """
-#     Login user via Slack OAuth tokens and store in database
-#     Call this endpoint after receiving tokens from callback
-#     """
-#     permission_classes = [permissions.AllowAny]
-
-#     def post(self, request):
-#         serializer = SlackLoginSerializer(data=request.data)
-        
-#         if not serializer.is_valid():
-#             return Response(
-#                 {
-#                     "success": False,
-#                     "errors": serializer.errors
-#                 },
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         try:
-#             validated_data = serializer.validated_data
-#             user, created, user_details = serializer.create_or_update_user(validated_data)
-            
-#             # Generate JWT tokens for authentication
-#             refresh = RefreshToken.for_user(user)
-            
-#             response_data = {
-#                 "success": True,
-#                 "message": "Slack login successful",
-#                 "user_created": created,
-#                 "tokens": {
-#                     "access": str(refresh.access_token),
-#                     "refresh": str(refresh),
-#                 },
-#                 "user": {
-#                     "id": user.id,
-#                     "email": user.email,
-#                     "firstname": user.firstname,
-#                     "lastname": user.lastname,
-#                     "full_name": user.full_name,  # Uses your @property method
-#                 },
-#                 "slack_data": {
-#                     "slack_user_id": user_details.get('slack_user_id'),
-#                     "slack_team_id": user_details.get('slack_team_id'),
-#                     "team_name": user_details.get('team_name'),
-#                     "display_name": user_details.get('display_name'),
-#                     "real_name": user_details.get('real_name'),
-#                     "image": user_details.get('image'),
-#                     "title": user_details.get('title'),
-#                     "phone": user_details.get('phone'),
-#                 }
-#             }
-            
-#             logger.info(f"Slack login successful for user: {user.email} (Created: {created})")
-#             return Response(response_data, status=status.HTTP_200_OK)
-            
-#         except Exception as e:
-#             logger.error(f"Slack login error: {str(e)}", exc_info=True)
-#             return Response(
-#                 {
-#                     "success": False,
-#                     "error": "An error occurred during Slack login",
-#                     "detail": str(e)
-#                 },
-#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
-#             )
-            
-            
+          
 class SlackOAuthView(APIView):
     """
     Verifies a Slack bot access token and returns bot/team/user info.
