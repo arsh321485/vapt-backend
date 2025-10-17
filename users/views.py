@@ -1,5 +1,6 @@
 from django.forms import ValidationError
 from .renderers import UserRenderer
+from django.http import HttpResponse, JsonResponse
 from rest_framework import status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
@@ -449,13 +450,11 @@ class MicrosoftTeamsCallbackView(APIView):
             state = request.GET.get("state")
 
             if not code:
-                return Response({"error": "Authorization code not provided"}, status=400)
-
+                return JsonResponse({"error": "Authorization code not provided"}, status=400)
             if not state:
-                return Response({"error": "Missing state parameter"}, status=400)
+                return JsonResponse({"error": "Missing state parameter"}, status=400)
 
-            # ✅ Decode redirect_uri from state
-            import base64, json
+            # Decode redirect_uri from state
             try:
                 state_json = json.loads(base64.urlsafe_b64decode(state + "==").decode())
                 redirect_uri = state_json.get("redirect_uri")
@@ -463,9 +462,9 @@ class MicrosoftTeamsCallbackView(APIView):
                 redirect_uri = None
 
             if not redirect_uri:
-                return Response({"error": "Missing redirect_uri in state"}, status=400)
+                return JsonResponse({"error": "Missing redirect_uri in state"}, status=400)
 
-            # 🔁 Exchange code for token
+            # Exchange code for access token
             token_url = settings.MICROSOFT_TOKEN_URL
             data = {
                 "grant_type": "authorization_code",
@@ -476,30 +475,54 @@ class MicrosoftTeamsCallbackView(APIView):
             }
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
             response = requests.post(token_url, data=data, headers=headers)
-
             if response.status_code != 200:
-                return Response(
-                    {"error": "Token exchange failed", "details": response.json()},
-                    status=response.status_code,
-                )
+                return JsonResponse({
+                    "error": "Token exchange failed",
+                    "details": response.json()
+                }, status=response.status_code)
 
             token_data = response.json()
             access_token = token_data.get("access_token")
 
+            # Fetch Microsoft Graph user info
             user_info = requests.get(
                 "https://graph.microsoft.com/v1.0/me",
                 headers={"Authorization": f"Bearer {access_token}"}
             ).json()
 
-            return Response({
-                "message": "Microsoft Teams login successful",
-                "user_info": user_info,
-                "token_data": token_data,
-                "redirect_uri_used": redirect_uri
-            })
+            # Determine response type
+            accept_header = request.headers.get("Accept", "")
+            if "application/json" in accept_header:
+                # Return JSON for Postman/API
+                return JsonResponse({
+                    "message": "Microsoft Teams login successful",
+                    "user_info": user_info,
+                    "token_data": token_data
+                })
+
+            # HTML for browser popup: auto-close + postMessage
+            html = f"""
+            <html>
+              <body>
+                <script>
+                  if (window.opener) {{
+                    window.opener.postMessage({{
+                      message: "Microsoft Teams login successful",
+                      user_info: {json.dumps(user_info)},
+                      token_data: {json.dumps(token_data)}
+                    }}, "*");
+                    window.close();
+                  }} else {{
+                    document.body.innerHTML = "<p>Login successful. You can close this window.</p>";
+                  }}
+                </script>
+              </body>
+            </html>
+            """
+            return HttpResponse(html)
 
         except Exception as e:
-            return Response({"error": f"Callback failed: {str(e)}"}, status=500)
+            return JsonResponse({"error": f"Callback failed: {str(e)}"}, status=500)
 
 
 
