@@ -50,6 +50,7 @@ MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/
 
 
 
+
 RECAPTCHA_SKIP = DEBUG
 INSTALLED_APPS = [
     "django.contrib.admin",
