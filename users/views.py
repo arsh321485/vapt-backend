@@ -2324,45 +2324,12 @@ class SlackOAuthCallbackView(APIView):
             logger.exception("Slack OAuth callback exception")
             return self._html_response(success=False, error=str(e))
 
-    # def _html_response(self, success=True, data=None, error=None):
-    #     """
-    #     Returns a small HTML that:
-    #       - Sends result to the main window via postMessage
-    #       - Closes the popup automatically
-    #     """
-    #     payload = {"success": success}
-    #     if success:
-    #         payload.update(data or {})
-    #     else:
-    #         payload.update({"error": error})
-
-    #     html = f"""
-    #     <html>
-    #     <head>
-    #         <title>Slack OAuth</title>
-    #         <script>
-    #             (function() {{
-    #                 var payload = {json.dumps(payload)};
-    #                 console.log("Slack OAuth finished:", payload);
-    #                 if (window.opener) {{
-    #                     window.opener.postMessage({
-    #                         type: "slack-auth-success",
-    #                         payload: payload
-    #                     }, "*");
-    #                 }}
-    #                 window.close();
-    #             }})();
-    #         </script>
-    #     </head>
-    #     <body style="background: #fff; font-family: sans-serif; text-align:center; padding-top:40px;">
-    #         <h2>Slack login successful 🎉</h2>
-    #         <p>You can close this window.</p>
-    #     </body>
-    #     </html>
-    #     """
-    #     return HttpResponse(html)
-      
     def _html_response(self, success=True, data=None, error=None):
+        """
+        Returns a small HTML that:
+          - Sends result to the main window via postMessage
+          - Closes the popup automatically
+        """
         payload = {"success": success}
         if success:
             payload.update(data or {})
@@ -2376,26 +2343,26 @@ class SlackOAuthCallbackView(APIView):
             <script>
                 (function() {{
                     var payload = {json.dumps(payload)};
-                    console.log("✅ Slack OAuth completed:", payload);
+                    console.log("Slack OAuth finished:", payload);
                     if (window.opener) {{
-                        window.opener.postMessage({{
+                        window.opener.postMessage({
                             type: "slack-auth-success",
                             payload: payload
-                        }}, "*");
+                        }, "*");
                     }}
-                    // Delay close to ensure postMessage reaches opener
-                    setTimeout(() => window.close(), 1500);
+                    window.close();
                 }})();
             </script>
         </head>
-        <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
+        <body style="background: #fff; font-family: sans-serif; text-align:center; padding-top:40px;">
             <h2>Slack login successful 🎉</h2>
-            <p>You can close this window now.</p>
+            <p>You can close this window.</p>
         </body>
         </html>
         """
         return HttpResponse(html)
-
+      
+  
 
 class SlackLoginView(APIView):
     """
