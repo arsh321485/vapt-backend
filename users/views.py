@@ -782,10 +782,27 @@ class MicrosoftTeamsCallbackView(APIView):
                 logger.warning("⚠️ Microsoft user missing email — not saved.")
 
             # ✅ 7. Redirect to frontend callback
+        # ✅ 7. Redirect to frontend callback
             if frontend_redirect:
-                redirect_url = f"{frontend_redirect}/teams-callback?code={code}&state={state}"
-                print("🔁 Redirecting to:", redirect_url)
-                return redirect(redirect_url)
+                redirect_html = f"""
+                <html>
+                <head><title>Microsoft Login Success</title></head>
+                <body style='font-family:sans-serif; text-align:center; margin-top:40px;'>
+                    <h2>✅ Microsoft Teams Login Successful</h2>
+                    <script>
+                        // Post message back to parent window
+                        window.opener?.postMessage({{
+                            code: "{code}",
+                            state: "{state}"
+                        }}, "{frontend_redirect}");
+                        // Close popup
+                        window.close();
+                    </script>
+                </body>
+                </html>
+                """
+                return HttpResponse(redirect_html)
+
 
             # ✅ 8. Return fallback JSON if no redirect found
             return JsonResponse({
