@@ -2365,130 +2365,130 @@ class SlackOAuthCallbackView(APIView):
             )
             
 
-class SlackOAuthCallbackView(APIView):
-    """
-    Handles Slack OAuth callback (GET).
-    Exchanges code for tokens, saves Slack user in DB,
-    and returns a small HTML that closes the popup window
-    and notifies the main frontend (via window.postMessage).
-    """
-    permission_classes = [AllowAny]
+# class SlackOAuthCallbackView(APIView):
+#     """
+#     Handles Slack OAuth callback (GET).
+#     Exchanges code for tokens, saves Slack user in DB,
+#     and returns a small HTML that closes the popup window
+#     and notifies the main frontend (via window.postMessage).
+#     """
+#     permission_classes = [AllowAny]
 
-    def get(self, request):
-        try:
-            code = request.GET.get("code")
-            state = request.GET.get("state", "")
+#     def get(self, request):
+#         try:
+#             code = request.GET.get("code")
+#             state = request.GET.get("state", "")
 
-            # ✅ Auto-detect base URL (ngrok / production safe)
-            try:
-                ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
-                https_tunnel = next(
-                    (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
-                    None
-                )
-                base_url = https_tunnel["public_url"] if https_tunnel else request.build_absolute_uri("/").rstrip("/")
-            except Exception:
-                base_url = request.build_absolute_uri("/").rstrip("/")
+#             # ✅ Auto-detect base URL (ngrok / production safe)
+#             try:
+#                 ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
+#                 https_tunnel = next(
+#                     (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
+#                     None
+#                 )
+#                 base_url = https_tunnel["public_url"] if https_tunnel else request.build_absolute_uri("/").rstrip("/")
+#             except Exception:
+#                 base_url = request.build_absolute_uri("/").rstrip("/")
 
-            redirect_uri = f"{base_url}/api/admin/users/slack/callback/"
+#             redirect_uri = f"{base_url}/api/admin/users/slack/callback/"
 
-            # ✅ Step 1: Exchange code for access tokens
-            token_url = "https://slack.com/api/oauth.v2.access"
-            token_data = {
-                "client_id": settings.SLACK_CLIENT_ID,
-                "client_secret": settings.SLACK_CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": redirect_uri,
-            }
+#             # ✅ Step 1: Exchange code for access tokens
+#             token_url = "https://slack.com/api/oauth.v2.access"
+#             token_data = {
+#                 "client_id": settings.SLACK_CLIENT_ID,
+#                 "client_secret": settings.SLACK_CLIENT_SECRET,
+#                 "code": code,
+#                 "redirect_uri": redirect_uri,
+#             }
 
-            token_res = requests.post(token_url, data=token_data)
-            token_json = token_res.json()
+#             token_res = requests.post(token_url, data=token_data)
+#             token_json = token_res.json()
 
-            if not token_json.get("ok"):
-                error = token_json.get("error", "OAuth failed")
-                logger.error(f"Slack OAuth error: {error}")
-                return self._html_response(success=False, error=error)
+#             if not token_json.get("ok"):
+#                 error = token_json.get("error", "OAuth failed")
+#                 logger.error(f"Slack OAuth error: {error}")
+#                 return self._html_response(success=False, error=error)
 
-            # ✅ Step 2: Extract Slack tokens
-            bot_token = token_json.get("access_token")
-            team_info = token_json.get("team", {})
-            authed_user = token_json.get("authed_user", {})
+#             # ✅ Step 2: Extract Slack tokens
+#             bot_token = token_json.get("access_token")
+#             team_info = token_json.get("team", {})
+#             authed_user = token_json.get("authed_user", {})
 
-            # ✅ Step 3: Fetch user profile from Slack
-            user_info = requests.get(
-                "https://slack.com/api/users.info",
-                params={"user": authed_user.get("id")},
-                headers={"Authorization": f"Bearer {bot_token}"},
-            ).json()
+#             # ✅ Step 3: Fetch user profile from Slack
+#             user_info = requests.get(
+#                 "https://slack.com/api/users.info",
+#                 params={"user": authed_user.get("id")},
+#                 headers={"Authorization": f"Bearer {bot_token}"},
+#             ).json()
 
-            user_data = user_info.get("user", {}) if user_info.get("ok") else {}
-            email = user_data.get("profile", {}).get("email")
-            name = user_data.get("real_name") or user_data.get("name") or "Slack User"
-            firstname = name.split()[0]
-            lastname = " ".join(name.split()[1:]) if len(name.split()) > 1 else ""
+#             user_data = user_info.get("user", {}) if user_info.get("ok") else {}
+#             email = user_data.get("profile", {}).get("email")
+#             name = user_data.get("real_name") or user_data.get("name") or "Slack User"
+#             firstname = name.split()[0]
+#             lastname = " ".join(name.split()[1:]) if len(name.split()) > 1 else ""
 
-            # ✅ Step 4: Create or update local user (no model change)
-            user, created = User.objects.get_or_create(
-                email=email,
-                defaults={"firstname": firstname, "lastname": lastname, "password": ""},
-            )
+#             # ✅ Step 4: Create or update local user (no model change)
+#             user, created = User.objects.get_or_create(
+#                 email=email,
+#                 defaults={"firstname": firstname, "lastname": lastname, "password": ""},
+#             )
 
-            # ✅ Step 5: Prepare data to send to frontend
-            data = {
-                "success": True,
-                "message": "Slack login successful",
-                "user_email": email,
-                "user_name": name,
-                "team": team_info.get("name"),
-                "team_id": team_info.get("id"),
-                "bot_access_token": bot_token,
-                "user_access_token": authed_user.get("access_token"),
-            }
+#             # ✅ Step 5: Prepare data to send to frontend
+#             data = {
+#                 "success": True,
+#                 "message": "Slack login successful",
+#                 "user_email": email,
+#                 "user_name": name,
+#                 "team": team_info.get("name"),
+#                 "team_id": team_info.get("id"),
+#                 "bot_access_token": bot_token,
+#                 "user_access_token": authed_user.get("access_token"),
+#             }
 
-            # ✅ Step 6: Return HTML to close popup and send data
-            return self._html_response(success=True, data=data)
+#             # ✅ Step 6: Return HTML to close popup and send data
+#             return self._html_response(success=True, data=data)
 
-        except Exception as e:
-            logger.exception("Slack OAuth callback exception")
-            return self._html_response(success=False, error=str(e))
+#         except Exception as e:
+#             logger.exception("Slack OAuth callback exception")
+#             return self._html_response(success=False, error=str(e))
 
-    def _html_response(self, success=True, data=None, error=None):
-        """
-        Returns a small HTML that:
-          - Sends result to the main window via postMessage
-          - Closes the popup automatically
-        """
-        payload = {"success": success}
-        if success:
-            payload.update(data or {})
-        else:
-            payload.update({"error": error})
+#     def _html_response(self, success=True, data=None, error=None):
+#         """
+#         Returns a small HTML that:
+#           - Sends result to the main window via postMessage
+#           - Closes the popup automatically
+#         """
+#         payload = {"success": success}
+#         if success:
+#             payload.update(data or {})
+#         else:
+#             payload.update({"error": error})
 
-        html = f"""
-        <html>
-        <head>
-            <title>Slack OAuth</title>
-            <script>
-                (function() {{
-                    var payload = {json.dumps(payload)};
-                    console.log("Slack OAuth finished:", payload);
-                    if (window.opener) {{
-                        window.opener.postMessage({{
-                            type: "slack-auth-complete",
-                            payload: payload
-                        }}, "*");
-                    }}
-                    window.close();
-                }})();
-            </script>
-        </head>
-        <body style="background: #fff; font-family: sans-serif; text-align:center; padding-top:40px;">
-            <h2>Slack login successful 🎉</h2>
-            <p>You can close this window.</p>
-        </body>
-        </html>
-        """
-        return HttpResponse(html)
+#         html = f"""
+#         <html>
+#         <head>
+#             <title>Slack OAuth</title>
+#             <script>
+#                 (function() {{
+#                     var payload = {json.dumps(payload)};
+#                     console.log("Slack OAuth finished:", payload);
+#                     if (window.opener) {{
+#                         window.opener.postMessage({{
+#                             type: "slack-auth-complete",
+#                             payload: payload
+#                         }}, "*");
+#                     }}
+#                     window.close();
+#                 }})();
+#             </script>
+#         </head>
+#         <body style="background: #fff; font-family: sans-serif; text-align:center; padding-top:40px;">
+#             <h2>Slack login successful 🎉</h2>
+#             <p>You can close this window.</p>
+#         </body>
+#         </html>
+#         """
+#         return HttpResponse(html)
       
   
             
