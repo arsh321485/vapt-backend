@@ -437,6 +437,9 @@ class MicrosoftTeamsCallbackView(APIView):
 
     def get(self, request):
         try:
+            import logging
+            logger = logging.getLogger(__name__)
+
             code = request.GET.get("code")
             state = request.GET.get("state")
 
@@ -445,60 +448,74 @@ class MicrosoftTeamsCallbackView(APIView):
             if not state:
                 return JsonResponse({"error": "Missing state"}, status=400)
 
-            # Decode redirect_uri from state
+            # Decode state safely
             try:
-                state_data = json.loads(base64.urlsafe_b64decode(state + "==").decode())
+                decoded_bytes = base64.urlsafe_b64decode(state + "==")
+                state_data = json.loads(decoded_bytes.decode())
                 frontend_redirect = state_data.get("redirect_uri")
-            except Exception:
+            except Exception as decode_error:
+                logger.error(f"State decode failed: {decode_error}")
                 frontend_redirect = None
 
-            # Exchange authorization code for token
+            # ✅ Use the same redirect URI that Microsoft accepted during authorization
+            redirect_uri = settings.MICROSOFT_REDIRECT_URI
+
+            # Exchange authorization code for access token
             data = {
                 "grant_type": "authorization_code",
                 "client_id": settings.MICROSOFT_CLIENT_ID,
                 "client_secret": settings.MICROSOFT_CLIENT_SECRET,
                 "code": code,
-                "redirect_uri": settings.MICROSOFT_REDIRECT_URI,
+                "redirect_uri": redirect_uri,
             }
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
             token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=data, headers=headers)
             token_data = token_response.json()
 
             if token_response.status_code != 200:
-                return JsonResponse({
-                    "error": "Token exchange failed",
-                    "details": token_data
-                }, status=token_response.status_code)
+                logger.error(f"Token exchange failed: {token_data}")
+                return JsonResponse({"error": "Token exchange failed", "details": token_data},
+                                    status=token_response.status_code)
 
             access_token = token_data.get("access_token")
+            if not access_token:
+                return JsonResponse({"error": "No access token returned"}, status=400)
 
-            # Fetch Microsoft user info
+            # ✅ Fetch Microsoft user info
             user_info = requests.get(
                 "https://graph.microsoft.com/v1.0/me",
                 headers={"Authorization": f"Bearer {access_token}"}
             ).json()
+            logger.info(f"Microsoft user info: {user_info}")
 
-            # ✅ Save user data to database (if applicable)
+            # ✅ Save to DB safely
             try:
-                from users.models import User  # adjust your path if needed
+                from users.models import User
+                from django.contrib.auth.hashers import make_password
 
+                # Extract usable data
                 email = user_info.get("mail") or user_info.get("userPrincipalName")
-                name = user_info.get("displayName", "Unknown")
+                full_name = user_info.get("displayName", "")
+                first_name, last_name = (full_name.split(" ", 1) + [""])[:2]
 
-                if email:
-                    user, created = User.objects.get_or_create(email=email, defaults={
-                        "first_name": name.split(" ")[0] if " " in name else name,
-                        "last_name": name.split(" ")[1] if " " in name else "",
-                        "password": make_password(None),  # blank password
-                    })
-                    print(f"✅ Microsoft user {'created' if created else 'exists'}: {user.email}")
+                if not email:
+                    logger.warning("⚠️ Microsoft user email missing — skipping DB save.")
                 else:
-                    print("⚠️ Microsoft user email not found, skipping DB save.")
+                    user, created = User.objects.get_or_create(
+                        email=email,
+                        defaults={
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "password": make_password(None),
+                        }
+                    )
+                    logger.info(f"✅ Microsoft user {'created' if created else 'already exists'}: {email}")
 
             except Exception as db_error:
-                print("⚠️ Database save skipped due to:", db_error)
+                logger.error(f"⚠️ DB save failed: {db_error}")
 
-            # ✅ Return HTML that auto-closes popup and posts message
+            # ✅ Return HTML that auto-closes popup and sends message
             html = f"""
             <html>
               <body>
@@ -521,8 +538,11 @@ class MicrosoftTeamsCallbackView(APIView):
             return HttpResponse(html)
 
         except Exception as e:
+            import traceback
+            logger.error("Microsoft callback error: %s", traceback.format_exc())
             return JsonResponse({"error": str(e)}, status=500)
-        
+
+
 
 # class MicrosoftTeamsCallbackView(APIView):
 #     permission_classes = [AllowAny]
