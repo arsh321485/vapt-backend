@@ -433,124 +433,14 @@ class MicrosoftTeamsOAuthUrlView(APIView):
             return JsonResponse({"error": str(e)}, status=500)
         
 
-# class MicrosoftTeamsCallbackView(APIView):
-#     permission_classes = [AllowAny]
-
-#     def get(self, request):
-#         try:
-#             import logging
-#             logger = logging.getLogger(__name__)
-
-#             code = request.GET.get("code")
-#             state = request.GET.get("state")
-
-#             if not code:
-#                 return JsonResponse({"error": "Missing code"}, status=400)
-#             if not state:
-#                 return JsonResponse({"error": "Missing state"}, status=400)
-
-#             # Decode state safely
-#             try:
-#                 decoded_bytes = base64.urlsafe_b64decode(state + "==")
-#                 state_data = json.loads(decoded_bytes.decode())
-#                 frontend_redirect = state_data.get("redirect_uri")
-#             except Exception as decode_error:
-#                 logger.error(f"State decode failed: {decode_error}")
-#                 frontend_redirect = None
-
-#             # ✅ Use the same redirect URI that Microsoft accepted during authorization
-#             redirect_uri = settings.MICROSOFT_REDIRECT_URI
-
-#             # Exchange authorization code for access token
-#             data = {
-#                 "grant_type": "authorization_code",
-#                 "client_id": settings.MICROSOFT_CLIENT_ID,
-#                 "client_secret": settings.MICROSOFT_CLIENT_SECRET,
-#                 "code": code,
-#                 "redirect_uri": redirect_uri,
-#             }
-#             headers = {"Content-Type": "application/x-www-form-urlencoded"}
-
-#             token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=data, headers=headers)
-#             token_data = token_response.json()
-
-#             if token_response.status_code != 200:
-#                 logger.error(f"Token exchange failed: {token_data}")
-#                 return JsonResponse({"error": "Token exchange failed", "details": token_data},
-#                                     status=token_response.status_code)
-
-#             access_token = token_data.get("access_token")
-#             if not access_token:
-#                 return JsonResponse({"error": "No access token returned"}, status=400)
-
-#             # ✅ Fetch Microsoft user info
-#             user_info = requests.get(
-#                 "https://graph.microsoft.com/v1.0/me",
-#                 headers={"Authorization": f"Bearer {access_token}"}
-#             ).json()
-#             logger.info(f"Microsoft user info: {user_info}")
-
-#             # ✅ Save to DB safely
-#             try:
-#                 from users.models import User
-#                 from django.contrib.auth.hashers import make_password
-
-#                 # Extract usable data
-#                 email = user_info.get("mail") or user_info.get("userPrincipalName")
-#                 full_name = user_info.get("displayName", "")
-#                 first_name, last_name = (full_name.split(" ", 1) + [""])[:2]
-
-#                 if not email:
-#                     logger.warning("⚠️ Microsoft user email missing — skipping DB save.")
-#                 else:
-#                     user, created = User.objects.get_or_create(
-#                         email=email,
-#                         defaults={
-#                             "first_name": first_name,
-#                             "last_name": last_name,
-#                             "password": make_password(None),
-#                         }
-#                     )
-#                     logger.info(f"✅ Microsoft user {'created' if created else 'already exists'}: {email}")
-
-#             except Exception as db_error:
-#                 logger.error(f"⚠️ DB save failed: {db_error}")
-
-#             # ✅ Return HTML that auto-closes popup and sends message
-#             html = f"""
-#             <html>
-#               <body>
-#                 <script>
-#                   if (window.opener) {{
-#                     window.opener.postMessage({{
-#                       type: "teams-login-success",
-#                       code: "{code}",
-#                       token_data: {json.dumps(token_data)},
-#                       user_info: {json.dumps(user_info)}
-#                     }}, "{frontend_redirect}");
-#                     window.close();
-#                   }} else {{
-#                     document.write("<p>Microsoft login successful. You can close this window.</p>");
-#                   }}
-#                 </script>
-#               </body>
-#             </html>
-#             """
-#             return HttpResponse(html)
-
-#         except Exception as e:
-#             import traceback
-#             logger.error("Microsoft callback error: %s", traceback.format_exc())
-#             return JsonResponse({"error": str(e)}, status=500)
-
 class MicrosoftTeamsCallbackView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        logger = logging.getLogger(__name__)
-
         try:
-            # Extract Microsoft code + state
+            import logging
+            logger = logging.getLogger(__name__)
+
             code = request.GET.get("code")
             state = request.GET.get("state")
 
@@ -559,7 +449,7 @@ class MicrosoftTeamsCallbackView(APIView):
             if not state:
                 return JsonResponse({"error": "Missing state"}, status=400)
 
-            # Decode redirect info from state
+            # Decode state safely
             try:
                 decoded_bytes = base64.urlsafe_b64decode(state + "==")
                 state_data = json.loads(decoded_bytes.decode())
@@ -568,13 +458,16 @@ class MicrosoftTeamsCallbackView(APIView):
                 logger.error(f"State decode failed: {decode_error}")
                 frontend_redirect = None
 
-            # Prepare token exchange request
+            # ✅ Use the same redirect URI that Microsoft accepted during authorization
+            redirect_uri = settings.MICROSOFT_REDIRECT_URI
+
+            # Exchange authorization code for access token
             data = {
                 "grant_type": "authorization_code",
                 "client_id": settings.MICROSOFT_CLIENT_ID,
                 "client_secret": settings.MICROSOFT_CLIENT_SECRET,
                 "code": code,
-                "redirect_uri": settings.MICROSOFT_REDIRECT_URI,
+                "redirect_uri": redirect_uri,
             }
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
@@ -583,29 +476,33 @@ class MicrosoftTeamsCallbackView(APIView):
 
             if token_response.status_code != 200:
                 logger.error(f"Token exchange failed: {token_data}")
-                return JsonResponse({
-                    "error": "Token exchange failed",
-                    "details": token_data
-                }, status=token_response.status_code)
+                return JsonResponse({"error": "Token exchange failed", "details": token_data},
+                                    status=token_response.status_code)
 
             access_token = token_data.get("access_token")
             if not access_token:
-                return JsonResponse({"error": "Access token missing"}, status=400)
+                return JsonResponse({"error": "No access token returned"}, status=400)
 
-            # Get user info from Microsoft Graph
+            # ✅ Fetch Microsoft user info
             user_info = requests.get(
                 "https://graph.microsoft.com/v1.0/me",
                 headers={"Authorization": f"Bearer {access_token}"}
             ).json()
             logger.info(f"Microsoft user info: {user_info}")
 
-            # Save user in database
+            # ✅ Save to DB safely
             try:
+                from users.models import User
+                from django.contrib.auth.hashers import make_password
+
+                # Extract usable data
                 email = user_info.get("mail") or user_info.get("userPrincipalName")
                 full_name = user_info.get("displayName", "")
                 first_name, last_name = (full_name.split(" ", 1) + [""])[:2]
 
-                if email:
+                if not email:
+                    logger.warning("⚠️ Microsoft user email missing — skipping DB save.")
+                else:
                     user, created = User.objects.get_or_create(
                         email=email,
                         defaults={
@@ -614,218 +511,41 @@ class MicrosoftTeamsCallbackView(APIView):
                             "password": make_password(None),
                         }
                     )
-                    logger.info(f"✅ Microsoft user {'created' if created else 'exists'}: {email}")
-                else:
-                    logger.warning("⚠️ Microsoft user has no email, skipped saving.")
+                    logger.info(f"✅ Microsoft user {'created' if created else 'already exists'}: {email}")
 
             except Exception as db_error:
-                logger.error(f"⚠️ Database save failed: {db_error}")
+                logger.error(f"⚠️ DB save failed: {db_error}")
 
-            # ✅ Redirect popup to frontend /teams-callback
-            if frontend_redirect:
-                frontend_callback_url = f"{frontend_redirect}/teams-callback?code={code}&state={state}"
-                return redirect(frontend_callback_url)
-            else:
-                return JsonResponse({"message": "Login success, but no redirect found."})
+            # ✅ Return HTML that auto-closes popup and sends message
+            html = f"""
+            <html>
+              <body>
+                <script>
+                  if (window.opener) {{
+                    window.opener.postMessage({{
+                      type: "teams-login-success",
+                      code: "{code}",
+                      token_data: {json.dumps(token_data)},
+                      user_info: {json.dumps(user_info)}
+                    }}, "{frontend_redirect}");
+                    window.close();
+                  }} else {{
+                    document.write("<p>Microsoft login successful. You can close this window.</p>");
+                  }}
+                </script>
+              </body>
+            </html>
+            """
+            return HttpResponse(html)
 
         except Exception as e:
-            logger.error(f"Microsoft callback error: {str(e)}", exc_info=True)
+            import traceback
+            logger.error("Microsoft callback error: %s", traceback.format_exc())
             return JsonResponse({"error": str(e)}, status=500)
-        
-        
 
-# class MicrosoftTeamsCallbackView(APIView):
-#     permission_classes = [AllowAny]
 
-#     def get(self, request):
-#         try:
-#             code = request.GET.get("code")
-#             state = request.GET.get("state")
 
-#             if not code:
-#                 return JsonResponse({"error": "Missing code"}, status=400)
-#             if not state:
-#                 return JsonResponse({"error": "Missing state"}, status=400)
-
-#             # Decode redirect_uri from state
-#             try:
-#                 state_data = json.loads(base64.urlsafe_b64decode(state + "==").decode())
-#                 frontend_redirect = state_data.get("redirect_uri")
-#             except Exception:
-#                 frontend_redirect = None
-
-#             # Exchange authorization code for token
-#             data = {
-#                 "grant_type": "authorization_code",
-#                 "client_id": settings.MICROSOFT_CLIENT_ID,
-#                 "client_secret": settings.MICROSOFT_CLIENT_SECRET,
-#                 "code": code,
-#                 "redirect_uri": settings.MICROSOFT_REDIRECT_URI,
-#             }
-#             headers = {"Content-Type": "application/x-www-form-urlencoded"}
-
-#             token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=data, headers=headers)
-#             token_data = token_response.json()
-
-#             if token_response.status_code != 200:
-#                 return JsonResponse({
-#                     "error": "Token exchange failed",
-#                     "details": token_data
-#                 }, status=token_response.status_code)
-
-#             access_token = token_data.get("access_token")
-#             user_info = requests.get(
-#                 "https://graph.microsoft.com/v1.0/me",
-#                 headers={"Authorization": f"Bearer {access_token}"}
-#             ).json()
-
-#             # ✅ Return HTML that auto-closes popup and posts message
-#             html = f"""
-#             <html>
-#               <body>
-#                 <script>
-#                   if (window.opener) {{
-#                     window.opener.postMessage({{
-#                       type: "teams-login-success",
-#                       code: "{code}",
-#                       token_data: {json.dumps(token_data)},
-#                       user_info: {json.dumps(user_info)}
-#                     }}, "{frontend_redirect}");
-#                     window.close();
-#                   }} else {{
-#                     document.write("<p>Microsoft login successful. You can close this window.</p>");
-#                   }}
-#                 </script>
-#               </body>
-#             </html>
-#             """
-#             return HttpResponse(html)
-
-#         except Exception as e:
-#             return JsonResponse({"error": str(e)}, status=500)
-
-  
-# class MicrosoftTeamsOAuthUrlView(APIView):
-#     permission_classes = [permissions.AllowAny]
-
-#     def get(self, request):
-#         try:
-#             redirect_uri = request.GET.get("redirect_uri")
-#             if not redirect_uri:
-#                 return Response({"error": "Missing redirect_uri parameter"}, status=400)
-
-#             # ✅ Combine state + redirect_uri into one base64-encoded value
-#             state_data = {
-#                 "redirect_uri": redirect_uri,
-#                 "nonce": secrets.token_urlsafe(8),
-#             }
-#             state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
-
-#             client_id = settings.MICROSOFT_CLIENT_ID
-#             scope = (
-#                 "https://graph.microsoft.com/User.Read "
-#                 "https://graph.microsoft.com/Group.ReadWrite.All "
-#                 "https://graph.microsoft.com/ChannelMessage.Send "
-#                 "offline_access openid email profile"
-#             )
-
-#             auth_url = (
-#                 f"{settings.MICROSOFT_AUTH_URL}?"
-#                 f"client_id={client_id}"
-#                 f"&response_type=code"
-#                 f"&redirect_uri={redirect_uri}"
-#                 f"&response_mode=query"
-#                 f"&scope={scope}"
-#                 f"&state={state}"
-#             )
-
-#             return Response({"auth_url": auth_url})
-#         except Exception as e:
-#             return Response({"error": str(e)}, status=500)
-        
-        
-# class MicrosoftTeamsCallbackView(APIView):
-#     permission_classes = [permissions.AllowAny]
-
-#     def get(self, request):
-#         try:
-#             code = request.GET.get("code")
-#             state = request.GET.get("state")
-
-#             if not code:
-#                 return JsonResponse({"error": "Authorization code not provided"}, status=400)
-#             if not state:
-#                 return JsonResponse({"error": "Missing state parameter"}, status=400)
-
-#             # Decode redirect_uri from state
-#             try:
-#                 state_json = json.loads(base64.urlsafe_b64decode(state + "==").decode())
-#                 redirect_uri = state_json.get("redirect_uri")
-#             except Exception:
-#                 redirect_uri = None
-
-#             if not redirect_uri:
-#                 return JsonResponse({"error": "Missing redirect_uri in state"}, status=400)
-
-#             # Exchange code for access token
-#             token_url = settings.MICROSOFT_TOKEN_URL
-#             data = {
-#                 "grant_type": "authorization_code",
-#                 "client_id": settings.MICROSOFT_CLIENT_ID,
-#                 "client_secret": settings.MICROSOFT_CLIENT_SECRET,
-#                 "code": code,
-#                 "redirect_uri": redirect_uri,
-#             }
-#             headers = {"Content-Type": "application/x-www-form-urlencoded"}
-#             response = requests.post(token_url, data=data, headers=headers)
-#             if response.status_code != 200:
-#                 return JsonResponse({
-#                     "error": "Token exchange failed",
-#                     "details": response.json()
-#                 }, status=response.status_code)
-
-#             token_data = response.json()
-#             access_token = token_data.get("access_token")
-
-#             # Fetch Microsoft Graph user info
-#             user_info = requests.get(
-#                 "https://graph.microsoft.com/v1.0/me",
-#                 headers={"Authorization": f"Bearer {access_token}"}
-#             ).json()
-
-#             # Determine response type
-#             accept_header = request.headers.get("Accept", "")
-#             if "application/json" in accept_header:
-#                 # Return JSON for Postman/API
-#                 return JsonResponse({
-#                     "message": "Microsoft Teams login successful",
-#                     "user_info": user_info,
-#                     "token_data": token_data
-#                 })
-
-#             # HTML for browser popup: auto-close + postMessage
-#             html = f"""
-#             <html>
-#               <body>
-#                 <script>
-#                   if (window.opener) {{
-#                     window.opener.postMessage({{
-#                       message: "Microsoft Teams login successful",
-#                       user_info: {json.dumps(user_info)},
-#                       token_data: {json.dumps(token_data)}
-#                     }}, "*");
-#                     window.close();
-#                   }} else {{
-#                     document.body.innerHTML = "<p>Login successful. You can close this window.</p>";
-#                   }}
-#                 </script>
-#               </body>
-#             </html>
-#             """
-#             return HttpResponse(html)
-
-#         except Exception as e:
-#             return JsonResponse({"error": f"Callback failed: {str(e)}"}, status=500)
+    
 
 
 @method_decorator(csrf_exempt, name='dispatch')
