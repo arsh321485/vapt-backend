@@ -199,23 +199,19 @@ class UserDetailUpdateView(generics.UpdateAPIView):
 #             {"message": "User detail deleted successfully"},
 #             status=status.HTTP_200_OK
 #         )
-        
- 
+  
+from rest_framework import generics, permissions, status
+from rest_framework.response import Response
+from bson import ObjectId
+from django.shortcuts import get_object_or_404
+
+from .models import UserDetail
+
+
 class UserDetailDeleteView(generics.DestroyAPIView):
     """
-    Delete a specific role from UserDetail's Member_role list.
+    Delete a specific role from UserDetail.Member_role list.
     If Member_role becomes empty after deletion, delete the entire UserDetail record.
-    
-    Requirements:
-      - request.user is the admin for that UserDetail (or is_staff)
-      - frontend sends {"confirm": true, "member_role": "<role>"} in the request body
-      - the provided member_role exists in the instance.Member_role list
-      
-    Member_role valid values (one of):
-      - "Patch management"
-      - "Configuration management"
-      - "Network security"
-      - "Architectural flaws"
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -229,9 +225,16 @@ class UserDetailDeleteView(generics.DestroyAPIView):
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
+        if not instance:
+            return Response({"detail": "Invalid detail_id"}, status=status.HTTP_400_BAD_REQUEST)
 
         # Permission check: Only the admin who owns this record or staff can delete
-        if not (request.user.id == instance.admin.id or request.user.is_staff):
+        try:
+            is_owner = (request.user.id == instance.admin.id)
+        except Exception:
+            is_owner = False
+
+        if not (is_owner or request.user.is_staff):
             return Response(
                 {"detail": "You do not have permission to delete this member's role."},
                 status=status.HTTP_403_FORBIDDEN
@@ -257,7 +260,7 @@ class UserDetailDeleteView(generics.DestroyAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Ensure provided_role is one of the allowed 4 roles
+        # Allowed roles
         allowed_roles = {
             "Patch management",
             "Configuration management",
@@ -270,51 +273,164 @@ class UserDetailDeleteView(generics.DestroyAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Get current Member_role (should be a list)
-        member_roles = instance.Member_role
-
-        # Ensure it's a list
+        # Get current Member_role (ensure list)
+        member_roles = instance.Member_role or []
         if not isinstance(member_roles, list):
-            # Convert to list if it's a string (backward compatibility)
             member_roles = [member_roles] if member_roles else []
 
-        # Check if the provided role exists in the member's roles
+        # Check if role exists
         if provided_role not in member_roles:
             return Response(
-                {
-                    "detail": f"Role '{provided_role}' not found in member's roles. Current roles: {member_roles}"
-                },
+                {"detail": f"Role '{provided_role}' not found in member's roles. Current roles: {member_roles}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Remove the specific role from the list
+        # Remove role
         member_roles.remove(provided_role)
 
-        # If no roles left, delete the entire record
+        # Build member full name
+        member_name = f"{instance.first_name} {instance.last_name}"
+
+        # If no roles left, delete the user detail record
         if len(member_roles) == 0:
-            member_name = f"{instance.first_name} {instance.last_name}"
             instance.delete()
             return Response(
                 {
-                    "message": f"Role '{provided_role}' removed. No roles remaining, so {member_name}'s record was deleted.",
+                    "message": f"Role '{provided_role}' removed successfully from {member_name}. No roles remaining; the member record was deleted.",
                     "action": "record_deleted",
                     "deleted_role": provided_role
                 },
                 status=status.HTTP_200_OK
             )
-        else:
-            # Update the Member_role field with remaining roles
-            instance.Member_role = member_roles
-            instance.save()
-            return Response(
-                {
-                    "message": f"Role '{provided_role}' removed successfully.",
-                    "action": "role_removed",
-                    "deleted_role": provided_role,
-                    "remaining_roles": member_roles
-                },
-                status=status.HTTP_200_OK
-            )
+
+        # Otherwise update and return remaining roles
+        instance.Member_role = member_roles
+        instance.save()
+        return Response(
+            {
+                "message": f"Role '{provided_role}' removed successfully from {member_name}.",
+                "action": "role_removed",
+                "deleted_role": provided_role,
+                "remaining_roles": member_roles
+            },
+            status=status.HTTP_200_OK
+        )
+      
+ 
+# class UserDetailDeleteView(generics.DestroyAPIView):
+#     """
+#     Delete a specific role from UserDetail's Member_role list.
+#     If Member_role becomes empty after deletion, delete the entire UserDetail record.
+    
+#     Requirements:
+#       - request.user is the admin for that UserDetail (or is_staff)
+#       - frontend sends {"confirm": true, "member_role": "<role>"} in the request body
+#       - the provided member_role exists in the instance.Member_role list
+      
+#     Member_role valid values (one of):
+#       - "Patch management"
+#       - "Configuration management"
+#       - "Network security"
+#       - "Architectural flaws"
+#     """
+#     permission_classes = [permissions.IsAuthenticated]
+
+#     def get_object(self):
+#         detail_id = self.kwargs.get("detail_id")
+#         try:
+#             obj_id = ObjectId(detail_id)
+#         except Exception:
+#             return None
+#         return get_object_or_404(UserDetail, _id=obj_id)
+
+#     def destroy(self, request, *args, **kwargs):
+#         instance = self.get_object()
+
+#         # Permission check: Only the admin who owns this record or staff can delete
+#         if not (request.user.id == instance.admin.id or request.user.is_staff):
+#             return Response(
+#                 {"detail": "You do not have permission to delete this member's role."},
+#                 status=status.HTTP_403_FORBIDDEN
+#             )
+
+#         # Read confirmation and role from request body
+#         confirm = request.data.get("confirm", False)
+#         provided_role = request.data.get("member_role")
+
+#         # Handle both boolean and string "true"/"false"
+#         if isinstance(confirm, str):
+#             confirm = confirm.lower() == "true"
+
+#         if not confirm:
+#             return Response(
+#                 {"detail": "Deletion not confirmed. Please set confirm to true."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         if not provided_role:
+#             return Response(
+#                 {"detail": "member_role is required in request body."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         # Ensure provided_role is one of the allowed 4 roles
+#         allowed_roles = {
+#             "Patch management",
+#             "Configuration management",
+#             "Network security",
+#             "Architectural flaws",
+#         }
+#         if provided_role not in allowed_roles:
+#             return Response(
+#                 {"detail": f"Invalid member_role. Must be one of: {', '.join(allowed_roles)}"},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         # Get current Member_role (should be a list)
+#         member_roles = instance.Member_role
+
+#         # Ensure it's a list
+#         if not isinstance(member_roles, list):
+#             # Convert to list if it's a string (backward compatibility)
+#             member_roles = [member_roles] if member_roles else []
+
+#         # Check if the provided role exists in the member's roles
+#         if provided_role not in member_roles:
+#             return Response(
+#                 {
+#                     "detail": f"Role '{provided_role}' not found in member's roles. Current roles: {member_roles}"
+#                 },
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         # Remove the specific role from the list
+#         member_roles.remove(provided_role)
+
+#         # If no roles left, delete the entire record
+#         if len(member_roles) == 0:
+#             member_name = f"{instance.first_name} {instance.last_name}"
+#             instance.delete()
+#             return Response(
+#                 {
+#                     "message": f"Role '{provided_role}' removed. No roles remaining, so {member_name}'s record was deleted.",
+#                     "action": "record_deleted",
+#                     "deleted_role": provided_role
+#                 },
+#                 status=status.HTTP_200_OK
+#             )
+#         else:
+#             # Update the Member_role field with remaining roles
+#             instance.Member_role = member_roles
+#             instance.save()
+#             return Response(
+#                 {
+#                     "message": f"Role '{provided_role}' removed successfully.",
+#                     "action": "role_removed",
+#                     "deleted_role": provided_role,
+#                     "remaining_roles": member_roles
+#                 },
+#                 status=status.HTTP_200_OK
+#             )
             
 class UserDetailCompleteDeleteView(generics.DestroyAPIView):
     """
