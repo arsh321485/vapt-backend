@@ -3,7 +3,6 @@ from bson import ObjectId
 from users.models import User
 from location.models import Location
 
-
 class UserDetail(models.Model):
     _id = models.ObjectIdField(primary_key=True, default=ObjectId, editable=False)
 
@@ -13,9 +12,8 @@ class UserDetail(models.Model):
     last_name = models.CharField(max_length=255)
     user_type = models.CharField(max_length=255)
     email = models.EmailField(unique=True)
-    select_location = models.CharField(max_length=255)  # e.g. "Mumbai"
-    Member_role = models.CharField(max_length=255)      # e.g. "management"
-
+    select_location = models.CharField(max_length=255)
+    Member_role = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

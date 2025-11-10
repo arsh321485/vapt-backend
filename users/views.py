@@ -124,6 +124,7 @@ class UserRegistrationView(generics.CreateAPIView):
             safe_data = {k: (v if k != 'password' else '***') for k, v in dict(request.data).items()}
             logger.debug(f"Request data: {safe_data}")
             return Response({"error": "Something went wrong"}, status=400)
+        
 class UserLoginView(generics.GenericAPIView):
     serializer_class = UserLoginSerializer
     permission_classes = [AllowAny]
