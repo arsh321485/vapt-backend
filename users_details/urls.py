@@ -5,8 +5,9 @@ from .views import (
     UserDetailSearchView,
     UserDetailView,
     UserDetailUpdateView,
-    UserDetailDeleteView,
-    UserDetailCompleteDeleteView
+    UserDetailRoleDeleteView,
+    UserDetailCompleteDeleteView,
+    UserDetailRoleUpdateView
 )
 
 app_name = "users_details"
@@ -17,9 +18,7 @@ urlpatterns = [
     path("search-user-details/", UserDetailSearchView.as_view(), name="userdetail-search"),
     path("user-detail/<str:detail_id>/", UserDetailView.as_view(), name="userdetail-detail"),
     path("user-detail/<str:detail_id>/update/", UserDetailUpdateView.as_view(), name="userdetail-update"),
-    # path("user-detail/<str:detail_id>/delete/", UserDetailDeleteView.as_view(), name="userdetail-delete"),
-    path("user-detail/<str:detail_id>/delete-role/", UserDetailDeleteView.as_view(), name="userdetail-delete-role"),
-    
-    # Delete the entire UserDetail record
+    path("user-detail/<str:detail_id>/delete-role/", UserDetailRoleDeleteView.as_view(), name="userdetail-delete-role"),
+    path("user-detail/<str:detail_id>/update-role/", UserDetailRoleUpdateView.as_view(), name="userdetail-update-role"),
     path("user-detail/<str:detail_id>/delete/", UserDetailCompleteDeleteView.as_view(), name="userdetail-delete-complete"),
 ]

@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from bson import ObjectId
 from django.shortcuts import get_object_or_404
 from .models import UserDetail
-from .serializers import UserDetailSerializer, UserDetailCreateSerializer,UserDetailUpdateSerializer
+from .serializers import UserDetailSerializer, UserDetailCreateSerializer,UserDetailUpdateSerializer,UserDetailRoleUpdateSerializer
 
 
 class UserDetailCreateView(generics.CreateAPIView):
@@ -91,124 +91,11 @@ class UserDetailUpdateView(generics.UpdateAPIView):
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
 
-# class UserDetailUpdateView(generics.UpdateAPIView):
-#     serializer_class = UserDetailCreateSerializer
-#     permission_classes = [permissions.IsAuthenticated]
-
-#     def get_object(self):
-#         detail_id = self.kwargs.get("detail_id")
-#         obj_id = ObjectId(detail_id)
-#         return get_object_or_404(UserDetail, _id=obj_id)
 
 
-# class UserDetailDeleteView(generics.DestroyAPIView):
-#     permission_classes = [permissions.IsAuthenticated]
-
-#     def get_object(self):
-#         detail_id = self.kwargs.get("detail_id")
-#         obj_id = ObjectId(detail_id)
-#         return get_object_or_404(UserDetail, _id=obj_id)
-
-#     def destroy(self, request, *args, **kwargs):
-#         instance = self.get_object()
-#         instance.delete()
-#         return Response(
-#             {"message": "User detail deleted successfully"},
-#             status=status.HTTP_200_OK
-#         )
 
 
-# class UserDetailDeleteView(generics.DestroyAPIView):
-#     """
-#     Delete a UserDetail only when:
-#       - request.user is the admin for that UserDetail (or is_staff)
-#       - frontend sends {"confirm": true, "member_role": "<role>"} in the request body
-#       - the provided member_role matches the instance.Member_role
-#     Member_role valid values (one of):
-#       - "Patch management"
-#       - "Configuration management"
-#       - "Network security"
-#       - "Architectural flaws"
-#     """
-#     permission_classes = [permissions.IsAuthenticated]
-
-#     def get_object(self):
-#         detail_id = self.kwargs.get("detail_id")
-#         obj_id = ObjectId(detail_id)
-#         return get_object_or_404(UserDetail, _id=obj_id)
-
-#     def destroy(self, request, *args, **kwargs):
-#         instance = self.get_object()
-
-#         # Only the admin who owns this record or staff can delete
-#         if not (request.user == instance.admin or request.user.is_staff):
-#             return Response(
-#                 {"detail": "You do not have permission to delete this member."},
-#                 status=status.HTTP_403_FORBIDDEN
-#             )
-
-#         # Read confirmation and role from request body
-#         confirm = request.data.get("confirm", False)
-#         provided_role = request.data.get("member_role")
-
-#         if not confirm:
-#             return Response(
-#                 {"detail": "Deletion not confirmed. Please check the confirmation box to delete."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         if not provided_role:
-#             return Response(
-#                 {"detail": "member_role is required in request body for verification."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         # Ensure provided_role is one of the allowed 4 roles (protects against typos)
-#         allowed_roles = {
-#             "Patch management",
-#             "Configuration management",
-#             "Network security",
-#             "Architectural flaws",
-#         }
-#         if provided_role not in allowed_roles:
-#             return Response(
-#                 {"detail": "Invalid member_role provided."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         # Check that the instance.Member_role equals provided_role
-#         # If Member_role is a string (single role), compare directly.
-#         # If Member_role is a list (multiple roles), check membership.
-#         instance_role = instance.Member_role
-
-#         # normalize for safe comparison if needed (exact match preferred)
-#         if isinstance(instance_role, (list, tuple)):
-#             match = provided_role in instance_role
-#         else:
-#             match = str(instance_role).strip() == str(provided_role).strip()
-
-#         if not match:
-#             return Response(
-#                 {"detail": "Provided member_role does not match the member's role. Deletion aborted."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         # Passed all checks -> delete
-#         instance.delete()
-#         return Response(
-#             {"message": "User detail deleted successfully"},
-#             status=status.HTTP_200_OK
-#         )
-  
-from rest_framework import generics, permissions, status
-from rest_framework.response import Response
-from bson import ObjectId
-from django.shortcuts import get_object_or_404
-
-from .models import UserDetail
-
-
-class UserDetailDeleteView(generics.DestroyAPIView):
+class UserDetailRoleDeleteView(generics.DestroyAPIView):
     """
     Delete a specific role from UserDetail.Member_role list.
     If Member_role becomes empty after deletion, delete the entire UserDetail record.
@@ -262,10 +149,10 @@ class UserDetailDeleteView(generics.DestroyAPIView):
 
         # Allowed roles
         allowed_roles = {
-            "Patch management",
-            "Configuration management",
-            "Network security",
-            "Architectural flaws",
+            "Patch Management",
+            "Configuration Management",
+            "Network Security",
+            "Architectural Flaws",
         }
         if provided_role not in allowed_roles:
             return Response(
@@ -316,122 +203,6 @@ class UserDetailDeleteView(generics.DestroyAPIView):
             status=status.HTTP_200_OK
         )
       
- 
-# class UserDetailDeleteView(generics.DestroyAPIView):
-#     """
-#     Delete a specific role from UserDetail's Member_role list.
-#     If Member_role becomes empty after deletion, delete the entire UserDetail record.
-    
-#     Requirements:
-#       - request.user is the admin for that UserDetail (or is_staff)
-#       - frontend sends {"confirm": true, "member_role": "<role>"} in the request body
-#       - the provided member_role exists in the instance.Member_role list
-      
-#     Member_role valid values (one of):
-#       - "Patch management"
-#       - "Configuration management"
-#       - "Network security"
-#       - "Architectural flaws"
-#     """
-#     permission_classes = [permissions.IsAuthenticated]
-
-#     def get_object(self):
-#         detail_id = self.kwargs.get("detail_id")
-#         try:
-#             obj_id = ObjectId(detail_id)
-#         except Exception:
-#             return None
-#         return get_object_or_404(UserDetail, _id=obj_id)
-
-#     def destroy(self, request, *args, **kwargs):
-#         instance = self.get_object()
-
-#         # Permission check: Only the admin who owns this record or staff can delete
-#         if not (request.user.id == instance.admin.id or request.user.is_staff):
-#             return Response(
-#                 {"detail": "You do not have permission to delete this member's role."},
-#                 status=status.HTTP_403_FORBIDDEN
-#             )
-
-#         # Read confirmation and role from request body
-#         confirm = request.data.get("confirm", False)
-#         provided_role = request.data.get("member_role")
-
-#         # Handle both boolean and string "true"/"false"
-#         if isinstance(confirm, str):
-#             confirm = confirm.lower() == "true"
-
-#         if not confirm:
-#             return Response(
-#                 {"detail": "Deletion not confirmed. Please set confirm to true."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         if not provided_role:
-#             return Response(
-#                 {"detail": "member_role is required in request body."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         # Ensure provided_role is one of the allowed 4 roles
-#         allowed_roles = {
-#             "Patch management",
-#             "Configuration management",
-#             "Network security",
-#             "Architectural flaws",
-#         }
-#         if provided_role not in allowed_roles:
-#             return Response(
-#                 {"detail": f"Invalid member_role. Must be one of: {', '.join(allowed_roles)}"},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         # Get current Member_role (should be a list)
-#         member_roles = instance.Member_role
-
-#         # Ensure it's a list
-#         if not isinstance(member_roles, list):
-#             # Convert to list if it's a string (backward compatibility)
-#             member_roles = [member_roles] if member_roles else []
-
-#         # Check if the provided role exists in the member's roles
-#         if provided_role not in member_roles:
-#             return Response(
-#                 {
-#                     "detail": f"Role '{provided_role}' not found in member's roles. Current roles: {member_roles}"
-#                 },
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         # Remove the specific role from the list
-#         member_roles.remove(provided_role)
-
-#         # If no roles left, delete the entire record
-#         if len(member_roles) == 0:
-#             member_name = f"{instance.first_name} {instance.last_name}"
-#             instance.delete()
-#             return Response(
-#                 {
-#                     "message": f"Role '{provided_role}' removed. No roles remaining, so {member_name}'s record was deleted.",
-#                     "action": "record_deleted",
-#                     "deleted_role": provided_role
-#                 },
-#                 status=status.HTTP_200_OK
-#             )
-#         else:
-#             # Update the Member_role field with remaining roles
-#             instance.Member_role = member_roles
-#             instance.save()
-#             return Response(
-#                 {
-#                     "message": f"Role '{provided_role}' removed successfully.",
-#                     "action": "role_removed",
-#                     "deleted_role": provided_role,
-#                     "remaining_roles": member_roles
-#                 },
-#                 status=status.HTTP_200_OK
-#             )
-            
 class UserDetailCompleteDeleteView(generics.DestroyAPIView):
     """
     Delete the entire UserDetail record (not just a single role).
@@ -509,3 +280,165 @@ class UserDetailSearchView(generics.ListAPIView):
                 pass
 
         return queryset
+    
+    
+class UserDetailRoleUpdateView(generics.GenericAPIView):
+    """
+    PATCH endpoint to add or replace roles.
+
+    - Add (default): {"new_roles": ["Configuration Management", "Patch Management"] }
+    - Replace first occurrence: {"operation":"replace","old_role":"Network Security","new_roles":["Patch Management"]}
+
+    If "confirm" explicitly provided and False -> rejected. If omitted or True -> proceeds.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserDetailRoleUpdateSerializer
+
+    # canonical allowed roles (Title Case stored)
+    allowed_roles = [
+        "Patch Management",
+        "Configuration Management",
+        "Network Security",
+        "Architectural Flaws",
+    ]
+    _allowed_map = {r.lower(): r for r in allowed_roles}
+
+    def get_object(self):
+        detail_id = self.kwargs.get("detail_id")
+        try:
+            obj_id = ObjectId(detail_id)
+        except Exception:
+            return None
+        return get_object_or_404(UserDetail, _id=obj_id)
+
+    def patch(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if not instance:
+            return Response({"detail": "Invalid detail_id"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Permission check: Only owner admin or staff
+        try:
+            is_owner = (request.user.id == instance.admin.id)
+        except Exception:
+            is_owner = False
+
+        if not (is_owner or request.user.is_staff):
+            return Response(
+                {"detail": "You do not have permission to update this member's role."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        old_role_raw = serializer.validated_data.get("old_role", None)
+        new_roles_raw = serializer.validated_data["new_roles"]
+        operation = serializer.validated_data.get("operation", "add")
+        confirm = serializer.validated_data.get("confirm", None)
+
+        # handle confirm: if explicitly False -> reject
+        if confirm is False:
+            return Response(
+                {"detail": "Update not confirmed. Please set confirm=true or omit confirm."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Normalize new_roles: map case-insensitively to canonical values
+        normalized_new = []
+        invalid_new = []
+        for r in new_roles_raw:
+            key = (r or "").strip().lower()
+            canonical = self._allowed_map.get(key)
+            if not canonical:
+                invalid_new.append(r)
+            else:
+                normalized_new.append(canonical)
+
+        if invalid_new:
+            return Response(
+                {"detail": f"Invalid new_roles: {invalid_new}. Allowed: {', '.join(self.allowed_roles)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Normalize old_role if provided
+        old_role = None
+        if old_role_raw:
+            key = old_role_raw.strip().lower()
+            old_role = self._allowed_map.get(key)
+            if not old_role:
+                return Response(
+                    {"detail": f"Invalid old_role '{old_role_raw}'. Allowed: {', '.join(self.allowed_roles)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # If operation == "replace" require old_role
+        if operation == "replace" and not old_role:
+            return Response(
+                {"detail": "old_role is required when operation is 'replace'."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Ensure Member_role is a list
+        roles = instance.Member_role or []
+        if not isinstance(roles, list):
+            roles = [roles] if roles else []
+
+        roles_lower = [r.lower() for r in roles]
+
+        if operation == "replace":
+            # Replace first occurrence of old_role (case-insensitive)
+            if old_role.lower() not in roles_lower:
+                return Response(
+                    {"detail": f"Old role '{old_role}' not found. Current roles: {roles}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            updated_roles = []
+            replaced = False
+            seen_lower = set()
+
+            for r in roles:
+                if (not replaced) and (r.lower() == old_role.lower()):
+                    # insert all normalized_new (avoid duplicates)
+                    for nr in normalized_new:
+                        if nr.lower() not in seen_lower:
+                            updated_roles.append(nr)
+                            seen_lower.add(nr.lower())
+                    replaced = True
+                else:
+                    if r.lower() not in seen_lower:
+                        updated_roles.append(r)
+                        seen_lower.add(r.lower())
+
+            action = "roles_replaced"
+            message = f"Role '{old_role}' replaced with {normalized_new}."
+        else:
+            # operation == "add" (default) — append normalized_new, avoid duplicates
+            updated_roles = []
+            seen_lower = set()
+            for r in roles:
+                if r.lower() not in seen_lower:
+                    updated_roles.append(r)
+                    seen_lower.add(r.lower())
+            for nr in normalized_new:
+                if nr.lower() not in seen_lower:
+                    updated_roles.append(nr)
+                    seen_lower.add(nr.lower())
+
+            action = "roles_added"
+            message = f"Added roles {normalized_new}."
+
+        # Save and respond
+        instance.Member_role = updated_roles
+        instance.save()
+
+        member_name = f"{instance.first_name or ''} {instance.last_name or ''}".strip()
+        return Response(
+            {
+                "message": f"Roles {normalized_new} added successfully to {member_name}.",
+                "action": action,
+                "updated_roles": updated_roles,
+                "member_name": member_name,
+            },
+            status=status.HTTP_200_OK
+        )
