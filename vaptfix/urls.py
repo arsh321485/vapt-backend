@@ -23,6 +23,7 @@ urlpatterns = [
     path("api/admin/location/", include("location.urls")),
     path("api/admin/users_details/", include("users_details.urls")),
     path("api/admin/risk_criteria/", include("risk_criteria.urls")),
+   
     
 
 ]
