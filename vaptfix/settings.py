@@ -66,7 +66,8 @@ INSTALLED_APPS = [
     "users",
     "location",
     "users_details",
-    "risk_criteria"
+    "risk_criteria",
+    "tickets",
 ]
 
 MIDDLEWARE = [

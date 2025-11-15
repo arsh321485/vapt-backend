@@ -4,7 +4,7 @@ from bson import ObjectId
 from django.shortcuts import get_object_or_404
 from .models import UserDetail
 from .serializers import UserDetailSerializer, UserDetailCreateSerializer,UserDetailUpdateSerializer,UserDetailRoleUpdateSerializer
-
+from django.utils import timezone
 
 class UserDetailCreateView(generics.CreateAPIView):
     serializer_class = UserDetailCreateSerializer
