@@ -29,15 +29,6 @@ localhost:5173
 GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "")
 GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "")
 
-# MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "")
-# MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "")
-# MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "") 
-# MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:3000")
-# MICROSOFT_AUTH_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
-# MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
-
-
-
 MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "")
 MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "")
 MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "")
@@ -68,6 +59,8 @@ INSTALLED_APPS = [
     "users_details",
     "risk_criteria",
     "tickets",
+    "upload_report",
+    "admindashboard",
 ]
 
 MIDDLEWARE = [
@@ -108,8 +101,10 @@ DATABASES = {
         'CLIENT': {
             'host': 'mongodb+srv://arshmittal740:ARSHMITTAL12@cluster0.9cj3n.mongodb.net/',
         }
+        # 'CLIENT': {'host': os.getenv("MONGO_DB_URL")}
     }
 }
+
 
 AUTH_USER_MODEL = "users.User"
 
