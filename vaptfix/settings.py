@@ -15,6 +15,8 @@ RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 DEBUG = os.getenv("DEBUG", "True") == "True"
 
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 ALLOWED_HOSTS = [host.strip() for host in """
 localhost,
 127.0.0.1,
@@ -23,7 +25,8 @@ vapt-backend.onrender.com,
 localhost:5173
 """.split(",")]
 
-
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
 # ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com','808d3a4404a9.ngrok-free.app','http://localhost:5173']
 
 GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "")
@@ -64,12 +67,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",   # FIRST or nearly first
-    "django.middleware.common.CommonMiddleware",
-    # "corsheaders.middleware.CorsMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-    # "django.middleware.common.CommonMiddleware",
+    "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
@@ -220,38 +221,79 @@ JIRA_SCOPES = [
 #     "http://localhost:5173",
 # ]
 
+# CORS_ALLOWED_ORIGINS = [origin.strip() for origin in """
+# http://localhost:3000,
+# http://127.0.0.1:3000,
+# https://vapt-backend.onrender.com,
+# https://login.microsoftonline.com,
+# https://graph.microsoft.com,
+# https://slack.com,
+# https://api.slack.com,
+# http://localhost:8000,
+# http://127.0.0.1:8000,
+# http://localhost:5502,
+# http://127.0.0.1:5502,
+# https://auth.atlassian.com,
+# https://api.atlassian.com,
+# http://localhost:5173,
+# http://127.0.0.1:5173,
+# https://vapt-frontend-liart.vercel.app
+# """.split(",")]
+
+# CORS_ALLOW_CREDENTIALS = True
+
+# CORS_ALLOW_HEADERS = [
+#     "accept",
+#     "accept-encoding",
+#     "authorization",
+#     "content-type",
+#     "origin",
+#     "user-agent",
+#     "x-csrftoken",
+#     "x-requested-with",
+# ]
+
 CORS_ALLOWED_ORIGINS = [origin.strip() for origin in """
 http://localhost:3000,
 http://127.0.0.1:3000,
-https://vapt-backend.onrender.com,
-https://login.microsoftonline.com,
-https://graph.microsoft.com,
-https://slack.com,
-https://api.slack.com,
+http://localhost:5173,
+http://127.0.0.1:5173,
 http://localhost:8000,
 http://127.0.0.1:8000,
 http://localhost:5502,
 http://127.0.0.1:5502,
+https://vapt-backend.onrender.com,
+https://vapt-frontend-liart.vercel.app,
+https://login.microsoftonline.com,
+https://graph.microsoft.com,
+https://slack.com,
+https://api.slack.com,
 https://auth.atlassian.com,
-https://api.atlassian.com,
-http://localhost:5173,
-http://127.0.0.1:5173,
-https://vapt-frontend-liart.vercel.app
+https://api.atlassian.com
 """.split(",")]
 
 CORS_ALLOW_CREDENTIALS = True
 
-CORS_ALLOW_HEADERS = [
-    "accept",
-    "accept-encoding",
-    "authorization",
-    "content-type",
-    "origin",
-    "user-agent",
-    "x-csrftoken",
-    "x-requested-with",
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
 ]
 
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
 
 CORS_ALLOW_ALL_ORIGINS = True  
 
