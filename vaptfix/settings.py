@@ -25,8 +25,8 @@ vapt-backend.onrender.com,
 localhost:5173
 """.split(",")]
 
-DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
-FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
+DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
 # ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com','808d3a4404a9.ngrok-free.app','http://localhost:5173']
 
 GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "")
