@@ -1,7 +1,8 @@
 from rest_framework import generics, status, permissions
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-
+from rest_framework.views import APIView
+from .serializers import VALID_COUNTRIES
 from bson import ObjectId
 from django.shortcuts import get_object_or_404
 from .models import Location
@@ -221,3 +222,14 @@ class LocationListByAdminView(generics.ListAPIView):
                 "error": "Failed to retrieve locations"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
+
+class CountryListView(APIView):
+    permission_classes = [permissions.AllowAny]  # or IsAuthenticated if required
+
+    def get(self, request):
+        countries = sorted(list(VALID_COUNTRIES))  # Sorted alphabetically
+        return Response({
+            "message": "Country list retrieved successfully",
+            "count": len(countries),
+            "countries": countries
+        }, status=status.HTTP_200_OK)
