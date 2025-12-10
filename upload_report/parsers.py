@@ -9,7 +9,6 @@ import html
 import json
 import xml.etree.ElementTree as ET
 from typing import Dict, Any, List, Optional
-
 import pandas as pd
 from PyPDF2 import PdfReader
 
@@ -23,6 +22,13 @@ except ImportError:
 
 
 # ==================== HELPER FUNCTIONS ==================== #
+
+
+
+def _safe_text(elem, tag_name: str) -> str:
+    """Helper: get text of a child tag or empty string."""
+    child = elem.find(tag_name)
+    return (child.text or "").strip() if child is not None and child.text else ""
 
 def _clean_text(node) -> str:
     """Return cleaned text from a BeautifulSoup node or string."""
@@ -130,81 +136,224 @@ def parse_excel(file_path: str) -> Dict[str, Any]:
 
 # ==================== NESSUS XML PARSER ==================== #
 
-def parse_nessus_xml(file_path: str) -> Dict[str, Any]:
-    """
-    Parse Nessus XML (.nessus or .xml) format.
+# def parse_nessus_xml(file_path: str) -> Dict[str, Any]:
+#     """
+#     Parse Nessus XML (.nessus or .xml) format.
     
-    Returns structured data with vulnerabilities grouped by host.
+#     Returns structured data with vulnerabilities grouped by host.
+#     """
+#     try:
+#         tree = ET.parse(file_path)
+#         root = tree.getroot()
+#     except Exception as exc:
+#         return {"error": f"XML parse error: {exc}"}
+
+#     # Find Report root
+#     report = root.find(".//Report") or root.find("Report") or root
+
+#     # Extract scan information
+#     scan_info: Dict[str, Any] = {}
+#     policy = root.find(".//Policy")
+#     if policy is not None:
+#         scan_info["policy_name"] = (policy.findtext("policyName") or "").strip()
+    
+#     preferences = root.find(".//Preferences")
+#     if preferences is not None:
+#         for pref in preferences.findall("preference"):
+#             name = pref.findtext("name")
+#             value = pref.findtext("value")
+#             if name:
+#                 scan_info[name] = value
+
+#     vulnerabilities_by_host: List[Dict[str, Any]] = []
+
+#     # Iterate through each ReportHost
+#     for report_host in report.findall(".//ReportHost"):
+#         host_name = report_host.get("name", "unknown-host")
+        
+#         host_entry = {
+#             "host_name": host_name,
+#             "host_information": {},
+#             "vulnerabilities": []
+#         }
+
+#         # Extract HostProperties
+#         host_props = report_host.find("HostProperties")
+#         if host_props is not None:
+#             for tag in host_props.findall("tag"):
+#                 tag_name = tag.get("name")
+#                 if tag_name:
+#                     host_entry["host_information"][tag_name] = (tag.text or "").strip()
+
+#         # Extract ReportItem entries (vulnerabilities)
+#         for item in report_host.findall(".//ReportItem"):
+#             vuln = {
+#                 "plugin_id": item.get("pluginID"),
+#                 "plugin_name": item.get("pluginName"),
+#                 "port": item.get("port"),
+#                 "protocol": item.get("protocol"),
+#                 "severity": item.get("severity"),
+#                 "risk_factor": (item.findtext("risk_factor") or "").strip(),
+#                 "synopsis": (item.findtext("synopsis") or "").strip(),
+#                 "description": (item.findtext("description") or "").strip(),
+#                 "solution": (item.findtext("solution") or "").strip(),
+#                 "see_also": [e.text.strip() for e in item.findall("see_also") if e.text],
+#                 "cvss_v3_base_score": (
+#                     item.findtext(".//cvss3_base_score") or 
+#                     item.findtext(".//cvss_base_score") or ""
+#                 ).strip(),
+#                 "plugin_information": (item.findtext("plugin_publication_date") or "").strip(),
+#                 "plugin_output": (item.findtext("plugin_output") or "").strip()[:5000],  # Limit size
+#             }
+#             host_entry["vulnerabilities"].append(vuln)
+
+#         vulnerabilities_by_host.append(host_entry)
+
+#     total_hosts = len(vulnerabilities_by_host)
+#     total_vulnerabilities = sum(len(h["vulnerabilities"]) for h in vulnerabilities_by_host)
+
+#     return {
+#         "type": "nessus",
+#         "scan_info": scan_info,
+#         "total_hosts": total_hosts,
+#         "total_vulnerabilities": total_vulnerabilities,
+#         "vulnerabilities_by_host": vulnerabilities_by_host
+#     }
+
+
+
+
+def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
+    """
+    Stream-parse a Nessus XML (.nessus / .xml) file and return structured data.
+
+    Memory: uses ET.iterparse and calls elem.clear() for processed subtrees,
+    so it can handle very large .nessus files without loading whole file.
     """
     try:
-        tree = ET.parse(file_path)
-        root = tree.getroot()
+        # Use iterparse to stream through the document.
+        # We watch for 'start' and 'end' events so we can build hosts and reportitems.
+        context = ET.iterparse(file_path, events=("start", "end"))
     except Exception as exc:
-        return {"error": f"XML parse error: {exc}"}
+        return {"error": f"XML open/iterparse error: {exc}"}
 
-    # Find Report root
-    report = root.find(".//Report") or root.find("Report") or root
-
-    # Extract scan information
-    scan_info: Dict[str, Any] = {}
-    policy = root.find(".//Policy")
-    if policy is not None:
-        scan_info["policy_name"] = (policy.findtext("policyName") or "").strip()
-    
-    preferences = root.find(".//Preferences")
-    if preferences is not None:
-        for pref in preferences.findall("preference"):
-            name = pref.findtext("name")
-            value = pref.findtext("value")
-            if name:
-                scan_info[name] = value
-
+    # Variables to build results
     vulnerabilities_by_host: List[Dict[str, Any]] = []
+    scan_info: Dict[str, Any] = {}
+    current_host: Dict[str, Any] = None
+    in_report = False
 
-    # Iterate through each ReportHost
-    for report_host in report.findall(".//ReportHost"):
-        host_name = report_host.get("name", "unknown-host")
-        
-        host_entry = {
-            "host_name": host_name,
-            "host_information": {},
-            "vulnerabilities": []
-        }
+    # Helper to get the localname of a tag (in case namespaces are present)
+    def local(tag: str) -> str:
+        if '}' in tag:
+            return tag.split('}', 1)[1].lower()
+        return tag.lower()
 
-        # Extract HostProperties
-        host_props = report_host.find("HostProperties")
-        if host_props is not None:
-            for tag in host_props.findall("tag"):
-                tag_name = tag.get("name")
-                if tag_name:
-                    host_entry["host_information"][tag_name] = (tag.text or "").strip()
+    try:
+        for event, elem in context:
+            tag = local(elem.tag)
 
-        # Extract ReportItem entries (vulnerabilities)
-        for item in report_host.findall(".//ReportItem"):
-            vuln = {
-                "plugin_id": item.get("pluginID"),
-                "plugin_name": item.get("pluginName"),
-                "port": item.get("port"),
-                "protocol": item.get("protocol"),
-                "severity": item.get("severity"),
-                "risk_factor": (item.findtext("risk_factor") or "").strip(),
-                "synopsis": (item.findtext("synopsis") or "").strip(),
-                "description": (item.findtext("description") or "").strip(),
-                "solution": (item.findtext("solution") or "").strip(),
-                "see_also": [e.text.strip() for e in item.findall("see_also") if e.text],
-                "cvss_v3_base_score": (
-                    item.findtext(".//cvss3_base_score") or 
-                    item.findtext(".//cvss_base_score") or ""
-                ).strip(),
-                "plugin_information": (item.findtext("plugin_publication_date") or "").strip(),
-                "plugin_output": (item.findtext("plugin_output") or "").strip()[:5000],  # Limit size
-            }
-            host_entry["vulnerabilities"].append(vuln)
+            # Detect the root Report element start (optional)
+            if event == "start" and tag == "report":
+                in_report = True
 
-        vulnerabilities_by_host.append(host_entry)
+            # Start of ReportHost -> create current_host
+            if event == "start" and tag == "reporthost":
+                host_name = elem.get("name") or ""
+                current_host = {
+                    "host_name": host_name,
+                    "host_information": {},
+                    "vulnerabilities": []
+                }
 
+            # HostProperties tag processing - tags inside HostProperties are <tag name="...">value</tag>
+            if event == "end" and tag == "tag" and current_host is not None:
+                name = elem.get("name")
+                if name:
+                    # Use elem.text (may be None)
+                    current_host["host_information"][name] = (elem.text or "").strip()
+                # Clear tag element to free memory
+                elem.clear()
+
+            # End of a ReportItem (a vulnerability) inside a ReportHost
+            if event == "end" and tag == "reportitem" and current_host is not None:
+                # Build vuln dict from children; use find/findtext as needed
+                # We prefer direct attributes for plugin id/name etc.
+                vuln = {
+                    "plugin_id": elem.get("pluginID") or elem.get("pluginid") or None,
+                    "plugin_name": elem.get("pluginName") or elem.get("pluginname") or None,
+                    "port": elem.get("port"),
+                    "protocol": elem.get("protocol"),
+                    "severity": elem.get("severity"),
+                    # risk_factor may appear as <risk_factor> or as text of some child - safe getter below
+                    "risk_factor": (_safe_text(elem, "risk_factor") or _safe_text(elem, "riskfactor") or "").strip(),
+                    "synopsis": _safe_text(elem, "synopsis"),
+                    "description": _safe_text(elem, "description"),
+                    "description_points": [],
+                    "solution": _safe_text(elem, "solution"),
+                    "see_also": [],
+                    "cvss_v3_base_score": (_safe_text(elem, "cvss3_base_score") or _safe_text(elem, "cvss_base_score") or "").strip(),
+                    "plugin_information": _safe_text(elem, "plugin_publication_date") or _safe_text(elem, "plugin_publication") or "",
+                    # plugin_output may be large; keep limited
+                    "plugin_output": (_safe_text(elem, "plugin_output") or "")[:20000],
+                }
+
+                # Try to extract multiple <see_also> children (if present)
+                see_also_list = []
+                for see in elem.findall("see_also"):
+                    if see is not None and see.text:
+                        text = see.text.strip()
+                        if text:
+                            see_also_list.append(text)
+                vuln["see_also"] = see_also_list
+
+                # Turn description into bullet points if multi-line
+                desc = vuln["description"] or ""
+                if desc:
+                    # split on newlines and common separators, keep short list
+                    pts = [p.strip(" -•\t") for p in desc.splitlines() if p.strip()]
+                    vuln["description_points"] = pts[:200]
+
+                current_host["vulnerabilities"].append(vuln)
+
+                # Clear the ReportItem subtree to free memory
+                elem.clear()
+
+            # End of this ReportHost -> append to list and clear memory
+            if event == "end" and tag == "reporthost":
+                # Only include host if it has vulnerabilities or host_information (keeps result compact)
+                if current_host is not None and (current_host["vulnerabilities"] or current_host["host_information"]):
+                    vulnerabilities_by_host.append(current_host)
+                # Clear host element
+                elem.clear()
+                current_host = None
+
+            # Optionally capture scan-level metadata from Policy/Preferences etc.
+            # When we hit end of Policy or Preferences children, pick useful info.
+            if event == "end" and tag == "policy":
+                # policyName under Policy
+                pname = elem.findtext("policyName")
+                if pname:
+                    scan_info["policy_name"] = pname.strip()
+                elem.clear()
+
+            if event == "end" and tag == "preferences":
+                # preferences contains multiple <preference><name>..</name><value>..</value></preference>
+                for pref in elem.findall("preference"):
+                    name = pref.findtext("name")
+                    val = pref.findtext("value")
+                    if name:
+                        scan_info[name] = val or ""
+                elem.clear()
+
+        # End for loop
+    except Exception as exc:
+        # In case of unexpected parse error, return a helpful message
+        return {"error": f"Nessus XML streaming parse error: {exc}"}
+
+    # Summarize results
     total_hosts = len(vulnerabilities_by_host)
-    total_vulnerabilities = sum(len(h["vulnerabilities"]) for h in vulnerabilities_by_host)
+    total_vulnerabilities = sum(len(h.get("vulnerabilities", [])) for h in vulnerabilities_by_host)
 
     return {
         "type": "nessus",
@@ -214,6 +363,9 @@ def parse_nessus_xml(file_path: str) -> Dict[str, Any]:
         "vulnerabilities_by_host": vulnerabilities_by_host
     }
 
+# Backwards-compat alias if you want to keep old name
+parse_nessus_xml = parse_nessus_xml_streaming
+parse_nessus = parse_nessus_xml_streaming
 
 # ==================== NESSUS HTML PARSER ==================== #
 
