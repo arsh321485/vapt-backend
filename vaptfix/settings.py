@@ -27,7 +27,7 @@ localhost:5173
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
-# ALLOWED_HOSTS = ['localhost', '127.0.0.1','vapt-backend.onrender.com','808d3a4404a9.ngrok-free.app','http://localhost:5173']
+
 
 GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "")
 GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH2_CLIENT_SECRET", "")
@@ -39,9 +39,6 @@ MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:5
 
 MICROSOFT_AUTH_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
 MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
-
-
-
 
 
 
@@ -221,37 +218,6 @@ JIRA_SCOPES = [
 #     "http://localhost:5173",
 # ]
 
-# CORS_ALLOWED_ORIGINS = [origin.strip() for origin in """
-# http://localhost:3000,
-# http://127.0.0.1:3000,
-# https://vapt-backend.onrender.com,
-# https://login.microsoftonline.com,
-# https://graph.microsoft.com,
-# https://slack.com,
-# https://api.slack.com,
-# http://localhost:8000,
-# http://127.0.0.1:8000,
-# http://localhost:5502,
-# http://127.0.0.1:5502,
-# https://auth.atlassian.com,
-# https://api.atlassian.com,
-# http://localhost:5173,
-# http://127.0.0.1:5173,
-# https://vapt-frontend-liart.vercel.app
-# """.split(",")]
-
-# CORS_ALLOW_CREDENTIALS = True
-
-# CORS_ALLOW_HEADERS = [
-#     "accept",
-#     "accept-encoding",
-#     "authorization",
-#     "content-type",
-#     "origin",
-#     "user-agent",
-#     "x-csrftoken",
-#     "x-requested-with",
-# ]
 
 CORS_ALLOWED_ORIGINS = [origin.strip() for origin in """
 http://localhost:3000,
