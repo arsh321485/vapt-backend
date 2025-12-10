@@ -368,7 +368,6 @@ def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
 parse_nessus_xml = parse_nessus_xml_streaming
 parse_nessus = parse_nessus_xml_streaming
 
-
 # ==================== NESSUS HTML PARSER ==================== #
 
 def parse_nessus_html(file_path: str) -> Dict[str, Any]:

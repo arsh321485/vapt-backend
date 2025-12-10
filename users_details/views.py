@@ -5,21 +5,155 @@ from django.shortcuts import get_object_or_404
 from .models import UserDetail
 from .serializers import UserDetailSerializer, UserDetailCreateSerializer,UserDetailUpdateSerializer,UserDetailRoleUpdateSerializer
 from django.utils import timezone
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+from django.conf import settings
+import logging
+
+logger = logging.getLogger('users_details')
+# class UserDetailCreateView(generics.CreateAPIView):
+#     serializer_class = UserDetailCreateSerializer
+#     permission_classes = [permissions.IsAuthenticated]
+
+#     def create(self, request, *args, **kwargs):
+#         serializer = self.get_serializer(data=request.data)
+#         serializer.is_valid(raise_exception=True)
+#         user_detail = serializer.save()
+#         return Response({
+#             "message": "User detail created successfully",
+#             "data": UserDetailSerializer(user_detail).data
+#         }, status=status.HTTP_201_CREATED)
+
+
 
 class UserDetailCreateView(generics.CreateAPIView):
     serializer_class = UserDetailCreateSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def send_welcome_email(self, email, first_name, last_name, roles, location):
+        """Enhanced SendGrid Email Sending with Better Error Handling"""
+        
+        # Validate inputs
+        if not email or not isinstance(email, str):
+            return False, "Invalid email address"
+        
+        if not settings.SENDGRID_API_KEY:
+            logger.error("SENDGRID_API_KEY is not configured")
+            return False, "SendGrid API key not configured"
+        
+        subject = "Your Account Has Been Created"
+        full_name = f"{first_name} {last_name}".strip() or "User"
+        
+        # Format roles properly
+        roles_str = ', '.join(roles) if isinstance(roles, list) else str(roles)
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                <h2 style="color: #2c3e50;">Welcome {full_name}!</h2>
+                <p>Your account has been created successfully in our VAPTFIX.</p>
+                
+                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                    <p style="margin: 10px 0;"><strong>Assigned Roles:</strong> {roles_str}</p>
+                    <p style="margin: 10px 0;"><strong>Location:</strong> {location}</p>
+                </div>
+                
+                <p>You can now access the system and perform tasks according to your assigned roles.</p>
+                
+                <p style="margin-top: 30px;">
+                    Best regards,<br>
+                    <strong>Security Management Team</strong>
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        try:
+            # Create the email message
+            message = Mail(
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to_emails=email,
+                subject=subject,
+                html_content=html_content
+            )
+            
+            # Initialize SendGrid client
+            sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
+            
+            # Send the email
+            response = sg.send(message)
+            
+            logger.info(f"Email sent successfully to {email}. Status code: {response.status_code}")
+            
+            # Check if email was accepted
+            if response.status_code in [200, 201, 202]:
+                return True, None
+            else:
+                error_msg = f"SendGrid returned status code: {response.status_code}"
+                logger.warning(error_msg)
+                return False, error_msg
+                
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Failed to send email to {email}: {error_msg}", exc_info=True)
+            return False, error_msg
+
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user_detail = serializer.save()
-        return Response({
-            "message": "User detail created successfully",
-            "data": UserDetailSerializer(user_detail).data
-        }, status=status.HTTP_201_CREATED)
-
-
+        try:
+            # Validate and create user detail
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            user_detail = serializer.save()
+            
+            # Extract data to send email
+            email = user_detail.email
+            first_name = user_detail.first_name or ""
+            last_name = user_detail.last_name or ""
+            roles = user_detail.Member_role or []
+            location = user_detail.select_location or "N/A"
+            
+            logger.info(f"Creating user detail for {email} with roles: {roles}")
+            
+            # Send Email
+            email_sent, error = self.send_welcome_email(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                roles=roles,
+                location=location
+            )
+            
+            response_data = {
+                "message": "User detail created successfully",
+                "email_sent": email_sent,
+                "data": UserDetailSerializer(user_detail).data
+            }
+            
+            # Only include error if email failed
+            if not email_sent:
+                response_data["email_error"] = error
+                logger.warning(f"User created but email failed for {email}: {error}")
+            else:
+                logger.info(f"User created and email sent successfully for {email}")
+            
+            return Response(response_data, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            logger.error(f"Error creating user detail: {str(e)}", exc_info=True)
+            return Response(
+                {"error": "Failed to create user detail", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
+            
+            
 class UserDetailListView(generics.ListAPIView):
     serializer_class = UserDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
