@@ -15,6 +15,8 @@ class UploadReport(models.Model):
     member_type = models.CharField(max_length=100, blank=True, null=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=50, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     parsed_count = models.IntegerField(default=0)
 
     class Meta:

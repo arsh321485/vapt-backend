@@ -22,7 +22,9 @@ localhost,
 127.0.0.1,
 vapt-backend.onrender.com,
 808d3a4404a9.ngrok-free.app,
-localhost:5173
+localhost:5173,
+38.242.247.151,
+vaptbackend.secureitlab.com
 """.split(",")]
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
@@ -61,6 +63,7 @@ INSTALLED_APPS = [
     "tickets",
     "upload_report",
     "admindashboard",
+    "adminregister"
 ]
 
 MIDDLEWARE = [
