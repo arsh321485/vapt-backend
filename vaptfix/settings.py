@@ -63,7 +63,8 @@ INSTALLED_APPS = [
     "tickets",
     "upload_report",
     "admindashboard",
-    "adminregister"
+    "adminregister",
+    "adminasset"
 ]
 
 MIDDLEWARE = [
