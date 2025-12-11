@@ -9,3 +9,7 @@ class AdminAssetSerializer(serializers.Serializer):
     total_vulnerabilities = serializers.IntegerField()
     severity_counts = serializers.DictField(child=serializers.IntegerField())
     host_information = serializers.DictField(child=serializers.CharField(allow_blank=True), required=False, allow_null=True)
+
+
+class AssetSearchSerializer(serializers.Serializer):
+    asset = serializers.CharField()
