@@ -28,6 +28,8 @@ urlpatterns = [
     path("api/admin/upload_report/", include("upload_report.urls")),
     path("api/admin/admindashboard/", include("admindashboard.urls")),
     path("api/admin/adminregister/", include("adminregister.urls")),
+    path("api/admin/adminasset/", include("adminasset.urls")),
+    
     
     
    
