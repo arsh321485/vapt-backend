@@ -300,7 +300,7 @@ class ReportAssetsAPIView(APIView):
 
                 return Response({
                     "report_id": report_id,
-                    "count": len(final),
+                    "total_assets": len(final),
                     "assets": serializer.data
                 }, status=200)
 
