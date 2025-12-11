@@ -238,7 +238,8 @@ https://graph.microsoft.com,
 https://slack.com,
 https://api.slack.com,
 https://auth.atlassian.com,
-https://api.atlassian.com
+https://api.atlassian.com,
+https://vaptbackend.secureitlab.com
 """.split(",")]
 
 CORS_ALLOW_CREDENTIALS = True
