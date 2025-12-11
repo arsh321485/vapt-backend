@@ -14,6 +14,6 @@ class UploadReportSerializer(serializers.ModelSerializer):
         fields = [
             '_id', 'file', 'location', 'location_name',
             'admin', 'admin_email', 'member_type',
-            'uploaded_at', 'status', 'parsed_count'
+            'uploaded_at', 'status', 'parsed_count','created_at','updated_at'
         ]
-        read_only_fields = ['_id', 'uploaded_at', 'status', 'parsed_count']
+        read_only_fields = ['_id', 'uploaded_at', 'created_at','updated_at','status', 'parsed_count']

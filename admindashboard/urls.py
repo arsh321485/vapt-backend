@@ -13,3 +13,4 @@ urlpatterns = [
     path("report/<str:report_id>/mitigation-timeline/", ReportMitigationTimelineAPIView.as_view(), name="report-mitigation-timeline"),
     path("report/<str:report_id>/mean-time-remediate/", ReportMeanTimeRemediateAPIView.as_view(), name="report-mean-time-remediate"),
 ]
+
