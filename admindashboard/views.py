@@ -46,10 +46,6 @@ def _get_latest_riskcriteria_for_user(user):
         return RiskCriteria.objects.filter(admin=user).order_by('-created_at').first()
     except Exception:
         return None
-# Helper to load a single report doc
-# def _load_report(db, report_id):
-#     coll = db[NESSUS_COLLECTION]
-#     return coll.find_one({"report_id": str(report_id)})
 
 class ReportTotalAssetsAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -57,22 +53,64 @@ class ReportTotalAssetsAPIView(APIView):
     def get(self, request, report_id):
         try:
             with MongoContext() as db:
-                doc = _load_report(db, report_id)
+                coll = db[NESSUS_COLLECTION]
+
+                # Load report
+                doc = coll.find_one(
+                    {"report_id": str(report_id)},
+                    {"vulnerabilities_by_host": 1}
+                )
+
                 if not doc:
-                    return Response({"detail":"report not found"}, status=status.HTTP_404_NOT_FOUND)
-                total_hosts = doc.get("total_hosts") or 0
-                try:
-                    total_assets = int(total_hosts)
-                except Exception:
-                    try:
-                        total_assets = int(float(total_hosts))
-                    except Exception:
-                        total_assets = 0
-                return Response(TotalAssetsSerializer({"total_assets": total_assets}).data)
-        except RuntimeError as rte:
-            return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                    return Response(
+                        {"detail": "report not found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+
+                # ------- COUNT UNIQUE HOST NAMES -------
+                hosts = set()
+
+                for h in (doc.get("vulnerabilities_by_host") or []):
+                    host_name = (h.get("host_name") or h.get("host") or "").strip()
+                    if host_name:
+                        hosts.add(host_name)
+
+                total_assets = len(hosts)
+
+                # Return result
+                serializer = TotalAssetsSerializer({"total_assets": total_assets})
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
         except Exception as e:
-            return Response({"detail":"error", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            import traceback; traceback.print_exc()
+            return Response(
+                {"detail": "error occurred", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+# class ReportTotalAssetsAPIView(APIView):
+#     permission_classes = [IsAuthenticated]
+
+#     def get(self, request, report_id):
+#         try:
+#             with MongoContext() as db:
+#                 doc = _load_report(db, report_id)
+#                 if not doc:
+#                     return Response({"detail":"report not found"}, status=status.HTTP_404_NOT_FOUND)
+#                 total_hosts = doc.get("total_hosts") or 0
+#                 try:
+#                     total_assets = int(total_hosts)
+#                 except Exception:
+#                     try:
+#                         total_assets = int(float(total_hosts))
+#                     except Exception:
+#                         total_assets = 0
+#                 return Response(TotalAssetsSerializer({"total_assets": total_assets}).data)
+#         except RuntimeError as rte:
+#             return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+#         except Exception as e:
+#             return Response({"detail":"error", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class ReportAvgScoreAPIView(APIView):
     permission_classes = [IsAuthenticated]
