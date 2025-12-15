@@ -12,11 +12,6 @@ class VulnerabilitiesSerializer(serializers.Serializer):
     medium = serializers.IntegerField()
     low = serializers.IntegerField()
 
-class ReportSummarySerializer(serializers.Serializer):
-    report_id = serializers.CharField()
-    total_assets = serializers.IntegerField()
-    avg_score = serializers.FloatField(allow_null=True)
-    vulnerabilities = VulnerabilitiesSerializer()
     
 class MitigationTimelineSerializer(serializers.Serializer):
     critical = serializers.CharField(allow_blank=True)
