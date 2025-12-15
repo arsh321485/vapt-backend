@@ -9,7 +9,7 @@ from django.utils import timezone
 import pymongo
 import re
 
-from .serializers import AdminAssetSerializer,AssetSearchSerializer,AssetHostVulnSerializer,HoldAssetSerializer
+from .serializers import AdminAssetSerializer,AssetSearchSerializer,AssetHostVulnSerializer,HoldAssetSerializer,HoldAssetListSerializer
 # Import User for organisation_name lookup
 try:
     from users.models import User
@@ -62,21 +62,14 @@ def _join_description(vuln):
 
 
 def compute_total_assets_for_report(db, report_id):
-    """
-    Return number of distinct host_name entries for a given report_id.
-    `db` is the pymongo database object returned by MongoContext().
-    """
     coll = db[NESSUS_COLLECTION]
-    doc = coll.find_one({"report_id": str(report_id)}, {"vulnerabilities_by_host": 1})
+    doc = coll.find_one(
+        {"report_id": str(report_id)},
+        {"vulnerabilities_by_host": 1}
+    )
     if not doc:
         return 0
-
-    hosts = set()
-    for h in (doc.get("vulnerabilities_by_host") or []):
-        hn = (h.get("host_name") or h.get("host") or "").strip()
-        if hn:
-            hosts.add(hn)
-    return len(hosts)
+    return len(doc.get("vulnerabilities_by_host", []))
 
 
 
@@ -327,22 +320,29 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
         except Exception as exc:
             import traceback; traceback.print_exc()
             return Response({"detail": "unexpected error", "error": str(exc)}, status=500)        
-        
-
+  
+# ----------------  ASSET HOLD ----------------        
 class AssetHoldAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, report_id, host_name):
         host_name = unquote(host_name)
+
         try:
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
                 held_coll = db[HOLD_COLLECTION]
 
-                # load report -> find host entry
-                doc = coll.find_one({"report_id": str(report_id)}, {"vulnerabilities_by_host": 1})
+                # Load report
+                doc = coll.find_one(
+                    {"report_id": str(report_id)},
+                    {"vulnerabilities_by_host": 1}
+                )
                 if not doc:
-                    return Response({"detail": "Report not found"}, status=status.HTTP_404_NOT_FOUND)
+                    return Response(
+                        {"detail": "Report not found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
 
                 found = None
                 for h in doc.get("vulnerabilities_by_host", []):
@@ -352,75 +352,236 @@ class AssetHoldAPIView(APIView):
                         break
 
                 if not found:
-                    return Response({"detail": "Asset not found in report"}, status=status.HTTP_404_NOT_FOUND)
+                    return Response(
+                        {"detail": "Asset not found in report"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
 
-                # remove host from report
-                res = coll.update_one(
+                # Remove asset from report
+                coll.update_one(
                     {"report_id": str(report_id)},
-                    {"$pull": {"vulnerabilities_by_host": {"$or": [{"host_name": host_name}, {"host": host_name}]}}}
+                    {
+                        "$pull": {
+                            "vulnerabilities_by_host": {
+                                "$or": [
+                                    {"host_name": host_name},
+                                    {"host": host_name}
+                                ]
+                            }
+                        }
+                    }
                 )
-                if res.modified_count == 0:
-                    return Response({"detail": "Failed to remove asset from report (maybe already removed)"},
-                                    status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-                # store into held_assets with metadata
-                held_doc = {
+                # Store into hold collection
+                held_coll.insert_one({
                     "report_id": str(report_id),
                     "host_name": host_name,
                     "host_entry": found,
                     "held_at": timezone.now(),
-                    "held_by": getattr(request.user, "email", None) or getattr(request.user, "username", None) or None,
+                    "held_by": getattr(request.user, "email", None)
+                               or getattr(request.user, "username", None),
+                })
+
+                # Prepare asset data for response
+                severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                for v in found.get("vulnerabilities", []):
+                    risk = (v.get("risk_factor") or "").lower()
+                    if risk.startswith("crit"):
+                        severity_counts["critical"] += 1
+                    elif risk.startswith("high"):
+                        severity_counts["high"] += 1
+                    elif risk.startswith("med"):
+                        severity_counts["medium"] += 1
+                    elif risk.startswith("low"):
+                        severity_counts["low"] += 1
+
+                asset_data = {
+                    "asset": host_name,
+                    "total_vulnerabilities": len(found.get("vulnerabilities", [])),
+                    "severity_counts": severity_counts,
+                    "host_information": found.get("host_information") or {}
                 }
-                held_coll.insert_one(held_doc)
 
-                # recompute total assets after removal
                 total_assets = compute_total_assets_for_report(db, report_id)
-                return Response({"detail": "Asset hold (removed from report)", "total_assets": total_assets},
-                status=status.HTTP_200_OK)
-        except pymongo.errors.ServerSelectionTimeoutError as e:
-            return Response({"detail": "Cannot connect to MongoDB", "error": str(e)}, status=500)
+
+                return Response(
+                    {
+                        "detail": "Asset hold (removed from report)",
+                        "total_assets": total_assets,
+                        "asset": asset_data
+                    },
+                    status=status.HTTP_200_OK
+                )
+
         except Exception as exc:
-            import traceback; traceback.print_exc()
-            return Response({"detail": "Hold failed", "error": str(exc)}, status=500)
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "Hold failed", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
+# ----------------  ASSET UNHOLD ----------------  
 class AssetUnholdAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, report_id, host_name):
         host_name = unquote(host_name)
+
         try:
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
                 held_coll = db[HOLD_COLLECTION]
 
-                # find held entry
-                held = held_coll.find_one({"report_id": str(report_id), "host_name": host_name})
+                # 1️⃣ Find held asset
+                held = held_coll.find_one({
+                    "report_id": str(report_id),
+                    "host_name": host_name
+                })
+
                 if not held:
-                    return Response({"detail": "No hold asset found"}, status=status.HTTP_404_NOT_FOUND)
+                    return Response(
+                        {"detail": "No hold asset found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
 
                 host_entry = held.get("host_entry")
                 if not host_entry:
-                    return Response({"detail": "Hold asset missing host_entry"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                    return Response(
+                        {"detail": "Hold asset missing host_entry"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
 
-                # restore to report
+                # 2️⃣ Restore asset to report
                 res = coll.update_one(
                     {"report_id": str(report_id)},
                     {"$push": {"vulnerabilities_by_host": host_entry}}
                 )
-                if res.matched_count == 0:
-                    return Response({"detail": "Report not found when restoring"}, status=status.HTTP_404_NOT_FOUND)
 
-                # remove held entry
+                if res.matched_count == 0:
+                    return Response(
+                        {"detail": "Report not found when restoring"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+
+                # 3️⃣ Remove from hold_assets
                 held_coll.delete_one({"_id": held["_id"]})
 
-                # recompute total assets after restore
+                # 4️⃣ Recompute total assets
                 total_assets = compute_total_assets_for_report(db, report_id)
-                return Response({"detail": "Asset unhold (restored to report)", "total_assets": total_assets},
-                                status=status.HTTP_200_OK)
+
+                # 5️⃣ Prepare asset response (summary)
+                asset_response = {
+                    "asset": host_name,
+                    "total_vulnerabilities": len(host_entry.get("vulnerabilities", [])),
+                    "host_information": host_entry.get("host_information", {}),
+                    "severity_counts": {
+                        "critical": 0,
+                        "high": 0,
+                        "medium": 0,
+                        "low": 0,
+                    }
+                }
+
+                for v in host_entry.get("vulnerabilities", []):
+                    sev = (v.get("risk_factor") or v.get("severity") or "").lower()
+                    if sev.startswith("crit"):
+                        asset_response["severity_counts"]["critical"] += 1
+                    elif sev.startswith("high"):
+                        asset_response["severity_counts"]["high"] += 1
+                    elif sev.startswith("med"):
+                        asset_response["severity_counts"]["medium"] += 1
+                    elif sev.startswith("low"):
+                        asset_response["severity_counts"]["low"] += 1
+
+                # 6️⃣ Final response
+                return Response(
+                    {
+                        "detail": "Asset unhold (restored to report)",
+                        "total_assets": total_assets,
+                        "asset": asset_response
+                    },
+                    status=status.HTTP_200_OK
+                )
 
         except pymongo.errors.ServerSelectionTimeoutError as e:
-            return Response({"detail": "Cannot connect to MongoDB", "error": str(e)}, status=500)
+            return Response(
+                {"detail": "Cannot connect to MongoDB", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         except Exception as exc:
-            import traceback; traceback.print_exc()
-            return Response({"detail": "Unhold failed", "error": str(exc)}, status=500)
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "Unhold failed", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+# ----------------HOLD  ASSET LIST ----------------  
+class HoldAssetsByReportAPIView(APIView):
+    """
+    GET /api/admin/adminasset/report/<report_id>/assets/hold-list/
+    Lists all held assets for a report
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            with MongoContext() as db:
+                held_coll = db[HOLD_COLLECTION]
+
+                cursor = held_coll.find({"report_id": str(report_id)})
+
+                results = []
+
+                for doc in cursor:
+                    host_entry = doc.get("host_entry") or {}
+                    vulns = host_entry.get("vulnerabilities", [])
+
+                    severity_counts = {
+                        "critical": 0,
+                        "high": 0,
+                        "medium": 0,
+                        "low": 0
+                    }
+
+                    for v in vulns:
+                        risk = (v.get("risk_factor") or "").lower()
+                        if risk.startswith("crit"):
+                            severity_counts["critical"] += 1
+                        elif risk.startswith("high"):
+                            severity_counts["high"] += 1
+                        elif risk.startswith("med"):
+                            severity_counts["medium"] += 1
+                        elif risk.startswith("low"):
+                            severity_counts["low"] += 1
+
+                    results.append({
+                        "asset": doc.get("host_name"),
+                        "total_vulnerabilities": len(vulns),
+                        "severity_counts": severity_counts,
+                        "host_information": host_entry.get("host_information") or {},
+                        "held_at": doc.get("held_at"),
+                        "held_by": doc.get("held_by"),
+                    })
+
+                serializer = HoldAssetListSerializer(results, many=True)
+
+                return Response(
+                    {
+                        "report_id": str(report_id),
+                        "count": len(results),
+                        "assets": serializer.data
+                    },
+                    status=status.HTTP_200_OK
+                )
+
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "Failed to fetch held assets", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
