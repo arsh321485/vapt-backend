@@ -29,3 +29,11 @@ class HoldAssetSerializer(serializers.Serializer):
     held_at = serializers.DateTimeField()
     held_by = serializers.CharField(allow_null=True, required=False)
     host_entry = serializers.DictField()
+    
+class HoldAssetListSerializer(serializers.Serializer):
+    asset = serializers.CharField()
+    total_vulnerabilities = serializers.IntegerField()
+    severity_counts = serializers.DictField(child=serializers.IntegerField())
+    host_information = serializers.DictField(required=False)
+    held_at = serializers.DateTimeField()
+    held_by = serializers.CharField(allow_null=True)
