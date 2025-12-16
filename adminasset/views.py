@@ -9,7 +9,7 @@ from django.utils import timezone
 import pymongo
 import re
 
-from .serializers import AdminAssetSerializer,AssetSearchSerializer,AssetHostVulnSerializer,HoldAssetSerializer,HoldAssetListSerializer
+from .serializers import AdminAssetSerializer,AssetHostVulnSerializer,HoldAssetSerializer,HoldAssetListSerializer
 # Import User for organisation_name lookup
 try:
     from users.models import User
@@ -79,6 +79,9 @@ class ReportAssetsAPIView(APIView):
 
     def get(self, request, report_id):
         try:
+            # 🔍 search query (asset / host_name only)
+            search_q = (request.query_params.get("q") or "").strip().lower()
+
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
                 doc = coll.find_one({"report_id": str(report_id)})
@@ -88,12 +91,15 @@ class ReportAssetsAPIView(APIView):
 
                 uploaded_at = doc.get("uploaded_at")
 
-                # ---------- ASSET AGGREGATION ----------
                 assets = {}
 
                 for host in doc.get("vulnerabilities_by_host", []):
-                    host_name = host.get("host_name") or ""
+                    host_name = (host.get("host_name") or "").strip()
                     if not host_name:
+                        continue
+
+                    # ✅ APPLY SEARCH FILTER (asset only)
+                    if search_q and search_q not in host_name.lower():
                         continue
 
                     if host_name not in assets:
@@ -113,11 +119,10 @@ class ReportAssetsAPIView(APIView):
 
                     entry = assets[host_name]
 
-                    # Count vulnerabilities by severity
                     for v in host.get("vulnerabilities", []):
                         entry["total_vulnerabilities"] += 1
-
                         risk = (v.get("risk_factor") or v.get("severity") or "").lower()
+
                         if risk.startswith("crit"):
                             entry["severity_counts"]["critical"] += 1
                         elif risk.startswith("high"):
@@ -127,7 +132,6 @@ class ReportAssetsAPIView(APIView):
                         elif risk.startswith("low"):
                             entry["severity_counts"]["low"] += 1
 
-                # ---------- FINAL OUTPUT ----------
                 final = []
                 for a in assets.values():
                     final.append({
@@ -150,51 +154,8 @@ class ReportAssetsAPIView(APIView):
         except Exception as exc:
             import traceback; traceback.print_exc()
             return Response({"detail": str(exc)}, status=500)
-     
-# ----------------  ASSET SEARCH ----------------
-class AssetSearchAPIView(APIView):
-    """
-    Search only host_name values across all reports.
-    GET /api/adminasset/assets/search/?q=
-    Returns: [{ "asset": "192.168.0.2" }, ...]
-    """
-    permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request):
-        q = (request.query_params.get("q") or "").strip()
-
-        try:
-            with MongoContext() as db:
-                coll = db[NESSUS_COLLECTION]
-
-                q_regex = re.compile(re.escape(q), re.IGNORECASE) if q else None
-
-                results = set()   # ensure only unique host names
-
-                cursor = coll.find({}, {"vulnerabilities_by_host": 1})
-
-                for doc in cursor:
-                    for host in doc.get("vulnerabilities_by_host", []):
-                        host_name = host.get("host_name") or host.get("host") or ""
-                        if not host_name:
-                            continue
-
-                        # if query provided, filter by substring match
-                        if q_regex and not q_regex.search(host_name):
-                            continue
-
-                        results.add(host_name)
-
-                final = [{"asset": h} for h in sorted(results)]
-
-                serializer = AssetSearchSerializer(final, many=True)
-                return Response({"count": len(final), "results": serializer.data}, status=200)
-
-        except Exception as exc:
-            import traceback; traceback.print_exc()
-            return Response({"detail": "search failed", "error": str(exc)}, status=500)
-        
-        
+ 
 # ----------------  ASSET DELETE ----------------    
 class AssetDeleteAPIView(APIView):
     """
