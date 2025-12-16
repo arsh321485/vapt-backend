@@ -393,7 +393,8 @@ class GoogleOAuthView(generics.GenericAPIView):
                         "access": str(refresh.access_token),
                     },
                     # Simplified: backend does not track "is_new_user" here reliably
-                    "is_new_user": False
+                    # "is_new_user": False
+                    "is_new_user": True
                 }, status=status.HTTP_200_OK)
                 
         except Exception as e:
