@@ -56,8 +56,7 @@ VALID_COUNTRIES = {
     "Venezuela", "Vietnam",
     "Yemen",
     "Zambia", "Zimbabwe"
-}
-
+} 
 
 class LocationCreateSerializer(serializers.ModelSerializer):
     admin_id = serializers.CharField(write_only=True)
@@ -66,66 +65,43 @@ class LocationCreateSerializer(serializers.ModelSerializer):
         model = Location
         fields = ['admin_id', 'location_name']
 
+    def validate_admin_id(self, value):
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError("Admin with this ID does not exist.")
+        return value
+
     def validate_location_name(self, value):
         value = value.strip()
 
         if value not in VALID_COUNTRIES:
-            raise serializers.ValidationError("Invalid country name. Only country names are allowed.")
+            raise serializers.ValidationError(
+                "Invalid country name. Only country names are allowed."
+            )
 
         return value
 
-    def validate_admin_id(self, value):
-        try:
-            User.objects.get(id=value)
-        except User.DoesNotExist:
-            raise serializers.ValidationError("Admin with this ID does not exist")
-        return value
+    def validate(self, attrs):
+        admin_id = attrs.get("admin_id")
+        location_name = attrs.get("location_name")
+
+        # ❌ BLOCK duplicate country for SAME admin
+        exists = Location.objects.filter(
+            admin_id=admin_id,
+            location_name__iexact=location_name  # case-insensitive
+        ).exists()
+
+        if exists:
+            raise serializers.ValidationError({
+                "location_name": "This country is already added for this admin."
+            })
+
+        return attrs
 
     def create(self, validated_data):
         admin = User.objects.get(id=validated_data.pop('admin_id'))
         return Location.objects.create(admin=admin, **validated_data)
+   
     
-    
-# class LocationCreateSerializer(serializers.ModelSerializer):
-#     admin_id = serializers.CharField(write_only=True)
-    
-#     class Meta:
-#         model = Location
-#         fields = ['admin_id', 'location_name']
-    
-#     def validate_admin_id(self, value):
-#         """Validate that admin_id exists in User model"""
-#         try:
-#             User.objects.get(id=value)
-#         except User.DoesNotExist:
-#             raise serializers.ValidationError("Admin with this ID does not exist")
-#         return value
-    
-#     def validate_location_name(self, value):
-#         """Validate location name length and format"""
-#         if len(value.strip()) < 2:
-#             raise serializers.ValidationError("Location name must be at least 2 characters long")
-#         return value.strip()
-    
-#     def create(self, validated_data):
-#         admin_id = validated_data.pop('admin_id')
-#         admin = User.objects.get(id=admin_id)
-#         location = Location.objects.create(admin=admin, **validated_data)
-#         return location
-
-
-# class LocationUpdateSerializer(serializers.ModelSerializer):
-#     class Meta:
-#         model = Location
-#         fields = ['location_name']
-    
-#     def validate_location_name(self, value):
-#         """Validate location name length and format"""
-#         if value and len(value.strip()) < 2:
-#             raise serializers.ValidationError("Location name must be at least 2 characters long")
-#         return value.strip() if value else value
-
-
 class LocationUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Location

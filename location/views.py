@@ -16,31 +16,30 @@ from .permissions import IsOwnerOrAdmin
 
 logger = logging.getLogger(__name__)
 
-
 class LocationCreateView(generics.CreateAPIView):
-    """Create a new location"""
     serializer_class = LocationCreateSerializer
     permission_classes = [IsAuthenticated]
-    
+
     def create(self, request, *args, **kwargs):
-        try:
-            serializer = self.get_serializer(data=request.data)
-            serializer.is_valid(raise_exception=True)
-            location = serializer.save()
-            
-            # Return complete location data
-            location_data = LocationSerializer(location).data
-            
-            return Response({
+        serializer = self.get_serializer(data=request.data)
+
+        if not serializer.is_valid():
+            # ✅ THIS sends exact validation error to frontend
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        location = serializer.save()
+        location_data = LocationSerializer(location).data
+
+        return Response(
+            {
                 "message": "Location created successfully",
                 "location": location_data
-            }, status=status.HTTP_201_CREATED)
-            
-        except Exception as e:
-            logger.error(f"Location creation error: {str(e)}")
-            return Response({
-                "error": "Failed to create location. Please try again."
-            }, status=status.HTTP_400_BAD_REQUEST)
+            },
+            status=status.HTTP_201_CREATED
+        )
 
 
 class LocationListView(generics.ListAPIView):
@@ -146,33 +145,6 @@ class LocationUpdateView(generics.UpdateAPIView):
             logger.exception("Error updating location")
             # More helpful error if serializer provided details will already be raised above
             return Response({"error": "Failed to update location"}, status=status.HTTP_400_BAD_REQUEST)
-
-# class LocationUpdateView(generics.UpdateAPIView):
-#     serializer_class = LocationUpdateSerializer
-#     permission_classes = [IsAuthenticated]
-
-#     def get_object(self):
-#         location_id = self.kwargs.get('location_id')
-#         try:
-#             obj_id = ObjectId(location_id)
-#         except Exception:
-#             logger.error(f"Invalid ObjectId format: {location_id}")
-#             raise
-#         return get_object_or_404(Location, _id=obj_id)
-
-#     def update(self, request, *args, **kwargs):
-#         partial = kwargs.pop('partial', True)
-#         instance = self.get_object()
-#         serializer = self.get_serializer(instance, data=request.data, partial=partial)
-#         serializer.is_valid(raise_exception=True)
-#         location = serializer.save()
-
-#         location_data = LocationSerializer(location).data
-#         return Response({
-#             "message": "Location updated successfully",
-#             "location": location_data
-#         }, status=status.HTTP_200_OK)
-
 
 class LocationDeleteView(generics.DestroyAPIView):
     permission_classes = [IsAuthenticated]

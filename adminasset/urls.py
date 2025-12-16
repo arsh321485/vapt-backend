@@ -1,7 +1,6 @@
 from django.urls import path
 from .views import (
     ReportAssetsAPIView,
-    AssetSearchAPIView,
     AssetDeleteAPIView,
     AssetVulnerabilitiesByHostAPIView,
     AssetHoldAPIView,
@@ -25,12 +24,6 @@ urlpatterns = [
         name="held-assets-by-report",
     ),
 
-    # ---------------- SEARCH ----------------
-    path(
-        "assets/search/",
-        AssetSearchAPIView.as_view(),
-        name="report-asset-search",
-    ),
 
     # ---------------- VULNERABILITIES BY HOST ----------------
     path(

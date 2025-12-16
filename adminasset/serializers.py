@@ -7,9 +7,6 @@ class AdminAssetSerializer(serializers.Serializer):
     severity_counts = serializers.DictField(child=serializers.IntegerField())
     host_information = serializers.DictField(child=serializers.CharField(allow_blank=True), required=False, allow_null=True)
 
-
-class AssetSearchSerializer(serializers.Serializer):
-    asset = serializers.CharField()
     
 class AssetHostVulnSerializer(serializers.Serializer):
     # fields required by frontend for a single host vulnerabilities list
