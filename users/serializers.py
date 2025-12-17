@@ -312,104 +312,176 @@ class SetPasswordSerializer(serializers.Serializer):
     
 
 class GoogleOAuthSerializer(serializers.Serializer):
-    # Accept either access_token (OAuth) or id_token (Google One Tap / Sign-In)
     access_token = serializers.CharField(required=False, allow_blank=True)
     id_token = serializers.CharField(required=False, allow_blank=True)
-    # Also accept 'credential' (GSI callback field) as alias for id_token
     credential = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
-        # Map 'credential' to 'id_token' if present
         if attrs.get("credential") and not attrs.get("id_token"):
             attrs["id_token"] = attrs["credential"]
-        # Ensure at least one token is provided
+
         if not attrs.get("access_token") and not attrs.get("id_token"):
-            raise serializers.ValidationError("Provide either access_token or id_token")
+            raise serializers.ValidationError(
+                "Provide either access_token or id_token"
+            )
         return attrs
-    # def get_google_user_data(self, *, access_token: Optional[str] = None, id_token: Optional[str] = None):
-    def get_google_user_data(self, *, access_token: Optional[str] = None, id_token: Optional[str] = None):
 
-    # def get_google_user_data(self, *, access_token: str | None = None, id_token: str | None = None):
-        """
-        Retrieve Google user info using either an OAuth access_token or an ID token.
-        - access_token: calls Google UserInfo endpoint
-        - id_token: verifies via tokeninfo and validates audience
-        Returns a dict containing at minimum: email, given_name, family_name
-        """
-        try:
-            user_data = None
-            if access_token:
-                # OAuth access token path
-                google_user_info_url = f"https://www.googleapis.com/oauth2/v2/userinfo?access_token={access_token}"
-                response = requests.get(google_user_info_url, timeout=10)
-                if response.status_code != 200:
-                    raise serializers.ValidationError("Invalid Google access token")
-                user_data = response.json()
-            elif id_token:
-                # ID token path - verify using tokeninfo
-                tokeninfo_url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
-                response = requests.get(tokeninfo_url, timeout=10)
-                if response.status_code != 200:
-                    raise serializers.ValidationError("Invalid Google ID token")
-                token_info = response.json()
+    def get_google_user_data(
+        self,
+        *,
+        access_token: Optional[str] = None,
+        id_token: Optional[str] = None
+    ):
+        if access_token:
+            url = "https://www.googleapis.com/oauth2/v2/userinfo"
+            response = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10
+            )
+            if response.status_code != 200:
+                raise serializers.ValidationError("Invalid Google access token")
+            data = response.json()
 
-                # Validate audience
-                aud = token_info.get("aud")
-                expected_aud = settings.GOOGLE_OAUTH2_CLIENT_ID
-                if expected_aud and aud != expected_aud:
-                    raise serializers.ValidationError("Google token audience mismatch")
+        else:
+            url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                raise serializers.ValidationError("Invalid Google ID token")
 
-                # Map token info to unified structure
-                user_data = {
-                    "email": token_info.get("email"),
-                    "given_name": token_info.get("given_name") or (token_info.get("name") or "").split(" ")[0] if token_info.get("name") else "",
-                    "family_name": token_info.get("family_name") or (token_info.get("name") or "").split(" ")[-1] if token_info.get("name") else "",
-                }
+            token_info = response.json()
+            if token_info.get("aud") != settings.GOOGLE_OAUTH2_CLIENT_ID:
+                raise serializers.ValidationError("Google token audience mismatch")
 
-            # Validate required fields
-            required_fields = ["email", "given_name", "family_name"]
-            for field in required_fields:
-                if not user_data or field not in user_data or user_data[field] is None:
-                    raise serializers.ValidationError(f"Missing required field: {field}")
+            data = {
+                "email": token_info.get("email"),
+                "given_name": token_info.get("given_name", ""),
+                "family_name": token_info.get("family_name", ""),
+            }
 
-            return user_data
+        if not data.get("email"):
+            raise serializers.ValidationError("Email not found")
 
-        except requests.RequestException as e:
-            logger.error(f"Google API request failed: {str(e)}")
-            raise serializers.ValidationError("Failed to validate Google token")
-        except serializers.ValidationError:
-            # Bubble up explicit validation errors
-            raise
-        except Exception as e:
-            logger.error(f"Google token validation error: {str(e)}")
-            raise serializers.ValidationError("Invalid Google token")
+        return data
 
     def create_or_get_user(self, google_user_data):
-        """
-        Create or get user from Google data
-        """
-        email = google_user_data['email']
+        email = google_user_data["email"]
 
         try:
-            # Try to get existing user
             user = User.objects.get(email=email)
-            logger.info(f"Existing user found: {email}")
-            return user
+            return user, False  # OLD USER
 
         except User.DoesNotExist:
-            # Create new user
             user = User.objects.create_user(
                 email=email,
-                firstname=google_user_data.get('given_name', ''),
-                lastname=google_user_data.get('family_name', ''),
-                # Set unusable password since they're using Google OAuth
-                password=None
+                firstname=google_user_data.get("given_name", ""),
+                lastname=google_user_data.get("family_name", ""),
+                password=None,
             )
             user.set_unusable_password()
             user.save()
+            return user, True 
 
-            logger.info(f"New user created via Google OAuth: {email}")
-            return user
+
+# class GoogleOAuthSerializer(serializers.Serializer):
+#     # Accept either access_token (OAuth) or id_token (Google One Tap / Sign-In)
+#     access_token = serializers.CharField(required=False, allow_blank=True)
+#     id_token = serializers.CharField(required=False, allow_blank=True)
+#     # Also accept 'credential' (GSI callback field) as alias for id_token
+#     credential = serializers.CharField(required=False, allow_blank=True)
+
+#     def validate(self, attrs):
+#         # Map 'credential' to 'id_token' if present
+#         if attrs.get("credential") and not attrs.get("id_token"):
+#             attrs["id_token"] = attrs["credential"]
+#         # Ensure at least one token is provided
+#         if not attrs.get("access_token") and not attrs.get("id_token"):
+#             raise serializers.ValidationError("Provide either access_token or id_token")
+#         return attrs
+#     # def get_google_user_data(self, *, access_token: Optional[str] = None, id_token: Optional[str] = None):
+#     def get_google_user_data(self, *, access_token: Optional[str] = None, id_token: Optional[str] = None):
+
+#     # def get_google_user_data(self, *, access_token: str | None = None, id_token: str | None = None):
+#         """
+#         Retrieve Google user info using either an OAuth access_token or an ID token.
+#         - access_token: calls Google UserInfo endpoint
+#         - id_token: verifies via tokeninfo and validates audience
+#         Returns a dict containing at minimum: email, given_name, family_name
+#         """
+#         try:
+#             user_data = None
+#             if access_token:
+#                 # OAuth access token path
+#                 google_user_info_url = f"https://www.googleapis.com/oauth2/v2/userinfo?access_token={access_token}"
+#                 response = requests.get(google_user_info_url, timeout=10)
+#                 if response.status_code != 200:
+#                     raise serializers.ValidationError("Invalid Google access token")
+#                 user_data = response.json()
+#             elif id_token:
+#                 # ID token path - verify using tokeninfo
+#                 tokeninfo_url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
+#                 response = requests.get(tokeninfo_url, timeout=10)
+#                 if response.status_code != 200:
+#                     raise serializers.ValidationError("Invalid Google ID token")
+#                 token_info = response.json()
+
+#                 # Validate audience
+#                 aud = token_info.get("aud")
+#                 expected_aud = settings.GOOGLE_OAUTH2_CLIENT_ID
+#                 if expected_aud and aud != expected_aud:
+#                     raise serializers.ValidationError("Google token audience mismatch")
+
+#                 # Map token info to unified structure
+#                 user_data = {
+#                     "email": token_info.get("email"),
+#                     "given_name": token_info.get("given_name") or (token_info.get("name") or "").split(" ")[0] if token_info.get("name") else "",
+#                     "family_name": token_info.get("family_name") or (token_info.get("name") or "").split(" ")[-1] if token_info.get("name") else "",
+#                 }
+
+#             # Validate required fields
+#             required_fields = ["email", "given_name", "family_name"]
+#             for field in required_fields:
+#                 if not user_data or field not in user_data or user_data[field] is None:
+#                     raise serializers.ValidationError(f"Missing required field: {field}")
+
+#             return user_data
+
+#         except requests.RequestException as e:
+#             logger.error(f"Google API request failed: {str(e)}")
+#             raise serializers.ValidationError("Failed to validate Google token")
+#         except serializers.ValidationError:
+#             # Bubble up explicit validation errors
+#             raise
+#         except Exception as e:
+#             logger.error(f"Google token validation error: {str(e)}")
+#             raise serializers.ValidationError("Invalid Google token")
+
+#     def create_or_get_user(self, google_user_data):
+#         """
+#         Create or get user from Google data
+#         """
+#         email = google_user_data['email']
+
+#         try:
+#             # Try to get existing user
+#             user = User.objects.get(email=email)
+#             logger.info(f"Existing user found: {email}")
+#             return user
+
+#         except User.DoesNotExist:
+#             # Create new user
+#             user = User.objects.create_user(
+#                 email=email,
+#                 firstname=google_user_data.get('given_name', ''),
+#                 lastname=google_user_data.get('family_name', ''),
+#                 # Set unusable password since they're using Google OAuth
+#                 password=None
+#             )
+#             user.set_unusable_password()
+#             user.save()
+
+#             logger.info(f"New user created via Google OAuth: {email}")
+#             return user
         
 
 class MicrosoftTeamsOAuthSerializer(serializers.Serializer):
