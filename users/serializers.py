@@ -309,8 +309,7 @@ class SetPasswordSerializer(serializers.Serializer):
         if attrs["new_password"] != attrs["confirm_password"]:
             raise serializers.ValidationError("Passwords do not match")
         return attrs
-    
-
+  
 class GoogleOAuthSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=False, allow_blank=True)
     id_token = serializers.CharField(required=False, allow_blank=True)
@@ -380,8 +379,8 @@ class GoogleOAuthSerializer(serializers.Serializer):
             )
             user.set_unusable_password()
             user.save()
-            return user, True 
-
+            return user, True   # NEW USER
+          
 
 # class GoogleOAuthSerializer(serializers.Serializer):
 #     # Accept either access_token (OAuth) or id_token (Google One Tap / Sign-In)

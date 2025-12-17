@@ -354,7 +354,7 @@ class SetPasswordView(generics.UpdateAPIView):
             return Response({"message": "Password set successfully"}, status=status.HTTP_200_OK)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-   
+    
 
 class GoogleOAuthView(generics.GenericAPIView):
     serializer_class = GoogleOAuthSerializer
@@ -387,8 +387,10 @@ class GoogleOAuthView(generics.GenericAPIView):
                 "access": str(refresh.access_token),
             },
             "is_new_user": is_new_user
-        }, status=status.HTTP_200_OK) 
-    
+        }, status=status.HTTP_200_OK)
+        
+        
+           
 # class GoogleOAuthView(generics.GenericAPIView):
 #     serializer_class = GoogleOAuthSerializer
 #     permission_classes = [AllowAny]
