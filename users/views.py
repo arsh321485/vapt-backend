@@ -354,54 +354,87 @@ class SetPasswordView(generics.UpdateAPIView):
             return Response({"message": "Password set successfully"}, status=status.HTTP_200_OK)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    
+   
+
 class GoogleOAuthView(generics.GenericAPIView):
     serializer_class = GoogleOAuthSerializer
     permission_classes = [AllowAny]
     renderer_classes = [UserRenderer]
 
-    def post(self, request, *args, **kwargs):
-        try:
-            serializer = self.get_serializer(data=request.data)
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        access_token = serializer.validated_data.get("access_token")
+        id_token = serializer.validated_data.get("id_token")
+
+        google_user_data = serializer.get_google_user_data(
+            access_token=access_token,
+            id_token=id_token
+        )
+
+        user, is_new_user = serializer.create_or_get_user(google_user_data)
+
+        login(request, user)
+
+        refresh = RefreshToken.for_user(user)
+
+        return Response({
+            "message": "Google login successful",
+            "user": UserProfileSerializer(user).data,
+            "tokens": {
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+            },
+            "is_new_user": is_new_user
+        }, status=status.HTTP_200_OK) 
+    
+# class GoogleOAuthView(generics.GenericAPIView):
+#     serializer_class = GoogleOAuthSerializer
+#     permission_classes = [AllowAny]
+#     renderer_classes = [UserRenderer]
+
+#     def post(self, request, *args, **kwargs):
+#         try:
+#             serializer = self.get_serializer(data=request.data)
             
-            if serializer.is_valid(raise_exception=True):
-                # Get Google user data using either access_token or id_token
-                access_token = serializer.validated_data.get('access_token')
-                id_token = serializer.validated_data.get('id_token')
-                google_user_data = serializer.get_google_user_data(
-                    access_token=access_token if access_token else None,
-                    id_token=id_token if id_token else None,
-                )
+#             if serializer.is_valid(raise_exception=True):
+#                 # Get Google user data using either access_token or id_token
+#                 access_token = serializer.validated_data.get('access_token')
+#                 id_token = serializer.validated_data.get('id_token')
+#                 google_user_data = serializer.get_google_user_data(
+#                     access_token=access_token if access_token else None,
+#                     id_token=id_token if id_token else None,
+#                 )
                 
-                # Create or get user
-                user = serializer.create_or_get_user(google_user_data)
+#                 # Create or get user
+#                 user = serializer.create_or_get_user(google_user_data)
                 
-                # Login user
-                login(request, user)
+#                 # Login user
+#                 login(request, user)
                 
-                # Generate JWT tokens
-                refresh = RefreshToken.for_user(user)
+#                 # Generate JWT tokens
+#                 refresh = RefreshToken.for_user(user)
                 
-                logger.info(f"Google OAuth login successful: {user.email}")
+#                 logger.info(f"Google OAuth login successful: {user.email}")
                 
-                return Response({
-                    "message": "Google login successful",
-                    "user": UserProfileSerializer(user).data,
-                    "tokens": {
-                        "refresh": str(refresh),
-                        "access": str(refresh.access_token),
-                    },
-                    # Simplified: backend does not track "is_new_user" here reliably
-                    # "is_new_user": False
-                    "is_new_user": True
-                }, status=status.HTTP_200_OK)
+#                 return Response({
+#                     "message": "Google login successful",
+#                     "user": UserProfileSerializer(user).data,
+#                     "tokens": {
+#                         "refresh": str(refresh),
+#                         "access": str(refresh.access_token),
+#                     },
+#                     # Simplified: backend does not track "is_new_user" here reliably
+#                     # "is_new_user": False
+#                     "is_new_user": True
+#                 }, status=status.HTTP_200_OK)
                 
-        except Exception as e:
-            logger.error(f"Google OAuth error: {str(e)}")
-            return Response({
-                "error": "Google authentication failed. Please try again."
-            }, status=status.HTTP_400_BAD_REQUEST)
+#         except Exception as e:
+#             logger.error(f"Google OAuth error: {str(e)}")
+#             return Response({
+#                 "error": "Google authentication failed. Please try again."
+#             }, status=status.HTTP_400_BAD_REQUEST)
             
 import base64
 import json
