@@ -10,3 +10,8 @@ class AdminRegisterSimpleVulnSerializer(serializers.Serializer):
     first_observation = serializers.CharField(allow_null=True)
     second_observation = serializers.CharField(allow_null=True)
     status = serializers.CharField()  # will be 'open' by default
+
+    
+
+class FixVulnerabilitySerializer(serializers.Serializer):
+    host_name = serializers.CharField()
