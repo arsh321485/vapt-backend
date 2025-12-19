@@ -14,4 +14,11 @@ class AdminRegisterSimpleVulnSerializer(serializers.Serializer):
     
 
 class FixVulnerabilitySerializer(serializers.Serializer):
-    host_name = serializers.CharField()
+    # host_name = serializers.CharField()
+    pass
+    
+
+class RaiseSupportRequestSerializer(serializers.Serializer):
+    vulnerability_id = serializers.CharField()
+    step = serializers.CharField()          # Step 1 / Step 2 / All Steps
+    description = serializers.CharField()
