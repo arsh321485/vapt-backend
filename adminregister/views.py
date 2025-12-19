@@ -7,9 +7,10 @@ from django.utils.timezone import is_naive, make_aware
 import pymongo
 from urllib.parse import urlparse
 import re
+from rest_framework.parsers import JSONParser
 
-from .serializers import AdminRegisterSimpleVulnSerializer
-
+from .serializers import AdminRegisterSimpleVulnSerializer,FixVulnerabilitySerializer
+FIX_VULN_COLLECTION = "fix_vulnerabilities"
 NESSUS_COLLECTION = "nessus_reports"
 
 # Robust MongoContext: same as before but compact
@@ -67,6 +68,40 @@ def _normalize_iso(dt):
         return d.isoformat()
     return str(dt)
 
+# ===============================
+# TEAM ASSIGNMENT HELPERS
+# ===============================
+HOST_TEAM_MAP = {
+    "192.168.0.2": "Patch Management",
+    "192.168.0.5": "Network Security",
+    "192.168.0.6": "Configuration Management",
+    "192.168.0.9": "Architectural Flaws",
+}
+
+def get_assigned_team_by_host(host_name: str) -> str:
+    return HOST_TEAM_MAP.get(host_name, "Patch Management")
+
+def get_team_members(db, team_name):
+    members = []
+
+    cursor = db["users_details_userdetail"].find({
+        "Member_role": {
+            "$elemMatch": {
+                "$regex": f"^{team_name}$",
+                "$options": "i"
+            }
+        }
+    })
+
+    for u in cursor:
+        members.append({
+            "user_id": str(u["_id"]),
+            "name": f"{u.get('first_name', '')} {u.get('last_name', '')}",
+            "email": u.get("email")
+        })
+
+    return members
+
 class VulnerabilityRegisterAPIView(APIView):
     """
     Returns a list of vulnerabilities for a report_id but only the 6 fields required by the UI.
@@ -120,3 +155,92 @@ class VulnerabilityRegisterAPIView(APIView):
         except Exception as exc:
             import traceback; traceback.print_exc()
             return Response({"detail":"unexpected error", "error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        
+class FixVulnerabilityCreateAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        serializer = FixVulnerabilitySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        host_name = serializer.validated_data["host_name"]
+
+        with MongoContext() as db:
+            nessus_coll = db[NESSUS_COLLECTION]
+            fix_coll = db[FIX_VULN_COLLECTION]
+
+            nessus_doc = nessus_coll.find_one({
+                "vulnerabilities_by_host.host_name": host_name
+            })
+
+            if not nessus_doc:
+                return Response(
+                    {"detail": "Host not found in Nessus report"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            vuln_data = None
+            for host in nessus_doc.get("vulnerabilities_by_host", []):
+                if host.get("host_name") == host_name:
+                    vuln_data = host.get("vulnerabilities", [])[0]
+                    break
+
+            if not vuln_data:
+                return Response(
+                    {"detail": "No vulnerabilities found for this host"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            plugin_name = vuln_data.get("plugin_name", "")
+            risk_factor = vuln_data.get("risk_factor", "")
+            description_points = vuln_data.get("description", "")
+
+            # ✅ ASSIGN TEAM BY HOST
+            assigned_team = get_assigned_team_by_host(host_name)
+            assigned_team_members = get_team_members(db, assigned_team)
+
+            mitigation_steps = []
+            for i in range(1, 7):
+                mitigation_steps.append({
+                    "step": f"Step {i}",
+                    "assigned_to": assigned_team,
+                    "deadline": None,
+                    "artifacts_tools_used": "Dummy Tool",
+                    "description": f"Dummy description for step {i}",
+                    "system_file_path": "C:\\dummy\\path"
+                })
+
+            doc = {
+                "host_name": host_name,
+                "risk_factor": risk_factor,
+                "plugin_name": plugin_name,
+
+                "vulnerability_type": "Dummy Vulnerability Type",
+                "affected_ports": "Dummy Port Range",
+                "file": "Dummy File",
+
+                "description_points": description_points,
+                "vendor_fix_available": True,
+
+                "assigned_team": assigned_team,
+                "assigned_team_members": assigned_team_members,
+
+                "mitigation_steps": mitigation_steps,
+                "status": "open",
+
+                "created_at": datetime.utcnow(),
+                "created_by": str(request.user.id)
+            }
+
+            result = fix_coll.insert_one(doc)
+            doc["_id"] = str(result.inserted_id)
+
+            return Response(
+                {
+                    "assigned_team": assigned_team,
+                    "assigned_team_members": assigned_team_members,
+                    "data": doc
+                },
+                status=status.HTTP_201_CREATED
+            )
