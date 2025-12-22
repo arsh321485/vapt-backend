@@ -326,6 +326,52 @@ class RaiseSupportRequestAPIView(APIView):
             )
 
 
+class SupportRequestDetailAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, support_request_id):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            support_coll = db["support_requests"]
+
+            support_req = support_coll.find_one({
+                "_id": ObjectId(support_request_id),
+                "admin_id": admin_id   # 🔒 only own requests
+            })
+
+            if not support_req:
+                return Response(
+                    {"detail": "Support request not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            response_data = {
+                "_id": str(support_req.get("_id")),
+                "report_id": support_req.get("report_id"),
+                "admin_id": support_req.get("admin_id"),
+                "vulnerability_id": support_req.get("vulnerability_id"),
+                "vul_name": support_req.get("vul_name"),
+                "host_name": support_req.get("host_name"),
+                "assigned_team": support_req.get("assigned_team"),
+                "assigned_team_members": support_req.get("assigned_team_members", []),
+                "steps": support_req.get("steps", []),
+                "step_requested": support_req.get("step_requested"),
+                "description": support_req.get("description"),
+                "status": support_req.get("status"),
+                "requested_by": support_req.get("requested_by"),
+                "requested_at": support_req.get("requested_at"),
+            }
+
+            return Response(
+                {
+                    "message": "Support request fetched successfully",
+                    "data": response_data
+                },
+                status=status.HTTP_200_OK
+            )
+            
+
 
 class SupportRequestByReportAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
