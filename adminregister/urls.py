@@ -1,6 +1,6 @@
 # adminregister/urls.py
 from django.urls import path
-from .views import VulnerabilityRegisterAPIView,FixVulnerabilityCreateAPIView,RaiseSupportRequestAPIView,SupportRequestByReportAPIView
+from .views import VulnerabilityRegisterAPIView,FixVulnerabilityCreateAPIView,RaiseSupportRequestAPIView,SupportRequestByReportAPIView,SupportRequestDetailAPIView
 
 urlpatterns = [
     path('register/<str:report_id>/vulns/', VulnerabilityRegisterAPIView.as_view(), name='report-vulns-by-id'),
@@ -16,6 +16,13 @@ urlpatterns = [
     RaiseSupportRequestAPIView.as_view(),
     name="raise-support-request"
     ),
+    
+    path(
+    "support-requests/<str:support_request_id>/",
+    SupportRequestDetailAPIView.as_view(),
+    name="support-request-detail"
+),
+
 
     path(
     "support-requests/report/<str:report_id>/",
