@@ -23,3 +23,10 @@ class RaiseSupportRequestSerializer(serializers.Serializer):
     report_id = serializers.CharField()   
     step = serializers.CharField()
     description = serializers.CharField()
+    
+    
+class CreateTicketSerializer(serializers.Serializer):
+    fix_vulnerability_id = serializers.CharField()
+    category = serializers.CharField()
+    subject = serializers.CharField()
+    description = serializers.CharField()
