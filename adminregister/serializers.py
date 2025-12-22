@@ -24,7 +24,6 @@ class RaiseSupportRequestSerializer(serializers.Serializer):
     
     
 class CreateTicketSerializer(serializers.Serializer):
-    fix_vulnerability_id = serializers.CharField()
     category = serializers.CharField()
     subject = serializers.CharField()
     description = serializers.CharField()
