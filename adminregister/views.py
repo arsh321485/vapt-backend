@@ -10,10 +10,11 @@ import re
 from rest_framework.parsers import JSONParser
 from bson import ObjectId
 
-from .serializers import AdminRegisterSimpleVulnSerializer,FixVulnerabilitySerializer,RaiseSupportRequestSerializer
+from .serializers import AdminRegisterSimpleVulnSerializer,FixVulnerabilitySerializer,RaiseSupportRequestSerializer,CreateTicketSerializer
 SUPPORT_REQUEST_COLLECTION = "support_requests"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
 NESSUS_COLLECTION = "nessus_reports"
+TICKETS_COLLECTION = "tickets"
 
 # Robust MongoContext: same as before but compact
 class MongoContext:
@@ -417,5 +418,62 @@ class SupportRequestByReportAPIView(APIView):
                     "results": results
                 },
                 status=status.HTTP_200_OK
+            )
+            
+            
+class CreateTicketAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        serializer = CreateTicketSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        fix_vuln_id = serializer.validated_data["fix_vulnerability_id"]
+        category = serializer.validated_data["category"]
+        subject = serializer.validated_data["subject"]
+        description = serializer.validated_data["description"]
+
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            fix_coll = db[FIX_VULN_COLLECTION]
+            ticket_coll = db[TICKETS_COLLECTION]
+
+            # 🔍 Fetch Fix Vulnerability
+            fix_vuln = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+            if not fix_vuln:
+                return Response(
+                    {"detail": "Fix vulnerability not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            ticket_doc = {
+                "fix_vulnerability_id": fix_vuln_id,
+                "admin_id": admin_id,
+
+                # from fix vulnerability
+                "host_name": fix_vuln.get("host_name"),
+                "plugin_name": fix_vuln.get("plugin_name"),
+
+                # from user
+                "category": category,
+                "subject": subject,
+                "description": description,
+
+                # system
+                "status": "open",
+                "created_at": datetime.utcnow()
+            }
+
+            result = ticket_coll.insert_one(ticket_doc)
+            ticket_doc["_id"] = str(result.inserted_id)
+
+            return Response(
+                {
+                    "message": "Ticket created successfully",
+                    "data": ticket_doc
+                },
+                status=status.HTTP_201_CREATED
             )
 
