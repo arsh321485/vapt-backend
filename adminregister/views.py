@@ -83,32 +83,11 @@ HOST_TEAM_MAP = {
 def get_assigned_team_by_host(host_name: str) -> str:
     return HOST_TEAM_MAP.get(host_name, "Patch Management")
 
-# def get_team_members(db, team_name):
-#     members = []
-
-#     cursor = db["users_details_userdetail"].find({
-#         "Member_role": {
-#             "$elemMatch": {
-#                 "$regex": f"^{team_name}$",
-#                 "$options": "i"
-#             }
-#         }
-#     })
-
-#     for u in cursor:
-#         members.append({
-#             "user_id": str(u["_id"]),
-#             "name": f"{u.get('first_name', '')} {u.get('last_name', '')}",
-#             "email": u.get("email")
-#         })
-
-#     return members
-
 def get_team_members(db, team_name: str, admin_id: str):
     members = []
 
     cursor = db["users_details_userdetail"].find({
-        "admin_id": admin_id,   # ✅ SAME ADMIN ONLY
+        "admin_id": admin_id, 
         "Member_role": {
             "$elemMatch": {
                 "$regex": f"^{team_name}$",
@@ -180,102 +159,7 @@ class VulnerabilityRegisterAPIView(APIView):
             import traceback; traceback.print_exc()
             return Response({"detail":"unexpected error", "error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
-        
-# class FixVulnerabilityCreateAPIView(APIView):
-#     permission_classes = [permissions.IsAuthenticated]
-#     parser_classes = [JSONParser]
-
-#     def post(self, request):
-#         serializer = FixVulnerabilitySerializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
-#         host_name = serializer.validated_data["host_name"]
-
-#         with MongoContext() as db:
-#             nessus_coll = db[NESSUS_COLLECTION]
-#             fix_coll = db[FIX_VULN_COLLECTION]
-
-#             nessus_doc = nessus_coll.find_one({
-#                 "vulnerabilities_by_host.host_name": host_name
-#             })
-
-#             if not nessus_doc:
-#                 return Response(
-#                     {"detail": "Host not found in Nessus report"},
-#                     status=status.HTTP_404_NOT_FOUND
-#                 )
-
-#             vuln_data = None
-#             for host in nessus_doc.get("vulnerabilities_by_host", []):
-#                 if host.get("host_name") == host_name:
-#                     vuln_data = host.get("vulnerabilities", [])[0]
-#                     break
-
-#             if not vuln_data:
-#                 return Response(
-#                     {"detail": "No vulnerabilities found for this host"},
-#                     status=status.HTTP_404_NOT_FOUND
-#                 )
-
-#             plugin_name = vuln_data.get("plugin_name", "")
-#             risk_factor = vuln_data.get("risk_factor", "")
-#             description_points = vuln_data.get("description", "")
-
-#             # ✅ ASSIGN TEAM BY HOST
-#             assigned_team = get_assigned_team_by_host(host_name)
-#             # assigned_team_members = get_team_members(db, assigned_team)
-#             created_by_admin_id = str(request.user.id)
-
-#             assigned_team_members = get_team_members(
-#                 db=db,
-#                 team_name=assigned_team,
-#                 admin_id=created_by_admin_id
-#             )
-
-#             mitigation_steps = []
-#             for i in range(1, 7):
-#                 mitigation_steps.append({
-#                     "step": f"Step {i}",
-#                     "assigned_to": assigned_team,
-#                     "deadline": None,
-#                     "artifacts_tools_used": "Dummy Tool",
-#                     "description": f"Dummy description for step {i}",
-#                     "system_file_path": "C:\\dummy\\path"
-#                 })
-
-#             doc = {
-#                 "host_name": host_name,
-#                 "risk_factor": risk_factor,
-#                 "plugin_name": plugin_name,
-
-#                 "vulnerability_type": "Dummy Vulnerability Type",
-#                 "affected_ports": "Dummy Port Range",
-#                 "file": "Dummy File",
-
-#                 "description_points": description_points,
-#                 "vendor_fix_available": True,
-
-#                 "assigned_team": assigned_team,
-#                 "assigned_team_members": assigned_team_members,
-
-#                 "mitigation_steps": mitigation_steps,
-#                 "status": "open",
-
-#                 "created_at": datetime.utcnow(),
-#                 "created_by": str(request.user.id)
-#             }
-
-#             result = fix_coll.insert_one(doc)
-#             doc["_id"] = str(result.inserted_id)
-
-#             return Response(
-#                 {
-#                     "assigned_team": assigned_team,
-#                     "assigned_team_members": assigned_team_members,
-#                     "data": doc
-#                 },
-#                 status=status.HTTP_201_CREATED
-#             )
-            
+              
 class FixVulnerabilityCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]
@@ -377,12 +261,29 @@ class RaiseSupportRequestAPIView(APIView):
         serializer.is_valid(raise_exception=True)
 
         vuln_id = serializer.validated_data["vulnerability_id"]
+        report_id = serializer.validated_data["report_id"]
         step_requested = serializer.validated_data["step"]
         description = serializer.validated_data["description"]
+
+        admin_id = str(request.user.id)
 
         with MongoContext() as db:
             fix_coll = db[FIX_VULN_COLLECTION]
             support_coll = db["support_requests"]
+
+            # ✅ CHECK: Already raised or not
+            existing_request = support_coll.find_one({
+                "vulnerability_id": vuln_id,
+                "admin_id": admin_id
+            })
+
+            if existing_request:
+                return Response(
+                    {
+                        "detail": "Support request already raised for this vulnerability"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
             vuln = fix_coll.find_one({"_id": ObjectId(vuln_id)})
             if not vuln:
@@ -392,38 +293,24 @@ class RaiseSupportRequestAPIView(APIView):
                 )
 
             assigned_team = vuln.get("assigned_team")
-            # assigned_team = vuln.get("assigned_team")
-            admin_id = str(request.user.id)
 
-            assigned_team_members = get_team_members(
-                db=db,
-                team_name=assigned_team,
-                admin_id=admin_id
-            )
             support_doc = {
-                # ✅ ADMIN ID AT TOP
-                "admin_id": str(request.user.id),
+                "report_id": report_id,
+                "admin_id": admin_id,
 
-                # fetched from fix_vulnerabilities
                 "vulnerability_id": vuln_id,
                 "vul_name": vuln.get("plugin_name"),
                 "host_name": vuln.get("host_name"),
 
-                # ✅ ASSIGNED TEAM PRINT
                 "assigned_team": assigned_team,
-                "assigned_team_members": assigned_team_members,
-
+                "assigned_team_members": vuln.get("assigned_team_members", []),
                 "steps": vuln.get("mitigation_steps", []),
 
-                # ✅ STEP REQUESTED
                 "step_requested": step_requested,
-
                 "description": description,
+
                 "status": "open",
-
-                # ✅ requested_by = assigned team name
                 "requested_by": assigned_team,
-
                 "requested_at": datetime.utcnow()
             }
 
@@ -437,3 +324,52 @@ class RaiseSupportRequestAPIView(APIView):
                 },
                 status=status.HTTP_201_CREATED
             )
+
+
+
+class SupportRequestByReportAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            support_coll = db["support_requests"]
+
+            cursor = support_coll.find(
+                {
+                    "report_id": report_id,
+                    "admin_id": admin_id
+                }
+            ).sort("requested_at", -1)
+
+            results = []
+
+            for doc in cursor:
+                results.append({
+                    "_id": str(doc.get("_id")),
+                    "report_id": doc.get("report_id"),
+                    "admin_id": doc.get("admin_id"),
+                    "vulnerability_id": doc.get("vulnerability_id"),
+                    "vul_name": doc.get("vul_name"),
+                    "host_name": doc.get("host_name"),
+                    "assigned_team": doc.get("assigned_team"),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    # "steps": doc.get("steps", []),
+                    "step_requested": doc.get("step_requested"),
+                    "description": doc.get("description"),
+                    "status": doc.get("status"),
+                    "requested_by": doc.get("requested_by"),
+                    "requested_at": doc.get("requested_at"),
+                })
+
+            return Response(
+                {
+                    "message": "Support requests fetched successfully",
+                    "report_id": report_id,
+                    "count": len(results),  
+                    "results": results
+                },
+                status=status.HTTP_200_OK
+            )
+
