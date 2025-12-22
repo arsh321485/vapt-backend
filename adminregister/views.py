@@ -253,16 +253,89 @@ class FixVulnerabilityCreateAPIView(APIView):
                 status=status.HTTP_201_CREATED
             )
           
+# class RaiseSupportRequestAPIView(APIView):
+#     permission_classes = [permissions.IsAuthenticated]
+#     parser_classes = [JSONParser]
+
+#     def post(self, request):
+#         serializer = RaiseSupportRequestSerializer(data=request.data)
+#         serializer.is_valid(raise_exception=True)
+
+#         vuln_id = serializer.validated_data["vulnerability_id"]
+#         report_id = serializer.validated_data["report_id"]
+#         step_requested = serializer.validated_data["step"]
+#         description = serializer.validated_data["description"]
+
+#         admin_id = str(request.user.id)
+
+#         with MongoContext() as db:
+#             fix_coll = db[FIX_VULN_COLLECTION]
+#             support_coll = db["support_requests"]
+
+#             # ✅ CHECK: Already raised or not
+#             existing_request = support_coll.find_one({
+#                 "vulnerability_id": vuln_id,
+#                 "admin_id": admin_id
+#             })
+
+#             if existing_request:
+#                 return Response(
+#                     {
+#                         "detail": "Support request already raised for this vulnerability"
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             vuln = fix_coll.find_one({"_id": ObjectId(vuln_id)})
+#             if not vuln:
+#                 return Response(
+#                     {"detail": "Vulnerability not found"},
+#                     status=status.HTTP_404_NOT_FOUND
+#                 )
+
+#             assigned_team = vuln.get("assigned_team")
+
+#             support_doc = {
+#                 "report_id": report_id,
+#                 "admin_id": admin_id,
+
+#                 "vulnerability_id": vuln_id,
+#                 "vul_name": vuln.get("plugin_name"),
+#                 "host_name": vuln.get("host_name"),
+
+#                 "assigned_team": assigned_team,
+#                 "assigned_team_members": vuln.get("assigned_team_members", []),
+#                 "steps": vuln.get("mitigation_steps", []),
+
+#                 "step_requested": step_requested,
+#                 "description": description,
+
+#                 "status": "open",
+#                 "requested_by": assigned_team,
+#                 "requested_at": datetime.utcnow()
+#             }
+
+#             result = support_coll.insert_one(support_doc)
+#             support_doc["_id"] = str(result.inserted_id)
+
+#             return Response(
+#                 {
+#                     "message": "Support request raised successfully",
+#                     "data": support_doc
+#                 },
+#                 status=status.HTTP_201_CREATED
+#             )
+
+
+
 class RaiseSupportRequestAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]
 
-    def post(self, request):
+    def post(self, request, report_id, vulnerability_id):
         serializer = RaiseSupportRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        vuln_id = serializer.validated_data["vulnerability_id"]
-        report_id = serializer.validated_data["report_id"]
         step_requested = serializer.validated_data["step"]
         description = serializer.validated_data["description"]
 
@@ -272,21 +345,20 @@ class RaiseSupportRequestAPIView(APIView):
             fix_coll = db[FIX_VULN_COLLECTION]
             support_coll = db["support_requests"]
 
-            # ✅ CHECK: Already raised or not
+            # ✅ Prevent duplicate support request
             existing_request = support_coll.find_one({
-                "vulnerability_id": vuln_id,
+                "vulnerability_id": vulnerability_id,
                 "admin_id": admin_id
             })
 
             if existing_request:
                 return Response(
-                    {
-                        "detail": "Support request already raised for this vulnerability"
-                    },
+                    {"detail": "Support request already raised for this vulnerability"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            vuln = fix_coll.find_one({"_id": ObjectId(vuln_id)})
+            # ✅ Fetch fix vulnerability
+            vuln = fix_coll.find_one({"_id": ObjectId(vulnerability_id)})
             if not vuln:
                 return Response(
                     {"detail": "Vulnerability not found"},
@@ -299,7 +371,7 @@ class RaiseSupportRequestAPIView(APIView):
                 "report_id": report_id,
                 "admin_id": admin_id,
 
-                "vulnerability_id": vuln_id,
+                "vulnerability_id": vulnerability_id,
                 "vul_name": vuln.get("plugin_name"),
                 "host_name": vuln.get("host_name"),
 
@@ -325,6 +397,7 @@ class RaiseSupportRequestAPIView(APIView):
                 },
                 status=status.HTTP_201_CREATED
             )
+
 
 
 class SupportRequestDetailAPIView(APIView):
