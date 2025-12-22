@@ -18,8 +18,13 @@ urlpatterns = [
     name="fix-vulnerability-create-by-asset"
     ),
     
+    # path(
+    # "support-requests/raise/",
+    # RaiseSupportRequestAPIView.as_view(),
+    # name="raise-support-request"
+    # ),
     path(
-    "support-requests/raise/",
+    "support-requests/raise/report/<str:report_id>/vulnerability/<str:vulnerability_id>/",
     RaiseSupportRequestAPIView.as_view(),
     name="raise-support-request"
     ),

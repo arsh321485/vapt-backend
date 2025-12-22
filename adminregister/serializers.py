@@ -19,8 +19,6 @@ class FixVulnerabilitySerializer(serializers.Serializer):
     
 
 class RaiseSupportRequestSerializer(serializers.Serializer):
-    vulnerability_id = serializers.CharField()
-    report_id = serializers.CharField()   
     step = serializers.CharField()
     description = serializers.CharField()
     
