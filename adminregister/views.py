@@ -253,81 +253,6 @@ class FixVulnerabilityCreateAPIView(APIView):
                 status=status.HTTP_201_CREATED
             )
           
-# class RaiseSupportRequestAPIView(APIView):
-#     permission_classes = [permissions.IsAuthenticated]
-#     parser_classes = [JSONParser]
-
-#     def post(self, request):
-#         serializer = RaiseSupportRequestSerializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
-
-#         vuln_id = serializer.validated_data["vulnerability_id"]
-#         report_id = serializer.validated_data["report_id"]
-#         step_requested = serializer.validated_data["step"]
-#         description = serializer.validated_data["description"]
-
-#         admin_id = str(request.user.id)
-
-#         with MongoContext() as db:
-#             fix_coll = db[FIX_VULN_COLLECTION]
-#             support_coll = db["support_requests"]
-
-#             # ✅ CHECK: Already raised or not
-#             existing_request = support_coll.find_one({
-#                 "vulnerability_id": vuln_id,
-#                 "admin_id": admin_id
-#             })
-
-#             if existing_request:
-#                 return Response(
-#                     {
-#                         "detail": "Support request already raised for this vulnerability"
-#                     },
-#                     status=status.HTTP_400_BAD_REQUEST
-#                 )
-
-#             vuln = fix_coll.find_one({"_id": ObjectId(vuln_id)})
-#             if not vuln:
-#                 return Response(
-#                     {"detail": "Vulnerability not found"},
-#                     status=status.HTTP_404_NOT_FOUND
-#                 )
-
-#             assigned_team = vuln.get("assigned_team")
-
-#             support_doc = {
-#                 "report_id": report_id,
-#                 "admin_id": admin_id,
-
-#                 "vulnerability_id": vuln_id,
-#                 "vul_name": vuln.get("plugin_name"),
-#                 "host_name": vuln.get("host_name"),
-
-#                 "assigned_team": assigned_team,
-#                 "assigned_team_members": vuln.get("assigned_team_members", []),
-#                 "steps": vuln.get("mitigation_steps", []),
-
-#                 "step_requested": step_requested,
-#                 "description": description,
-
-#                 "status": "open",
-#                 "requested_by": assigned_team,
-#                 "requested_at": datetime.utcnow()
-#             }
-
-#             result = support_coll.insert_one(support_doc)
-#             support_doc["_id"] = str(result.inserted_id)
-
-#             return Response(
-#                 {
-#                     "message": "Support request raised successfully",
-#                     "data": support_doc
-#                 },
-#                 status=status.HTTP_201_CREATED
-#             )
-
-
-
 class RaiseSupportRequestAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]
@@ -493,16 +418,15 @@ class SupportRequestByReportAPIView(APIView):
                 status=status.HTTP_200_OK
             )
             
-            
+
 class CreateTicketAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]
 
-    def post(self, request):
+    def post(self, request, report_id, fix_vulnerability_id):
         serializer = CreateTicketSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        fix_vuln_id = serializer.validated_data["fix_vulnerability_id"]
         category = serializer.validated_data["category"]
         subject = serializer.validated_data["subject"]
         description = serializer.validated_data["description"]
@@ -513,28 +437,43 @@ class CreateTicketAPIView(APIView):
             fix_coll = db[FIX_VULN_COLLECTION]
             ticket_coll = db[TICKETS_COLLECTION]
 
-            # 🔍 Fetch Fix Vulnerability
-            fix_vuln = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+            # 🔍 Fetch Fix Vulnerability (validate ownership + report)
+            fix_vuln = fix_coll.find_one({
+                "_id": ObjectId(fix_vulnerability_id),
+                "report_id": report_id
+            })
+
             if not fix_vuln:
                 return Response(
-                    {"detail": "Fix vulnerability not found"},
+                    {"detail": "Fix vulnerability not found for this report"},
                     status=status.HTTP_404_NOT_FOUND
                 )
 
+            # ❌ DUPLICATE CHECK
+            existing_ticket = ticket_coll.find_one({
+                "fix_vulnerability_id": fix_vulnerability_id,
+                "admin_id": admin_id
+            })
+
+            if existing_ticket:
+                return Response(
+                    {"detail": "Ticket already created for this vulnerability"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # ✅ CREATE TICKET
             ticket_doc = {
-                "fix_vulnerability_id": fix_vuln_id,
+                "fix_vulnerability_id": fix_vulnerability_id,
+                "report_id": report_id,
                 "admin_id": admin_id,
 
-                # from fix vulnerability
                 "host_name": fix_vuln.get("host_name"),
                 "plugin_name": fix_vuln.get("plugin_name"),
 
-                # from user
                 "category": category,
                 "subject": subject,
                 "description": description,
 
-                # system
                 "status": "open",
                 "created_at": datetime.utcnow()
             }
@@ -548,5 +487,47 @@ class CreateTicketAPIView(APIView):
                     "data": ticket_doc
                 },
                 status=status.HTTP_201_CREATED
+            )
+
+
+class TicketByReportAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            ticket_coll = db[TICKETS_COLLECTION]
+
+            cursor = ticket_coll.find(
+                {
+                    "report_id": report_id,
+                    "admin_id": admin_id
+                }
+            ).sort("created_at", -1)
+
+            results = []
+            for doc in cursor:
+                results.append({
+                    "_id": str(doc.get("_id")),
+                    "report_id": doc.get("report_id"),
+                    "fix_vulnerability_id": doc.get("fix_vulnerability_id"),
+                    "host_name": doc.get("host_name"),
+                    "plugin_name": doc.get("plugin_name"),
+                    "category": doc.get("category"),
+                    "subject": doc.get("subject"),
+                    "description": doc.get("description"),
+                    "status": doc.get("status", "open"),
+                    "created_at": doc.get("created_at"),
+                })
+
+            return Response(
+                {
+                    "message": "Tickets fetched successfully",
+                    "report_id": report_id,
+                    "count": len(results),
+                    "results": results
+                },
+                status=status.HTTP_200_OK
             )
 

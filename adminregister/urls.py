@@ -7,6 +7,7 @@ from .views import (
     SupportRequestByReportAPIView,
     SupportRequestDetailAPIView,
     CreateTicketAPIView,
+    TicketByReportAPIView
  )
                     
 urlpatterns = [
@@ -17,12 +18,7 @@ urlpatterns = [
     FixVulnerabilityCreateAPIView.as_view(),
     name="fix-vulnerability-create-by-asset"
     ),
-    
-    # path(
-    # "support-requests/raise/",
-    # RaiseSupportRequestAPIView.as_view(),
-    # name="raise-support-request"
-    # ),
+
     path(
     "support-requests/raise/report/<str:report_id>/vulnerability/<str:vulnerability_id>/",
     RaiseSupportRequestAPIView.as_view(),
@@ -41,10 +37,17 @@ urlpatterns = [
     SupportRequestByReportAPIView.as_view(),
     name="support-requests-by-report"    
     ),
+ 
     path(
-        "tickets/create/",
+        "tickets/report/<str:report_id>/fix/<str:fix_vulnerability_id>/create/",
         CreateTicketAPIView.as_view(),
         name="create-ticket"
+    ),
+    
+    path(
+        "tickets/report/<str:report_id>/",
+        TicketByReportAPIView.as_view(),
+        name="tickets-by-report"
     ),
 
 
