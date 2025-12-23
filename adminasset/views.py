@@ -301,13 +301,17 @@ class AssetHoldAPIView(APIView):
                 # Load report
                 doc = coll.find_one(
                     {"report_id": str(report_id)},
-                    {"vulnerabilities_by_host": 1}
+                    {"vulnerabilities_by_host": 1,
+                     "member_type": 1
+                    }
                 )
                 if not doc:
                     return Response(
                         {"detail": "Report not found"},
                         status=status.HTTP_404_NOT_FOUND
                     )
+                
+                member_type = doc.get("member_type")
 
                 found = None
                 for h in doc.get("vulnerabilities_by_host", []):
@@ -341,6 +345,7 @@ class AssetHoldAPIView(APIView):
                 held_coll.insert_one({
                     "report_id": str(report_id),
                     "host_name": host_name,
+                    "member_type": member_type,
                     "host_entry": found,
                     "held_at": timezone.now(),
                     "held_by": getattr(request.user, "email", None)
@@ -362,6 +367,7 @@ class AssetHoldAPIView(APIView):
 
                 asset_data = {
                     "asset": host_name,
+                    "member_type": member_type,
                     "total_vulnerabilities": len(found.get("vulnerabilities", [])),
                     "severity_counts": severity_counts,
                     "host_information": found.get("host_information") or {}
@@ -412,6 +418,8 @@ class AssetUnholdAPIView(APIView):
                     )
 
                 host_entry = held.get("host_entry")
+                member_type = held.get("member_type")
+                
                 if not host_entry:
                     return Response(
                         {"detail": "Hold asset missing host_entry"},
@@ -439,6 +447,7 @@ class AssetUnholdAPIView(APIView):
                 # 5️⃣ Prepare asset response (summary)
                 asset_response = {
                     "asset": host_name,
+                    "member_type": member_type,
                     "total_vulnerabilities": len(host_entry.get("vulnerabilities", [])),
                     "host_information": host_entry.get("host_information", {}),
                     "severity_counts": {
@@ -485,19 +494,22 @@ class AssetUnholdAPIView(APIView):
 
 # ----------------HOLD  ASSET LIST ----------------  
 class HoldAssetsByReportAPIView(APIView):
-    """
-    GET /api/admin/adminasset/report/<report_id>/assets/hold-list/
-    Lists all held assets for a report
-    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, report_id):
         try:
             with MongoContext() as db:
                 held_coll = db[HOLD_COLLECTION]
+                report_coll = db[NESSUS_COLLECTION]
+
+                # 🔹 fetch report member_type as fallback
+                report_doc = report_coll.find_one(
+                    {"report_id": str(report_id)},
+                    {"member_type": 1}
+                )
+                fallback_member_type = report_doc.get("member_type") if report_doc else None
 
                 cursor = held_coll.find({"report_id": str(report_id)})
-
                 results = []
 
                 for doc in cursor:
@@ -524,6 +536,8 @@ class HoldAssetsByReportAPIView(APIView):
 
                     results.append({
                         "asset": doc.get("host_name"),
+                        # ✅ fallback logic
+                        "member_type": doc.get("member_type") or fallback_member_type,
                         "total_vulnerabilities": len(vulns),
                         "severity_counts": severity_counts,
                         "host_information": host_entry.get("host_information") or {},
@@ -531,13 +545,11 @@ class HoldAssetsByReportAPIView(APIView):
                         "held_by": doc.get("held_by"),
                     })
 
-                serializer = HoldAssetListSerializer(results, many=True)
-
                 return Response(
                     {
                         "report_id": str(report_id),
                         "count": len(results),
-                        "assets": serializer.data
+                        "assets": results
                     },
                     status=status.HTTP_200_OK
                 )
@@ -549,7 +561,6 @@ class HoldAssetsByReportAPIView(APIView):
                 {"detail": "Failed to fetch held assets", "error": str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 # ----------------RAISE SUPPORT REQUEST BY HOST ----------------
 
