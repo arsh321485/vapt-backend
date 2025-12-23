@@ -5,7 +5,7 @@ from .views import (
     FixVulnerabilityCreateAPIView,
     RaiseSupportRequestAPIView,
     SupportRequestByReportAPIView,
-    SupportRequestDetailAPIView,
+    RaiseSupportRequestByVulnerabilityAPIView,
     CreateTicketAPIView,
     TicketByReportAPIView
  )
@@ -26,9 +26,9 @@ urlpatterns = [
     ),
     
     path(
-    "support-requests/<str:support_request_id>/",
-    SupportRequestDetailAPIView.as_view(),
-    name="support-request-detail"
+        "raise-support-requests/vulnerability/<str:vulnerability_id>/",
+        RaiseSupportRequestByVulnerabilityAPIView.as_view(),
+        name="support-request-by-vulnerability"
     ),
 
 
