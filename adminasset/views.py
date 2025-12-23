@@ -90,6 +90,7 @@ class ReportAssetsAPIView(APIView):
                     return Response({"detail": "report not found"}, status=404)
 
                 uploaded_at = doc.get("uploaded_at")
+                member_type = doc.get("member_type")
 
                 assets = {}
 
@@ -107,6 +108,7 @@ class ReportAssetsAPIView(APIView):
                             "asset": host_name,
                             "first_seen": uploaded_at,
                             "last_seen": uploaded_at,
+                            "member_type": member_type,
                             "total_vulnerabilities": 0,
                             "severity_counts": {
                                 "critical": 0,
@@ -136,6 +138,7 @@ class ReportAssetsAPIView(APIView):
                 for a in assets.values():
                     final.append({
                         "asset": a["asset"],
+                        "member_type": a["member_type"],
                         "first_seen": _iso(a["first_seen"]),
                         "last_seen": _iso(a["last_seen"]),
                         "total_vulnerabilities": a["total_vulnerabilities"],
@@ -147,6 +150,7 @@ class ReportAssetsAPIView(APIView):
 
                 return Response({
                     "report_id": report_id,
+                    "member_type": member_type,
                     "total_assets": len(final),
                     "assets": serializer.data
                 }, status=200)
@@ -546,3 +550,44 @@ class HoldAssetsByReportAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
+# ----------------RAISE SUPPORT REQUEST BY HOST ----------------
+
+class SupportRequestByHostAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, host_name):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            support_coll = db["support_requests"]
+
+            cursor = support_coll.find(
+                {
+                    "host_name": host_name,
+                    "admin_id": admin_id
+                }
+            ).sort("requested_at", -1)
+
+            results = []
+            for doc in cursor:
+                results.append({
+                    "_id": str(doc.get("_id")),
+                    "report_id": doc.get("report_id"),
+                    "vulnerability_id": doc.get("vulnerability_id"),
+                    "vul_name": doc.get("vul_name"),
+                    "host_name": doc.get("host_name"),
+                    "assigned_team": doc.get("assigned_team"),
+                    "step_requested": doc.get("step_requested"),
+                    "status": doc.get("status"),
+                    "requested_at": doc.get("requested_at"),
+                })
+
+            return Response(
+                {
+                    "host_name": host_name,
+                    "count": len(results),
+                    "results": results
+                },
+                status=status.HTTP_200_OK
+            )

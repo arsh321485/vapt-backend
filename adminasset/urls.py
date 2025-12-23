@@ -3,6 +3,7 @@ from .views import (
     ReportAssetsAPIView,
     AssetDeleteAPIView,
     AssetVulnerabilitiesByHostAPIView,
+    SupportRequestByHostAPIView,
     AssetHoldAPIView,
     AssetUnholdAPIView,
     HoldAssetsByReportAPIView,
@@ -32,6 +33,12 @@ urlpatterns = [
         name="report-asset-vulns-by-host",
     ),
 
+  # ---------------- HOST NAME BY RAISE SUPPORT REQUEST ----------------
+    path(
+        "support-requests/host/<str:host_name>/",
+        SupportRequestByHostAPIView.as_view(),
+        name="support-requests-by-host"
+    ),
     # ---------------- HOLD / UNHOLD ----------------
     path(
         "report/<str:report_id>/assets/<path:host_name>/hold/",
