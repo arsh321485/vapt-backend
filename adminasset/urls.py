@@ -4,6 +4,7 @@ from .views import (
     AssetDeleteAPIView,
     AssetVulnerabilitiesByHostAPIView,
     SupportRequestByHostAPIView,
+    ClosedFixVulnerabilitiesByHostAPIView,
     AssetHoldAPIView,
     AssetUnholdAPIView,
     HoldAssetsByReportAPIView,
@@ -39,6 +40,14 @@ urlpatterns = [
         SupportRequestByHostAPIView.as_view(),
         name="support-requests-by-host"
     ),
+    
+      # ---------------- HOST NAME BY FixVulnerabilitie ----------------
+    path(
+        "fix-vulnerabilities/host/<str:host_name>/closed/",
+        ClosedFixVulnerabilitiesByHostAPIView.as_view(),
+        name="closed-fix-vulnerabilities-by-host"
+    ),
+
     # ---------------- HOLD / UNHOLD ----------------
     path(
         "report/<str:report_id>/assets/<path:host_name>/hold/",

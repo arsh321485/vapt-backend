@@ -18,7 +18,7 @@ except Exception:
 
 NESSUS_COLLECTION = "nessus_reports"
 HOLD_COLLECTION = "hold_assets"
-
+FIX_VULN_COLLECTION = "fix_vulnerabilities"
 
 # ---------------------- Mongo Context ----------------------
 class MongoContext:
@@ -579,6 +579,7 @@ class SupportRequestByHostAPIView(APIView):
                     "host_name": doc.get("host_name"),
                     "assigned_team": doc.get("assigned_team"),
                     "step_requested": doc.get("step_requested"),
+                    "description": doc.get("description"),
                     "status": doc.get("status"),
                     "requested_at": doc.get("requested_at"),
                 })
@@ -586,6 +587,58 @@ class SupportRequestByHostAPIView(APIView):
             return Response(
                 {
                     "host_name": host_name,
+                    "count": len(results),
+                    "results": results
+                },
+                status=status.HTTP_200_OK
+            )
+
+
+
+class ClosedFixVulnerabilitiesByHostAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, host_name):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            fix_coll = db[FIX_VULN_COLLECTION]
+
+            # ✅ ONLY CLOSED FIX VULNERABILITIES
+            cursor = fix_coll.find(
+                {
+                    "host_name": host_name,
+                    "created_by": admin_id,
+                    "status": "close"   # 🔑 main condition
+                }
+            ).sort("created_at", -1)
+
+            results = []
+            for doc in cursor:
+                results.append({
+                    "fix_vulnerability_id": str(doc.get("_id")),
+                    "report_id": doc.get("report_id"),
+                    "host_name": doc.get("host_name"),
+                    "plugin_name": doc.get("plugin_name"),
+                    "risk_factor": doc.get("risk_factor"),
+
+                    "description_points": doc.get("description_points"),
+                    "vendor_fix_available": doc.get("vendor_fix_available"),
+
+                    "assigned_team": doc.get("assigned_team"),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+
+                    "mitigation_steps": doc.get("mitigation_steps", []),
+
+                    "status": doc.get("status"),  # always "close"
+                    "created_at": doc.get("created_at"),
+                    "created_by": doc.get("created_by"),
+                })
+
+            return Response(
+                {
+                    "host_name": host_name,
+                    "status": "close",
                     "count": len(results),
                     "results": results
                 },
