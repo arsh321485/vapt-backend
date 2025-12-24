@@ -81,6 +81,47 @@ def parse_timeline_to_days(value: str) -> int:
 def days_to_hours(days: int) -> int:
     return days * 24
 
+def days_to_week_label(days: int) -> str:
+    """
+    Convert days into week labels if exact multiple of 7
+    """
+    if not days or days <= 0:
+        return "0 day"
+
+    if days % 7 == 0:
+        weeks = days // 7
+        return f"{weeks} week" if weeks == 1 else f"{weeks} weeks"
+
+    return f"{days} days"
+
+
+def hours_to_wdh(hours: int) -> dict:
+    weeks = hours // 168
+    hours = hours % 168
+
+    days = hours // 24
+    hours = hours % 24
+
+    return {
+        "weeks": weeks,
+        "days": days,
+        "hours": hours
+    }
+
+
+def format_wdh_label(wdh: dict) -> str:
+    parts = []
+
+    if wdh["weeks"]:
+        parts.append(f'{wdh["weeks"]} week' if wdh["weeks"] == 1 else f'{wdh["weeks"]} weeks')
+    if wdh["days"]:
+        parts.append(f'{wdh["days"]} day' if wdh["days"] == 1 else f'{wdh["days"]} days')
+    if wdh["hours"]:
+        parts.append(f'{wdh["hours"]} hour' if wdh["hours"] == 1 else f'{wdh["hours"]} hours')
+
+    return ", ".join(parts) if parts else "0 hour"
+
+
 class ReportTotalAssetsAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -172,6 +213,58 @@ class ReportVulnerabilitiesAPIView(APIView):
         except Exception as e:
             return Response({"detail":"error", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+# class ReportMitigationTimelineAPIView(APIView):
+#     permission_classes = [IsAuthenticated]
+
+#     def get(self, request, report_id):
+#         try:
+#             with MongoContext() as db:
+#                 doc = _load_report(db, report_id)
+#                 if not doc:
+#                     return Response({"detail": "report not found"}, status=404)
+
+#                 admin_email = doc.get("admin_email", "")
+#                 rc = None
+
+#                 if admin_email:
+#                     rc = _get_latest_riskcriteria_for_admin_email(admin_email)
+
+#                 if not rc:
+#                     rc = _get_latest_riskcriteria_for_user(request.user)
+
+#                 if not rc:
+#                     return Response({"detail": "Risk criteria not found"}, status=404)
+
+#                 # Convert timelines → days
+#                 critical_days = parse_timeline_to_days(rc.critical)
+#                 high_days     = parse_timeline_to_days(rc.high)
+#                 medium_days   = parse_timeline_to_days(rc.medium)
+#                 low_days      = parse_timeline_to_days(rc.low)
+
+#                 total_days = critical_days + high_days + medium_days + low_days
+#                 total_hours = days_to_hours(total_days)
+
+#                 payload = {
+#                     "critical": rc.critical,
+#                     "critical_days": critical_days,
+#                     "high": rc.high,
+#                     "high_days": high_days,
+#                     "medium": rc.medium,
+#                     "medium_days": medium_days,
+#                     "low": rc.low,
+#                     "low_days": low_days,
+#                     "mitigation_timeline_total_days": total_days,
+#                     "mitigation_timeline_total_hours": total_hours
+#                 }
+
+#                 return Response(payload, status=200)
+
+#         except Exception as exc:
+#             return Response(
+#                 {"detail": "unexpected error", "error": str(exc)},
+#                 status=500
+#             )
+
 class ReportMitigationTimelineAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -194,26 +287,42 @@ class ReportMitigationTimelineAPIView(APIView):
                 if not rc:
                     return Response({"detail": "Risk criteria not found"}, status=404)
 
-                # Convert timelines → days
+                # 🔹 Convert timelines → days
                 critical_days = parse_timeline_to_days(rc.critical)
                 high_days     = parse_timeline_to_days(rc.high)
                 medium_days   = parse_timeline_to_days(rc.medium)
                 low_days      = parse_timeline_to_days(rc.low)
 
-                total_days = critical_days + high_days + medium_days + low_days
+                # 🔹 Total
+                total_days  = critical_days + high_days + medium_days + low_days
                 total_hours = days_to_hours(total_days)
 
                 payload = {
-                    "critical": rc.critical,
-                    "critical_days": critical_days,
-                    "high": rc.high,
-                    "high_days": high_days,
-                    "medium": rc.medium,
-                    "medium_days": medium_days,
-                    "low": rc.low,
-                    "low_days": low_days,
-                    "mitigation_timeline_total_days": total_days,
-                    "mitigation_timeline_total_hours": total_hours
+                    "critical": {
+                        "raw": rc.critical,
+                        "days": critical_days,
+                        "label": days_to_week_label(critical_days)
+                    },
+                    "high": {
+                        "raw": rc.high,
+                        "days": high_days,
+                        "label": days_to_week_label(high_days)
+                    },
+                    "medium": {
+                        "raw": rc.medium,
+                        "days": medium_days,
+                        "label": days_to_week_label(medium_days)
+                    },
+                    "low": {
+                        "raw": rc.low,
+                        "days": low_days,
+                        "label": days_to_week_label(low_days)
+                    },
+                    "total": {
+                        "days": total_days,
+                        "hours": total_hours,
+                        "label": days_to_week_label(total_days)
+                    }
                 }
 
                 return Response(payload, status=200)
@@ -247,31 +356,64 @@ class ReportMeanTimeRemediateAPIView(APIView):
                 if not rc:
                     return Response({"detail": "Risk criteria not found"}, status=404)
 
-                # Convert to days
+                # 🔹 Convert timelines → days
                 critical_days = parse_timeline_to_days(rc.critical)
                 high_days     = parse_timeline_to_days(rc.high)
                 medium_days   = parse_timeline_to_days(rc.medium)
                 low_days      = parse_timeline_to_days(rc.low)
 
-                # MTTR formula
-                mttr_days = round(
-                    (critical_days + high_days + medium_days + low_days) / 4,
-                    2
+                # 🔹 Convert days → hours
+                critical_hours = days_to_hours(critical_days)
+                high_hours     = days_to_hours(high_days)
+                medium_hours   = days_to_hours(medium_days)
+                low_hours      = days_to_hours(low_days)
+
+                # 🔹 MTTR calculation (AVERAGE)
+                total_hours = (
+                    critical_hours +
+                    high_hours +
+                    medium_hours +
+                    low_hours
                 )
-                mttr_hours = days_to_hours(mttr_days)
+
+                mttr_hours = round(total_hours / 4)
+
+                # 🔹 Convert MTTR → week/day/hour
+                mttr_wdh = hours_to_wdh(mttr_hours)
 
                 payload = {
                     "report_id": str(report_id),
 
-                    "risk_criteria_days": {
-                        "critical": critical_days,
-                        "high": high_days,
-                        "medium": medium_days,
-                        "low": low_days,
+                    "risk_criteria": {
+                        "critical": {
+                            "raw": rc.critical,
+                            "days": critical_days,
+                            "hours": critical_hours
+                        },
+                        "high": {
+                            "raw": rc.high,
+                            "days": high_days,
+                            "hours": high_hours
+                        },
+                        "medium": {
+                            "raw": rc.medium,
+                            "days": medium_days,
+                            "hours": medium_hours
+                        },
+                        "low": {
+                            "raw": rc.low,
+                            "days": low_days,
+                            "hours": low_hours
+                        }
                     },
 
-                    "mean_time_to_remediate_days": mttr_days,
-                    "mean_time_to_remediate_hours": mttr_hours
+                    "mean_time_to_remediate": {
+                        "hours": mttr_hours,
+                        "weeks": mttr_wdh["weeks"],
+                        "days": mttr_wdh["days"],
+                        "hours_remaining": mttr_wdh["hours"],
+                        "label": format_wdh_label(mttr_wdh)
+                    }
                 }
 
                 return Response(payload, status=200)
@@ -281,3 +423,4 @@ class ReportMeanTimeRemediateAPIView(APIView):
                 {"detail": "unexpected error", "error": str(exc)},
                 status=500
             )
+
