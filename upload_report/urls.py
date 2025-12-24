@@ -12,11 +12,18 @@ URLs configuration for upload_report app
 """
 
 from django.urls import path
-from .views import UploadReportView
+from .views import UploadReportView,UploadReportLocationAPIView
 
 app_name = 'upload_report'
 
 urlpatterns = [
     # Upload endpoint
     path('upload/', UploadReportView.as_view(), name='upload_report'),
+    
+    path(
+            "upload/locations/<str:report_id>/",
+            UploadReportLocationAPIView.as_view(),
+            name="upload_report_locations_by_report",
+        ),
+    
 ]

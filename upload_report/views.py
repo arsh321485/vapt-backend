@@ -467,3 +467,78 @@ class UploadReportView(APIView):
             return Response({
                 "error": f"Upload failed: {str(exc)}"
             }, status=500)
+            
+            
+
+
+class UploadReportLocationAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            # 🔹 Validate report_id
+            try:
+                obj_id = ObjectId(report_id)
+            except Exception:
+                return Response(
+                    {"error": "Invalid report_id"},
+                    status=400
+                )
+
+            # 🔹 Fetch the report
+            report = (
+                UploadReport.objects
+                .filter(_id=obj_id, admin=request.user)
+                .select_related("location")
+                .first()
+            )
+
+            if not report:
+                return Response(
+                    {"error": "Report not found"},
+                    status=404
+                )
+
+            # ✅ FIX: use _id instead of id
+            selected_location_id = (
+                str(report.location._id) if report.location else None
+            )
+
+            # 🔹 Fetch all locations from uploaded reports
+            qs = (
+                UploadReport.objects
+                .filter(admin=request.user)
+                .select_related("location")
+                .order_by("-uploaded_at")
+            )
+
+            locations_map = {}
+
+            for r in qs:
+                loc = r.location
+                if not loc:
+                    continue
+
+                # ✅ FIX HERE
+                loc_id = str(loc._id)
+
+                if loc_id not in locations_map:
+                    locations_map[loc_id] = {
+                        "id": loc_id,
+                        "name": loc.location_name
+                    }
+
+            locations = list(locations_map.values())
+
+            return Response({
+                "success": True,
+                "count": len(locations),
+                "locations": locations,
+                "selected_location_id": selected_location_id
+            }, status=200)
+
+        except Exception as exc:
+            return Response(
+                {"detail": "unexpected error", "error": str(exc)},
+                status=500
+            )
