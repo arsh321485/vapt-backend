@@ -253,261 +253,76 @@ class FixVulnerabilityCreateAPIView(APIView):
                 status=status.HTTP_201_CREATED
             )
           
+class RaiseSupportRequestAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser]
 
+    def post(self, request, report_id, vulnerability_id):
+        serializer = RaiseSupportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
+        step_requested = serializer.validated_data["step"]
+        description = serializer.validated_data["description"]
 
-# add the admin and assign team member
+        admin_id = str(request.user.id)
 
-# class RaiseSupportRequestAPIView(APIView):
-#     permission_classes = [permissions.IsAuthenticated]
-#     parser_classes = [JSONParser]
+        with MongoContext() as db:
+            fix_coll = db[FIX_VULN_COLLECTION]
+            support_coll = db["support_requests"]
 
-#     def post(self, request, report_id, vulnerability_id):
-#         serializer = RaiseSupportRequestSerializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
+            # ✅ Prevent duplicate support request
+            existing_request = support_coll.find_one({
+                "vulnerability_id": vulnerability_id,
+                "admin_id": admin_id
+            })
 
-#         step_requested = serializer.validated_data["step"]
-#         description = serializer.validated_data["description"]
-#         user_id = str(request.user.id)
+            if existing_request:
+                return Response(
+                    {"detail": "Support request already raised for this vulnerability"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-#         with MongoContext() as db:
-#             nessus_coll = db[NESSUS_COLLECTION]
-#             fix_coll = db[FIX_VULN_COLLECTION]
-#             support_coll = db["support_requests"]
+            # ✅ Fetch fix vulnerability
+            vuln = fix_coll.find_one({"_id": ObjectId(vulnerability_id)})
+            if not vuln:
+                return Response(
+                    {"detail": "Vulnerability not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
 
-#             # -------------------------------
-#             # 1️⃣ FETCH REPORT
-#             # -------------------------------
-#             report = nessus_coll.find_one(
-#                 {"report_id": str(report_id)},
-#                 {"admin_id": 1, "created_by": 1, "uploaded_by": 1, "vulnerabilities_by_host": 1}
-#             )
+            assigned_team = vuln.get("assigned_team")
 
-#             if not report:
-#                 return Response({"detail": "Report not found"}, status=404)
+            support_doc = {
+                "report_id": report_id,
+                "admin_id": admin_id,
 
-#             report_admin_id = (
-#                 str(report.get("admin_id"))
-#                 or str(report.get("created_by"))
-#                 or str(report.get("uploaded_by"))
-#             )
+                "vulnerability_id": vulnerability_id,
+                "vul_name": vuln.get("plugin_name"),
+                "host_name": vuln.get("host_name"),
 
-#             # -------------------------------
-#             # 2️⃣ FETCH FIX VULNERABILITY
-#             # -------------------------------
-#             vuln = fix_coll.find_one({"_id": ObjectId(vulnerability_id)})
-#             if not vuln:
-#                 return Response({"detail": "Vulnerability not found"}, status=404)
+                "assigned_team": assigned_team,
+                "assigned_team_members": vuln.get("assigned_team_members", []),
+                "steps": vuln.get("mitigation_steps", []),
 
-#             assigned_team_members = [
-#                 str(m) for m in vuln.get("assigned_team_members", [])
-#             ]
+                "step_requested": step_requested,
+                "description": description,
 
-#             # -------------------------------
-#             # 3️⃣ PERMISSION CHECK
-#             # -------------------------------
-#             if user_id != report_admin_id and user_id not in assigned_team_members:
-#                 return Response(
-#                     {"detail": "Only report admin or assigned team members can raise support request"},
-#                     status=403
-#                 )
+                "status": "open",
+                "requested_by": assigned_team,
+                "requested_at": datetime.utcnow()
+            }
 
-#             # -------------------------------
-#             # 4️⃣ PREVENT DUPLICATE
-#             # -------------------------------
-#             if support_coll.find_one({
-#                 "report_id": str(report_id),
-#                 "vulnerability_id": str(vulnerability_id)
-#             }):
-#                 return Response(
-#                     {"detail": "Support request already exists for this report and vulnerability"},
-#                     status=400
-#                 )
+            result = support_coll.insert_one(support_doc)
+            support_doc["_id"] = str(result.inserted_id)
 
-#             # -------------------------------
-#             # 5️⃣ SEVERITY CALCULATION
-#             # -------------------------------
-#             host_name = vuln.get("host_name")
-
-#             severity_counts = {
-#                 "critical": 0,
-#                 "high": 0,
-#                 "medium": 0,
-#                 "low": 0
-#             }
-#             total_vulnerabilities = 0
-
-#             for host in report.get("vulnerabilities_by_host", []):
-#                 if host.get("host_name") != host_name:
-#                     continue
-
-#                 for v in host.get("vulnerabilities", []):
-#                     total_vulnerabilities += 1
-#                     risk = (v.get("risk_factor") or v.get("severity") or "").lower()
-
-#                     if risk.startswith("crit"):
-#                         severity_counts["critical"] += 1
-#                     elif risk.startswith("high"):
-#                         severity_counts["high"] += 1
-#                     elif risk.startswith("med"):
-#                         severity_counts["medium"] += 1
-#                     elif risk.startswith("low"):
-#                         severity_counts["low"] += 1
-
-#             # -------------------------------
-#             # 6️⃣ CREATE SUPPORT REQUEST
-#             # -------------------------------
-#             support_doc = {
-#                 "report_id": str(report_id),
-#                 "vulnerability_id": str(vulnerability_id),
-
-#                 "raised_by": user_id,
-#                 "raised_by_role": "admin" if user_id == report_admin_id else "team",
-
-#                 "vul_name": vuln.get("plugin_name"),
-#                 "host_name": host_name,
-
-#                 "assigned_team": vuln.get("assigned_team"),
-#                 "assigned_team_members": vuln.get("assigned_team_members", []),
-
-#                 "total_vulnerabilities": total_vulnerabilities,
-#                 "severity_counts": severity_counts,
-
-#                 "steps": vuln.get("mitigation_steps", []),
-#                 "step_requested": step_requested,
-#                 "description": description,
-
-#                 "status": "open",
-#                 "requested_at": datetime.utcnow()
-#             }
-
-#             result = support_coll.insert_one(support_doc)
-#             support_doc["_id"] = str(result.inserted_id)
-
-#             return Response(
-#                 {
-#                     "message": "Support request raised successfully",
-#                     "data": support_doc
-#                 },
-#                 status=201
-#             )
+            return Response(
+                {
+                    "message": "Support request raised successfully",
+                    "data": support_doc
+                },
+                status=status.HTTP_201_CREATED
+            )
   
-# class RaiseSupportRequestAPIView(APIView):
-#     permission_classes = [permissions.IsAuthenticated]
-#     parser_classes = [JSONParser]
-
-#     def post(self, request, report_id, vulnerability_id):
-#         serializer = RaiseSupportRequestSerializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
-
-#         step_requested = serializer.validated_data["step"]
-#         description = serializer.validated_data["description"]
-#         admin_id = str(request.user.id)
-
-#         with MongoContext() as db:
-#             fix_coll = db[FIX_VULN_COLLECTION]
-#             support_coll = db["support_requests"]
-#             nessus_coll = db[NESSUS_COLLECTION]
-
-#             # ------------------------------------
-#             # ✅ 1️⃣ PREVENT DUPLICATE (FINAL FIX)
-#             # ------------------------------------
-#             duplicate = support_coll.find_one({
-#                 "report_id": str(report_id),
-#                 "vulnerability_id": str(vulnerability_id)
-#             })
-
-#             if duplicate:
-#                 return Response(
-#                     {
-#                         "detail": "Support request already exists for this report and vulnerability"
-#                     },
-#                     status=status.HTTP_400_BAD_REQUEST
-#                 )
-
-#             # ------------------------------------
-#             # 2️⃣ FETCH FIX VULNERABILITY
-#             # ------------------------------------
-#             vuln = fix_coll.find_one({"_id": ObjectId(vulnerability_id)})
-#             if not vuln:
-#                 return Response(
-#                     {"detail": "Vulnerability not found"},
-#                     status=status.HTTP_404_NOT_FOUND
-#                 )
-
-#             host_name = vuln.get("host_name")
-
-#             # ------------------------------------
-#             # 3️⃣ SEVERITY CALCULATION
-#             # ------------------------------------
-#             severity_counts = {
-#                 "critical": 0,
-#                 "high": 0,
-#                 "medium": 0,
-#                 "low": 0
-#             }
-#             total_vulnerabilities = 0
-
-#             report = nessus_coll.find_one(
-#                 {"report_id": str(report_id)},
-#                 {"vulnerabilities_by_host": 1}
-#             )
-
-#             if report:
-#                 for host in report.get("vulnerabilities_by_host", []):
-#                     if host.get("host_name") != host_name:
-#                         continue
-
-#                     for v in host.get("vulnerabilities", []):
-#                         total_vulnerabilities += 1
-#                         risk = (v.get("risk_factor") or v.get("severity") or "").lower()
-
-#                         if risk.startswith("crit"):
-#                             severity_counts["critical"] += 1
-#                         elif risk.startswith("high"):
-#                             severity_counts["high"] += 1
-#                         elif risk.startswith("med"):
-#                             severity_counts["medium"] += 1
-#                         elif risk.startswith("low"):
-#                             severity_counts["low"] += 1
-
-#             # ------------------------------------
-#             # 4️⃣ CREATE SUPPORT REQUEST
-#             # ------------------------------------
-#             support_doc = {
-#                 "report_id": str(report_id),
-#                 "admin_id": admin_id,
-
-#                 "vulnerability_id": str(vulnerability_id),
-#                 "vul_name": vuln.get("plugin_name"),
-#                 "host_name": host_name,
-
-#                 "total_vulnerabilities": total_vulnerabilities,
-#                 "severity_counts": severity_counts,
-
-#                 "assigned_team": vuln.get("assigned_team"),
-#                 "assigned_team_members": vuln.get("assigned_team_members", []),
-#                 "steps": vuln.get("mitigation_steps", []),
-
-#                 "step_requested": step_requested,
-#                 "description": description,
-
-#                 "status": "open",
-#                 "requested_by": admin_id,
-#                 "requested_at": datetime.utcnow()
-#             }
-
-#             result = support_coll.insert_one(support_doc)
-#             support_doc["_id"] = str(result.inserted_id)
-
-#             return Response(
-#                 {
-#                     "message": "Support request raised successfully",
-#                     "data": support_doc
-#                 },
-#                 status=status.HTTP_201_CREATED
-#             )
-            
 class RaiseSupportRequestByVulnerabilityAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -556,81 +371,7 @@ class RaiseSupportRequestByVulnerabilityAPIView(APIView):
                 status=status.HTTP_200_OK
             )
           
-class RaiseSupportRequestByVulnerabilityAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request, vulnerability_id):
-        user_id = str(request.user.id)
-
-        with MongoContext() as db:
-            support_coll = db["support_requests"]
-
-            # 🔍 Fetch support request (same vulnerability)
-            support_req = support_coll.find_one({
-                "vulnerability_id": str(vulnerability_id)
-            })
-
-            if not support_req:
-                return Response(
-                    {
-                        "exists": False,
-                        "detail": "No support request found for this vulnerability"
-                    },
-                    status=status.HTTP_200_OK
-                )
-
-            # 🔐 Permission check (admin or team member)
-            assigned_team_members = [
-                str(m) for m in support_req.get("assigned_team_members", [])
-            ]
-
-            is_owner = user_id == str(support_req.get("admin_id") or support_req.get("raised_by"))
-            is_team_member = user_id in assigned_team_members
-
-            if not (is_owner or is_team_member):
-                return Response(
-                    {"detail": "You are not allowed to view this support request"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-            # ✅ Response data with severity
-            data = {
-                "_id": str(support_req.get("_id")),
-                "report_id": support_req.get("report_id"),
-                "vulnerability_id": support_req.get("vulnerability_id"),
-
-                "vul_name": support_req.get("vul_name"),
-                "host_name": support_req.get("host_name"),
-
-                "assigned_team": support_req.get("assigned_team"),
-                "assigned_team_members": support_req.get("assigned_team_members", []),
-
-                "total_vulnerabilities": support_req.get("total_vulnerabilities", 0),
-                "severity_counts": support_req.get("severity_counts", {
-                    "critical": 0,
-                    "high": 0,
-                    "medium": 0,
-                    "low": 0
-                }),
-
-                "steps": support_req.get("steps", []),
-                "step_requested": support_req.get("step_requested"),
-                "description": support_req.get("description"),
-
-                "status": support_req.get("status"),
-                "requested_at": support_req.get("requested_at"),
-                "raised_by": support_req.get("raised_by"),
-                "raised_by_role": support_req.get("raised_by_role"),
-            }
-
-            return Response(
-                {
-                    "exists": True,
-                    "message": "Raise support request fetched successfully",
-                    "data": data
-                },
-                status=status.HTTP_200_OK
-            )
 
 class SupportRequestByReportAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -790,7 +531,4 @@ class TicketByReportAPIView(APIView):
                 },
                 status=status.HTTP_200_OK
             )
-
-
-
 
