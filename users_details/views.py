@@ -1,5 +1,6 @@
 from rest_framework import generics, permissions, status,filters
 from rest_framework.response import Response
+from django.contrib.auth import get_user_model
 from bson import ObjectId
 from django.shortcuts import get_object_or_404
 from .models import UserDetail
@@ -11,21 +12,7 @@ from django.conf import settings
 import logging
 
 logger = logging.getLogger('users_details')
-# class UserDetailCreateView(generics.CreateAPIView):
-#     serializer_class = UserDetailCreateSerializer
-#     permission_classes = [permissions.IsAuthenticated]
-
-#     def create(self, request, *args, **kwargs):
-#         serializer = self.get_serializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
-#         user_detail = serializer.save()
-#         return Response({
-#             "message": "User detail created successfully",
-#             "data": UserDetailSerializer(user_detail).data
-#         }, status=status.HTTP_201_CREATED)
-
-
-
+User = get_user_model()
 class UserDetailCreateView(generics.CreateAPIView):
     serializer_class = UserDetailCreateSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -573,6 +560,47 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
                 "action": action,
                 "updated_roles": updated_roles,
                 "member_name": member_name,
+            },
+            status=status.HTTP_200_OK
+        )
+        
+        
+class UserDetailByAdminAPIView(generics.ListAPIView):
+    """
+    List all UserDetails created by a specific admin.
+    """
+    serializer_class = UserDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        admin_id = self.kwargs.get("admin_id")
+
+        try:
+            admin = User.objects.get(id=admin_id)
+        except User.DoesNotExist:
+            return UserDetail.objects.none()
+
+        return UserDetail.objects.filter(admin=admin).order_by("-created_at")
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+
+        if not queryset.exists():
+            return Response(
+                {
+                    "count": 0,
+                    "results": [],
+                    "message": "No users found for this admin"
+                },
+                status=status.HTTP_200_OK
+            )
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(
+            {
+                "count": queryset.count(),
+                "admin_id": self.kwargs.get("admin_id"),
+                "results": serializer.data
             },
             status=status.HTTP_200_OK
         )

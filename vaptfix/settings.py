@@ -60,7 +60,6 @@ INSTALLED_APPS = [
     "location",
     "users_details",
     "risk_criteria",
-    "tickets",
     "upload_report",
     "admindashboard",
     "adminregister",
