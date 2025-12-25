@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import re
 from rest_framework.parsers import JSONParser
 from bson import ObjectId
+from rest_framework.permissions import IsAuthenticated
 
 from .serializers import AdminRegisterSimpleVulnSerializer,FixVulnerabilitySerializer,RaiseSupportRequestSerializer,CreateTicketSerializer
 SUPPORT_REQUEST_COLLECTION = "support_requests"
@@ -531,4 +532,148 @@ class TicketByReportAPIView(APIView):
                 },
                 status=status.HTTP_200_OK
             )
+            
+            
+class TicketOpenListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def get(self, request, report_id):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            ticket_coll = db[TICKETS_COLLECTION]
+
+            cursor = ticket_coll.find(
+                {
+                    "report_id": report_id,
+                    "admin_id": admin_id,
+                    "status": "open"
+                }
+            ).sort("created_at", -1)
+
+            results = []
+            for doc in cursor:
+                results.append({
+                    "_id": str(doc["_id"]),
+                    "report_id": doc.get("report_id"),
+                    "fix_vulnerability_id": doc.get("fix_vulnerability_id"),
+                    "host_name": doc.get("host_name"),
+                    "plugin_name": doc.get("plugin_name"),
+                    "category": doc.get("category"),
+                    "subject": doc.get("subject"),
+                    "description": doc.get("description"),
+                    "status": doc.get("status"),
+                    "created_at": doc.get("created_at"),
+                })
+
+            return Response(
+                {
+                    "message": "Open tickets fetched successfully",
+                    "report_id": report_id,
+                    "status": "open",
+                    "count": len(results),
+                    "results": results
+                },
+                status=status.HTTP_200_OK
+            )
+            
+            
+class TicketClosedListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            ticket_coll = db[TICKETS_COLLECTION]
+
+            cursor = ticket_coll.find(
+                {
+                    "report_id": report_id,
+                    "admin_id": admin_id,
+                    "status": "closed"
+                }
+            ).sort("closed_at", -1)
+
+            results = []
+            for doc in cursor:
+                results.append({
+                    "_id": str(doc["_id"]),
+                    "report_id": doc.get("report_id"),
+                    "fix_vulnerability_id": doc.get("fix_vulnerability_id"),
+                    "host_name": doc.get("host_name"),
+                    "plugin_name": doc.get("plugin_name"),
+                    "category": doc.get("category"),
+                    "subject": doc.get("subject"),
+                    "description": doc.get("description"),
+                    "status": doc.get("status"),
+                    "created_at": doc.get("created_at"),
+                    "closed_at": doc.get("closed_at"),
+                    "close_comment": doc.get("close_comment"),
+                })
+
+            return Response(
+                {
+                    "message": "Closed tickets fetched successfully",
+                    "report_id": report_id,
+                    "status": "closed",
+                    "count": len(results),
+                    "results": results
+                },
+                status=status.HTTP_200_OK
+            )
+
+
+class TicketDetailAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, ticket_id):
+        admin_id = str(request.user.id)
+
+        try:
+            ticket_obj_id = ObjectId(ticket_id)
+        except Exception:
+            return Response(
+                {"detail": "Invalid ticket_id"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with MongoContext() as db:
+            ticket_coll = db[TICKETS_COLLECTION]
+
+            ticket = ticket_coll.find_one({
+                "_id": ticket_obj_id,
+                "admin_id": admin_id
+            })
+
+            if not ticket:
+                return Response(
+                    {"detail": "Ticket not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            response_data = {
+                "_id": str(ticket["_id"]),
+                "report_id": ticket.get("report_id"),
+                "fix_vulnerability_id": ticket.get("fix_vulnerability_id"),
+
+                "host_name": ticket.get("host_name"),
+                "plugin_name": ticket.get("plugin_name"),
+
+                "category": ticket.get("category"),
+                "subject": ticket.get("subject"),
+                "description": ticket.get("description"),
+
+                "status": ticket.get("status"),
+                "created_at": ticket.get("created_at"),
+                "closed_at": ticket.get("closed_at"),
+                "close_comment": ticket.get("close_comment"),
+            }
+
+            return Response(
+                {
+                    "message": "Ticket fetched successfully",
+                    "data": response_data
+                },
+                status=status.HTTP_200_OK
+            )
