@@ -18,6 +18,7 @@ from django.contrib import admin
 from django.urls import path,include
 from django.conf import settings
 from django.conf.urls.static import static
+from upload_report.views import serve_report_file 
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -29,6 +30,9 @@ urlpatterns = [
     path("api/admin/admindashboard/", include("admindashboard.urls")),
     path("api/admin/adminregister/", include("adminregister.urls")),
     path("api/admin/adminasset/", include("adminasset.urls")),
+    
+    
+    path("media/<path:path>", serve_report_file),
 
 ]
 
