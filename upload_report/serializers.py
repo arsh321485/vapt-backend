@@ -60,8 +60,15 @@ class UploadReportSerializer(serializers.ModelSerializer):
     #         return request.build_absolute_uri(obj.file.url)
     #     return None   
     
+    # def get_file(self, obj):
+    #     request = self.context.get("request")
+    #     if obj.file and request:
+    #         return request.build_absolute_uri(obj.file.url)
+    #     return None
+    
     def get_file(self, obj):
         request = self.context.get("request")
         if obj.file and request:
+            # obj.file.url -> /media/reports/xxx.html
             return request.build_absolute_uri(obj.file.url)
         return None
