@@ -23,6 +23,7 @@ class UploadReportSerializer(serializers.ModelSerializer):
     _id = serializers.SerializerMethodField()
     location = serializers.SerializerMethodField()
     admin = serializers.SerializerMethodField()
+    file_url = serializers.SerializerMethodField()
 
     location_name = serializers.CharField(source='location.location_name', read_only=True)
     admin_email = serializers.CharField(source='admin.email', read_only=True)
@@ -58,3 +59,4 @@ class UploadReportSerializer(serializers.ModelSerializer):
         if obj.file and request:
             return request.build_absolute_uri(obj.file.url)
         return None   
+    
