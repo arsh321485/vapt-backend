@@ -39,6 +39,8 @@ def serve_report_file(request, path):
         content_type="text/html"
     )
 
+
+
 class UploadReportView(APIView):
     """API endpoint for uploading and parsing vulnerability reports."""
     
