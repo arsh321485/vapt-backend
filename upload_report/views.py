@@ -603,3 +603,44 @@ class UploadReportLocationAPIView(APIView):
                 {"detail": "unexpected error", "error": str(exc)},
                 status=500
             )
+            
+            
+            
+
+class UploadReportDetailAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        # 🔹 Validate ObjectId
+        try:
+            obj_id = ObjectId(report_id)
+        except (InvalidId, TypeError):
+            return Response(
+                {"error": "Invalid upload_report_id"},
+                status=400
+            )
+
+        # 🔹 Fetch report ONLY for logged-in admin
+        report = (
+            UploadReport.objects
+            .filter(_id=obj_id, admin=request.user)
+            .select_related("location", "admin")
+            .first()
+        )
+
+        if not report:
+            return Response(
+                {"error": "Upload report not found"},
+                status=404
+            )
+
+        serializer = UploadReportSerializer(report)
+
+        return Response(
+            {
+                "success": True,
+                "message": "Upload report retrieved successfully",
+                "upload_report": serializer.data
+            },
+            status=200
+        )

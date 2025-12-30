@@ -43,19 +43,53 @@ class RiskCriteriaListView(generics.ListAPIView):
         return Response({"message": "Risk Criteria retrieved successfully", "count": len(serializer.data), "risk_criteria": serializer.data}, status=200)
 
 
+# class RiskCriteriaDetailView(generics.RetrieveAPIView):
+#     serializer_class = RiskCriteriaSerializer
+#     permission_classes = [IsAuthenticated]
+
+#     def get_object(self):
+#         risk_id = self.kwargs.get('risk_id')
+#         obj_id = ObjectId(risk_id)
+#         return get_object_or_404(RiskCriteria, _id=obj_id)
+
+#     def retrieve(self, request, *args, **kwargs):
+#         instance = self.get_object()
+#         serializer = self.get_serializer(instance)
+#         return Response({"message": "Risk Criteria retrieved successfully", "risk_criteria": serializer.data}, status=200)
+
+
 class RiskCriteriaDetailView(generics.RetrieveAPIView):
     serializer_class = RiskCriteriaSerializer
     permission_classes = [IsAuthenticated]
 
     def get_object(self):
         risk_id = self.kwargs.get('risk_id')
-        obj_id = ObjectId(risk_id)
-        return get_object_or_404(RiskCriteria, _id=obj_id)
+
+        try:
+            obj_id = ObjectId(risk_id)
+        except Exception:
+            return Response(
+                {"detail": "Invalid Risk Criteria ID"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 🔐 IMPORTANT: filter by BOTH id and admin
+        return get_object_or_404(
+            RiskCriteria,
+            _id=obj_id,
+            admin=self.request.user
+        )
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
         serializer = self.get_serializer(instance)
-        return Response({"message": "Risk Criteria retrieved successfully", "risk_criteria": serializer.data}, status=200)
+        return Response(
+            {
+                "message": "Risk Criteria retrieved successfully",
+                "risk_criteria": serializer.data
+            },
+            status=status.HTTP_200_OK
+        )
 
 
 class RiskCriteriaUpdateView(generics.UpdateAPIView):
