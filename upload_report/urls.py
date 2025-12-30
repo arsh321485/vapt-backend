@@ -12,7 +12,7 @@ URLs configuration for upload_report app
 """
 
 from django.urls import path
-from .views import UploadReportView,UploadReportLocationAPIView,UploadReportDetailAPIView
+from .views import UploadReportView,UploadReportLocationAPIView,UploadReportDetailAPIView,serve_report_file
 
 app_name = 'upload_report'
 
@@ -32,5 +32,8 @@ urlpatterns = [
         UploadReportDetailAPIView.as_view(),
         name="upload_report_detail",
     ),
+     
+     
+     path("media/<path:path>", serve_report_file),
     
 ]

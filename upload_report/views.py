@@ -21,7 +21,23 @@ import pymongo
 from location.models import Location
 from .models import UploadReport
 from .serializers import UploadReportSerializer
+from django.http import FileResponse, Http404
+from rest_framework.decorators import api_view, permission_classes
 
+# Serve uploaded report files
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def serve_report_file(request, path):
+    file_path = os.path.join(settings.MEDIA_ROOT, path)
+
+    if not os.path.exists(file_path):
+        raise Http404("File not found")
+
+    # HTML report open karne ke liye
+    return FileResponse(
+        open(file_path, "rb"),
+        content_type="text/html"
+    )
 
 class UploadReportView(APIView):
     """API endpoint for uploading and parsing vulnerability reports."""
