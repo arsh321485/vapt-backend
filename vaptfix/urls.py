@@ -16,7 +16,8 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path,include
-
+from django.conf import settings
+from django.conf.urls.static import static
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -28,11 +29,12 @@ urlpatterns = [
     path("api/admin/admindashboard/", include("admindashboard.urls")),
     path("api/admin/adminregister/", include("adminregister.urls")),
     path("api/admin/adminasset/", include("adminasset.urls")),
-    
-    
-    
-   
-    
 
 ]
 
+
+if settings.DEBUG:
+    urlpatterns += static(
+        settings.MEDIA_URL,
+        document_root=settings.MEDIA_ROOT
+    )

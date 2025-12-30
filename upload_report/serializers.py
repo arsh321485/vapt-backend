@@ -52,3 +52,9 @@ class UploadReportSerializer(serializers.ModelSerializer):
 
     def get_admin(self, obj):
         return str(obj.admin.id) if obj.admin else None
+    
+    def get_file_url(self, obj):
+        request = self.context.get("request")
+        if obj.file and request:
+            return request.build_absolute_uri(obj.file.url)
+        return None   

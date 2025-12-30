@@ -634,7 +634,10 @@ class UploadReportDetailAPIView(APIView):
                 status=404
             )
 
-        serializer = UploadReportSerializer(report)
+        serializer = UploadReportSerializer(
+            report,
+            context={"request": request}
+            )
 
         return Response(
             {
