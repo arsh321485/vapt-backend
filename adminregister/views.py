@@ -16,6 +16,9 @@ SUPPORT_REQUEST_COLLECTION = "support_requests"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
 NESSUS_COLLECTION = "nessus_reports"
 TICKETS_COLLECTION = "tickets"
+FIX_VULN_STEPS_COLLECTION = "fix_vulnerability_steps"
+FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
+
 
 # Robust MongoContext: same as before but compact
 class MongoContext:
@@ -128,7 +131,7 @@ class VulnerabilityRegisterAPIView(APIView):
                 # iterate hosts -> vulnerabilities
                 for host in doc.get("vulnerabilities_by_host", []) or []:
                     host_name = host.get("host_name") or host.get("host") or ""
-                    for v in (host.get("vulnerabilities") or []):
+                    for v in (host.get("esvulnerabiliti") or []):
                         # map fields defensively
                         plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                         # severity/risk
@@ -162,83 +165,204 @@ class VulnerabilityRegisterAPIView(APIView):
             return Response({"detail":"unexpected error", "error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
               
+# class FixVulnerabilityCreateAPIView(APIView):
+#     permission_classes = [permissions.IsAuthenticated]
+#     parser_classes = [JSONParser]
+
+#     def post(self, request, report_id, host_name):
+
+#         with MongoContext() as db:
+#             nessus_coll = db[NESSUS_COLLECTION]
+#             fix_coll = db[FIX_VULN_COLLECTION]
+
+#             # 1️⃣ FETCH REPORT
+#             nessus_doc = nessus_coll.find_one({
+#                 "report_id": str(report_id)
+#             })
+
+#             if not nessus_doc:
+#                 return Response(
+#                     {"detail": "Report not found"},
+#                     status=status.HTTP_404_NOT_FOUND
+#                 )
+
+#             # 2️⃣ FETCH HOST
+#             vuln_data = None
+#             for host in nessus_doc.get("vulnerabilities_by_host", []):
+#                 if host.get("host_name") == host_name:
+#                     vuln_data = host.get("vulnerabilities", [])[0]
+#                     break
+
+#             if not vuln_data:
+#                 return Response(
+#                     {"detail": "No vulnerabilities found for this asset"},
+#                     status=status.HTTP_404_NOT_FOUND
+#                 )
+
+#             plugin_name = vuln_data.get("plugin_name", "")
+#             risk_factor = vuln_data.get("risk_factor", "")
+#             description_points = vuln_data.get("description", "")
+
+#             # 3️⃣ ASSIGN TEAM
+#             assigned_team = get_assigned_team_by_host(host_name)
+#             admin_id = str(request.user.id)
+
+#             assigned_team_members = get_team_members(
+#                 db=db,
+#                 team_name=assigned_team,
+#                 admin_id=admin_id
+#             )
+
+#             # 4️⃣ MITIGATION STEPS
+#             mitigation_steps = [
+#                 {
+#                     "step": f"Step {i}",
+#                     "assigned_to": assigned_team,
+#                     "deadline": None,
+#                     "artifacts_tools_used": "Dummy Tool",
+#                     "description": f"Dummy description for step {i}",
+#                     "system_file_path": "C:\\dummy\\path"
+#                 }
+#                 for i in range(1, 7)
+#             ]
+
+#             # 5️⃣ SAVE FIX VULNERABILITY
+#             doc = {
+#                 "report_id": report_id,
+#                 "host_name": host_name,
+#                 "risk_factor": risk_factor,
+#                 "plugin_name": plugin_name,
+
+#                 "description_points": description_points,
+#                 "vendor_fix_available": True,
+
+#                 "assigned_team": assigned_team,
+#                 "assigned_team_members": assigned_team_members,
+
+#                 "mitigation_steps": mitigation_steps,
+#                 "status": "open",
+
+#                 "created_at": datetime.utcnow(),
+#                 "created_by": admin_id
+#             }
+
+#             result = fix_coll.insert_one(doc)
+#             doc["_id"] = str(result.inserted_id)
+
+#             return Response(
+#                 {
+#                     "message": "Fix vulnerability created successfully",
+#                     "data": doc
+#                 },
+#                 status=status.HTTP_201_CREATED
+#             )
+    
 class FixVulnerabilityCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]
 
     def post(self, request, report_id, host_name):
+        admin_id = str(request.user.id)
+
+        plugin_name_req = request.data.get("plugin_name")
+        risk_factor_req = request.data.get("risk_factor")
+
+        if not plugin_name_req or not risk_factor_req:
+            return Response(
+                {"detail": "plugin_name and risk_factor are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         with MongoContext() as db:
             nessus_coll = db[NESSUS_COLLECTION]
             fix_coll = db[FIX_VULN_COLLECTION]
 
-            # 1️⃣ FETCH REPORT
-            nessus_doc = nessus_coll.find_one({
-                "report_id": str(report_id)
+            # 1️⃣ DUPLICATE CHECK
+            existing_fix = fix_coll.find_one({
+                "report_id": str(report_id),
+                "host_name": host_name,
+                "plugin_name": plugin_name_req,
+                "risk_factor": risk_factor_req
             })
 
+            if existing_fix:
+                return Response(
+                    {
+                        "detail": "Fix vulnerability already exists",
+                        "fix_vulnerability_id": str(existing_fix["_id"])
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # 2️⃣ FETCH REPORT
+            nessus_doc = nessus_coll.find_one({"report_id": str(report_id)})
             if not nessus_doc:
                 return Response(
                     {"detail": "Report not found"},
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # 2️⃣ FETCH HOST
-            vuln_data = None
-            for host in nessus_doc.get("vulnerabilities_by_host", []):
-                if host.get("host_name") == host_name:
-                    vuln_data = host.get("vulnerabilities", [])[0]
-                    break
+            selected_vuln = None
 
-            if not vuln_data:
+            # 3️⃣ MATCH HOST → PLUGIN → RISK
+            for host in nessus_doc.get("vulnerabilities_by_host", []):
+                if (host.get("host_name") or host.get("host")) != host_name:
+                    continue
+
+                for vuln in host.get("vulnerabilities", []):
+                    db_plugin = (
+                        vuln.get("plugin_name")
+                        or vuln.get("pluginname")
+                        or vuln.get("name")
+                        or ""
+                    )
+                    db_risk = (
+                        vuln.get("risk_factor")
+                        or vuln.get("severity")
+                        or vuln.get("risk")
+                        or ""
+                    )
+
+                    if (
+                        db_plugin == plugin_name_req
+                        and db_risk.lower() == risk_factor_req.lower()
+                    ):
+                        selected_vuln = vuln
+                        break
+                break
+
+            if not selected_vuln:
                 return Response(
-                    {"detail": "No vulnerabilities found for this asset"},
+                    {"detail": "Matching vulnerability not found"},
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            plugin_name = vuln_data.get("plugin_name", "")
-            risk_factor = vuln_data.get("risk_factor", "")
-            description_points = vuln_data.get("description", "")
-
-            # 3️⃣ ASSIGN TEAM
+            # 4️⃣ ASSIGN TEAM
             assigned_team = get_assigned_team_by_host(host_name)
-            admin_id = str(request.user.id)
-
             assigned_team_members = get_team_members(
                 db=db,
                 team_name=assigned_team,
                 admin_id=admin_id
             )
 
-            # 4️⃣ MITIGATION STEPS
-            mitigation_steps = [
-                {
-                    "step": f"Step {i}",
-                    "assigned_to": assigned_team,
-                    "deadline": None,
-                    "artifacts_tools_used": "Dummy Tool",
-                    "description": f"Dummy description for step {i}",
-                    "system_file_path": "C:\\dummy\\path"
-                }
-                for i in range(1, 7)
-            ]
-
-            # 5️⃣ SAVE FIX VULNERABILITY
+            # 5️⃣ CREATE FIX VULNERABILITY
             doc = {
-                "report_id": report_id,
+                "report_id": str(report_id),
                 "host_name": host_name,
-                "risk_factor": risk_factor,
-                "plugin_name": plugin_name,
+                "plugin_name": plugin_name_req,
+                "risk_factor": risk_factor_req,
+                "description_points": selected_vuln.get("description", ""),
 
-                "description_points": description_points,
+                # dummy UI fields
+                "vulnerability_type": "Network Vulnerability",
+                "affected_ports_ranges": "6379/tcp",
+                "file_path": "N/A",
+
                 "vendor_fix_available": True,
-
                 "assigned_team": assigned_team,
                 "assigned_team_members": assigned_team_members,
 
-                "mitigation_steps": mitigation_steps,
                 "status": "open",
-
                 "created_at": datetime.utcnow(),
                 "created_by": admin_id
             }
@@ -253,7 +377,199 @@ class FixVulnerabilityCreateAPIView(APIView):
                 },
                 status=status.HTTP_201_CREATED
             )
-          
+
+
+class FixVulnerabilityStepsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    # =====================
+    # GET → Fetch steps
+    # =====================
+    def get(self, request, fix_vuln_id):
+        with MongoContext() as db:
+            fix_coll = db[FIX_VULN_COLLECTION]
+            steps_coll = db[FIX_VULN_STEPS_COLLECTION]
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+            # 🔍 Check active OR closed
+            fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+            status_value = "open"
+
+            if not fix_doc:
+                fix_doc = closed_coll.find_one(
+                    {"fix_vulnerability_id": fix_vuln_id}
+                )
+                if not fix_doc:
+                    return Response(
+                        {"detail": "Fix vulnerability not found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+                status_value = "closed"
+
+            steps = list(
+                steps_coll.find(
+                    {"fix_vulnerability_id": fix_vuln_id},
+                    {"_id": 0}
+                ).sort("step_number", 1)
+            )
+
+            return Response(
+                {
+                    "fix_vulnerability_id": fix_vuln_id,
+                    "status": status_value,
+                    "steps": steps
+                },
+                status=status.HTTP_200_OK
+            )
+
+    # =====================
+    # POST → Create / Update step
+    # =====================
+    def post(self, request, fix_vuln_id):
+        admin_id = str(request.user.id)
+
+        step_number = request.data.get("step_number")
+        comment = request.data.get("comment", "")
+        step_status = request.data.get("status", "completed")
+
+        if step_number not in [1, 2, 3, 4, 5, 6]:
+            return Response(
+                {"detail": "step_number must be between 1 and 6"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with MongoContext() as db:
+            fix_coll = db[FIX_VULN_COLLECTION]
+            steps_coll = db[FIX_VULN_STEPS_COLLECTION]
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+            fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+            if not fix_doc:
+                return Response(
+                    {"detail": "Fix vulnerability not found or already closed"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # 🔁 UPSERT STEP (create OR update)
+            steps_coll.update_one(
+                {
+                    "fix_vulnerability_id": fix_vuln_id,
+                    "step_number": step_number
+                },
+                {
+                    "$set": {
+                        "status": step_status,
+                        "comment": comment,
+                        "updated_by": admin_id,
+                        "updated_at": datetime.utcnow()
+                    },
+                    "$setOnInsert": {
+                        "created_at": datetime.utcnow(),
+                        "created_by": admin_id
+                    }
+                },
+                upsert=True
+            )
+
+            # ✅ Count completed steps
+            completed_steps = steps_coll.count_documents({
+                "fix_vulnerability_id": fix_vuln_id,
+                "status": "completed"
+            })
+
+            # 🔒 AUTO CLOSE ON STEP 6
+            if completed_steps == 6:
+                closed_doc = fix_doc.copy()
+
+                # 🔑 keep reference of original fix
+                closed_doc["fix_vulnerability_id"] = str(fix_doc["_id"])
+                closed_doc.pop("_id", None)
+
+                closed_doc.update({
+                    "status": "closed",
+                    "closed_at": datetime.utcnow(),
+                    "closed_by": admin_id
+                })
+
+                closed_coll.insert_one(closed_doc)
+                fix_coll.delete_one({"_id": ObjectId(fix_vuln_id)})
+
+                return Response(
+                    {
+                        "message": "All steps completed. Fix vulnerability closed.",
+                        "status": "closed",
+                        "completed_steps": completed_steps
+                    },
+                    status=status.HTTP_200_OK
+                )
+
+            return Response(
+                {
+                    "message": f"Step {step_number} saved successfully",
+                    "status": "open",
+                    "completed_steps": completed_steps
+                },
+                status=status.HTTP_200_OK
+            )
+  
+
+# class FixVulnerabilityFeedbackAPIView(APIView):
+#     permission_classes = [IsAuthenticated]
+#     parser_classes = [JSONParser]
+
+#     def post(self, request, fix_vuln_id):
+#         admin_id = str(request.user.id)
+#         feedback_text = request.data.get("feedback", "").strip()
+#         rating = request.data.get("rating")
+
+#         if not feedback_text:
+#             return Response(
+#                 {"detail": "Feedback is required"},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         with MongoContext() as db:
+#             feedback_coll = db["fix_vulnerability_feedback"]
+#             closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+#             # ✅ CORRECT CHECK
+#             closed_doc = closed_coll.find_one({
+#                 "fix_vulnerability_id": fix_vuln_id
+#             })
+
+#             if not closed_doc:
+#                 return Response(
+#                     {"detail": "Feedback allowed only after closure"},
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             # prevent duplicate feedback
+#             if feedback_coll.find_one({"fix_vulnerability_id": fix_vuln_id}):
+#                 return Response(
+#                     {"detail": "Feedback already submitted"},
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             feedback_doc = {
+#                 "fix_vulnerability_id": fix_vuln_id,
+#                 "feedback": feedback_text,
+#                 "rating": rating,
+#                 "submitted_by": admin_id,
+#                 "submitted_at": datetime.utcnow()
+#             }
+
+#             feedback_coll.insert_one(feedback_doc)
+
+#             return Response(
+#                 {
+#                     "message": "Feedback submitted successfully",
+#                     "data": feedback_doc
+#                 },
+#                 status=status.HTTP_201_CREATED
+#             )
+
+  
 class RaiseSupportRequestAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]

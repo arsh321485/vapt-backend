@@ -5,6 +5,8 @@ from .views import (
     FixVulnerabilityCreateAPIView,
     RaiseSupportRequestAPIView,
     SupportRequestByReportAPIView,
+    FixVulnerabilityStepsAPIView,
+    # FixVulnerabilityFeedbackAPIView,
     RaiseSupportRequestByVulnerabilityAPIView,
     CreateTicketAPIView,
     TicketByReportAPIView,
@@ -17,11 +19,20 @@ urlpatterns = [
     path('register/<str:report_id>/vulns/', VulnerabilityRegisterAPIView.as_view(), name='report-vulns-by-id'),
 
     path(
-    "fix-vulnerability/report/<str:report_id>/asset/<str:host_name>/create/",
-    FixVulnerabilityCreateAPIView.as_view(),
-    name="fix-vulnerability-create-by-asset"
+        "fix-vulnerability/report/<str:report_id>/asset/<str:host_name>/create/",
+        FixVulnerabilityCreateAPIView.as_view(),
     ),
 
+    path(
+        "fix-vulnerability/<str:fix_vuln_id>/step-complete/",
+        FixVulnerabilityStepsAPIView.as_view(),
+    ),
+    
+    # path(
+    # "fix-vulnerability/<str:fix_vuln_id>/feedback/",
+    # FixVulnerabilityFeedbackAPIView.as_view(),
+    # name="fix-vulnerability-feedback"
+    # ),
     path(
     "support-requests/raise/report/<str:report_id>/vulnerability/<str:vulnerability_id>/",
     RaiseSupportRequestAPIView.as_view(),
