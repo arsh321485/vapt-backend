@@ -110,60 +110,147 @@ def get_team_members(db, team_name: str, admin_id: str):
 
     return members
 
+
+
+# class VulnerabilityRegisterAPIView(APIView):
+#     """
+#     Returns a list of vulnerabilities for a report_id but only the 6 fields required by the UI.
+#     GET /api/adminregister/report/<report_id>/vulns-simple/
+#     """
+#     permission_classes = [permissions.IsAuthenticated]  # change to AllowAny if wanted
+
+#     def get(self, request, report_id):
+#         try:
+#             with MongoContext() as db:
+#                 coll = db[NESSUS_COLLECTION]
+#                 doc = coll.find_one({"report_id": str(report_id)})
+#                 if not doc:
+#                     return Response({"detail": "report not found"}, status=status.HTTP_404_NOT_FOUND)
+
+#                 uploaded_at = doc.get("uploaded_at")
+
+#                 out = []
+#                 # iterate hosts -> vulnerabilities
+#                 for host in doc.get("vulnerabilities_by_host", []) or []:
+#                     host_name = host.get("host_name") or host.get("host") or ""
+#                     for v in (host.get("esvulnerabiliti") or []):
+#                         # map fields defensively
+#                         plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+#                         # severity/risk
+#                         risk_raw = v.get("risk_factor") or v.get("severity") or v.get("risk") or ""
+#                         severity = risk_raw.strip().title() if isinstance(risk_raw, str) else risk_raw
+
+#                         # prefer per-vuln created/updated if present, otherwise fallback
+#                         first_obs = v.get("created_at") or v.get("first_observation") or uploaded_at
+#                         second_obs = v.get("updated_at") or v.get("second_observation") or None
+
+#                         item = {
+#                             "vul_name": plugin_name,
+#                             "asset": host_name,
+#                             "severity": severity or "",
+#                             "first_observation": _normalize_iso(first_obs),
+#                             "second_observation": _normalize_iso(second_obs),
+#                             "status": "open",
+#                         }
+#                         out.append(item)
+
+#                 # optional: you can sort by first_observation or severity here if desired
+#                 serializer = AdminRegisterSimpleVulnSerializer(out, many=True)
+#                 return Response({"report_id": str(report_id), "count": len(out), "rows": serializer.data}, status=status.HTTP_200_OK)
+
+#         except pymongo.errors.ServerSelectionTimeoutError as e:
+#             return Response({"detail":"cannot connect to MongoDB", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+#         except RuntimeError as rexc:
+#             return Response({"detail": str(rexc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+#         except Exception as exc:
+#             import traceback; traceback.print_exc()
+#             return Response({"detail":"unexpected error", "error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+  
 class VulnerabilityRegisterAPIView(APIView):
     """
-    Returns a list of vulnerabilities for a report_id but only the 6 fields required by the UI.
+    Returns a list of vulnerabilities for a report_id
     GET /api/adminregister/report/<report_id>/vulns-simple/
     """
-    permission_classes = [permissions.IsAuthenticated]  # change to AllowAny if wanted
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, report_id):
         try:
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
+
                 doc = coll.find_one({"report_id": str(report_id)})
                 if not doc:
-                    return Response({"detail": "report not found"}, status=status.HTTP_404_NOT_FOUND)
+                    return Response(
+                        {"detail": "report not found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
 
                 uploaded_at = doc.get("uploaded_at")
+                rows = []
 
-                out = []
-                # iterate hosts -> vulnerabilities
-                for host in doc.get("vulnerabilities_by_host", []) or []:
+                # ===============================
+                # LOOP: HOST -> VULNERABILITIES
+                # ===============================
+                for host in doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
-                    for v in (host.get("esvulnerabiliti") or []):
-                        # map fields defensively
-                        plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
-                        # severity/risk
-                        risk_raw = v.get("risk_factor") or v.get("severity") or v.get("risk") or ""
-                        severity = risk_raw.strip().title() if isinstance(risk_raw, str) else risk_raw
 
-                        # prefer per-vuln created/updated if present, otherwise fallback
-                        first_obs = v.get("created_at") or v.get("first_observation") or uploaded_at
-                        second_obs = v.get("updated_at") or v.get("second_observation") or None
+                    # ✅ FIXED KEY
+                    for v in host.get("vulnerabilities", []):
 
-                        item = {
+                        plugin_name = (
+                            v.get("plugin_name")
+                            or v.get("pluginname")
+                            or v.get("name")
+                            or ""
+                        )
+
+                        risk_raw = (
+                            v.get("risk_factor")
+                            or v.get("severity")
+                            or v.get("risk")
+                            or ""
+                        )
+
+                        severity = (
+                            risk_raw.strip().title()
+                            if isinstance(risk_raw, str)
+                            else ""
+                        )
+
+                        first_obs = v.get("created_at") or uploaded_at
+                        second_obs = v.get("updated_at")
+
+                        rows.append({
                             "vul_name": plugin_name,
                             "asset": host_name,
-                            "severity": severity or "",
+                            "severity": severity,
                             "first_observation": _normalize_iso(first_obs),
                             "second_observation": _normalize_iso(second_obs),
                             "status": "open",
-                        }
-                        out.append(item)
+                        })
 
-                # optional: you can sort by first_observation or severity here if desired
-                serializer = AdminRegisterSimpleVulnSerializer(out, many=True)
-                return Response({"report_id": str(report_id), "count": len(out), "rows": serializer.data}, status=status.HTTP_200_OK)
+                serializer = AdminRegisterSimpleVulnSerializer(rows, many=True)
+
+                return Response(
+                    {
+                        "report_id": str(report_id),
+                        "count": len(rows),
+                        "rows": serializer.data
+                    },
+                    status=status.HTTP_200_OK
+                )
 
         except pymongo.errors.ServerSelectionTimeoutError as e:
-            return Response({"detail":"cannot connect to MongoDB", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except RuntimeError as rexc:
-            return Response({"detail": str(rexc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {"detail": "cannot connect to MongoDB", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
         except Exception as exc:
-            import traceback; traceback.print_exc()
-            return Response({"detail":"unexpected error", "error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+            return Response(
+                {"detail": "unexpected error", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )      
               
 # class FixVulnerabilityCreateAPIView(APIView):
 #     permission_classes = [permissions.IsAuthenticated]
