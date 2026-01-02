@@ -2085,29 +2085,33 @@ class SlackOAuthCallbackView(APIView):
     
     def _html_response(self, success=True, data=None, error=None):
         payload = {"success": success}
+
         if success:
             payload.update(data or {})
         else:
             payload["error"] = error
 
-        html = f"""
+        payload_json = json.dumps(payload)
+
+        html = """
         <html>
         <head>
             <title>Slack OAuth</title>
             <script>
-                (function() {{
-                    var payload = {json.dumps(payload)};
+                (function () {
+                    var payload = PAYLOAD_JSON;
+
                     console.log("Slack OAuth finished:", payload);
 
-                    if (window.opener) {{
-                        window.opener.postMessage({{
+                    if (window.opener) {
+                        window.opener.postMessage({
                             type: "slack-auth-success",
                             payload: payload
-                        }}, "*");
-                    }}
+                        }, "*");
+                    }
 
                     window.close();
-                }})();
+                })();
             </script>
         </head>
         <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
@@ -2116,8 +2120,9 @@ class SlackOAuthCallbackView(APIView):
         </body>
         </html>
         """
-        return HttpResponse(html)
 
+        html = html.replace("PAYLOAD_JSON", payload_json)
+        return HttpResponse(html)
              
 class SlackLoginView(APIView):
     """
