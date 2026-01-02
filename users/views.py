@@ -2084,43 +2084,45 @@ class SlackOAuthCallbackView(APIView):
     #     return HttpResponse(html)
     
     def _html_response(self, success=True, data=None, error=None):
+        """
+        Returns a minimal HTML:
+        - Sends result via postMessage to parent window
+        - Closes popup after a short delay
+        """
         payload = {"success": success}
-
         if success:
             payload.update(data or {})
         else:
-            payload["error"] = error
+            payload.update({"error": error})
 
+        # Convert payload to JSON string first
         payload_json = json.dumps(payload)
 
-        html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Slack OAuth</title>
-        <script>
-            (function () {
-                var payload = __PAYLOAD__;
-
-                if (window.opener) {
-                    window.opener.postMessage({
-                        type: "slack-auth-success",
-                        payload: payload
-                    }, "*");
-                }
-
-                window.close();
-            })();
-        </script>
-    </head>
-    <body>
-        <h3>Slack login successful</h3>
-    </body>
-    </html>
-    """
-
-        html = html.replace("__PAYLOAD__", payload_json)
-        return HttpResponse(html, content_type="text/html")
+        html = f"""
+        <html>
+        <head>
+            <title>Slack OAuth</title>
+            <script>
+                (function() {{
+                    var payload = {payload_json};
+                    console.log("Slack OAuth finished:", payload);
+                    if (window.opener) {{
+                        window.opener.postMessage({{
+                            type: "slack-auth-success",
+                            payload: payload
+                        }}, "*");
+                    }}
+                    window.close();
+                }})();
+            </script>
+        </head>
+        <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
+            <h2>Slack login successful 🎉</h2>
+            <p>You can close this window now.</p>
+        </body>
+        </html>
+        """
+        return HttpResponse(html)
              
 class SlackLoginView(APIView):
     """
