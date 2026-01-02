@@ -163,7 +163,7 @@ MICROSOFT_SCOPES = [
 SLACK_CLIENT_ID = os.getenv("SLACK_CLIENT_ID", "")
 SLACK_CLIENT_SECRET = os.getenv("SLACK_CLIENT_SECRET", "")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
-SLACK_REDIRECT_URI = os.getenv("SLACK_REDIRECT_URI", "https://vaptbackend.secureitlab.com/slack/callback")
+SLACK_REDIRECT_URI = os.getenv("SLACK_REDIRECT_URI", "https://vaptbackend.secureitlab.com/api/admin/users/slack/callback/")
 
 SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
