@@ -5,7 +5,7 @@ from .views import (
     UserRegistrationView,
     UserLoginView,
     UserProfileView,
-    UserProfileUpdateView,
+    # UserProfileUpdateView,
     ChangePasswordView,
     SendPasswordResetEmailView,
     UserPasswordResetView,
@@ -76,7 +76,7 @@ urlpatterns = [
     
     # Profile Management
     path('profile/', UserProfileView.as_view(), name='profile'),
-    path('profile/update/', UserProfileUpdateView.as_view(), name='profile-update'),
+    # path('profile/update/', UserProfileUpdateView.as_view(), name='profile-update'),
     
     # Password Management
     path('change-password/', ChangePasswordView.as_view(), name='change-password'),
