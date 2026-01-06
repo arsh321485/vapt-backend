@@ -28,7 +28,7 @@ from .serializers import (
     UserRegistrationSerializer,
     UserLoginSerializer,
     UserProfileSerializer,
-    UserProfileUpdateSerializer,
+    # UserProfileUpdateSerializer,
     ChangePasswordSerializer,
     UserPasswordResetSerializer,
     SendPasswordResetEmailSerializer,
@@ -68,6 +68,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 logger = logging.getLogger(__name__)
 from .utils import Util
+
 @method_decorator(csrf_exempt, name='dispatch')
 class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
@@ -102,9 +103,15 @@ class UserRegistrationView(generics.CreateAPIView):
                 logger.exception("UserProfile serialization failed during registration")
                 user_payload = {"email": user.email}
 
-            logger.info(f"User registered successfully: {user.email}")
+            logger.info(f"Admin account created successfully: {user.email}")
+            # 📧 Send admin welcome email
+            try:
+                Util.send_admin_welcome_email(user.email)
+            except Exception:
+                logger.exception("Failed to send admin welcome email")
+                
             response_body = {
-                "message": "User registered successfully",
+                "message": "Welcome! Your admin account has been created successfully",
                 "user": user_payload,
             }
             if tokens:
@@ -143,10 +150,10 @@ class UserLoginView(generics.GenericAPIView):
             # Generate JWT tokens
             refresh = RefreshToken.for_user(user)
 
-            logger.info(f"User logged in successfully: {user.email}")
+            logger.info(f"Admin authenticated successfully: {user.email}")
 
             return Response({
-                "message": "Login successful",
+                "message": "Welcome back! You have successfully logged in as an admin",
                 "user": UserProfileSerializer(user).data,
                 "tokens": {
                     "refresh": str(refresh),
@@ -184,43 +191,43 @@ class UserProfileView(generics.RetrieveAPIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class UserProfileUpdateView(generics.UpdateAPIView):
-    serializer_class = UserProfileUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    renderer_classes = [UserRenderer]
+# class UserProfileUpdateView(generics.UpdateAPIView):
+#     serializer_class = UserProfileUpdateSerializer
+#     permission_classes = [permissions.IsAuthenticated]
+#     renderer_classes = [UserRenderer]
 
-    def get_object(self):
-        return self.request.user
+#     def get_object(self):
+#         return self.request.user
 
-    def update(self, request, *args, **kwargs):
-        try:
-            partial = kwargs.pop('partial', True)
-            instance = self.get_object()
-            serializer = self.get_serializer(
-                instance,
-                data=request.data,
-                partial=partial,
-                context={"request": request}
-            )
-            serializer.is_valid(raise_exception=True)
-            self.perform_update(serializer)
+#     def update(self, request, *args, **kwargs):
+#         try:
+#             partial = kwargs.pop('partial', True)
+#             instance = self.get_object()
+#             serializer = self.get_serializer(
+#                 instance,
+#                 data=request.data,
+#                 partial=partial,
+#                 context={"request": request}
+#             )
+#             serializer.is_valid(raise_exception=True)
+#             self.perform_update(serializer)
 
-            # Get updated user data
-            updated_user = self.get_object()
+#             # Get updated user data
+#             updated_user = self.get_object()
             
-            return Response({
-                "message": "Profile updated successfully",
-                "user": UserProfileSerializer(updated_user).data
-            }, status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.error(f"Profile update error: {str(e)}")
-            return Response({
-                "error": "Failed to update profile"
-            }, status=status.HTTP_400_BAD_REQUEST)
+#             return Response({
+#                 "message": "Profile updated successfully",
+#                 "user": UserProfileSerializer(updated_user).data
+#             }, status=status.HTTP_200_OK)
+#         except Exception as e:
+#             logger.error(f"Profile update error: {str(e)}")
+#             return Response({
+#                 "error": "Failed to update profile"
+#             }, status=status.HTTP_400_BAD_REQUEST)
 
-    def patch(self, request, *args, **kwargs):
-        kwargs['partial'] = True
-        return self.update(request, *args, **kwargs)
+#     def patch(self, request, *args, **kwargs):
+#         kwargs['partial'] = True
+#         return self.update(request, *args, **kwargs)
 
 
 class ChangePasswordView(generics.UpdateAPIView):

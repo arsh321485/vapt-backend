@@ -29,6 +29,29 @@ class Util:
         except Exception as e:
             logger.error(f"SendGrid send error: {str(e)}")
             return False
+        
+        # ✅ ADMIN FIRST-TIME SIGNUP EMAIL
+    @staticmethod
+    def send_admin_welcome_email(user_email):
+
+        body = f"""
+        Dear Administrator,
+
+        Your administrator account for VAPTFIX has been successfully created.
+
+        Once signed in, you will be able to complete your initial setup and begin managing the system.
+
+        Thank you for choosing VAPTFIX.
+
+        """
+
+        data = {
+            "to_email": user_email,
+            "subject": "Your Admin Account Has Been Created",
+            "body": body,
+        }
+
+        return Util.send_mail(data)
 
 
 def verify_recaptcha(recaptcha_response):
