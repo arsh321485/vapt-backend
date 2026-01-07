@@ -156,19 +156,45 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             "recaptcha": {"write_only": True},
         }
 
-    def validate(self, attrs):
-        # 🔐 Password match check
-        if attrs.get("password") != attrs.get("confirm_password"):
-            raise serializers.ValidationError("Passwords don't match")
+    # def validate(self, attrs):
+    #     # 🔐 Password match check
+    #     if attrs.get("password") != attrs.get("confirm_password"):
+    #         raise serializers.ValidationError("Passwords don't match")
 
-        # 🤖 reCAPTCHA check (only in production)
+    #     # 🤖 reCAPTCHA check (only in production)
+    #     if not settings.DEBUG:
+    #         recaptcha_value = attrs.get("recaptcha", "")
+    #         is_valid, message = verify_recaptcha(recaptcha_value)
+    #         if not is_valid:
+    #             raise serializers.ValidationError({"recaptcha": message})
+    #     else:
+    #         logger.info("DEBUG mode active – skipping reCAPTCHA verification")
+
+    #     return attrs
+
+    def validate(self, attrs):
+        # 🔐 Password match
+        if attrs.get("password") != attrs.get("confirm_password"):
+            raise serializers.ValidationError({
+                "confirm_password": "Passwords do not match"
+            })
+
+        # 🤖 reCAPTCHA validation
         if not settings.DEBUG:
-            recaptcha_value = attrs.get("recaptcha", "")
+            recaptcha_value = attrs.get("recaptcha")
+
+            if not recaptcha_value:
+                raise serializers.ValidationError({
+                    "recaptcha": "reCAPTCHA is required"
+                })
+
             is_valid, message = verify_recaptcha(recaptcha_value)
             if not is_valid:
-                raise serializers.ValidationError({"recaptcha": message})
+                raise serializers.ValidationError({
+                    "recaptcha": message
+                })
         else:
-            logger.info("DEBUG mode active – skipping reCAPTCHA verification")
+            logger.info("DEBUG mode – skipping reCAPTCHA verification")
 
         return attrs
 
