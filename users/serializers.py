@@ -156,22 +156,6 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             "recaptcha": {"write_only": True},
         }
 
-    # def validate(self, attrs):
-    #     # 🔐 Password match check
-    #     if attrs.get("password") != attrs.get("confirm_password"):
-    #         raise serializers.ValidationError("Passwords don't match")
-
-    #     # 🤖 reCAPTCHA check (only in production)
-    #     if not settings.DEBUG:
-    #         recaptcha_value = attrs.get("recaptcha", "")
-    #         is_valid, message = verify_recaptcha(recaptcha_value)
-    #         if not is_valid:
-    #             raise serializers.ValidationError({"recaptcha": message})
-    #     else:
-    #         logger.info("DEBUG mode active – skipping reCAPTCHA verification")
-
-    #     return attrs
-
     def validate(self, attrs):
         # 🔐 Password match
         if attrs.get("password") != attrs.get("confirm_password"):
