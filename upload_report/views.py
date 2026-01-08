@@ -7,6 +7,7 @@ import uuid
 import json
 import datetime
 from typing import Optional, Dict, Any, List
+import hashlib
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -40,6 +41,7 @@ def serve_report_file(request, path):
     )
 
 
+# single upload report view
 
 class UploadReportView(APIView):
     """API endpoint for uploading and parsing vulnerability reports."""
@@ -48,8 +50,14 @@ class UploadReportView(APIView):
 
     ALLOWED_EXTENSIONS = {
         '.pdf', '.csv', '.xlsx', '.xls', '.xml', '.nessus',
-        '.html', '.htm', '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'
+        '.html', '.htm', '.bmp', '.tiff'
     }
+    
+    def _generate_file_hash(self, uploaded_file):
+        hasher = hashlib.sha256()
+        for chunk in uploaded_file.chunks():
+            hasher.update(chunk)
+        return hasher.hexdigest()
 
     def _get_mongo_uri(self) -> Optional[str]:
         """Get MongoDB URI from Django settings."""
@@ -268,299 +276,452 @@ class UploadReportView(APIView):
         # Default fallback
         return {"type": report_type}
 
-    def _resolve_locations(self, location_value, user) -> List[Location]:
+    # def _resolve_locations(self, location_value, user) -> List[Location]:
+    #     """
+    #     Resolve a location parameter into Location objects.
+    #     - "all" -> all locations for the current admin user
+    #     - single id / comma-separated ids / JSON array -> those specific locations
+    #     """
+    #     if not location_value:
+    #         return []
+    #     if isinstance(location_value, (list, tuple)):
+    #         raw_ids = list(location_value)
+    #     else:
+    #         value = str(location_value).strip()
+    #         if not value:
+    #             return []
+    #         if value.lower() == "all":
+    #             # All locations for this admin only
+    #             locations = list(Location.objects.filter(admin=user))
+    #             if not locations:
+    #                 raise ValueError("No locations are configured for this admin")
+    #             return locations
+    #         if value.startswith("[") and value.endswith("]"):
+    #             try:
+    #                 parsed = json.loads(value)
+    #             except json.JSONDecodeError:
+    #                 parsed = [value]
+    #             raw_ids = parsed
+    #         else:
+    #             raw_ids = [part.strip() for part in value.split(",") if part.strip()]
+    #     locations: List[Location] = []
+    #     for raw_id in raw_ids:
+    #         try:
+    #             obj_id = ObjectId(str(raw_id))
+    #         except (InvalidId, TypeError):
+    #             raise ValueError(f"Location ID '{raw_id}' is not a valid ObjectId")
+    #         try:
+    #             locations.append(Location.objects.get(pk=obj_id))
+    #         except Location.DoesNotExist:
+    #             raise ValueError(f"Location with ID '{raw_id}' not found")
+    #     return locations
+    
+    def _resolve_location(self, location_value, user) -> Location:
         """
-        Resolve a location parameter into Location objects.
-        - "all" -> all locations for the current admin user
-        - single id / comma-separated ids / JSON array -> those specific locations
+        Accept ONLY one Location ID.
+        No 'all', no list, no comma-separated values.
         """
-        if not location_value:
-            return []
-        if isinstance(location_value, (list, tuple)):
-            raw_ids = list(location_value)
-        else:
-            value = str(location_value).strip()
-            if not value:
-                return []
-            if value.lower() == "all":
-                # All locations for this admin only
-                locations = list(Location.objects.filter(admin=user))
-                if not locations:
-                    raise ValueError("No locations are configured for this admin")
-                return locations
-            if value.startswith("[") and value.endswith("]"):
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError:
-                    parsed = [value]
-                raw_ids = parsed
-            else:
-                raw_ids = [part.strip() for part in value.split(",") if part.strip()]
-        locations: List[Location] = []
-        for raw_id in raw_ids:
-            try:
-                obj_id = ObjectId(str(raw_id))
-            except (InvalidId, TypeError):
-                raise ValueError(f"Location ID '{raw_id}' is not a valid ObjectId")
-            try:
-                locations.append(Location.objects.get(pk=obj_id))
-            except Location.DoesNotExist:
-                raise ValueError(f"Location with ID '{raw_id}' not found")
-        return locations
 
-    def post(self, request):
-        """
-        Handle POST request to upload and parse vulnerability report.
+        if not location_value:
+            raise ValueError("Location is required")
+
+        # ❌ block list / array
+        if isinstance(location_value, (list, tuple)):
+            raise ValueError("Only one location can be selected at a time")
+
+        location_str = str(location_value).strip()
+
+        # ❌ block comma-separated ids
+        if "," in location_str:
+            raise ValueError("Only one location can be selected at a time")
+
+        try:
+            location_id = ObjectId(location_str)
+        except Exception:
+            raise ValueError("Invalid location ID format")
+
+        try:
+            return Location.objects.get(pk=location_id)
+        except Location.DoesNotExist:
+            raise ValueError("Location not found")
+
+
+    # Single file upload 
+    # def post(self, request):
+    #     """
+    #     Handle POST request to upload and parse vulnerability report.
         
-        Expected form data:
-        - file: The uploaded file
-        - location: Location ID (can be "all", single ID, or comma-separated IDs)
-        - member_type: Type of member (external/internal)
-        - report_type: Optional report type hint (excel, csv, nessus, etc.)
-        """
-        # Import parser module
+    #     Expected form data:
+    #     - file: The uploaded file
+    #     - location: Location ID (can be "all", single ID, or comma-separated IDs)
+    #     - member_type: Type of member (external/internal)
+    #     - report_type: Optional report type hint (excel, csv, nessus, etc.)
+    #     """
+    #     # Import parser module
+    #     try:
+    #         from .parsers import dispatch_parse
+    #     except ImportError:
+    #         return Response({
+    #             "error": "File parser module not found. Ensure file_parsers.py exists."
+    #         }, status=500)
+        
+    #     file_path = None
+
+    #     try:
+    #         # Extract request data
+    #         location_raw = request.data.get("location")
+    #         member_type = request.data.get("member_type", "external")
+    #         uploaded_file = request.FILES.get("file")
+
+    #         # Validation
+    #         if not location_raw:
+    #             return Response({"error": "Location is required"}, status=400)
+    #         try:
+    #             location_objects = self._resolve_locations(location_raw, request.user)
+    #         except ValueError as exc:
+    #             return Response({"error": str(exc)}, status=400)
+
+    #         if not location_objects:
+    #             return Response({"error": "No valid locations were provided"}, status=400)
+
+    #         if not uploaded_file:
+    #             return Response({"error": "File is required"}, status=400)
+
+    #         # Check file extension
+    #         ext = os.path.splitext(uploaded_file.name)[1].lower()
+    #         if ext not in self.ALLOWED_EXTENSIONS:
+    #             return Response({
+    #                 "error": f"Unsupported file type: {ext}. Allowed: {', '.join(self.ALLOWED_EXTENSIONS)}"
+    #             }, status=400)
+
+    #         # Save uploaded file to MEDIA_ROOT/reports/
+    #         unique_filename = f"{uuid.uuid4().hex}_{uploaded_file.name}"
+    #         relative_filename = os.path.join("reports", unique_filename).replace("\\", "/")
+    #         file_path = os.path.join(settings.MEDIA_ROOT, relative_filename)
+    #         os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+    #         with open(file_path, "wb+") as dest:
+    #             for chunk in uploaded_file.chunks():
+    #                 dest.write(chunk)
+
+    #         # Parse the file
+    #         parsed_data = dispatch_parse(file_path, uploaded_file.name)
+            
+    #         # Check for parsing errors
+    #         if not isinstance(parsed_data, dict):
+    #             if file_path and os.path.exists(file_path):
+    #                 os.remove(file_path)
+    #             return Response({
+    #                 "error": "Failed to parse the uploaded file"
+    #             }, status=400)
+            
+    #         if "error" in parsed_data:
+    #             if file_path and os.path.exists(file_path):
+    #                 os.remove(file_path)
+    #             return Response({
+    #                 "error": parsed_data["error"]
+    #             }, status=400)
+
+    #         # Calculate parsed count for status tracking
+    #         parsed_count = 1
+    #         if parsed_data.get("type") in ("nessus", "nessus_html"):
+    #             parsed_count = parsed_data.get("total_vulnerabilities", 1) or 1
+    #         elif "rows" in parsed_data:
+    #             parsed_count = parsed_data.get("rows", 1)
+
+    #         # Process each location
+    #         upload_results = []
+    #         errors = []
+    #         for location_obj in location_objects:
+    #             location_name = getattr(location_obj, "location_name", "")
+    #             try:
+    #                 upload_report = UploadReport.objects.create(
+    #                     file=relative_filename,
+    #                     location=location_obj,
+    #                     admin=request.user,
+    #                     member_type=member_type,
+    #                     status="processed",
+    #                     parsed_count=parsed_count,
+    #                 )
+
+    #                 report_id = str(getattr(upload_report, "_id", upload_report.pk))
+
+    #                 mongodb_stored = self._store_in_mongodb(
+    #                     parsed_data=parsed_data,
+    #                     report_id=report_id,
+    #                     location_id=str(location_obj.pk),
+    #                     location_name=location_name,
+    #                     admin_email=getattr(request.user, "email", ""),
+    #                     original_filename=uploaded_file.name,
+    #                     member_type=member_type
+    #                 )
+
+    #                 serializer = UploadReportSerializer(upload_report)
+    #                 report_payload = json.loads(json.dumps(serializer.data, default=str))
+    #                 upload_results.append({
+    #                     "location": {
+    #                         "id": str(location_obj.pk),
+    #                         "name": location_name,
+    #                     },
+    #                     "upload_report": report_payload,
+    #                     "mongodb_stored": mongodb_stored,
+    #                 })
+    #             except Exception as loop_exc:
+    #                 errors.append({
+    #                     "location": {
+    #                         "id": str(location_obj.pk),
+    #                         "name": location_name,
+    #                     },
+    #                     "error": str(loop_exc)
+    #                 })
+
+    #         # Create preview for API response
+    #         preview = self._create_preview(parsed_data)
+
+    #         if errors and not upload_results:
+    #             return Response({
+    #                 "error": "Upload failed for all locations",
+    #                 "details": errors
+    #             }, status=500)
+
+    #         if len(upload_results) == 1:
+    #             single = upload_results[0]
+    #             response_payload = {
+    #                 "success": True,
+    #                 "message": "File uploaded and parsed successfully",
+    #                 "upload_report": single["upload_report"],
+    #                 "location": single["location"],
+    #                 "parsed_count": parsed_count,
+    #                 "mongodb_stored": single["mongodb_stored"],
+    #                 "report_type": parsed_data.get("type"),
+    #                 "structured_data_preview": preview
+    #             }
+    #         else:
+    #             response_payload = {
+    #                 "success": True,
+    #                 "message": "File uploaded and parsed successfully",
+    #                 "results": upload_results,
+    #                 "parsed_count": parsed_count,
+    #                 "report_type": parsed_data.get("type"),
+    #                 "structured_data_preview": preview,
+    #                 "errors": errors
+    #             }
+            
+    #         return Response(response_payload, status=201)
+
+    #     except Exception as exc:
+    #         print(f"Upload error: {exc}")
+    #         import traceback
+    #         traceback.print_exc()
+            
+    #         # Cleanup on error
+    #         if file_path and os.path.exists(file_path):
+    #             try:
+    #                 os.remove(file_path)
+    #             except Exception:
+    #                 pass
+            
+    #         return Response({
+    #             "error": f"Upload failed: {str(exc)}"
+    #         }, status=500)
+    
+    #Multiple file upload
+    def post(self, request):
         try:
             from .parsers import dispatch_parse
-        except ImportError:
-            return Response({
-                "error": "File parser module not found. Ensure file_parsers.py exists."
-            }, status=500)
-        
-        file_path = None
 
-        try:
-            # Extract request data
             location_raw = request.data.get("location")
             member_type = request.data.get("member_type", "external")
-            uploaded_file = request.FILES.get("file")
+            
+            if member_type not in {"external", "internal", "both"}:
+                return Response(
+                    {"error": "member_type must be external, internal or both"},
+                    status=400
+                )
 
-            # Validation
-            if not location_raw:
-                return Response({"error": "Location is required"}, status=400)
+            # ✅ MULTIPLE FILES
+            uploaded_files = request.FILES.getlist("file")
+
+            if not uploaded_files:
+                return Response({"error": "At least one file is required"}, status=400)
+
+            # 🔹 Resolve locations (your existing logic)
             try:
-                location_objects = self._resolve_locations(location_raw, request.user)
+                # location_objects = self._resolve_locations(location_raw, request.user)
+                location_obj = self._resolve_location(location_raw, request.user)
             except ValueError as exc:
                 return Response({"error": str(exc)}, status=400)
 
-            if not location_objects:
-                return Response({"error": "No valid locations were provided"}, status=400)
-
-            if not uploaded_file:
-                return Response({"error": "File is required"}, status=400)
-
-            # Check file extension
-            ext = os.path.splitext(uploaded_file.name)[1].lower()
-            if ext not in self.ALLOWED_EXTENSIONS:
-                return Response({
-                    "error": f"Unsupported file type: {ext}. Allowed: {', '.join(self.ALLOWED_EXTENSIONS)}"
-                }, status=400)
-
-            # Save uploaded file to MEDIA_ROOT/reports/
-            unique_filename = f"{uuid.uuid4().hex}_{uploaded_file.name}"
-            relative_filename = os.path.join("reports", unique_filename).replace("\\", "/")
-            file_path = os.path.join(settings.MEDIA_ROOT, relative_filename)
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            
-            with open(file_path, "wb+") as dest:
-                for chunk in uploaded_file.chunks():
-                    dest.write(chunk)
-
-            # Parse the file
-            parsed_data = dispatch_parse(file_path, uploaded_file.name)
-            
-            # Check for parsing errors
-            if not isinstance(parsed_data, dict):
-                if file_path and os.path.exists(file_path):
-                    os.remove(file_path)
-                return Response({
-                    "error": "Failed to parse the uploaded file"
-                }, status=400)
-            
-            if "error" in parsed_data:
-                if file_path and os.path.exists(file_path):
-                    os.remove(file_path)
-                return Response({
-                    "error": parsed_data["error"]
-                }, status=400)
-
-            # Calculate parsed count for status tracking
-            parsed_count = 1
-            if parsed_data.get("type") in ("nessus", "nessus_html"):
-                parsed_count = parsed_data.get("total_vulnerabilities", 1) or 1
-            elif "rows" in parsed_data:
-                parsed_count = parsed_data.get("rows", 1)
-
-            # Process each location
             upload_results = []
             errors = []
-            for location_obj in location_objects:
-                location_name = getattr(location_obj, "location_name", "")
+
+            for uploaded_file in uploaded_files:
+                file_path = None
+
                 try:
-                    upload_report = UploadReport.objects.create(
-                        file=relative_filename,
-                        location=location_obj,
+                    # 🔹 Extension check
+                    ext = os.path.splitext(uploaded_file.name)[1].lower()
+                    if ext not in self.ALLOWED_EXTENSIONS:
+                        errors.append({
+                            "file": uploaded_file.name,
+                            "error": "Unsupported file type"
+                        })
+                        continue
+
+                    # 🔹 FILE HASH (duplicate check)
+                    file_hash = self._generate_file_hash(uploaded_file)
+
+                    if UploadReport.objects.filter(
                         admin=request.user,
-                        member_type=member_type,
-                        status="processed",
-                        parsed_count=parsed_count,
+                        file_hash=file_hash
+                    ).exists():
+                        errors.append({
+                            "file": uploaded_file.name,
+                            "error": "Duplicate file detected. This file was already uploaded."
+                        })
+                        continue
+
+                    # 🔹 Save file
+                    # Save under admin folder to avoid overwrite
+                    admin_id = str(request.user.id)
+
+                    relative_filename = f"reports/{admin_id}/{uploaded_file.name}"
+                    file_path = os.path.join(settings.MEDIA_ROOT, relative_filename)
+
+                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+                    with open(file_path, "wb+") as dest:
+                        for chunk in uploaded_file.chunks():
+                            dest.write(chunk)
+
+                    # 🔹 Parse file (your existing parser)
+                    parsed_data = dispatch_parse(file_path, uploaded_file.name)
+
+                    if "error" in parsed_data:
+                        raise Exception(parsed_data["error"])
+
+                    # 🔹 Parsed count
+                    parsed_count = 1
+                    if parsed_data.get("type") in ("nessus", "nessus_html"):
+                        parsed_count = parsed_data.get("total_vulnerabilities", 1) or 1
+                    elif "rows" in parsed_data:
+                        parsed_count = parsed_data.get("rows", 1)
+
+                    member_types_to_create = (
+                        ["external", "internal"]
+                        if member_type == "both"
+                        else [member_type]
                     )
 
-                    report_id = str(getattr(upload_report, "_id", upload_report.pk))
+                    for mt in member_types_to_create:
+                        upload_report = UploadReport.objects.create(
+                            file=relative_filename,
+                            file_hash=file_hash,
+                            location=location_obj,   # 👈 SAME LOCATION
+                            admin=request.user,
+                            member_type=mt,          # 👈 external / internal
+                            status="processed",
+                            parsed_count=parsed_count,
+                        )
 
-                    mongodb_stored = self._store_in_mongodb(
-                        parsed_data=parsed_data,
-                        report_id=report_id,
-                        location_id=str(location_obj.pk),
-                        location_name=location_name,
-                        admin_email=getattr(request.user, "email", ""),
-                        original_filename=uploaded_file.name,
-                        member_type=member_type
-                    )
+                        report_id = str(upload_report._id)
 
-                    serializer = UploadReportSerializer(upload_report)
-                    report_payload = json.loads(json.dumps(serializer.data, default=str))
-                    upload_results.append({
-                        "location": {
-                            "id": str(location_obj.pk),
-                            "name": location_name,
-                        },
-                        "upload_report": report_payload,
-                        "mongodb_stored": mongodb_stored,
-                    })
-                except Exception as loop_exc:
+                        mongodb_stored = self._store_in_mongodb(
+                            parsed_data=parsed_data,
+                            report_id=report_id,
+                            location_id=str(location_obj.pk),
+                            location_name=location_obj.location_name,
+                            admin_email=request.user.email,
+                            original_filename=uploaded_file.name,
+                            member_type=mt
+                        )
+
+                        file_url = request.build_absolute_uri(
+                            settings.MEDIA_URL + relative_filename
+                        )
+
+                        upload_results.append({
+                            "report_id": report_id,
+                            "file_name": uploaded_file.name,
+                            "file_url": file_url,
+                            "location": location_obj.location_name,
+                            "member_type": mt,
+                            "status": upload_report.status,
+                            "parsed_count": parsed_count,
+                            "mongodb_stored": mongodb_stored,
+                            "report_type": parsed_data.get("type"),
+                            "structured_data_preview": self._create_preview(parsed_data)
+                        })
+
+                    # 🔹 Process each location (UNCHANGED)
+                    # for location_obj in location_objects:
+                    #     upload_report = UploadReport.objects.create(
+                    #         file=relative_filename,
+                    #         file_hash=file_hash,
+                    #         location=location_obj,
+                    #         admin=request.user,
+                    #         member_type=member_type,
+                    #         status="processed",
+                    #         parsed_count=parsed_count,
+                    #     )
+
+                    #     report_id = str(upload_report._id)
+
+                    #     # 🔹 MongoDB storage (UNCHANGED)
+                    #     mongodb_stored = self._store_in_mongodb(
+                    #         parsed_data=parsed_data,
+                    #         report_id=report_id,
+                    #         location_id=str(location_obj.pk),
+                    #         location_name=location_obj.location_name,
+                    #         admin_email=request.user.email,
+                    #         original_filename=uploaded_file.name,
+                    #         member_type=member_type
+                    #     )
+
+                    #     # 🔹 FILE DATA (FETCH)
+                    #     file_url = request.build_absolute_uri(
+                    #         settings.MEDIA_URL + relative_filename
+                    #     )
+
+                    #     upload_results.append({
+                    #         "report_id": report_id,
+                    #         "file_name": uploaded_file.name,
+                    #         "file_url": file_url,
+                    #         "file_size": uploaded_file.size,
+                    #         "uploaded_at": upload_report.created_at,
+                    #         "location": location_obj.location_name,
+                    #         "member_type": member_type,
+                    #         "status": upload_report.status,
+                    #         "parsed_count": parsed_count,
+                    #         "mongodb_stored": mongodb_stored,
+                    #         "report_type": parsed_data.get("type"),
+                    #         "structured_data_preview": self._create_preview(parsed_data)
+                    #     })
+
+                except Exception as file_exc:
+                    if file_path and os.path.exists(file_path):
+                        os.remove(file_path)
+
                     errors.append({
-                        "location": {
-                            "id": str(location_obj.pk),
-                            "name": location_name,
-                        },
-                        "error": str(loop_exc)
+                        "file": uploaded_file.name,
+                        "error": str(file_exc)
                     })
 
-            # Create preview for API response
-            preview = self._create_preview(parsed_data)
-
-            if errors and not upload_results:
-                return Response({
-                    "error": "Upload failed for all locations",
-                    "details": errors
-                }, status=500)
-
-            if len(upload_results) == 1:
-                single = upload_results[0]
-                response_payload = {
-                    "success": True,
-                    "message": "File uploaded and parsed successfully",
-                    "upload_report": single["upload_report"],
-                    "location": single["location"],
-                    "parsed_count": parsed_count,
-                    "mongodb_stored": single["mongodb_stored"],
-                    "report_type": parsed_data.get("type"),
-                    "structured_data_preview": preview
-                }
-            else:
-                response_payload = {
-                    "success": True,
-                    "message": "File uploaded and parsed successfully",
-                    "results": upload_results,
-                    "parsed_count": parsed_count,
-                    "report_type": parsed_data.get("type"),
-                    "structured_data_preview": preview,
-                    "errors": errors
-                }
-            
-            return Response(response_payload, status=201)
+            return Response({
+                "success": True,
+                "message": "Files Uploaded Successfully",
+                "count": len(upload_results),
+                "results": upload_results,
+                "errors": errors
+            }, status=201)
 
         except Exception as exc:
-            print(f"Upload error: {exc}")
-            import traceback
-            traceback.print_exc()
-            
-            # Cleanup on error
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-            
-            return Response({
-                "error": f"Upload failed: {str(exc)}"
-            }, status=500)
-            
-            
-
-
-# class UploadReportLocationAPIView(APIView):
-#     permission_classes = [IsAuthenticated]
-
-#     def get(self, request, report_id):
-#         try:
-#             # 🔹 Validate report_id
-#             try:
-#                 obj_id = ObjectId(report_id)
-#             except Exception:
-#                 return Response(
-#                     {"error": "Invalid report_id"},
-#                     status=400
-#                 )
-
-#             # 🔹 Fetch the report
-#             report = (
-#                 UploadReport.objects
-#                 .filter(_id=obj_id, admin=request.user)
-#                 .select_related("location")
-#                 .first()
-#             )
-
-#             if not report:
-#                 return Response(
-#                     {"error": "Report not found"},
-#                     status=404
-#                 )
-
-#             # ✅ FIX: use _id instead of id
-#             selected_location_id = (
-#                 str(report.location._id) if report.location else None
-#             )
-
-#             # 🔹 Fetch all locations from uploaded reports
-#             qs = (
-#                 UploadReport.objects
-#                 .filter(admin=request.user)
-#                 .select_related("location")
-#                 .order_by("-uploaded_at")
-#             )
-
-#             locations_map = {}
-
-#             for r in qs:
-#                 loc = r.location
-#                 if not loc:
-#                     continue
-
-#                 # ✅ FIX HERE
-#                 loc_id = str(loc._id)
-
-#                 if loc_id not in locations_map:
-#                     locations_map[loc_id] = {
-#                         "id": loc_id,
-#                         "name": loc.location_name
-#                     }
-
-#             locations = list(locations_map.values())
-
-#             return Response({
-#                 "success": True,
-#                 "count": len(locations),
-#                 "locations": locations,
-#                 "selected_location_id": selected_location_id
-#             }, status=200)
-
-#         except Exception as exc:
-#             return Response(
-#                 {"detail": "unexpected error", "error": str(exc)},
-#                 status=500
-#             )
-
+            return Response(
+                {"error": "Upload failed", "detail": str(exc)},
+                status=500
+            )
+      
+        
 
 class UploadReportLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
