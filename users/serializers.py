@@ -358,73 +358,104 @@ class SendPasswordResetEmailSerializer(serializers.Serializer):
         return value
 
 
+# class UserPasswordResetSerializer(serializers.Serializer):
+#     password = serializers.CharField(
+#         max_length=255,
+#         style={"input_type": "password"},
+#         write_only=True,
+#         validators=[validate_password]
+#     )
+#     confirm_password = serializers.CharField(
+#         max_length=255,
+#         style={"input_type": "password"},
+#         write_only=True
+#     )
+
+#     class Meta:
+#         fields = ["password", "confirm_password"]
+
+#     def validate(self, attrs):
+#         try:
+#             password = attrs.get("password")
+#             confirm_password = attrs.get("confirm_password")
+#             uid = self.context.get("uid")
+#             token = self.context.get("token")
+
+#             if not uid or not token:
+#                 raise serializers.ValidationError({"error": "Invalid reset link"})
+
+#             # Decode user ID
+#             try:
+#                 user_id = smart_str(urlsafe_base64_decode(uid))
+#                 user = User.objects.get(id=user_id)  # Changed from _id to id
+#             except (ValueError, User.DoesNotExist):
+#                 raise serializers.ValidationError({"error": "Invalid reset link"})
+
+#             # Verify token
+#             if not PasswordResetTokenGenerator().check_token(user, token):
+#                 raise serializers.ValidationError({"error": "Token is not valid or expired"})
+
+#             # Check password confirmation
+#             if password != confirm_password:
+#                 raise serializers.ValidationError({"error": "Password and confirm password don't match"})
+
+#             # Set new password
+#             user.set_password(password)
+#             user.save()
+
+#             logger.info(f"Password reset successful for user: {user.email}")
+#             return attrs
+
+#         except DjangoUnicodeDecodeError:
+#             raise serializers.ValidationError({"error": "Invalid reset link"})
+#         except Exception as e:
+#             logger.error(f"Error in UserPasswordResetSerializer: {str(e)}")
+#             raise serializers.ValidationError({"error": "Password reset failed. Please try again."})
+        
+  
 class UserPasswordResetSerializer(serializers.Serializer):
     password = serializers.CharField(
-        max_length=255,
-        style={"input_type": "password"},
         write_only=True,
         validators=[validate_password]
     )
-    confirm_password = serializers.CharField(
-        max_length=255,
-        style={"input_type": "password"},
-        write_only=True
-    )
-
-    class Meta:
-        fields = ["password", "confirm_password"]
+    confirm_password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
-        try:
-            password = attrs.get("password")
-            confirm_password = attrs.get("confirm_password")
-            uid = self.context.get("uid")
-            token = self.context.get("token")
+        password = attrs.get("password")
+        confirm_password = attrs.get("confirm_password")
 
-            if not uid or not token:
-                raise serializers.ValidationError({"error": "Invalid reset link"})
+        uid = self.context.get("uid")
+        token = self.context.get("token")
 
-            # Decode user ID
-            try:
-                user_id = smart_str(urlsafe_base64_decode(uid))
-                user = User.objects.get(id=user_id)  # Changed from _id to id
-            except (ValueError, User.DoesNotExist):
-                raise serializers.ValidationError({"error": "Invalid reset link"})
-
-            # Verify token
-            if not PasswordResetTokenGenerator().check_token(user, token):
-                raise serializers.ValidationError({"error": "Token is not valid or expired"})
-
-            # Check password confirmation
-            if password != confirm_password:
-                raise serializers.ValidationError({"error": "Password and confirm password don't match"})
-
-            # Set new password
-            user.set_password(password)
-            user.save()
-
-            logger.info(f"Password reset successful for user: {user.email}")
-            return attrs
-
-        except DjangoUnicodeDecodeError:
-            raise serializers.ValidationError({"error": "Invalid reset link"})
-        except Exception as e:
-            logger.error(f"Error in UserPasswordResetSerializer: {str(e)}")
-            raise serializers.ValidationError({"error": "Password reset failed. Please try again."})
-        
-        
-class SetPasswordSerializer(serializers.Serializer):
-    new_password = serializers.CharField(
-        required=True,
-        write_only=True,
-        validators=[validate_password]
-    )
-    confirm_password = serializers.CharField(required=True, write_only=True)
-
-    def validate(self, attrs):
-        if attrs["new_password"] != attrs["confirm_password"]:
+        if password != confirm_password:
             raise serializers.ValidationError("Passwords do not match")
+
+        try:
+            user_id = smart_str(urlsafe_base64_decode(uid))
+            user = User.objects.get(id=user_id)
+        except:
+            raise serializers.ValidationError("Invalid reset link")
+
+        if not PasswordResetTokenGenerator().check_token(user, token):
+            raise serializers.ValidationError("Token expired or invalid")
+
+        user.set_password(password)
+        user.save()
+
         return attrs
+      
+# class SetPasswordSerializer(serializers.Serializer):
+#     new_password = serializers.CharField(
+#         required=True,
+#         write_only=True,
+#         validators=[validate_password]
+#     )
+#     confirm_password = serializers.CharField(required=True, write_only=True)
+
+#     def validate(self, attrs):
+#         if attrs["new_password"] != attrs["confirm_password"]:
+#             raise serializers.ValidationError("Passwords do not match")
+#         return attrs
   
 class GoogleOAuthSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=False, allow_blank=True)
