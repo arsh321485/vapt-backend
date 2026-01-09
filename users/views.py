@@ -22,6 +22,7 @@ import uuid
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from urllib.parse import urlencode
+
 class SlackAccessTokenSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=True)
 from .serializers import (
@@ -32,7 +33,7 @@ from .serializers import (
     ChangePasswordSerializer,
     UserPasswordResetSerializer,
     SendPasswordResetEmailSerializer,
-    SetPasswordSerializer,
+    # SetPasswordSerializer,
     GoogleOAuthSerializer,    
     MicrosoftTeamsOAuthSerializer,
     CreateChannelSerializer,
@@ -285,7 +286,7 @@ class SendPasswordResetEmailView(generics.GenericAPIView):
             uid = urlsafe_base64_encode(force_bytes(user.pk))  # This will use the UUID id
             token = PasswordResetTokenGenerator().make_token(user)
 
-            reset_link = f"https://vapt-frontend-liart.vercel.app/set-password/{uid}/{token}/"
+            reset_link = f"https://vapt-frontend-liart.vercel.app/reset-password/{uid}/{token}/"
 
             data = {
                 "to_email": user_email,
@@ -315,27 +316,44 @@ class SendPasswordResetEmailView(generics.GenericAPIView):
             )
 
 
+
+
+# class UserPasswordResetView(APIView):
+#     renderer_classes = [UserRenderer]
+#     permission_classes = [AllowAny]
+
+#     def post(self, request, uid, token, format=None):
+#         try:
+#             serializer = UserPasswordResetSerializer(
+#                 data=request.data, 
+#                 context={"uid": uid, "token": token}
+#             )
+#             if serializer.is_valid(raise_exception=True):
+#                 return Response(
+#                     {"msg": "Password reset successfully"}, 
+#                     status=status.HTTP_200_OK
+#                 )
+#         except Exception as e:
+#             logger.error(f"Password reset error: {str(e)}")
+#             return Response(
+#                 {"error": "Password reset failed"}, 
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
 class UserPasswordResetView(APIView):
-    renderer_classes = [UserRenderer]
     permission_classes = [AllowAny]
 
-    def post(self, request, uid, token, format=None):
-        try:
-            serializer = UserPasswordResetSerializer(
-                data=request.data, 
-                context={"uid": uid, "token": token}
-            )
-            if serializer.is_valid(raise_exception=True):
-                return Response(
-                    {"msg": "Password reset successfully"}, 
-                    status=status.HTTP_200_OK
-                )
-        except Exception as e:
-            logger.error(f"Password reset error: {str(e)}")
-            return Response(
-                {"error": "Password reset failed"}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+    def post(self, request, uid, token):
+        serializer = UserPasswordResetSerializer(
+            data=request.data,
+            context={"uid": uid, "token": token}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        return Response(
+            {"msg": "Password reset successfully"},
+            status=status.HTTP_200_OK
+        )
 
 
 @api_view(["POST"])
@@ -344,23 +362,23 @@ def logout_view(request):
     return Response({"message": "Logout successful"}, status=200)
     
     
-class SetPasswordView(generics.UpdateAPIView):
-    serializer_class = SetPasswordSerializer
-    permission_classes = [IsAuthenticated]
+# class SetPasswordView(generics.UpdateAPIView):
+#     serializer_class = SetPasswordSerializer
+#     permission_classes = [IsAuthenticated]
 
-    def get_object(self):
-        return self.request.user
+#     def get_object(self):
+#         return self.request.user
 
-    def update(self, request, *args, **kwargs):
-        user = self.get_object()
-        serializer = self.get_serializer(data=request.data)
+#     def update(self, request, *args, **kwargs):
+#         user = self.get_object()
+#         serializer = self.get_serializer(data=request.data)
 
-        if serializer.is_valid():
-            user.set_password(serializer.validated_data["new_password"])
-            user.save()
-            return Response({"message": "Password set successfully"}, status=status.HTTP_200_OK)
+#         if serializer.is_valid():
+#             user.set_password(serializer.validated_data["new_password"])
+#             user.save()
+#             return Response({"message": "Password set successfully"}, status=status.HTTP_200_OK)
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
 
 class GoogleOAuthView(generics.GenericAPIView):
