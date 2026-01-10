@@ -213,58 +213,6 @@ class ReportVulnerabilitiesAPIView(APIView):
         except Exception as e:
             return Response({"detail":"error", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-# class ReportMitigationTimelineAPIView(APIView):
-#     permission_classes = [IsAuthenticated]
-
-#     def get(self, request, report_id):
-#         try:
-#             with MongoContext() as db:
-#                 doc = _load_report(db, report_id)
-#                 if not doc:
-#                     return Response({"detail": "report not found"}, status=404)
-
-#                 admin_email = doc.get("admin_email", "")
-#                 rc = None
-
-#                 if admin_email:
-#                     rc = _get_latest_riskcriteria_for_admin_email(admin_email)
-
-#                 if not rc:
-#                     rc = _get_latest_riskcriteria_for_user(request.user)
-
-#                 if not rc:
-#                     return Response({"detail": "Risk criteria not found"}, status=404)
-
-#                 # Convert timelines → days
-#                 critical_days = parse_timeline_to_days(rc.critical)
-#                 high_days     = parse_timeline_to_days(rc.high)
-#                 medium_days   = parse_timeline_to_days(rc.medium)
-#                 low_days      = parse_timeline_to_days(rc.low)
-
-#                 total_days = critical_days + high_days + medium_days + low_days
-#                 total_hours = days_to_hours(total_days)
-
-#                 payload = {
-#                     "critical": rc.critical,
-#                     "critical_days": critical_days,
-#                     "high": rc.high,
-#                     "high_days": high_days,
-#                     "medium": rc.medium,
-#                     "medium_days": medium_days,
-#                     "low": rc.low,
-#                     "low_days": low_days,
-#                     "mitigation_timeline_total_days": total_days,
-#                     "mitigation_timeline_total_hours": total_hours
-#                 }
-
-#                 return Response(payload, status=200)
-
-#         except Exception as exc:
-#             return Response(
-#                 {"detail": "unexpected error", "error": str(exc)},
-#                 status=500
-#             )
-
 class ReportMitigationTimelineAPIView(APIView):
     permission_classes = [IsAuthenticated]
 

@@ -1,18 +1,12 @@
-# # upload_report/urls.py
-# from django.urls import path
-# from .views import UploadReportView
-
-# urlpatterns = [
-#     path('upload/', UploadReportView.as_view(), name='upload-report'),
-# ]
-
-# upload_report/urls.py
-"""
-URLs configuration for upload_report app
-"""
-
 from django.urls import path
-from .views import UploadReportView,UploadReportLocationAPIView,UploadReportDetailAPIView,serve_report_file
+from .views import (
+    UploadReportView,
+    UploadReportLocationAPIView,
+    UploadReportDetailAPIView,
+    serve_report_file,
+    UploadReportListByAdminAPIView,
+    UploadReportDeleteAPIView
+)
 
 app_name = 'upload_report'
 
@@ -26,11 +20,18 @@ urlpatterns = [
             name="upload_report_locations_by_report",
         ),
     
+    path("upload/all/", UploadReportListByAdminAPIView.as_view(), name="upload_report_list_by_admin"),
     
-     path(
+    path(
         "upload/<str:report_id>/",
         UploadReportDetailAPIView.as_view(),
         name="upload_report_detail",
+    ),
+     
+    path(
+        "upload/<str:report_id>/delete/",
+        UploadReportDeleteAPIView.as_view(),
+        name="upload_report_delete",
     ),
      
      
