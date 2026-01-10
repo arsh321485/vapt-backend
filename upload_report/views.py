@@ -1,7 +1,3 @@
-"""
-Fixed Upload Report View - Now properly stores risk_factor in MongoDB
-"""
-
 import os
 import uuid
 import json
@@ -41,7 +37,7 @@ def serve_report_file(request, path):
     )
 
 
-# single upload report view
+# Multiple upload report view
 
 class UploadReportView(APIView):
     """API endpoint for uploading and parsing vulnerability reports."""
@@ -275,46 +271,6 @@ class UploadReportView(APIView):
         
         # Default fallback
         return {"type": report_type}
-
-    # def _resolve_locations(self, location_value, user) -> List[Location]:
-    #     """
-    #     Resolve a location parameter into Location objects.
-    #     - "all" -> all locations for the current admin user
-    #     - single id / comma-separated ids / JSON array -> those specific locations
-    #     """
-    #     if not location_value:
-    #         return []
-    #     if isinstance(location_value, (list, tuple)):
-    #         raw_ids = list(location_value)
-    #     else:
-    #         value = str(location_value).strip()
-    #         if not value:
-    #             return []
-    #         if value.lower() == "all":
-    #             # All locations for this admin only
-    #             locations = list(Location.objects.filter(admin=user))
-    #             if not locations:
-    #                 raise ValueError("No locations are configured for this admin")
-    #             return locations
-    #         if value.startswith("[") and value.endswith("]"):
-    #             try:
-    #                 parsed = json.loads(value)
-    #             except json.JSONDecodeError:
-    #                 parsed = [value]
-    #             raw_ids = parsed
-    #         else:
-    #             raw_ids = [part.strip() for part in value.split(",") if part.strip()]
-    #     locations: List[Location] = []
-    #     for raw_id in raw_ids:
-    #         try:
-    #             obj_id = ObjectId(str(raw_id))
-    #         except (InvalidId, TypeError):
-    #             raise ValueError(f"Location ID '{raw_id}' is not a valid ObjectId")
-    #         try:
-    #             locations.append(Location.objects.get(pk=obj_id))
-    #         except Location.DoesNotExist:
-    #             raise ValueError(f"Location with ID '{raw_id}' not found")
-    #     return locations
     
     def _resolve_location(self, location_value, user) -> Location:
         """
@@ -617,10 +573,10 @@ class UploadReportView(APIView):
                         upload_report = UploadReport.objects.create(
                             file=relative_filename,
                             file_hash=file_hash,
-                            location=location_obj,   # 👈 SAME LOCATION
+                            location=location_obj, 
                             admin=request.user,
-                            member_type=mt,          # 👈 external / internal
-                            status="processed",
+                            member_type=mt,         
+                            status="Sucessfully Processed",
                             parsed_count=parsed_count,
                         )
 
@@ -652,51 +608,6 @@ class UploadReportView(APIView):
                             "report_type": parsed_data.get("type"),
                             "structured_data_preview": self._create_preview(parsed_data)
                         })
-
-                    # 🔹 Process each location (UNCHANGED)
-                    # for location_obj in location_objects:
-                    #     upload_report = UploadReport.objects.create(
-                    #         file=relative_filename,
-                    #         file_hash=file_hash,
-                    #         location=location_obj,
-                    #         admin=request.user,
-                    #         member_type=member_type,
-                    #         status="processed",
-                    #         parsed_count=parsed_count,
-                    #     )
-
-                    #     report_id = str(upload_report._id)
-
-                    #     # 🔹 MongoDB storage (UNCHANGED)
-                    #     mongodb_stored = self._store_in_mongodb(
-                    #         parsed_data=parsed_data,
-                    #         report_id=report_id,
-                    #         location_id=str(location_obj.pk),
-                    #         location_name=location_obj.location_name,
-                    #         admin_email=request.user.email,
-                    #         original_filename=uploaded_file.name,
-                    #         member_type=member_type
-                    #     )
-
-                    #     # 🔹 FILE DATA (FETCH)
-                    #     file_url = request.build_absolute_uri(
-                    #         settings.MEDIA_URL + relative_filename
-                    #     )
-
-                    #     upload_results.append({
-                    #         "report_id": report_id,
-                    #         "file_name": uploaded_file.name,
-                    #         "file_url": file_url,
-                    #         "file_size": uploaded_file.size,
-                    #         "uploaded_at": upload_report.created_at,
-                    #         "location": location_obj.location_name,
-                    #         "member_type": member_type,
-                    #         "status": upload_report.status,
-                    #         "parsed_count": parsed_count,
-                    #         "mongodb_stored": mongodb_stored,
-                    #         "report_type": parsed_data.get("type"),
-                    #         "structured_data_preview": self._create_preview(parsed_data)
-                    #     })
 
                 except Exception as file_exc:
                     if file_path and os.path.exists(file_path):
@@ -785,7 +696,7 @@ class UploadReportLocationAPIView(APIView):
             
             
             
-
+# Upload Report BY ID
 class UploadReportDetailAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -823,6 +734,99 @@ class UploadReportDetailAPIView(APIView):
                 "success": True,
                 "message": "Upload report retrieved successfully",
                 "upload_report": serializer.data
+            },
+            status=200
+        )
+
+
+#Upload report get all by admin
+class UploadReportListByAdminAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # 🔹 Fetch all reports for logged-in admin
+        reports = (
+            UploadReport.objects
+            .filter(admin=request.user)
+            .select_related("location", "admin")
+            .order_by("-uploaded_at")
+        )
+
+        serializer = UploadReportSerializer(
+            reports,
+            many=True,
+            context={"request": request}
+        )
+
+        return Response(
+            {
+                "success": True,
+                "count": reports.count(),
+                "upload_reports": serializer.data
+            },
+            status=200
+        )
+        
+# DELETE UPLOAD REPORT BY ID
+class UploadReportDeleteAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, report_id):
+        # 🔹 Validate ObjectId
+        try:
+            obj_id = ObjectId(report_id)
+        except (InvalidId, TypeError):
+            return Response(
+                {"success": False, "message": "Invalid upload_report_id"},
+                status=400
+            )
+
+        # 🔹 Fetch report only for logged-in admin
+        report = (
+            UploadReport.objects
+            .filter(_id=obj_id, admin=request.user)
+            .first()
+        )
+
+        if not report:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Upload report not found or access denied"
+                },
+                status=404
+            )
+
+        # 🔹 Delete file from disk (if exists)
+        if report.file:
+            try:
+                file_path = report.file.path
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass  # do not fail delete if file missing
+
+        # 🔹 OPTIONAL: delete MongoDB data
+        try:
+            from pymongo import MongoClient
+            mongo_uri = settings.DATABASES["default"]["CLIENT"]["host"]
+
+            with MongoClient(mongo_uri) as client:
+                db = client.get_default_database()
+                db["nessus_reports"].delete_one(
+                    {"report_id": str(report._id)}
+                )
+        except Exception:
+            pass  # Mongo cleanup should not block API
+
+        # 🔹 Delete DB record
+        report.delete()
+
+        return Response(
+            {
+                "success": True,
+                "message": "Upload report deleted successfully",
+                "deleted_report_id": report_id
             },
             status=200
         )
