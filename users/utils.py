@@ -6,6 +6,8 @@ import sendgrid
 from sendgrid.helpers.mail import Mail
 from django.conf import settings
 from users.models import User
+import random
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,31 @@ class Util:
             return False
         
         # ✅ ADMIN FIRST-TIME SIGNUP EMAIL
+    # ADMIN OTP EMAIL (SIGNUP)
+    @staticmethod
+    def send_signup_otp(email, otp=None):
+        if otp is None:
+            otp = str(random.randint(100000, 999999))
+        
+        # Cache OTP only (password stored separately)
+        cache.set(f"signup_otp_{email}", otp, timeout=300)
+
+        body = f"""
+        Your OTP for VAPTFIX Admin Signup is: {otp}
+        This OTP is valid for 5 minutes.
+        """
+
+        data = {
+            "to_email": email,
+            "subject": "VAPTFIX Signup OTP", 
+            "body": body,
+        }
+        Util.send_mail(data)
+
+   
+   
+   
+    # ✅ ADMIN WELCOME EMAIL
     @staticmethod
     def send_admin_welcome_email(user_email):
 
@@ -53,7 +80,7 @@ class Util:
 
         return Util.send_mail(data)
 
-
+# Verify reCAPTCHA
 def verify_recaptcha(recaptcha_response):
     """
     Verify reCAPTCHA response with Google's verification endpoint.

@@ -12,6 +12,7 @@ from .models import User
 from django.apps import apps
 from django.contrib.auth.hashers import make_password
 from django.shortcuts import redirect
+from django.utils import timezone
 import requests
 import secrets
 import traceback
@@ -22,6 +23,17 @@ import uuid
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from urllib.parse import urlencode
+import random
+from django.conf import settings
+from pymongo import MongoClient
+from django.core.cache import cache
+from rest_framework_simplejwt.tokens import RefreshToken
+# from .utils import send_signup_otp, verify_signup_otp, verify_recaptcha,send_admin_welcome_email
+from .utils import Util, verify_recaptcha
+from .validators import strong_password_validator
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from .validators import strong_password_validator  # Your custom validator
 
 class SlackAccessTokenSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=True)
@@ -70,6 +82,7 @@ from django.views.decorators.csrf import csrf_exempt
 logger = logging.getLogger(__name__)
 from .utils import Util
 
+#Admin Registration View
 @method_decorator(csrf_exempt, name='dispatch')
 class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
@@ -132,43 +145,143 @@ class UserRegistrationView(generics.CreateAPIView):
             safe_data = {k: (v if k != 'password' else '***') for k, v in dict(request.data).items()}
             logger.debug(f"Request data: {safe_data}")
             return Response({"error": "Something went wrong"}, status=400)
-        
+      
+#Admin Login View  
 class UserLoginView(generics.GenericAPIView):
     serializer_class = UserLoginSerializer
     permission_classes = [AllowAny]
-    renderer_classes = [UserRenderer]
 
     def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user"]
+
+        refresh = RefreshToken.for_user(user)
+
+        return Response({
+            "message": "Welcome back! You have successfully logged in as an admin",
+            "user": {
+                "id": user.id,
+                "email": user.email
+            },
+            "tokens": {
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+            }
+
+        }, status=status.HTTP_200_OK)
+
+
+#  Admin Signup OTP View   
+class AdminSignupSendOTPView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = (request.data.get("email") or "").strip().lower()
+        password = request.data.get("password")
+        confirm_password = request.data.get("confirm_password")
+        recaptcha = request.data.get("recaptcha")
+
+        if not email or not password or not confirm_password:
+            return Response({"error": "All fields required"}, status=400)
+
+        if password != confirm_password:
+            return Response({"error": "Passwords do not match"}, status=400)
+
+        # Password strength validation
         try:
-            serializer = self.get_serializer(data=request.data)
-            
-            # This will automatically validate reCAPTCHA through the serializer
-            serializer.is_valid(raise_exception=True)
+            validate_password(password)
+            strong_password_validator(password)
+        except ValidationError as e:
+            return Response({"error": e.messages}, status=400)
 
-            user = serializer.validated_data["user"]
-            login(request, user)
+        if User.objects.filter(email=email).exists():
+            return Response({"error": "User already exists"}, status=400)
 
-            # Generate JWT tokens
-            refresh = RefreshToken.for_user(user)
+        # reCAPTCHA
+        ok, msg = verify_recaptcha(recaptcha)
+        if not ok:
+            return Response({"error": msg}, status=400)
 
-            logger.info(f"Admin authenticated successfully: {user.email}")
+        # ✅ Store BOTH OTP + PASSWORD in cache for 5 minutes
+        otp = str(random.randint(100000, 999999))
+        cache_data = {
+            'otp': otp,
+            'password': password  # Store hashed? No, hash when creating user
+        }
+        cache.set(f"signup_data_{email}", cache_data, timeout=300)
 
-            return Response({
-                "message": "Welcome back! You have successfully logged in as an admin",
-                "user": UserProfileSerializer(user).data,
-                "tokens": {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                }
-            }, status=status.HTTP_200_OK)
-            
+        # Send OTP email
+        Util.send_signup_otp(email, otp)  # Pass OTP explicitly
+
+        return Response({"message": "OTP sent to your email"}, status=200)
+
+
+  
+# Admin Signup Verify OTP View
+class AdminSignupVerifyOTPView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = (request.data.get("email") or "").strip().lower()
+        otp = request.data.get("otp")
+
+        if not email or not otp:
+            return Response({"error": "Email and OTP are required"}, status=400)
+
+        # ✅ Get cached OTP + password
+        cache_key = f"signup_data_{email}"
+        cached_data = cache.get(cache_key)
+        
+        if not cached_data:
+            return Response({"error": "No signup session found. Please start again."}, status=400)
+        
+        if cached_data['otp'] != otp:
+            return Response({"error": "Invalid OTP"}, status=400)
+
+        # ✅ OTP valid → create admin user with cached password
+        try:
+            user = User.objects.create_user(
+                email=email,
+                password=cached_data['password'],  # Use cached password
+                is_active=True,
+                is_staff=True,  # Admin privileges
+                is_superuser=False
+            )
         except Exception as e:
-            logger.error(f"Login error: {str(e)}")
-            return Response({
-                "error": "Login failed. Please check your credentials."
-            }, status=status.HTTP_400_BAD_REQUEST)
+            logger.error(f"Failed to create user: {str(e)}")
+            return Response({"error": "Failed to create account"}, status=500)
+
+        # ✅ Clean up cache
+        cache.delete(cache_key)
+        cache.delete(f"signup_otp_{email}")
+
+        # Generate tokens
+        refresh = RefreshToken.for_user(user)
+
+        # Send welcome email
+        try:
+            Util.send_admin_welcome_email(user.email)
+        except:
+            pass  # Don't fail signup if email fails
+
+        return Response({
+            "message": "Welcome! Your admin account has been created successfully",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "is_staff": user.is_staff
+            },
+            "tokens": {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh)
+            },
+        }, status=201)
 
 
+
+
+# ADMIN PROFILE VIEW     
 class UserProfileView(generics.RetrieveAPIView):
     serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -230,7 +343,7 @@ class UserProfileView(generics.RetrieveAPIView):
 #         kwargs['partial'] = True
 #         return self.update(request, *args, **kwargs)
 
-
+# ADMIN CHANGE PASSWORD VIEW
 class ChangePasswordView(generics.UpdateAPIView):
     serializer_class = ChangePasswordSerializer
     permission_classes = [IsAuthenticated]
@@ -261,6 +374,7 @@ class ChangePasswordView(generics.UpdateAPIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
 
+# ADMIN FORGOT PASSWORD VIEW
 @method_decorator(csrf_exempt, name="dispatch")
 class SendPasswordResetEmailView(generics.GenericAPIView):
     serializer_class = SendPasswordResetEmailSerializer
@@ -315,31 +429,7 @@ class SendPasswordResetEmailView(generics.GenericAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
-
-
-# class UserPasswordResetView(APIView):
-#     renderer_classes = [UserRenderer]
-#     permission_classes = [AllowAny]
-
-#     def post(self, request, uid, token, format=None):
-#         try:
-#             serializer = UserPasswordResetSerializer(
-#                 data=request.data, 
-#                 context={"uid": uid, "token": token}
-#             )
-#             if serializer.is_valid(raise_exception=True):
-#                 return Response(
-#                     {"msg": "Password reset successfully"}, 
-#                     status=status.HTTP_200_OK
-#                 )
-#         except Exception as e:
-#             logger.error(f"Password reset error: {str(e)}")
-#             return Response(
-#                 {"error": "Password reset failed"}, 
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
+# ADMIN PASSWORD RESET VIEW
 class UserPasswordResetView(APIView):
     permission_classes = [AllowAny]
 
@@ -355,32 +445,14 @@ class UserPasswordResetView(APIView):
             status=status.HTTP_200_OK
         )
 
-
+# ADMIN LOGOUT VIEW
 @api_view(["POST"])
 @permission_classes([AllowAny]) 
 def logout_view(request):
     return Response({"message": "Logout successful"}, status=200)
     
     
-# class SetPasswordView(generics.UpdateAPIView):
-#     serializer_class = SetPasswordSerializer
-#     permission_classes = [IsAuthenticated]
-
-#     def get_object(self):
-#         return self.request.user
-
-#     def update(self, request, *args, **kwargs):
-#         user = self.get_object()
-#         serializer = self.get_serializer(data=request.data)
-
-#         if serializer.is_valid():
-#             user.set_password(serializer.validated_data["new_password"])
-#             user.save()
-#             return Response({"message": "Password set successfully"}, status=status.HTTP_200_OK)
-
-#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-
+# Admin Google OAuth View
 class GoogleOAuthView(generics.GenericAPIView):
     serializer_class = GoogleOAuthSerializer
     permission_classes = [AllowAny]

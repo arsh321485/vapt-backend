@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from .utils import Util, verify_recaptcha
+from .validators import strong_password_validator
 import re
 import logging
 logger = logging.getLogger(__name__)
@@ -25,115 +26,15 @@ from .utils import verify_recaptcha
 from rest_framework_simplejwt.tokens import RefreshToken
 User = get_user_model()
 
-
-
-# class UserRegistrationSerializer(serializers.ModelSerializer):
-#     password = serializers.CharField(write_only=True, min_length=8, validators=[validate_password])
-#     confirm_password = serializers.CharField(write_only=True)
-#     recaptcha = serializers.CharField(
-#         write_only=True,
-#         required=False,
-#         allow_blank=True
-#     )
-
-#     class Meta:
-#         model = User
-#         fields = [
-#             "firstname",
-#             "lastname",
-#             "organisation_name",
-#             "organisation_url",
-#             "email",
-#             "password",
-#             "confirm_password",
-#             "recaptcha"  # <-- must include it here!
-#         ]
-#         extra_kwargs = {
-#             "password": {"write_only": True},
-#             "confirm_password": {"write_only": True},
-#             "recaptcha": {"write_only": True},
-#         }
-
-#     def validate(self, attrs):
-#         # Password match check
-#         if attrs.get("password") != attrs.get("confirm_password"):
-#             raise serializers.ValidationError("Passwords don't match")
-
-#         # reCAPTCHA check only in production
-#         if not settings.DEBUG:
-#             recaptcha_value = attrs.get("recaptcha", "")
-#             is_valid, message = verify_recaptcha(recaptcha_value)
-#             if not is_valid:
-#                 raise serializers.ValidationError({"recaptcha": message})
-#         else:
-#             logger.info("DEBUG mode active – skipping reCAPTCHA verification")
-
-#         return attrs
-
-#     def create(self, validated_data):
-#         validated_data.pop("confirm_password", None)
-#         validated_data.pop("recaptcha", None)
-#         user = User.objects.create_user(**validated_data)
-#         return user
-
-
-# class UserLoginSerializer(serializers.Serializer):
-#     email = serializers.EmailField()
-#     password = serializers.CharField(write_only=True)
-#     recaptcha = serializers.CharField(write_only=True, required=True)
-
-#     def validate_recaptcha(self, value):
-#         """
-#         Validate reCAPTCHA response
-#         """
-#         is_valid, message = verify_recaptcha(value)
-#         if not is_valid:
-#             raise serializers.ValidationError(message)
-#         return value
-
-#     def validate(self, attrs):
-#         email = attrs.get("email")
-#         password = attrs.get("password")
-
-#         if email and password:
-#             user = authenticate(
-#                 request=self.context.get("request"),
-#                 username=email,
-#                 password=password
-#             )
-
-#             if not user:
-#                 raise serializers.ValidationError("Invalid credentials")
-
-#             if not user.is_active:
-#                 raise serializers.ValidationError("User account is disabled")
-
-#             attrs["user"] = user
-#             return attrs
-#         else:
-#             raise serializers.ValidationError("Must include email and password")
-
-# class UserProfileSerializer(serializers.ModelSerializer):
-#     full_name = serializers.SerializerMethodField()
-
-#     class Meta:
-#         model = User
-#         fields = [
-#             "id", "email", "firstname", "lastname",
-#             "organisation_name", "organisation_url", "created_at",
-#             "full_name",
-#         ]
-#         read_only_fields = ["id", "email", "created_at"]
-
-#     def get_full_name(self, obj):
-#         return f"{obj.firstname} {obj.lastname}".strip()
-
 # Signup serializer
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
         write_only=True,
         min_length=8,
-        validators=[validate_password]
+        validators=[
+            validate_password,
+            strong_password_validator
+        ]
     )
     confirm_password = serializers.CharField(write_only=True)
     recaptcha = serializers.CharField(
@@ -192,35 +93,19 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
-    recaptcha = serializers.CharField(write_only=True, required=True)
-
-    def validate_recaptcha(self, value):
-        is_valid, message = verify_recaptcha(value)
-        if not is_valid:
-            raise serializers.ValidationError(message)
-        return value
 
     def validate(self, attrs):
-        email = attrs.get("email")
-        password = attrs.get("password")
+        email = attrs["email"].strip().lower()
+        password = attrs["password"]
 
-        if not email or not password:
-            raise serializers.ValidationError("Must include email and password")
-
-        user = authenticate(
-            request=self.context.get("request"),
-            username=email,
-            password=password
-        )
+        user = authenticate(username=email, password=password)
 
         if not user:
-            raise serializers.ValidationError("Invalid credentials")
-
-        if not user.is_active:
-            raise serializers.ValidationError("User account is disabled")
+            raise serializers.ValidationError("Invalid email or password")
 
         attrs["user"] = user
         return attrs
+
 
 # User Profile Serializer
 class UserProfileSerializer(serializers.ModelSerializer):
