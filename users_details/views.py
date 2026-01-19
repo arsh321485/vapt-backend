@@ -17,7 +17,7 @@ class UserDetailCreateView(generics.CreateAPIView):
     serializer_class = UserDetailCreateSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def send_welcome_email(self, email, first_name, last_name, roles, location):
+    def send_welcome_email(self, email, first_name, last_name, roles):
         """Enhanced SendGrid Email Sending with Better Error Handling"""
         
         # Validate inputs
@@ -48,7 +48,6 @@ class UserDetailCreateView(generics.CreateAPIView):
                 
                 <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
                     <p style="margin: 10px 0;"><strong>Assigned Roles:</strong> {roles_str}</p>
-                    <p style="margin: 10px 0;"><strong>Location:</strong> {location}</p>
                 </div>
                 
                 <p>You can now access the system and perform tasks according to your assigned roles.</p>
@@ -104,7 +103,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             first_name = user_detail.first_name or ""
             last_name = user_detail.last_name or ""
             roles = user_detail.Member_role or []
-            location = user_detail.select_location or "N/A"
+            # location = user_detail.select_location or "N/A"
             
             logger.info(f"Creating user detail for {email} with roles: {roles}")
             
@@ -114,7 +113,7 @@ class UserDetailCreateView(generics.CreateAPIView):
                 first_name=first_name,
                 last_name=last_name,
                 roles=roles,
-                location=location
+                # location=location
             )
             
             response_data = {
@@ -141,22 +140,37 @@ class UserDetailCreateView(generics.CreateAPIView):
             
             
             
+# class UserDetailListView(generics.ListAPIView):
+#     serializer_class = UserDetailSerializer
+#     permission_classes = [permissions.IsAuthenticated]
+
+#     def get_queryset(self):
+#         admin_id = self.request.query_params.get("admin_id")
+#         location_id = self.request.query_params.get("location_id")
+
+#         queryset = UserDetail.objects.all().order_by("-created_at")
+#         if admin_id:
+#             queryset = queryset.filter(admin__id=admin_id)
+#         if location_id:
+#             try:
+#                 queryset = queryset.filter(location__id=ObjectId(location_id))
+#             except Exception:
+#                 pass
+#         return queryset
+
+
 class UserDetailListView(generics.ListAPIView):
     serializer_class = UserDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         admin_id = self.request.query_params.get("admin_id")
-        location_id = self.request.query_params.get("location_id")
 
         queryset = UserDetail.objects.all().order_by("-created_at")
+
         if admin_id:
             queryset = queryset.filter(admin__id=admin_id)
-        if location_id:
-            try:
-                queryset = queryset.filter(location__id=ObjectId(location_id))
-            except Exception:
-                pass
+
         return queryset
 
 
