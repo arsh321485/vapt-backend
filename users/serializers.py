@@ -90,9 +90,32 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         return user
 
 # Login serializer
+# class UserLoginSerializer(serializers.Serializer):
+#     email = serializers.EmailField()
+#     password = serializers.CharField(write_only=True)
+
+#     def validate(self, attrs):
+#         email = attrs["email"].strip().lower()
+#         password = attrs["password"]
+
+#         user = authenticate(username=email, password=password)
+
+#         if not user:
+#             raise serializers.ValidationError("Invalid email or password")
+
+#         attrs["user"] = user
+#         return attrs
+
 class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
+
+    testing_type = serializers.ListField(
+        child=serializers.ChoiceField(
+            choices=["white_box", "grey_box", "black_box"]
+        ),
+        allow_empty=False
+    )
 
     def validate(self, attrs):
         email = attrs["email"].strip().lower()
@@ -106,6 +129,12 @@ class UserLoginSerializer(serializers.Serializer):
         attrs["user"] = user
         return attrs
 
+
+# Admin Testing Type Serializer
+class AdminTestingTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "email", "testing_type"]
 
 # User Profile Serializer
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -867,25 +896,25 @@ class SlackOperationSerializer(serializers.Serializer):
             )
         return value
 
-class SlackLoginSerializer(serializers.Serializer):
-    code = serializers.CharField(
-        required=True, 
-        help_text="Authorization code received from Slack OAuth callback",
-        min_length=10
-    )
-    redirect_uri = serializers.URLField(
-        required=False, 
-        default="http://localhost:3000/slack/callback",
-        help_text="Redirect URI that was used in the OAuth flow"
-    )
+# class SlackLoginSerializer(serializers.Serializer):
+#     code = serializers.CharField(
+#         required=True, 
+#         help_text="Authorization code received from Slack OAuth callback",
+#         min_length=10
+#     )
+#     redirect_uri = serializers.URLField(
+#         required=False, 
+#         default="http://localhost:3000/slack/callback",
+#         help_text="Redirect URI that was used in the OAuth flow"
+#     )
     
-    def validate_code(self, value):
-        """Basic validation for OAuth code format"""
-        if len(value) < 10:
-            raise serializers.ValidationError(
-                "Invalid authorization code format"
-            )
-        return value
+#     def validate_code(self, value):
+#         """Basic validation for OAuth code format"""
+#         if len(value) < 10:
+#             raise serializers.ValidationError(
+#                 "Invalid authorization code format"
+#             )
+#         return value
 
 
 class SlackChannelListSerializer(serializers.Serializer):
