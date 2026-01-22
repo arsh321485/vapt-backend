@@ -6,6 +6,7 @@ from .views import (
     UserLoginView,
     AdminSignupSendOTPView,
     AdminSignupVerifyOTPView,
+    AdminTestingTypeView,
     UserProfileView,
     # UserProfileUpdateView,
     ChangePasswordView,
@@ -74,6 +75,11 @@ urlpatterns = [
     path("signup/send-otp/", AdminSignupSendOTPView.as_view(),name="admin-signup-send-otp"),
     path("signup/verify-otp/", AdminSignupVerifyOTPView.as_view(),name="admin-signup-verify-otp"),
     path('login/', UserLoginView.as_view(), name='login'),
+    path(
+        "<str:admin_id>/testing-type/",
+        AdminTestingTypeView.as_view(),
+        name="admin-testing-type"
+    ),
     path('google-oauth/', GoogleOAuthView.as_view(), name='google-oauth'),
     path('logout/', logout_view, name='logout'),
     path('profile/', UserProfileView.as_view(), name='profile'),

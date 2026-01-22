@@ -20,7 +20,7 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 ALLOWED_HOSTS = [host.strip() for host in """
 localhost,
 127.0.0.1,
-8727279952a9.ngrok-free.app,
+deaf387e4d71.ngrok-free.app,
 localhost:5173,
 38.242.247.151,
 vaptbackend.secureitlab.com
