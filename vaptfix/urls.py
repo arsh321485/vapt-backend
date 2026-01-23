@@ -30,6 +30,7 @@ urlpatterns = [
     path("api/admin/admindashboard/", include("admindashboard.urls")),
     path("api/admin/adminregister/", include("adminregister.urls")),
     path("api/admin/adminasset/", include("adminasset.urls")),
+    path("api/admin/scope/", include("scope.urls")),
     
     
     path("media/<path:path>", serve_report_file),
