@@ -62,7 +62,8 @@ INSTALLED_APPS = [
     "upload_report",
     "admindashboard",
     "adminregister",
-    "adminasset"
+    "adminasset",
+    "scope",
 ]
 
 MIDDLEWARE = [
