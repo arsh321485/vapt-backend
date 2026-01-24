@@ -53,9 +53,34 @@ class Scope(models.Model):
         choices=TARGET_TYPE_CHOICES,
         db_index=True
     )
-    target_value = models.CharField(max_length=500, db_index=True)
+    target_value = models.CharField(
+        max_length=500, 
+        db_index=True,
+        help_text="IP address, URL, or subnet - stored exactly as provided"
+    )
+    
+    def save(self, *args, **kwargs):
+        """Override save to ensure target_value is stored exactly as string."""
+        # Ensure target_value is a string and not modified
+        if self.target_value:
+            self.target_value = str(self.target_value).strip()
+        super().save(*args, **kwargs)
     notes = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True)
+    # Testing type associated with this scope target (single choice: white_box, grey_box, black_box)
+    TESTING_TYPE_CHOICES = (
+        ('white_box', 'White Box'),
+        ('grey_box', 'Grey Box'),
+        ('black_box', 'Black Box'),
+    )
+    testing_type = models.CharField(
+        max_length=20,
+        choices=TESTING_TYPE_CHOICES,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Single testing type: white_box, grey_box, or black_box"
+    )
     # Subnet count (number of IPs in subnet, only for subnets)
     subnet_count = models.IntegerField(null=True, blank=True, help_text="Number of IPs in subnet (only for subnets)")
     # Link to file upload if created from file
@@ -75,9 +100,23 @@ class Scope(models.Model):
             models.Index(fields=["admin", "target_type"]),
             models.Index(fields=["admin", "target_value"]),
             models.Index(fields=["admin", "is_active"]),
+            models.Index(fields=["admin", "testing_type"]),  # Index for gate filtering
             models.Index(fields=["file_upload"]),
         ]
         unique_together = [['admin', 'target_value']]  # Prevent duplicate targets per admin
     
     def __str__(self):
         return f"{self.target_type}: {self.target_value} ({self.admin.email})"
+    
+    def clean(self):
+        """Ensure target_value is always a string and not modified."""
+        if self.target_value:
+            # Ensure it's a string, not converted to number or other type
+            self.target_value = str(self.target_value).strip()
+            # Prevent any auto-increment or modification
+            # IP addresses should be stored exactly as provided (after normalization)
+    
+    def save(self, *args, **kwargs):
+        """Override save to ensure target_value is stored exactly as string."""
+        self.clean()  # Clean before saving
+        super().save(*args, **kwargs)

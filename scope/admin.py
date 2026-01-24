@@ -16,9 +16,9 @@ class ScopeFileUploadAdmin(admin.ModelAdmin):
 
 @admin.register(Scope)
 class ScopeAdmin(admin.ModelAdmin):
-    list_display = ['_id', 'admin', 'target_type', 'target_value', 'is_active', 'file_upload', 'created_at']
+    list_display = ['_id', 'admin', 'target_type', 'target_value', 'testing_type', 'is_active', 'subnet_count', 'file_upload', 'created_at']
     list_filter = ['target_type', 'is_active', 'created_at']
-    search_fields = ['target_value', 'admin__email']
+    search_fields = ['target_value', 'admin__email', 'file_upload__file_name']
     readonly_fields = ['_id', 'created_at', 'updated_at']
     list_editable = ['is_active']
     
