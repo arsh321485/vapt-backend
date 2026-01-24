@@ -46,6 +46,16 @@ class ScopeCreateView(APIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request):
+        # Check if request has any data
+        if not request.data and not request.FILES:
+            return Response(
+                {
+                    'success': False,
+                    'error': 'No data provided. Please provide target_value (JSON), targets (form-data), or file (form-data).'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         # Check content type to determine request type
         content_type = request.content_type or ''
         
@@ -55,7 +65,10 @@ class ScopeCreateView(APIView):
             
             if not target_value:
                 return Response(
-                    {'error': 'target_value is required for single target creation.'},
+                    {
+                        'success': False,
+                        'error': 'target_value is required for single target creation.'
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -68,22 +81,54 @@ class ScopeCreateView(APIView):
                     subnet_count = get_subnet_count(target_value)
                     serializer.validated_data['subnet_count'] = subnet_count
                 
+                # Gate: Use current_testing_box parameter if provided, otherwise use provided testing_type or admin's
+                current_testing_box = request.query_params.get('current_testing_box') or request.data.get('current_testing_box')
+                if not serializer.validated_data.get('testing_type'):
+                    if current_testing_box:
+                        # Validate current_testing_box
+                        if current_testing_box in ['white_box', 'grey_box', 'black_box']:
+                            serializer.validated_data['testing_type'] = current_testing_box
+                        else:
+                            return Response(
+                                {
+                                    'success': False,
+                                    'error': f'Invalid current_testing_box: {current_testing_box}. Must be white_box, grey_box, or black_box.'
+                                },
+                                status=status.HTTP_400_BAD_REQUEST
+                            )
+                    else:
+                        # Get admin's testing_type from their profile (use first one if list)
+                        admin_testing_type = getattr(request.user, 'testing_type', None)
+                        if admin_testing_type:
+                            if isinstance(admin_testing_type, list) and len(admin_testing_type) > 0:
+                                serializer.validated_data['testing_type'] = admin_testing_type[0]  # Use first one
+                            elif isinstance(admin_testing_type, str):
+                                serializer.validated_data['testing_type'] = admin_testing_type
+                        # If still no testing_type, leave it as None (will be filtered by gate)
+
                 scope = serializer.save(admin=request.user)
                 return Response({
                     'success': True,
                     'message': 'Target created successfully.',
+                    'admin_id': str(request.user.id),
+                    'admin_email': request.user.email,
                     'data': {
                         '_id': str(scope._id),
                         'target_type': scope.target_type,
                         'target_value': scope.target_value,
                         'notes': scope.notes,
                         'is_active': scope.is_active,
+                        'testing_type': scope.testing_type,
                         'subnet_count': scope.subnet_count,
                         'created_at': scope.created_at
                     }
                 }, status=status.HTTP_201_CREATED)
             else:
-                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response({
+                    'success': False,
+                    'error': 'Validation failed.',
+                    'errors': serializer.errors
+                }, status=status.HTTP_400_BAD_REQUEST)
         
         # Case 2: Form-data request
         # Check for file upload first
@@ -95,7 +140,10 @@ class ScopeCreateView(APIView):
         if uploaded_file:
             if targets_text or target_value:
                 return Response(
-                    {'error': 'Cannot provide both file and targets/target_value. Use only one method.'},
+                    {
+                        'success': False,
+                        'error': 'Cannot provide both file and targets/target_value. Use only one method.'
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -105,7 +153,10 @@ class ScopeCreateView(APIView):
         elif targets_text:
             if target_value:
                 return Response(
-                    {'error': 'Cannot provide both targets and target_value. Use targets for bulk, target_value for single.'},
+                    {
+                        'success': False,
+                        'error': 'Cannot provide both targets and target_value. Use targets for bulk, target_value for single.'
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -119,26 +170,70 @@ class ScopeCreateView(APIView):
                 'notes': request.data.get('notes', ''),
                 'is_active': request.data.get('is_active', True)
             }
+            # Get testing_type from form-data if provided (single value only)
+            testing_type = request.data.get('testing_type')
+            if testing_type:
+                # Accept single string value only
+                if isinstance(testing_type, str) and testing_type in ['white_box', 'grey_box', 'black_box']:
+                    data['testing_type'] = testing_type
+                elif isinstance(testing_type, list) and len(testing_type) > 0:
+                    # If list provided, use first one
+                    data['testing_type'] = testing_type[0] if testing_type[0] in ['white_box', 'grey_box', 'black_box'] else None
+                else:
+                    return Response(
+                        {
+                            'success': False,
+                            'error': 'testing_type must be a single value: white_box, grey_box, or black_box'
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            
             # Calculate subnet_count if it's a subnet
             if is_valid_subnet(target_value):
                 data['subnet_count'] = get_subnet_count(target_value)
             
             serializer = ScopeCreateSerializer(data=data)
             if serializer.is_valid():
-                scope = serializer.save(admin=request.user)
-                return Response({
-                    'success': True,
-                    'message': 'Target created successfully.',
-                    'data': {
-                        '_id': str(scope._id),
-                        'target_type': scope.target_type,
-                        'target_value': scope.target_value,
-                        'notes': scope.notes,
-                        'is_active': scope.is_active,
-                        'subnet_count': scope.subnet_count,
-                        'created_at': scope.created_at
-                    }
-                }, status=status.HTTP_201_CREATED)
+                # Gate: Use current_testing_box parameter if provided
+                current_testing_box = request.query_params.get('current_testing_box') or request.data.get('current_testing_box')
+                if not serializer.validated_data.get('testing_type'):
+                    if current_testing_box:
+                        if current_testing_box in ['white_box', 'grey_box', 'black_box']:
+                            serializer.validated_data['testing_type'] = current_testing_box
+                        else:
+                            return Response(
+                                {
+                                    'success': False,
+                                    'error': f'Invalid current_testing_box: {current_testing_box}. Must be white_box, grey_box, or black_box.'
+                                },
+                                status=status.HTTP_400_BAD_REQUEST
+                            )
+                    else:
+                        # Get admin's testing_type (use first one if list)
+                        admin_testing_type = getattr(request.user, 'testing_type', None)
+                        if admin_testing_type:
+                            if isinstance(admin_testing_type, list) and len(admin_testing_type) > 0:
+                                serializer.validated_data['testing_type'] = admin_testing_type[0]
+                            elif isinstance(admin_testing_type, str):
+                                serializer.validated_data['testing_type'] = admin_testing_type
+
+                        scope = serializer.save(admin=request.user)
+                        return Response({
+                            'success': True,
+                            'message': 'Target created successfully.',
+                            'admin_id': str(request.user.id),
+                            'admin_email': request.user.email,
+                            'data': {
+                                '_id': str(scope._id),
+                                'target_type': scope.target_type,
+                                'target_value': scope.target_value,
+                                'notes': scope.notes,
+                                'is_active': scope.is_active,
+                                'testing_type': scope.testing_type,
+                                'subnet_count': scope.subnet_count,
+                                'created_at': scope.created_at
+                            }
+                        }, status=status.HTTP_201_CREATED)
             else:
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
@@ -146,6 +241,7 @@ class ScopeCreateView(APIView):
         else:
             return Response(
                 {
+                    'success': False,
                     'error': 'Please provide one of: target_value (JSON or form-data), targets (form-data), or file (form-data).'
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -171,8 +267,10 @@ class ScopeCreateView(APIView):
             tmp_file_path = tmp_file.name
         
         try:
+            # Check if expand_subnets parameter is provided
+            expand_subnets = request.data.get('expand_subnets', 'true').lower() == 'true'
             # Parse file
-            extracted_targets = parse_file(tmp_file_path)
+            extracted_targets = parse_file(tmp_file_path, expand_subnets=expand_subnets)
         except Exception as e:
             errors.append(f"Error parsing file: {str(e)}")
         finally:
@@ -184,8 +282,9 @@ class ScopeCreateView(APIView):
             file_upload.delete()  # Delete file record if no targets found
             return Response(
                 {
+                    'success': False,
                     'error': 'No valid targets found in file. Please ensure the file contains valid IP addresses or URLs.',
-                    'errors': errors
+                    'errors': errors if errors else None
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -194,6 +293,7 @@ class ScopeCreateView(APIView):
             file_upload.delete()  # Delete file record if parsing failed
             return Response(
                 {
+                    'success': False,
                     'error': 'Failed to parse file.',
                     'errors': errors
                 },
@@ -210,7 +310,10 @@ class ScopeCreateView(APIView):
         """Handle bulk text input and create targets."""
         if not targets_text or not targets_text.strip():
             return Response(
-                {'error': 'Targets text cannot be empty.'},
+                {
+                    'success': False,
+                    'error': 'Targets text cannot be empty.'
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -231,6 +334,31 @@ class ScopeCreateView(APIView):
         created = []
         skipped = []
         
+        # Gate: Get current_testing_box from query params or request data
+        current_testing_box = request.query_params.get('current_testing_box') or request.data.get('current_testing_box')
+        
+        # Get admin's testing_type to use as default (single value only)
+        admin_testing_type = getattr(request.user, 'testing_type', None)
+        default_testing_type = None
+        if admin_testing_type:
+            if isinstance(admin_testing_type, list) and len(admin_testing_type) > 0:
+                default_testing_type = admin_testing_type[0]  # Use first one
+            elif isinstance(admin_testing_type, str):
+                default_testing_type = admin_testing_type
+        
+        # Use current_testing_box if provided, otherwise use default
+        final_testing_type = current_testing_box if current_testing_box else default_testing_type
+        
+        # Validate final_testing_type
+        if final_testing_type and final_testing_type not in ['white_box', 'grey_box', 'black_box']:
+            return Response(
+                {
+                    'success': False,
+                    'error': f'Invalid testing_type: {final_testing_type}. Must be white_box, grey_box, or black_box.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         for target_data in extracted_targets:
             target_value = target_data['target_value']
             target_type = target_data['target_type']
@@ -250,6 +378,9 @@ class ScopeCreateView(APIView):
                 if subnet_count is None:
                     subnet_count = get_subnet_count(clean_target_value)
             
+            # Use final_testing_type (single value)
+            testing_type = final_testing_type
+            
             # Check if already exists (use clean value)
             if Scope.objects.filter(admin=request.user, target_value=clean_target_value).exists():
                 skipped.append({
@@ -260,19 +391,24 @@ class ScopeCreateView(APIView):
                 continue
             
             try:
+                # Ensure target_value is stored as string exactly (no conversion)
+                clean_target_value_str = str(clean_target_value).strip()
+                
                 scope = Scope.objects.create(
                     admin=request.user,
                     target_type=target_type,
-                    target_value=clean_target_value,
+                    target_value=clean_target_value_str,  # Store as string exactly
                     subnet_count=subnet_count,  # Will be None for individual IPs
+                    testing_type=testing_type,  # Add testing_type
                     file_upload=file_upload
                 )
                 created.append({
                     '_id': str(scope._id),
                     'target_type': scope.target_type,
                     'target_value': scope.target_value,
+                    'testing_type': scope.testing_type,  # Include testing_type in response
                     'subnet_count': scope.subnet_count,
-                    'created_at': scope.created_at
+                    'created_at': scope.created_at.isoformat() if scope.created_at else None
                 })
             except Exception as e:
                 skipped.append({
@@ -293,6 +429,8 @@ class ScopeCreateView(APIView):
         response_data = {
             'success': True,
             'message': message,
+            'admin_id': str(request.user.id),
+            'admin_email': request.user.email,
             'created_count': len(created),
             'skipped_count': len(skipped),
             'created': created,
@@ -321,6 +459,7 @@ class ScopeListView(generics.ListAPIView):
     - is_active: Filter by active status (true/false)
     - search: Search in target_value
     - file_upload_id: Filter by file upload ID
+    - testing_type: Filter by testing type (white_box, grey_box, black_box) - can be comma-separated
     """
     permission_classes = [IsAuthenticated]
     serializer_class = ScopeListSerializer
@@ -407,6 +546,23 @@ class ScopeListView(generics.ListAPIView):
             except (InvalidId, TypeError):
                 pass  # Invalid ID, ignore filter
         
+        # GATE: Filter by current_testing_box (gate mechanism)
+        current_testing_box = self.request.query_params.get('current_testing_box')
+        if current_testing_box:
+            # Validate and filter by single testing box
+            if current_testing_box in ['white_box', 'grey_box', 'black_box']:
+                queryset = queryset.filter(testing_type=current_testing_box)
+            else:
+                # Invalid testing box, return empty queryset
+                return Scope.objects.none()
+        
+        # Filter by testing_type (legacy support - single value only now)
+        testing_type_param = self.request.query_params.get('testing_type')
+        if testing_type_param:
+            # Single value only
+            if testing_type_param in ['white_box', 'grey_box', 'black_box']:
+                queryset = queryset.filter(testing_type=testing_type_param)
+        
         return queryset.order_by('-created_at')
 
 
@@ -423,7 +579,17 @@ class ScopeDetailView(generics.RetrieveUpdateDestroyAPIView):
     lookup_field = '_id'
     
     def get_queryset(self):
-        return Scope.objects.filter(admin=self.request.user)
+        queryset = Scope.objects.filter(admin=self.request.user)
+        
+        # GATE: Filter by current_testing_box if provided
+        current_testing_box = self.request.query_params.get('current_testing_box')
+        if current_testing_box:
+            if current_testing_box in ['white_box', 'grey_box', 'black_box']:
+                queryset = queryset.filter(testing_type=current_testing_box)
+            else:
+                return Scope.objects.none()
+        
+        return queryset
     
     def get_object(self):
         pk = self.kwargs.get('pk')
@@ -444,9 +610,11 @@ class ScopeDetailView(generics.RetrieveUpdateDestroyAPIView):
         """GET - Retrieve a single scope target."""
         instance = self.get_object()
         serializer = self.get_serializer(instance)
+        # Ensure target_value is a string for the message
+        target_value_str = str(instance.target_value) if instance.target_value else "N/A"
         return Response({
             'success': True,
-            'message': f'Scope target "{instance.target_value}" retrieved successfully.',
+            'message': f'Scope target "{target_value_str}" retrieved successfully.',
             'data': serializer.data
         }, status=status.HTTP_200_OK)
     
@@ -465,7 +633,8 @@ class ScopeDetailView(generics.RetrieveUpdateDestroyAPIView):
         
         # Build message based on what was updated
         update_type = "partially updated" if partial else "fully updated"
-        message = f'Scope target "{instance.target_value}" {update_type} successfully.'
+        target_value_str = str(instance.target_value) if instance.target_value else "N/A"
+        message = f'Scope target "{target_value_str}" {update_type} successfully.'
         
         return Response({
             'success': True,
@@ -481,7 +650,8 @@ class ScopeDetailView(generics.RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         """DELETE - Delete a scope target."""
         instance = self.get_object()
-        target_value = instance.target_value
+        # Ensure target_value is a string before deletion
+        target_value = str(instance.target_value) if instance.target_value else "N/A"
         self.perform_destroy(instance)
         
         return Response({
@@ -531,11 +701,25 @@ class ScopeBulkDeleteView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Only delete scopes belonging to the authenticated user
-        deleted_count = Scope.objects.filter(
+        # Build queryset for deletion
+        queryset = Scope.objects.filter(
             admin=request.user,
             _id__in=object_ids
-        ).delete()[0]
+        )
+        
+        # GATE: Filter by current_testing_box if provided
+        current_testing_box = request.query_params.get('current_testing_box') or request.data.get('current_testing_box')
+        if current_testing_box:
+            if current_testing_box in ['white_box', 'grey_box', 'black_box']:
+                queryset = queryset.filter(testing_type=current_testing_box)
+            else:
+                return Response({
+                    'success': False,
+                    'error': f'Invalid current_testing_box: {current_testing_box}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Only delete scopes belonging to the authenticated user (and matching gate)
+        deleted_count = queryset.delete()[0]
         
         return Response({
             'success': True,
@@ -576,6 +760,28 @@ class ScopeStatsView(APIView):
         
         # Get base queryset
         base_queryset = Scope.objects.filter(admin=target_admin)
+        
+        # GATE: Filter by current_testing_box if provided
+        current_testing_box = request.query_params.get('current_testing_box')
+        if current_testing_box:
+            if current_testing_box in ['white_box', 'grey_box', 'black_box']:
+                base_queryset = base_queryset.filter(testing_type=current_testing_box)
+            else:
+                # Invalid testing box, return empty stats
+                return Response({
+                    'success': True,
+                    'message': f'Invalid current_testing_box: {current_testing_box}',
+                    'admin_id': str(target_admin.id),
+                    'admin_email': target_admin.email,
+                    'total_targets': 0,
+                    'internal_ips': 0,
+                    'external_ips': 0,
+                    'web_urls': 0,
+                    'mobile_urls': 0,
+                    'subnets': 0,
+                    'active_targets': 0,
+                    'inactive_targets': 0,
+                }, status=status.HTTP_200_OK)
         
         # Fetch all records and count in Python to avoid Djongo boolean filter issues
         all_targets = list(base_queryset.values('target_type', 'is_active'))
@@ -652,6 +858,20 @@ class ScopeByTypeView(APIView):
         
         # Get base queryset (avoid boolean filter by fetching all and filtering in Python)
         base_queryset = Scope.objects.filter(admin=target_admin)
+        
+        # GATE: Filter by current_testing_box if provided
+        current_testing_box = request.query_params.get('current_testing_box')
+        if current_testing_box:
+            if current_testing_box in ['white_box', 'grey_box', 'black_box']:
+                base_queryset = base_queryset.filter(testing_type=current_testing_box)
+            else:
+                # Invalid testing box, return empty response
+                return Response({
+                    'success': False,
+                    'message': f'Invalid current_testing_box: {current_testing_box}',
+                    'error': 'Invalid testing box. Must be white_box, grey_box, or black_box.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
         all_targets = list(base_queryset.values('_id', 'target_type', 'target_value', 'notes', 'created_at', 'subnet_count', 'is_active'))
         
         # Filter active targets and group by type

@@ -18,15 +18,16 @@ except ImportError:
 from .utils import extract_targets_from_text, classify_target, is_valid_subnet, expand_subnet
 
 
-def parse_excel(file_path: str) -> List[Dict[str, str]]:
+def parse_excel(file_path: str, expand_subnets: bool = True) -> List[Dict[str, any]]:
     """
-    Parse Excel file (.xlsx, .xls) and extract IPs/URLs from all columns.
+    Parse Excel file (.xlsx, .xls) and extract IPs/URLs/Subnets from all columns.
     
     Args:
         file_path: Path to Excel file
+        expand_subnets: If True, expand subnets into individual IPs. If False, keep as subnet with count.
     
     Returns:
-        List of dicts with 'target_type' and 'target_value'
+        List of dicts with 'target_type', 'target_value', and optionally 'subnet_count'
     """
     targets = []
     seen = set()
@@ -35,23 +36,23 @@ def parse_excel(file_path: str) -> List[Dict[str, str]]:
         # Read Excel file
         df = pd.read_excel(file_path, header=None)
         
-        # Iterate through all cells
+        # Collect all values into text format (one per line)
+        text_lines = []
         for column in df.columns:
             for value in df[column].dropna():
                 value_str = str(value).strip()
-                if not value_str or value_str.lower() in ['nan', 'none', '']:
-                    continue
-                
-                # Try to classify the target
-                result = classify_target(value_str)
-                if result:
-                    target_type, target_value = result
-                    if target_value not in seen:
-                        seen.add(target_value)
-                        targets.append({
-                            'target_type': target_type,
-                            'target_value': target_value
-                        })
+                if value_str and value_str.lower() not in ['nan', 'none', '']:
+                    text_lines.append(value_str)
+        
+        # Use extract_targets_from_text for consistent processing
+        if text_lines:
+            text_content = '\n'.join(text_lines)
+            extracted = extract_targets_from_text(text_content, expand_subnets=expand_subnets)
+            # Deduplicate
+            for item in extracted:
+                if item['target_value'] not in seen:
+                    seen.add(item['target_value'])
+                    targets.append(item)
     
     except Exception as e:
         raise ValueError(f"Error parsing Excel file: {str(e)}")
@@ -59,15 +60,16 @@ def parse_excel(file_path: str) -> List[Dict[str, str]]:
     return targets
 
 
-def parse_csv(file_path: str) -> List[Dict[str, str]]:
+def parse_csv(file_path: str, expand_subnets: bool = True) -> List[Dict[str, any]]:
     """
-    Parse CSV file and extract IPs/URLs from all columns.
+    Parse CSV file and extract IPs/URLs/Subnets from all columns.
     
     Args:
         file_path: Path to CSV file
+        expand_subnets: If True, expand subnets into individual IPs. If False, keep as subnet with count.
     
     Returns:
-        List of dicts with 'target_type' and 'target_value'
+        List of dicts with 'target_type', 'target_value', and optionally 'subnet_count'
     """
     targets = []
     seen = set()
@@ -87,23 +89,23 @@ def parse_csv(file_path: str) -> List[Dict[str, str]]:
         if df is None:
             raise ValueError("Could not decode CSV file with any supported encoding")
         
-        # Iterate through all cells
+        # Collect all values into text format (one per line)
+        text_lines = []
         for column in df.columns:
             for value in df[column].dropna():
                 value_str = str(value).strip()
-                if not value_str or value_str.lower() in ['nan', 'none', '']:
-                    continue
-                
-                # Try to classify the target
-                result = classify_target(value_str)
-                if result:
-                    target_type, target_value = result
-                    if target_value not in seen:
-                        seen.add(target_value)
-                        targets.append({
-                            'target_type': target_type,
-                            'target_value': target_value
-                        })
+                if value_str and value_str.lower() not in ['nan', 'none', '']:
+                    text_lines.append(value_str)
+        
+        # Use extract_targets_from_text for consistent processing
+        if text_lines:
+            text_content = '\n'.join(text_lines)
+            extracted = extract_targets_from_text(text_content, expand_subnets=expand_subnets)
+            # Deduplicate
+            for item in extracted:
+                if item['target_value'] not in seen:
+                    seen.add(item['target_value'])
+                    targets.append(item)
     
     except Exception as e:
         raise ValueError(f"Error parsing CSV file: {str(e)}")
@@ -157,15 +159,16 @@ def parse_word(file_path: str) -> List[Dict[str, str]]:
     return targets
 
 
-def parse_text(file_path: str) -> List[Dict[str, str]]:
+def parse_text(file_path: str, expand_subnets: bool = True) -> List[Dict[str, any]]:
     """
-    Parse text file (.txt) and extract IPs/URLs.
+    Parse text file (.txt) and extract IPs/URLs/Subnets.
     
     Args:
         file_path: Path to text file
+        expand_subnets: If True, expand subnets into individual IPs. If False, keep as subnet with count.
     
     Returns:
-        List of dicts with 'target_type' and 'target_value'
+        List of dicts with 'target_type', 'target_value', and optionally 'subnet_count'
     """
     targets = []
     
@@ -186,7 +189,7 @@ def parse_text(file_path: str) -> List[Dict[str, str]]:
             raise ValueError("Could not decode text file with any supported encoding")
         
         # Extract targets from text
-        targets = extract_targets_from_text(content)
+        targets = extract_targets_from_text(content, expand_subnets=expand_subnets)
     
     except Exception as e:
         raise ValueError(f"Error parsing text file: {str(e)}")
@@ -194,15 +197,16 @@ def parse_text(file_path: str) -> List[Dict[str, str]]:
     return targets
 
 
-def parse_file(file_path: str) -> List[Dict[str, str]]:
+def parse_file(file_path: str, expand_subnets: bool = True) -> List[Dict[str, any]]:
     """
     Main dispatcher function that routes to appropriate parser based on file extension.
     
     Args:
         file_path: Full path to the file
+        expand_subnets: If True, expand subnets into individual IPs. If False, keep as subnet with count.
     
     Returns:
-        List of dicts with 'target_type' and 'target_value'
+        List of dicts with 'target_type', 'target_value', and optionally 'subnet_count'
     
     Raises:
         ValueError: If file type is unsupported or parsing fails
@@ -214,11 +218,11 @@ def parse_file(file_path: str) -> List[Dict[str, str]]:
     
     # Excel files
     if ext in ('.xlsx', '.xls'):
-        return parse_excel(file_path)
+        return parse_excel(file_path, expand_subnets=expand_subnets)
     
     # CSV files
     if ext == '.csv':
-        return parse_csv(file_path)
+        return parse_csv(file_path, expand_subnets=expand_subnets)
     
     # Word files
     if ext in ('.docx', '.doc'):
@@ -226,6 +230,6 @@ def parse_file(file_path: str) -> List[Dict[str, str]]:
     
     # Text files
     if ext == '.txt':
-        return parse_text(file_path)
+        return parse_text(file_path, expand_subnets=expand_subnets)
     
     raise ValueError(f"Unsupported file type: {ext}. Supported: .xlsx, .xls, .csv, .docx, .doc, .txt")
