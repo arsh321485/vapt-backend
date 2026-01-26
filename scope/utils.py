@@ -204,6 +204,8 @@ def is_mobile_url(url_str: str) -> bool:
     - www.mobile.example.com
     - app.example.com (mobile apps)
     - api.mobile.example.com
+    - Play Store URLs (play.google.com/store/apps/...)
+    - Apple Store URLs (apps.apple.com/..., itunes.apple.com/...)
     
     Args:
         url_str: URL string to check
@@ -211,16 +213,28 @@ def is_mobile_url(url_str: str) -> bool:
     Returns:
         True if mobile URL, False otherwise
     """
-    url_str = url_str.strip().lower()
+    url_str_lower = url_str.strip().lower()
+    original_url = url_str_lower
     
-    # Remove protocol if present
-    if url_str.startswith(('http://', 'https://')):
-        url_str = url_str.split('://', 1)[1]
+    # Check for Play Store and Apple Store URLs (need full URL with path)
+    store_patterns = [
+        r'play\.google\.com',  # Play Store
+        r'apps\.apple\.com',  # Apple App Store
+        r'itunes\.apple\.com',  # iTunes/App Store
+    ]
     
-    # Remove path and query
-    url_str = url_str.split('/')[0]
+    for pattern in store_patterns:
+        if re.search(pattern, original_url):
+            return True
     
-    # Mobile URL patterns
+    # Remove protocol if present for domain-based checks
+    if url_str_lower.startswith(('http://', 'https://')):
+        url_str_lower = url_str_lower.split('://', 1)[1]
+    
+    # Extract domain (remove path and query)
+    domain = url_str_lower.split('/')[0]
+    
+    # Mobile URL patterns (domain-based)
     mobile_patterns = [
         r'^m\.',  # m.example.com
         r'^mobile\.',  # mobile.example.com
@@ -233,7 +247,7 @@ def is_mobile_url(url_str: str) -> bool:
     ]
     
     for pattern in mobile_patterns:
-        if re.search(pattern, url_str):
+        if re.search(pattern, domain):
             return True
     
     return False
@@ -299,14 +313,20 @@ def normalize_url(url_str: str) -> str:
 
 def classify_target(target: str) -> Optional[Tuple[str, str]]:
     """
-    Classify a target as internal IP, external IP, web URL, mobile URL, or subnet.
+    Classify a target and return ONLY one of these 4 types:
+    - internal_ip: Internal IP addresses or internal subnets
+    - external_ip: External IP addresses or external subnets
+    - mobile_url: Mobile URLs (including Play Store, Apple Store, m.*, mobile.*, etc.)
+    - web_url: Web URLs
+    
     Subnets are classified as internal_ip or external_ip based on their IP range.
+    All other inputs are rejected (returns None).
     
     Args:
         target: Target string (IP, URL, or subnet)
     
     Returns:
-        Tuple of (target_type, normalized_value) or None if invalid
+        Tuple of (target_type, normalized_value) or None if invalid/not accepted
     """
     target = target.strip()
     
@@ -318,13 +338,15 @@ def classify_target(target: str) -> Optional[Tuple[str, str]]:
     if target.endswith('/32'):
         clean_target = target.replace('/32', '')
     
-    # Check if it's a subnet (CIDR notation) - but not /32 (which is just a single IP)
-    if is_valid_subnet(target) and not target.endswith('/32'):
-        # Classify subnet as internal or external based on IP range
-        if is_internal_subnet(target):
-            return ('internal_ip', target)  # Subnet with internal IPs
-        else:
-            return ('external_ip', target)  # Subnet with external IPs
+    # Check if it's a subnet (must have CIDR notation with /, and not /32)
+    # Individual IPs without CIDR notation should be checked as IPs, not subnets
+    if '/' in target and not target.endswith('/32'):
+        if is_valid_subnet(target):
+            # Classify subnet as internal or external based on IP range
+            if is_internal_subnet(target):
+                return ('internal_ip', target)  # Subnet with internal IPs
+            else:
+                return ('external_ip', target)  # Subnet with external IPs
     
     # Check if it's a valid IP (use clean target without /32)
     if is_valid_ip(clean_target):
@@ -348,14 +370,17 @@ def classify_target(target: str) -> Optional[Tuple[str, str]]:
 def extract_targets_from_text(text: str, expand_subnets: bool = True) -> List[Dict[str, any]]:
     """
     Extract and classify targets from text (one per line).
-    Supports IPs, URLs, mobile URLs, and subnets.
+    Only accepts: Internal IP, External IP, Mobile URL, and Web URL.
+    Subnets are classified as internal_ip or external_ip based on their IP range.
+    All other inputs are automatically rejected and not included in the results.
     
     Args:
         text: Text containing targets (one per line)
         expand_subnets: If True, expand subnets into individual IPs. If False, keep as subnet with count.
     
     Returns:
-        List of dicts with 'target_type', 'target_value', and optionally 'subnet_count'
+        List of dicts with 'target_type', 'target_value', and optionally 'subnet_count'.
+        Only contains valid targets (internal_ip, external_ip, mobile_url, web_url).
     """
     targets = []
     seen = set()  # To avoid duplicates
@@ -369,8 +394,8 @@ def extract_targets_from_text(text: str, expand_subnets: bool = True) -> List[Di
         if line.startswith('#'):
             continue
         
-        # Check if it's a subnet first
-        if is_valid_subnet(line):
+        # Check if it's a subnet first (must have CIDR notation with /, and not /32)
+        if '/' in line and not line.endswith('/32') and is_valid_subnet(line):
             if expand_subnets:
                 # Expand subnet into individual IPs
                 expanded_ips = expand_subnet(line)
@@ -395,13 +420,13 @@ def extract_targets_from_text(text: str, expand_subnets: bool = True) -> List[Di
                 # Keep as subnet with classification and count
                 if line not in seen:
                     seen.add(line)
-                    # Classify subnet as internal or external
+                    # Classify subnet
                     subnet_result = classify_target(line)
                     if subnet_result:
                         subnet_type, subnet_value = subnet_result
                         subnet_count = get_subnet_count(line)
                         targets.append({
-                            'target_type': subnet_type,  # internal_ip or external_ip
+                            'target_type': subnet_type,  # internal_ip or external_ip based on subnet range
                             'target_value': subnet_value,
                             'subnet_count': subnet_count
                         })

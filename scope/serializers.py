@@ -71,7 +71,7 @@ class ScopeSerializer(serializers.ModelSerializer):
         result = classify_target(value)
         if not result:
             raise serializers.ValidationError(
-                f"'{value}' is not a valid IP address or URL."
+                f"'{value}' is not accepted. Only Internal IP, External IP, Mobile URL, and Web URL are accepted."
             )
         return value
     
@@ -93,7 +93,7 @@ class ScopeSerializer(serializers.ModelSerializer):
                 data['target_value'] = normalized_value
             else:
                 raise serializers.ValidationError(
-                    f"'{target_value}' is not a valid IP address or URL."
+                    f"'{target_value}' is not accepted. Only Internal IP, External IP, Mobile URL, and Web URL are accepted."
                 )
         
         return data
@@ -124,7 +124,7 @@ class ScopeCreateSerializer(serializers.ModelSerializer):
         result = classify_target(value)
         if not result:
             raise serializers.ValidationError(
-                f"'{value}' is not a valid IP address or URL."
+                f"'{value}' is not accepted. Only Internal IP, External IP, Mobile URL, and Web URL are accepted."
             )
         # Return normalized value (removes /32, adds https:// for URLs, but preserves IP format)
         _, normalized = result
@@ -143,7 +143,7 @@ class ScopeCreateSerializer(serializers.ModelSerializer):
                 data['target_value'] = normalized_value
             else:
                 raise serializers.ValidationError(
-                    f"'{target_value}' is not a valid IP address or URL."
+                    f"'{target_value}' is not accepted. Only Internal IP, External IP, Mobile URL, and Web URL are accepted."
                 )
         
         return data
