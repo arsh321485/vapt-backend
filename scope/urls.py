@@ -10,6 +10,12 @@ from .views import (
     ScopeLockAPIView,
     TestingTypesAPIView,
     ScopesByAdminAPIView,
+    ScopeNamesByAdminAPIView,
+    ScopeTestingTypeAPIView,
+    ScopeDataByNameAPIView,
+    ScopeHierarchyAPIView,
+    ContactSuperAdminAPIView,
+    ContactSupportAPIView,
 )
 
 urlpatterns = [
@@ -34,11 +40,46 @@ urlpatterns = [
         name="testing-types"
     ),
 
+    # Contact super admin for general support
+    path(
+        "contact-support/",
+        ContactSupportAPIView.as_view(),
+        name="contact-support"
+    ),
+
     # List scopes by admin (super admin only)
     path(
         "admin/<str:admin_id>/",
         ScopesByAdminAPIView.as_view(),
         name="scopes-by-admin"
+    ),
+
+    # Get scope names by admin
+    path(
+        "names/<str:admin_id>/",
+        ScopeNamesByAdminAPIView.as_view(),
+        name="scope-names-by-admin"
+    ),
+
+    # Get testing type by admin and scope name
+    path(
+        "testing-type/<str:admin_id>/<str:scope_name>/",
+        ScopeTestingTypeAPIView.as_view(),
+        name="scope-testing-type"
+    ),
+
+    # Get full scope data by admin and scope name
+    path(
+        "data/<str:admin_id>/<str:scope_name>/",
+        ScopeDataByNameAPIView.as_view(),
+        name="scope-data-by-name"
+    ),
+
+    # Get hierarchical scope data for admin
+    path(
+        "hierarchy/<str:admin_id>/",
+        ScopeHierarchyAPIView.as_view(),
+        name="scope-hierarchy"
     ),
 
     # Get/Update/Delete scope by ID
@@ -81,5 +122,12 @@ urlpatterns = [
         "<str:scope_id>/lock/",
         ScopeLockAPIView.as_view(),
         name="scope-lock"
+    ),
+
+    # Contact super admin about scope issues
+    path(
+        "<str:scope_id>/contact-superadmin/",
+        ContactSuperAdminAPIView.as_view(),
+        name="contact-superadmin"
     ),
 ]
