@@ -15,6 +15,8 @@ from .serializers import (
     ScopeLockSerializer,
     BulkEntrySerializer,
     FileUploadSerializer,
+    ContactSuperAdminSerializer,
+    ContactSupportSerializer,
 )
 from .permissions import (
     IsScopeOwnerOrSuperAdmin,
@@ -26,6 +28,8 @@ from .utils import (
     parse_targets_string,
     process_entries,
     send_scope_lock_notification,
+    send_contact_superadmin_email,
+    get_superadmin_emails,
 )
 
 
@@ -59,6 +63,13 @@ class ScopeCreateAPIView(APIView):
         if not name:
             return Response(
                 {"detail": "name is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check for duplicate scope name for this admin
+        if Scope.objects.filter(admin=request.user, name__iexact=name).exists():
+            return Response(
+                {"detail": f"A scope with the project name '{name}' already exists for your account"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -209,6 +220,15 @@ class ScopeDetailAPIView(APIView):
                 {"detail": "Cannot modify a locked scope"},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # Check for duplicate scope name if name is being updated
+        new_name = request.data.get("name", "").strip()
+        if new_name and new_name.lower() != scope.name.lower():
+            if Scope.objects.filter(admin=scope.admin, name__iexact=new_name).exclude(id=scope_id).exists():
+                return Response(
+                    {"detail": f"A scope with the name '{new_name}' already exists for this admin"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         serializer = ScopeUpdateSerializer(scope, data=request.data, partial=True)
 
@@ -492,7 +512,8 @@ class ScopeLockAPIView(APIView):
     """
     POST /api/admin/scope/<id>/lock/
 
-    Lock or unlock a scope.
+    Lock or unlock a scope (Super Admin only).
+    When locked, an email notification is sent to the scope owner.
     """
     permission_classes = [permissions.IsAuthenticated, CanLockScope]
 
@@ -518,6 +539,7 @@ class ScopeLockAPIView(APIView):
             scope.locked_at = timezone.now()
             scope.save()
 
+            # Send email notification to the scope owner
             send_scope_lock_notification(
                 scope_owner_email=scope.admin.email,
                 scope_name=scope.name,
@@ -525,7 +547,7 @@ class ScopeLockAPIView(APIView):
             )
 
             return Response({
-                "detail": "Scope locked successfully",
+                "detail": "Scope locked successfully. Email notification sent to admin.",
                 "scope": ScopeSerializer(scope).data
             }, status=status.HTTP_200_OK)
 
@@ -534,12 +556,6 @@ class ScopeLockAPIView(APIView):
                 return Response(
                     {"detail": "Scope is not locked"},
                     status=status.HTTP_400_BAD_REQUEST
-                )
-
-            if not request.user.is_superuser:
-                return Response(
-                    {"detail": "Only super admin can unlock scopes"},
-                    status=status.HTTP_403_FORBIDDEN
                 )
 
             scope.is_locked = False
@@ -589,9 +605,330 @@ class ScopesByAdminAPIView(APIView):
     def get(self, request, admin_id):
         scopes = Scope.objects.filter(admin_id=admin_id)
         serializer = ScopeListSerializer(scopes, many=True)
+        count = scopes.count()
+
+        if count == 0:
+            return Response({
+                "message": "No scopes found for this admin",
+                "admin_id": admin_id,
+                "count": 0,
+                "scopes": []
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "message": "Scopes retrieved successfully",
+            "admin_id": admin_id,
+            "count": count,
+            "scopes": serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class ScopeNamesByAdminAPIView(APIView):
+    """
+    GET /api/admin/scope/names/<admin_id>/
+
+    Get list of scope names for a specific admin.
+    Super admin can view any admin's scope names.
+    Regular admin can only view their own scope names.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, admin_id):
+        # Regular admin can only fetch their own scope names
+        if not request.user.is_superuser and str(request.user.id) != str(admin_id):
+            return Response(
+                {"message": "You can only view your own scope Project names"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        scopes = Scope.objects.filter(admin_id=admin_id).values_list("name", flat=True).distinct()
+        scope_list = list(scopes)
+        count = len(scope_list)
+
+        if count == 0:
+            return Response({
+                "message": "No scope Project names found for this admin",
+                "admin_id": admin_id,
+                "count": 0,
+                "scope_names": []
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "message": "Scope Project names retrieved successfully",
+            "admin_id": admin_id,
+            "count": count,
+            "scope_names": scope_list
+        }, status=status.HTTP_200_OK)
+
+
+class ScopeTestingTypeAPIView(APIView):
+    """
+    GET /api/admin/scope/testing-type/<admin_id>/<scope_name>/
+
+    Get testing type(s) for a specific scope name and admin.
+    Returns the testing type associated with the scope.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, admin_id, scope_name):
+        # Regular admin can only fetch their own data
+        if not request.user.is_superuser and str(request.user.id) != str(admin_id):
+            return Response(
+                {"message": "You can only view your own scope data"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Find scope by admin and name (case-insensitive)
+        scope = Scope.objects.filter(
+            admin_id=admin_id,
+            name__iexact=scope_name
+        ).first()
+
+        if not scope:
+            return Response(
+                {"message": f"Scope '{scope_name}' not found for this admin"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        return Response({
+            "message": "Scope testing type retrieved successfully",
+            "admin_id": admin_id,
+            "scope_name": scope.name,
+            "testing_type": scope.testing_type,
+            "scope_id": str(scope.id)
+        }, status=status.HTTP_200_OK)
+
+
+class ScopeDataByNameAPIView(APIView):
+    """
+    GET /api/admin/scope/data/<admin_id>/<scope_name>/
+
+    Get full scope data by admin ID and scope name.
+    Returns complete scope details including entries.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, admin_id, scope_name):
+        # Regular admin can only fetch their own data
+        if not request.user.is_superuser and str(request.user.id) != str(admin_id):
+            return Response(
+                {"detail": "You can only view your own scope data"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Find scope by admin and name (case-insensitive)
+        scope = Scope.objects.filter(
+            admin_id=admin_id,
+            name__iexact=scope_name
+        ).first()
+
+        if not scope:
+            return Response(
+                {"detail": f"Scope '{scope_name}' not found for this admin"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        serializer = ScopeSerializer(scope)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ScopeHierarchyAPIView(APIView):
+    """
+    GET /api/admin/scope/hierarchy/<admin_id>/
+
+    Get hierarchical scope data for an admin:
+    - List of scope names
+    - For each scope: name, testing_type, id, entry_count
+
+    Optional query params:
+    - scope_name: Filter to get details for specific scope
+    - include_entries: Set to 'true' to include full entry data
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, admin_id):
+        # Regular admin can only fetch their own data
+        if not request.user.is_superuser and str(request.user.id) != str(admin_id):
+            return Response(
+                {"detail": "You can only view your own scope data"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        scope_name = request.query_params.get("scope_name")
+        include_entries = request.query_params.get("include_entries", "").lower() == "true"
+
+        scopes = Scope.objects.filter(admin_id=admin_id)
+
+        # Filter by scope name if provided
+        if scope_name:
+            scopes = scopes.filter(name__iexact=scope_name)
+
+        if not scopes.exists():
+            return Response({
+                "admin_id": admin_id,
+                "count": 0,
+                "scopes": []
+            }, status=status.HTTP_200_OK)
+
+        # Build response
+        scope_data = []
+        for scope in scopes:
+            data = {
+                "id": str(scope.id),
+                "name": scope.name,
+                "testing_type": scope.testing_type,
+                "is_locked": scope.is_locked,
+                "locked_by": scope.locked_by,
+                "entry_count": scope.entries.count(),
+                "created_at": scope.created_at,
+                "updated_at": scope.updated_at
+            }
+
+            if include_entries:
+                data["entries"] = ScopeEntrySerializer(scope.entries.all(), many=True).data
+
+            scope_data.append(data)
 
         return Response({
             "admin_id": admin_id,
-            "count": scopes.count(),
-            "scopes": serializer.data
+            "count": len(scope_data),
+            "scope_names": list(scopes.values_list("name", flat=True)),
+            "scopes": scope_data
         }, status=status.HTTP_200_OK)
+
+
+class ContactSuperAdminAPIView(APIView):
+    """
+    POST /api/admin/scope/<scope_id>/contact-superadmin/
+
+    Allow admin to contact super admin about scope issues.
+    Useful when scope is locked and admin needs assistance.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsScopeOwnerOrSuperAdmin]
+
+    def post(self, request, scope_id):
+        scope = get_object_or_404(Scope, id=scope_id)
+        self.check_object_permissions(request, scope)
+
+        serializer = ContactSuperAdminSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        subject = serializer.validated_data["subject"]
+        message = serializer.validated_data["message"]
+
+        # Get super admin emails
+        superadmin_emails = get_superadmin_emails()
+
+        if not superadmin_emails:
+            return Response(
+                {"detail": "No super admin available to contact"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # Get admin name
+        admin_name = getattr(request.user, 'name', None) or \
+                     getattr(request.user, 'full_name', None) or \
+                     request.user.email
+
+        # Send email to all super admins
+        sent_count = 0
+        for superadmin_email in superadmin_emails:
+            success = send_contact_superadmin_email(
+                admin_email=request.user.email,
+                admin_name=admin_name,
+                scope_name=scope.name,
+                scope_id=str(scope.id),
+                subject=subject,
+                message=message,
+                superadmin_email=superadmin_email
+            )
+            if success:
+                sent_count += 1
+
+        if sent_count > 0:
+            return Response({
+                "detail": f"Your message has been sent to {sent_count} super admin(s)",
+                "scope_id": scope_id,
+                "scope_name": scope.name
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response(
+                {"detail": "Failed to send message. Please try again later."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class ContactSupportAPIView(APIView):
+    """
+    POST /api/admin/scope/contact-support/
+
+    Allow admin to contact super admin for general support.
+    Optionally can include a scope_id for context.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = ContactSupportSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        subject = serializer.validated_data["subject"]
+        message = serializer.validated_data["message"]
+        scope_id = serializer.validated_data.get("scope_id", "").strip()
+
+        # Get scope info if scope_id provided
+        scope_name = "N/A"
+        if scope_id:
+            try:
+                scope = Scope.objects.get(id=scope_id)
+                # Verify user owns this scope or is super admin
+                if not request.user.is_superuser and scope.admin != request.user:
+                    return Response(
+                        {"detail": "You don't have permission to reference this scope"},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+                scope_name = scope.name
+            except Scope.DoesNotExist:
+                scope_id = "Invalid scope ID"
+                scope_name = "Unknown"
+
+        # Get super admin emails
+        superadmin_emails = get_superadmin_emails()
+
+        if not superadmin_emails:
+            return Response(
+                {"detail": "No super admin available to contact"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # Get admin name
+        admin_name = getattr(request.user, 'name', None) or \
+                     getattr(request.user, 'full_name', None) or \
+                     request.user.email
+
+        # Send email to all super admins
+        sent_count = 0
+        for superadmin_email in superadmin_emails:
+            success = send_contact_superadmin_email(
+                admin_email=request.user.email,
+                admin_name=admin_name,
+                scope_name=scope_name,
+                scope_id=scope_id if scope_id else "General Support",
+                subject=subject,
+                message=message,
+                superadmin_email=superadmin_email
+            )
+            if success:
+                sent_count += 1
+
+        if sent_count > 0:
+            return Response({
+                "detail": f"Your message has been sent to {sent_count} super admin(s)",
+                "subject": subject
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response(
+                {"detail": "Failed to send message. Please try again later."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

@@ -343,7 +343,7 @@ Your scope "{scope_name}" has been locked.
 
 Locked by: {locked_by_email}
 
-If you believe this was done in error, please contact your super administrator.
+If you believe this was done in error or need assistance, please contact your super administrator.
 
 Thank you,
 VAPTFIX Team
@@ -363,3 +363,67 @@ VAPTFIX Team
     except Exception as e:
         logger.error(f"Failed to send scope lock notification: {str(e)}")
         return False
+
+
+def send_contact_superadmin_email(
+    admin_email: str,
+    admin_name: str,
+    scope_name: str,
+    scope_id: str,
+    subject: str,
+    message: str,
+    superadmin_email: str
+) -> bool:
+    """
+    Send email to super admin when an admin needs assistance with a scope.
+    """
+    try:
+        sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+
+        body = f"""
+Support Request from Admin
+
+From: {admin_name} ({admin_email})
+Scope: {scope_name}
+Scope ID: {scope_id}
+
+Subject: {subject}
+
+Message:
+{message}
+
+---
+This is an automated message from VAPTFIX.
+Please respond directly to the admin at: {admin_email}
+"""
+
+        mail = Mail(
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to_emails=superadmin_email,
+            subject=f"[VAPTFIX Support] {subject}",
+            plain_text_content=body,
+        )
+
+        # Add reply-to header so super admin can reply directly to admin
+        mail.reply_to = admin_email
+
+        response = sg.send(mail)
+        logger.info(f"Contact super admin email sent from {admin_email}: {response.status_code}")
+        return response.status_code in [200, 201, 202]
+
+    except Exception as e:
+        logger.error(f"Failed to send contact super admin email: {str(e)}")
+        return False
+
+
+def get_superadmin_emails() -> List[str]:
+    """
+    Get list of super admin email addresses.
+    """
+    try:
+        from users.models import User
+        superadmins = User.objects.filter(is_superuser=True).values_list('email', flat=True)
+        return list(superadmins)
+    except Exception as e:
+        logger.error(f"Failed to get super admin emails: {str(e)}")
+        return []

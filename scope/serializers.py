@@ -144,3 +144,36 @@ class FileUploadSerializer(serializers.Serializer):
             raise serializers.ValidationError("File size exceeds 10MB limit")
 
         return file
+
+
+class ContactSuperAdminSerializer(serializers.Serializer):
+    """Serializer for admin to contact super admin about scope issues."""
+    subject = serializers.CharField(max_length=200)
+    message = serializers.CharField(max_length=2000)
+
+    def validate_subject(self, value):
+        if len(value.strip()) < 5:
+            raise serializers.ValidationError("Subject must be at least 5 characters")
+        return value.strip()
+
+    def validate_message(self, value):
+        if len(value.strip()) < 10:
+            raise serializers.ValidationError("Message must be at least 10 characters")
+        return value.strip()
+
+
+class ContactSupportSerializer(serializers.Serializer):
+    """Serializer for admin to contact super admin for general support."""
+    subject = serializers.CharField(max_length=200)
+    message = serializers.CharField(max_length=2000)
+    scope_id = serializers.CharField(max_length=50, required=False, allow_blank=True)
+
+    def validate_subject(self, value):
+        if len(value.strip()) < 5:
+            raise serializers.ValidationError("Subject must be at least 5 characters")
+        return value.strip()
+
+    def validate_message(self, value):
+        if len(value.strip()) < 10:
+            raise serializers.ValidationError("Message must be at least 10 characters")
+        return value.strip()

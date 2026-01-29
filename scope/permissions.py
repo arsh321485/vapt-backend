@@ -46,30 +46,20 @@ class CanModifyScope(permissions.BasePermission):
 
 class CanLockScope(permissions.BasePermission):
     """
-    Permission class for locking scopes:
-    - Super admins can lock/unlock any scope
-    - Regular admins can only LOCK their own scopes (not unlock)
+    Permission class for locking/unlocking scopes:
+    - Only super admins can lock or unlock any scope
     """
 
     def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated
+        return (
+            request.user and
+            request.user.is_authenticated and
+            request.user.is_superuser
+        )
 
     def has_object_permission(self, request, view, obj):
-        action = request.data.get("action", "lock")
-
-        # Super admin can lock/unlock any scope
-        if request.user.is_superuser:
-            return True
-
-        # Regular admin permissions
-        if str(obj.admin_id) != str(request.user.id):
-            return False
-
-        # Regular admins can only lock, not unlock
-        if action == "unlock":
-            return False
-
-        return True
+        # Only super admin can lock/unlock scopes
+        return request.user.is_superuser
 
 
 class IsSuperAdmin(permissions.BasePermission):
