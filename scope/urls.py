@@ -4,6 +4,7 @@ from .views import (
     ScopeListAPIView,
     ScopeDetailAPIView,
     ScopeEntriesAPIView,
+    ScopeEntryDetailAPIView,
     ScopeEntryDeleteAPIView,
     ScopeEntryUpdateAPIView,
     ScopeFileUploadAPIView,
@@ -94,6 +95,13 @@ urlpatterns = [
         "<str:scope_id>/entries/",
         ScopeEntriesAPIView.as_view(),
         name="scope-entries"
+    ),
+
+    # Get a single entry detail
+    path(
+        "<str:scope_id>/entries/<str:entry_id>/detail/",
+        ScopeEntryDetailAPIView.as_view(),
+        name="scope-entry-detail"
     ),
 
     # Delete a single entry

@@ -54,7 +54,7 @@ class ScopeCreateAPIView(APIView):
 
         if testing_type not in valid_types:
             return Response(
-                {"detail": f"Invalid testing_type. Must be one of: {', '.join(valid_types)}"},
+                {"message": f"Invalid testing_type. Must be one of: {', '.join(valid_types)}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -62,14 +62,7 @@ class ScopeCreateAPIView(APIView):
         name = request.data.get("name", "").strip()
         if not name:
             return Response(
-                {"detail": "name is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Check for duplicate scope name for this admin
-        if Scope.objects.filter(admin=request.user, name__iexact=name).exists():
-            return Response(
-                {"detail": f"A scope with the project name '{name}' already exists for your account"},
+                {"message": "Scope name is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -83,7 +76,7 @@ class ScopeCreateAPIView(APIView):
 
         if not file_obj and not targets_str:
             return Response(
-                {"detail": "Either 'file' or 'targets' is required"},
+                {"message": "Either 'file' or 'targets' is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -102,7 +95,7 @@ class ScopeCreateAPIView(APIView):
                 values = parse_file_content(file_obj, file_obj.name)
             except ValueError as e:
                 return Response(
-                    {"detail": str(e)},
+                    {"message": str(e)},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -113,12 +106,41 @@ class ScopeCreateAPIView(APIView):
 
         if not values:
             return Response(
-                {"detail": "No valid targets found"},
+                {"message": "No valid targets found"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         # Process entries with auto-detection
         processed = process_entries(values, expand_subnets=expand_subnets)
+
+        # Get valid entry values for duplicate check
+        new_entry_values = set(
+            entry["value"].lower() for entry in processed if entry["is_valid"]
+        )
+
+        if not new_entry_values:
+            return Response(
+                {"message": "No valid targets found in the uploaded file"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check for duplicate file content in existing scopes with same name + testing_type
+        existing_scopes = Scope.objects.filter(
+            admin=request.user,
+            name__iexact=name,
+            testing_type=testing_type
+        )
+
+        for existing_scope in existing_scopes:
+            existing_entry_values = set(
+                entry.value.lower() for entry in existing_scope.entries.all()
+            )
+            # Check if the new entries exactly match an existing scope's entries
+            if new_entry_values == existing_entry_values:
+                return Response(
+                    {"message": f"This file has already been uploaded for scope '{name}' with {testing_type.replace('_', ' ')} testing"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         # Create scope
         scope = Scope.objects.create(
@@ -217,18 +239,40 @@ class ScopeDetailAPIView(APIView):
 
         if not request.user.is_superuser and scope.is_locked:
             return Response(
-                {"detail": "Cannot modify a locked scope"},
+                {"message": "Cannot modify a locked scope"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Check for duplicate scope name if name is being updated
-        new_name = request.data.get("name", "").strip()
-        if new_name and new_name.lower() != scope.name.lower():
-            if Scope.objects.filter(admin=scope.admin, name__iexact=new_name).exclude(id=scope_id).exists():
-                return Response(
-                    {"detail": f"A scope with the name '{new_name}' already exists for this admin"},
-                    status=status.HTTP_400_BAD_REQUEST
+        # Check for duplicate file content if name or testing_type is being updated
+        new_name = request.data.get("name", "").strip() or scope.name
+        new_testing_type = request.data.get("testing_type", scope.testing_type)
+
+        # Check if the combination is changing
+        name_changed = new_name.lower() != scope.name.lower()
+        testing_type_changed = new_testing_type != scope.testing_type
+
+        if name_changed or testing_type_changed:
+            # Get current scope's entry values
+            current_entry_values = set(
+                entry.value.lower() for entry in scope.entries.all()
+            )
+
+            # Check if moving to a name+testing_type that already has same entries
+            existing_scopes = Scope.objects.filter(
+                admin=scope.admin,
+                name__iexact=new_name,
+                testing_type=new_testing_type
+            ).exclude(id=scope_id)
+
+            for existing_scope in existing_scopes:
+                existing_entry_values = set(
+                    entry.value.lower() for entry in existing_scope.entries.all()
                 )
+                if current_entry_values == existing_entry_values:
+                    return Response(
+                        {"message": f"A scope with the same targets already exists for '{new_name}' with {new_testing_type.replace('_', ' ')} testing"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
 
         serializer = ScopeUpdateSerializer(scope, data=request.data, partial=True)
 
@@ -246,13 +290,13 @@ class ScopeDetailAPIView(APIView):
 
         if not request.user.is_superuser and scope.is_locked:
             return Response(
-                {"detail": "Cannot delete a locked scope"},
+                {"message": "Cannot delete a locked scope"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
         scope.delete()
         return Response(
-            {"detail": "Scope deleted successfully"},
+            {"message": "Scope deleted successfully"},
             status=status.HTTP_200_OK
         )
 
@@ -298,7 +342,7 @@ class ScopeEntriesAPIView(APIView):
 
         if not request.user.is_superuser and scope.is_locked:
             return Response(
-                {"detail": "Cannot add entries to a locked scope"},
+                {"message": "Cannot add entries to a locked scope"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -352,9 +396,36 @@ class ScopeEntriesAPIView(APIView):
         }, status=status.HTTP_201_CREATED if created_entries else status.HTTP_400_BAD_REQUEST)
 
 
+class ScopeEntryDetailAPIView(APIView):
+    """
+    GET /api/admin/scope/<scope_id>/entries/<entry_id>/detail/
+
+    Retrieve a single scope entry by ID.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsScopeOwnerOrSuperAdmin]
+
+    def get(self, request, scope_id, entry_id):
+        scope = get_object_or_404(Scope, id=scope_id)
+        self.check_object_permissions(request, scope)
+
+        entry = get_object_or_404(ScopeEntry, id=entry_id, scope=scope)
+
+        return Response({
+            "message": "Entry retrieved successfully",
+            "entry": ScopeEntrySerializer(entry).data,
+            "scope_info": {
+                "scope_id": str(scope.id),
+                "scope_name": scope.name,
+                "testing_type": scope.testing_type
+            }
+        }, status=status.HTTP_200_OK)
+
+
 class ScopeEntryDeleteAPIView(APIView):
     """
-    DELETE /api/admin/scope/<id>/entries/<entry_id>/
+    DELETE /api/admin/scope/<scope_id>/entries/<entry_id>/
+
+    Delete a single scope entry.
     """
     permission_classes = [permissions.IsAuthenticated, IsScopeOwnerOrSuperAdmin]
 
@@ -364,17 +435,21 @@ class ScopeEntryDeleteAPIView(APIView):
 
         if not request.user.is_superuser and scope.is_locked:
             return Response(
-                {"detail": "Cannot delete entries from a locked scope"},
+                {"message": "Cannot delete entries from a locked scope"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
         entry = get_object_or_404(ScopeEntry, id=entry_id, scope=scope)
+        deleted_value = entry.value
         entry.delete()
 
-        return Response(
-            {"detail": "Entry deleted successfully"},
-            status=status.HTTP_200_OK
-        )
+        return Response({
+            "message": "Entry deleted successfully",
+            "deleted_entry": {
+                "id": entry_id,
+                "value": deleted_value
+            }
+        }, status=status.HTTP_200_OK)
 
 
 class ScopeEntryUpdateAPIView(APIView):
@@ -391,7 +466,7 @@ class ScopeEntryUpdateAPIView(APIView):
 
         if not request.user.is_superuser and scope.is_locked:
             return Response(
-                {"detail": "Cannot update entries in a locked scope"},
+                {"message": "Cannot update entries in a locked scope"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -410,13 +485,13 @@ class ScopeEntryUpdateAPIView(APIView):
 
                 if exists:
                     return Response(
-                        {"detail": "An entry with this value already exists in the scope"},
+                        {"message": "An entry with this value already exists in the scope"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
             serializer.save()
             return Response({
-                "detail": "Entry updated successfully",
+                "message": "Entry updated successfully",
                 "entry": ScopeEntrySerializer(entry).data
             }, status=status.HTTP_200_OK)
 
@@ -438,7 +513,7 @@ class ScopeFileUploadAPIView(APIView):
 
         if not request.user.is_superuser and scope.is_locked:
             return Response(
-                {"detail": "Cannot upload to a locked scope"},
+                {"message": "Cannot upload to a locked scope"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -454,7 +529,7 @@ class ScopeFileUploadAPIView(APIView):
 
             if not values:
                 return Response(
-                    {"detail": "No valid values found in file"},
+                    {"message": "No valid values found in file"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -503,7 +578,7 @@ class ScopeFileUploadAPIView(APIView):
 
         except ValueError as e:
             return Response(
-                {"detail": str(e)},
+                {"message": str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -530,7 +605,7 @@ class ScopeLockAPIView(APIView):
         if action == "lock":
             if scope.is_locked:
                 return Response(
-                    {"detail": "Scope is already locked"},
+                    {"message": "Scope is already locked"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -547,14 +622,14 @@ class ScopeLockAPIView(APIView):
             )
 
             return Response({
-                "detail": "Scope locked successfully. Email notification sent to admin.",
+                "message": "Scope locked successfully. Email notification sent to admin.",
                 "scope": ScopeSerializer(scope).data
             }, status=status.HTTP_200_OK)
 
         else:  # unlock
             if not scope.is_locked:
                 return Response(
-                    {"detail": "Scope is not locked"},
+                    {"message": "Scope is not locked"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -564,7 +639,7 @@ class ScopeLockAPIView(APIView):
             scope.save()
 
             return Response({
-                "detail": "Scope unlocked successfully",
+                "message": "Scope unlocked successfully",
                 "scope": ScopeSerializer(scope).data
             }, status=status.HTTP_200_OK)
 
@@ -666,7 +741,8 @@ class ScopeTestingTypeAPIView(APIView):
     GET /api/admin/scope/testing-type/<admin_id>/<scope_name>/
 
     Get testing type(s) for a specific scope name and admin.
-    Returns the testing type associated with the scope.
+    Returns all testing types associated with the scope name.
+    Same scope name can have multiple testing types (white_box, grey_box, black_box).
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -678,33 +754,49 @@ class ScopeTestingTypeAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Find scope by admin and name (case-insensitive)
-        scope = Scope.objects.filter(
+        # Find all scopes by admin and name (case-insensitive)
+        scopes = Scope.objects.filter(
             admin_id=admin_id,
             name__iexact=scope_name
-        ).first()
+        )
 
-        if not scope:
+        if not scopes.exists():
             return Response(
                 {"message": f"Scope '{scope_name}' not found for this admin"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        # Group by testing_type and get unique testing types
+        testing_type_data = {}
+        for scope in scopes:
+            tt = scope.testing_type
+            if tt not in testing_type_data:
+                testing_type_data[tt] = {
+                    "testing_type": tt,
+                    "scope_count": 0,
+                    "scope_ids": []
+                }
+            testing_type_data[tt]["scope_count"] += 1
+            testing_type_data[tt]["scope_ids"].append(str(scope.id))
+
         return Response({
-            "message": "Scope testing type retrieved successfully",
+            "message": "Scope testing types retrieved successfully",
             "admin_id": admin_id,
-            "scope_name": scope.name,
-            "testing_type": scope.testing_type,
-            "scope_id": str(scope.id)
+            "scope_name": scopes.first().name,
+            "testing_types": list(testing_type_data.values()),
+            "available_types": list(testing_type_data.keys())
         }, status=status.HTTP_200_OK)
 
 
 class ScopeDataByNameAPIView(APIView):
     """
-    GET /api/admin/scope/data/<admin_id>/<scope_name>/
+    GET /api/admin/scope/data/<admin_id>/<scope_name>/?testing_type=white_box
 
     Get full scope data by admin ID and scope name.
-    Returns complete scope details including entries.
+    Returns all scopes matching the criteria with their entries.
+
+    Required query params:
+    - testing_type: Filter by testing type (white_box, grey_box, black_box)
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -712,24 +804,64 @@ class ScopeDataByNameAPIView(APIView):
         # Regular admin can only fetch their own data
         if not request.user.is_superuser and str(request.user.id) != str(admin_id):
             return Response(
-                {"detail": "You can only view your own scope data"},
+                {"message": "You can only view your own scope data"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Find scope by admin and name (case-insensitive)
-        scope = Scope.objects.filter(
-            admin_id=admin_id,
-            name__iexact=scope_name
-        ).first()
-
-        if not scope:
+        # testing_type is required to get specific scope data
+        testing_type = request.query_params.get("testing_type")
+        if not testing_type:
             return Response(
-                {"detail": f"Scope '{scope_name}' not found for this admin"},
+                {"message": "testing_type query parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Find all scopes by admin, name, and testing_type
+        scopes = Scope.objects.filter(
+            admin_id=admin_id,
+            name__iexact=scope_name,
+            testing_type=testing_type
+        ).order_by("-created_at")
+
+        if not scopes.exists():
+            return Response(
+                {"message": f"Scope '{scope_name}' with {testing_type.replace('_', ' ')} testing not found for this admin"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        serializer = ScopeSerializer(scope)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        # Collect all entries from all matching scopes, grouped by entry_type
+        all_entries = {
+            "internal_ip": [],
+            "external_ip": [],
+            "web_url": [],
+            "mobile_url": [],
+            "subnet": []
+        }
+
+        scope_ids = []
+        for scope in scopes:
+            scope_ids.append(str(scope.id))
+            for entry in scope.entries.all():
+                entry_data = ScopeEntrySerializer(entry).data
+                entry_data["scope_id"] = str(scope.id)
+                all_entries[entry.entry_type].append(entry_data)
+
+        return Response({
+            "message": "Scope data retrieved successfully",
+            "admin_id": admin_id,
+            "scope_name": scopes.first().name,
+            "testing_type": testing_type,
+            "scope_count": scopes.count(),
+            "scope_ids": scope_ids,
+            "entries": {
+                "internal_targets": all_entries["internal_ip"],
+                "external_targets": all_entries["external_ip"],
+                "web_app_targets": all_entries["web_url"],
+                "mobile_app_targets": all_entries["mobile_url"],
+                "subnets": all_entries["subnet"]
+            },
+            "total_entries": sum(len(v) for v in all_entries.values())
+        }, status=status.HTTP_200_OK)
 
 
 class ScopeHierarchyAPIView(APIView):
@@ -750,7 +882,7 @@ class ScopeHierarchyAPIView(APIView):
         # Regular admin can only fetch their own data
         if not request.user.is_superuser and str(request.user.id) != str(admin_id):
             return Response(
-                {"detail": "You can only view your own scope data"},
+                {"message": "You can only view your own scope data"},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -765,6 +897,7 @@ class ScopeHierarchyAPIView(APIView):
 
         if not scopes.exists():
             return Response({
+                "message": "No scopes found for this admin",
                 "admin_id": admin_id,
                 "count": 0,
                 "scopes": []
@@ -790,9 +923,10 @@ class ScopeHierarchyAPIView(APIView):
             scope_data.append(data)
 
         return Response({
+            "message": "Scope hierarchy retrieved successfully",
             "admin_id": admin_id,
             "count": len(scope_data),
-            "scope_names": list(scopes.values_list("name", flat=True)),
+            "scope_names": list(set(scopes.values_list("name", flat=True))),
             "scopes": scope_data
         }, status=status.HTTP_200_OK)
 
@@ -822,7 +956,7 @@ class ContactSuperAdminAPIView(APIView):
 
         if not superadmin_emails:
             return Response(
-                {"detail": "No super admin available to contact"},
+                {"message": "No super admin available to contact"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -848,13 +982,13 @@ class ContactSuperAdminAPIView(APIView):
 
         if sent_count > 0:
             return Response({
-                "detail": f"Your message has been sent to {sent_count} super admin(s)",
+                "message": f"Your message has been sent to {sent_count} super admin(s)",
                 "scope_id": scope_id,
                 "scope_name": scope.name
             }, status=status.HTTP_200_OK)
         else:
             return Response(
-                {"detail": "Failed to send message. Please try again later."},
+                {"message": "Failed to send message. Please try again later."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -885,7 +1019,7 @@ class ContactSupportAPIView(APIView):
                 # Verify user owns this scope or is super admin
                 if not request.user.is_superuser and scope.admin != request.user:
                     return Response(
-                        {"detail": "You don't have permission to reference this scope"},
+                        {"message": "You don't have permission to reference this scope"},
                         status=status.HTTP_403_FORBIDDEN
                     )
                 scope_name = scope.name
@@ -898,7 +1032,7 @@ class ContactSupportAPIView(APIView):
 
         if not superadmin_emails:
             return Response(
-                {"detail": "No super admin available to contact"},
+                {"message": "No super admin available to contact"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -924,11 +1058,11 @@ class ContactSupportAPIView(APIView):
 
         if sent_count > 0:
             return Response({
-                "detail": f"Your message has been sent to {sent_count} super admin(s)",
+                "message": f"Your message has been sent to {sent_count} super admin(s)",
                 "subject": subject
             }, status=status.HTTP_200_OK)
         else:
             return Response(
-                {"detail": "Failed to send message. Please try again later."},
+                {"message": "Failed to send message. Please try again later."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
