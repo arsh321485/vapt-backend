@@ -716,8 +716,14 @@ class ScopeNamesByAdminAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        scopes = Scope.objects.filter(admin_id=admin_id).values_list("name", flat=True).distinct()
-        scope_list = list(scopes)
+        scopes = Scope.objects.filter(admin_id=admin_id).values_list("name", flat=True)
+        # Use dict to get unique names (case-insensitive) while preserving original case
+        unique_names = {}
+        for name in scopes:
+            name_lower = name.lower()
+            if name_lower not in unique_names:
+                unique_names[name_lower] = name
+        scope_list = list(unique_names.values())
         count = len(scope_list)
 
         if count == 0:
@@ -829,13 +835,12 @@ class ScopeDataByNameAPIView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Collect all entries from all matching scopes, grouped by entry_type
+        # Collect all entries from all matching scopes, grouped by category
         all_entries = {
-            "internal_ip": [],
-            "external_ip": [],
-            "web_url": [],
-            "mobile_url": [],
-            "subnet": []
+            "internal_targets": [],
+            "external_targets": [],
+            "web_app_targets": [],
+            "mobile_app_targets": []
         }
 
         scope_ids = []
@@ -844,7 +849,23 @@ class ScopeDataByNameAPIView(APIView):
             for entry in scope.entries.all():
                 entry_data = ScopeEntrySerializer(entry).data
                 entry_data["scope_id"] = str(scope.id)
-                all_entries[entry.entry_type].append(entry_data)
+
+                # Classify entry into appropriate category
+                if entry.entry_type == "internal_ip":
+                    all_entries["internal_targets"].append(entry_data)
+                elif entry.entry_type == "external_ip":
+                    all_entries["external_targets"].append(entry_data)
+                elif entry.entry_type == "web_url":
+                    all_entries["web_app_targets"].append(entry_data)
+                elif entry.entry_type == "mobile_url":
+                    all_entries["mobile_app_targets"].append(entry_data)
+                elif entry.entry_type == "subnet":
+                    # Subnets are classified based on is_internal flag
+                    entry_data["is_subnet"] = True
+                    if entry.is_internal:
+                        all_entries["internal_targets"].append(entry_data)
+                    else:
+                        all_entries["external_targets"].append(entry_data)
 
         return Response({
             "message": "Scope data retrieved successfully",
@@ -853,13 +874,7 @@ class ScopeDataByNameAPIView(APIView):
             "testing_type": testing_type,
             "scope_count": scopes.count(),
             "scope_ids": scope_ids,
-            "entries": {
-                "internal_targets": all_entries["internal_ip"],
-                "external_targets": all_entries["external_ip"],
-                "web_app_targets": all_entries["web_url"],
-                "mobile_app_targets": all_entries["mobile_url"],
-                "subnets": all_entries["subnet"]
-            },
+            "entries": all_entries,
             "total_entries": sum(len(v) for v in all_entries.values())
         }, status=status.HTTP_200_OK)
 
@@ -922,11 +937,18 @@ class ScopeHierarchyAPIView(APIView):
 
             scope_data.append(data)
 
+        # Get unique scope names (case-insensitive)
+        unique_names = {}
+        for name in scopes.values_list("name", flat=True):
+            name_lower = name.lower()
+            if name_lower not in unique_names:
+                unique_names[name_lower] = name
+
         return Response({
             "message": "Scope hierarchy retrieved successfully",
             "admin_id": admin_id,
             "count": len(scope_data),
-            "scope_names": list(set(scopes.values_list("name", flat=True))),
+            "scope_names": list(unique_names.values()),
             "scopes": scope_data
         }, status=status.HTTP_200_OK)
 
