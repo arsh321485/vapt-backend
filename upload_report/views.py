@@ -16,24 +16,38 @@ from rest_framework.permissions import IsAuthenticated
 import pymongo
 
 from location.models import Location
+from scope.models import Scope
+from users.models import User
 from .models import UploadReport
 from .serializers import UploadReportSerializer
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponseForbidden
 from rest_framework.decorators import api_view, permission_classes
+from django.contrib.auth.decorators import login_required
 
-# Serve uploaded report files
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
+# Serve uploaded report files (uses Django session auth for admin access)
+@login_required(login_url='/admin/login/')
 def serve_report_file(request, path):
     file_path = os.path.join(settings.MEDIA_ROOT, path)
 
     if not os.path.exists(file_path):
         raise Http404("File not found")
 
-    # HTML report open karne ke liye
+    # Determine content type based on file extension
+    ext = os.path.splitext(path)[1].lower()
+    content_types = {
+        '.html': 'text/html',
+        '.htm': 'text/html',
+        '.pdf': 'application/pdf',
+        '.csv': 'text/csv',
+        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '.xls': 'application/vnd.ms-excel',
+        '.xml': 'application/xml',
+    }
+    content_type = content_types.get(ext, 'application/octet-stream')
+
     return FileResponse(
         open(file_path, "rb"),
-        content_type="text/html"
+        content_type=content_type
     )
 
 
@@ -486,9 +500,44 @@ class UploadReportView(APIView):
         try:
             from .parsers import dispatch_parse
 
-            location_raw = request.data.get("location")
+            # Determine target admin for upload
+            admin_id = request.data.get("admin_id")
+
+            if admin_id:
+                # Only Super Admin can upload on behalf of another admin
+                if not request.user.is_superuser:
+                    return Response(
+                        {"error": "Only Super Admin can upload reports for other admins."},
+                        status=403
+                    )
+
+                # Validate and fetch the target admin
+                try:
+                    target_admin = User.objects.get(id=admin_id)
+                except User.DoesNotExist:
+                    return Response(
+                        {"error": "Admin not found with the provided admin_id."},
+                        status=404
+                    )
+            else:
+                # Regular flow: use the requesting user as target admin
+                target_admin = request.user
+
+            # Check if target admin's scope is locked
+            # If scope is locked, only Super Admin can upload reports
+            admin_has_locked_scope = Scope.objects.filter(
+                admin=target_admin,
+                is_locked=True
+            ).exists()
+
+            if admin_has_locked_scope and not request.user.is_superuser:
+                return Response(
+                    {"error": "Scope is locked. Only Super Admin can upload reports."},
+                    status=403
+                )
+
             member_type = request.data.get("member_type", "external")
-            
+
             if member_type not in {"external", "internal", "both"}:
                 return Response(
                     {"error": "member_type must be external, internal or both"},
@@ -500,13 +549,6 @@ class UploadReportView(APIView):
 
             if not uploaded_files:
                 return Response({"error": "At least one file is required"}, status=400)
-
-            # 🔹 Resolve locations (your existing logic)
-            try:
-                # location_objects = self._resolve_locations(location_raw, request.user)
-                location_obj = self._resolve_location(location_raw, request.user)
-            except ValueError as exc:
-                return Response({"error": str(exc)}, status=400)
 
             upload_results = []
             errors = []
@@ -528,7 +570,7 @@ class UploadReportView(APIView):
                     file_hash = self._generate_file_hash(uploaded_file)
 
                     if UploadReport.objects.filter(
-                        admin=request.user,
+                        admin=target_admin,
                         file_hash=file_hash
                     ).exists():
                         errors.append({
@@ -538,10 +580,10 @@ class UploadReportView(APIView):
                         continue
 
                     # 🔹 Save file
-                    # Save under admin folder to avoid overwrite
-                    admin_id = str(request.user.id)
+                    # Save under target admin folder to avoid overwrite
+                    target_admin_id = str(target_admin.id)
 
-                    relative_filename = f"reports/{admin_id}/{uploaded_file.name}"
+                    relative_filename = f"reports/{target_admin_id}/{uploaded_file.name}"
                     file_path = os.path.join(settings.MEDIA_ROOT, relative_filename)
 
                     os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -573,9 +615,9 @@ class UploadReportView(APIView):
                         upload_report = UploadReport.objects.create(
                             file=relative_filename,
                             file_hash=file_hash,
-                            location=location_obj, 
-                            admin=request.user,
-                            member_type=mt,         
+                            location=None,
+                            admin=target_admin,
+                            member_type=mt,
                             status="Sucessfully Processed",
                             parsed_count=parsed_count,
                         )
@@ -585,9 +627,9 @@ class UploadReportView(APIView):
                         mongodb_stored = self._store_in_mongodb(
                             parsed_data=parsed_data,
                             report_id=report_id,
-                            location_id=str(location_obj.pk),
-                            location_name=location_obj.location_name,
-                            admin_email=request.user.email,
+                            location_id="",
+                            location_name="",
+                            admin_email=target_admin.email,
                             original_filename=uploaded_file.name,
                             member_type=mt
                         )
@@ -600,7 +642,8 @@ class UploadReportView(APIView):
                             "report_id": report_id,
                             "file_name": uploaded_file.name,
                             "file_url": file_url,
-                            "location": location_obj.location_name,
+                            "admin_id": str(target_admin.id),
+                            "admin_email": target_admin.email,
                             "member_type": mt,
                             "status": upload_report.status,
                             "parsed_count": parsed_count,

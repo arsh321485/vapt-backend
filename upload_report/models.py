@@ -7,10 +7,15 @@ def upload_report_file_path(instance, filename):
     return f"reports/{filename}"
 
 class UploadReport(models.Model):
+    MEMBER_TYPE_CHOICES = [
+        ('internal', 'Internal'),
+        ('external', 'External'),
+    ]
+
     _id = models.ObjectIdField(primary_key=True, default=ObjectId)
 
     file = models.FileField(upload_to=upload_report_file_path)
-    file_hash = models.CharField(max_length=64, db_index=True)  # ✅ ADD THIS
+    file_hash = models.CharField(max_length=64, db_index=True)
 
     location = models.ForeignKey(
         Location, on_delete=models.SET_NULL,
@@ -22,7 +27,12 @@ class UploadReport(models.Model):
         null=True, blank=True, related_name="upload_reports"
     )
 
-    member_type = models.CharField(max_length=100, blank=True, null=True)
+    member_type = models.CharField(
+        max_length=100,
+        choices=MEMBER_TYPE_CHOICES,
+        blank=True,
+        null=True
+    )
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=50, default='pending')
