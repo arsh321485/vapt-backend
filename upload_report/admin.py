@@ -4,10 +4,42 @@ from django.conf import settings
 from django.contrib import messages
 from .models import UploadReport
 from users.models import User
+from scope.models import Scope
 import hashlib
 import os
 import datetime
 import pymongo
+
+
+def check_admin_has_locked_scope(admin_id):
+    """Check if admin has at least one locked scope using direct MongoDB query."""
+    try:
+        mongo_uri = settings.DATABASES['default']['CLIENT']['host']
+    except Exception:
+        mongo_uri = getattr(settings, "MONGO_DB_URL", None)
+
+    if not mongo_uri:
+        return False
+
+    try:
+        with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as client:
+            try:
+                db = client.get_default_database()
+            except Exception:
+                try:
+                    dbname = settings.DATABASES['default'].get('NAME')
+                    db = client[dbname] if dbname else client["vaptfix"]
+                except Exception:
+                    db = client["vaptfix"]
+
+            # Query scopes collection for locked scope with this admin_id
+            locked_scope = db["scopes"].find_one({
+                "admin_id": str(admin_id),
+                "is_locked": True
+            })
+            return locked_scope is not None
+    except Exception:
+        return False
 
 
 class UploadReportAdminForm(forms.ModelForm):
@@ -46,9 +78,20 @@ class UploadReportAdminForm(forms.ModelForm):
         if not admin_id:
             raise forms.ValidationError("Please select an admin.")
         try:
-            return User.objects.get(id=admin_id)
+            admin_user = User.objects.get(id=admin_id)
         except User.DoesNotExist:
             raise forms.ValidationError("Selected admin does not exist.")
+
+        # Check if the admin has at least one locked scope using direct MongoDB query
+        has_locked_scope = check_admin_has_locked_scope(admin_id)
+
+        if not has_locked_scope:
+            raise forms.ValidationError(
+                f"Cannot upload report: Admin '{admin_user.email}' does not have any locked scope. "
+                "Please lock the admin's scope first before uploading reports."
+            )
+
+        return admin_user
 
 
 @admin.register(UploadReport)
@@ -58,8 +101,8 @@ class UploadReportAdmin(admin.ModelAdmin):
     list_display = ('_id', 'file', 'member_type', 'get_admin_id', 'get_admin_email', 'uploaded_at', 'status')
     search_fields = ('file', 'status', 'member_type')
     list_filter = ('uploaded_at', 'status', 'member_type')
-    readonly_fields = ('uploaded_at', 'created_at', 'updated_at', 'file_hash', 'parsed_count')
-    exclude = ('file_hash', 'location', 'admin')
+    readonly_fields = ()
+    exclude = ('file_hash', 'location', 'admin', 'uploaded_at', 'created_at', 'updated_at', 'parsed_count')
 
     def get_admin_id(self, obj):
         return getattr(obj.admin, "id", None)

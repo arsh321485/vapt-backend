@@ -407,7 +407,8 @@ class AdminTotalAssetsAPIView(APIView):
 
                 if not doc:
                     return Response({
-                        "total_assets": 0
+                        "total_assets": 0,
+                        "report_id": None
                     }, status=status.HTTP_200_OK)
 
                 hosts = set()
@@ -417,9 +418,11 @@ class AdminTotalAssetsAPIView(APIView):
                         hosts.add(host_name)
 
                 total_assets = len(hosts)
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
                 return Response({
-                    "total_assets": total_assets
+                    "total_assets": total_assets,
+                    "report_id": report_id
                 }, status=status.HTTP_200_OK)
 
         except Exception as e:
@@ -445,7 +448,7 @@ class AdminAvgScoreAPIView(APIView):
                 doc = _load_latest_report_for_admin(db, admin_email)
 
                 if not doc:
-                    return Response({"avg_score": None}, status=status.HTTP_200_OK)
+                    return Response({"avg_score": None, "report_id": None}, status=status.HTTP_200_OK)
 
                 cvss_vals = []
                 for host in doc.get("vulnerabilities_by_host") or []:
@@ -456,8 +459,9 @@ class AdminAvgScoreAPIView(APIView):
                             cvss_vals.append(num)
 
                 avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else None
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
-                return Response({"avg_score": avg}, status=status.HTTP_200_OK)
+                return Response({"avg_score": avg, "report_id": report_id}, status=status.HTTP_200_OK)
 
         except Exception as e:
             import traceback
@@ -482,8 +486,10 @@ class AdminVulnerabilitiesAPIView(APIView):
                 doc = _load_latest_report_for_admin(db, admin_email)
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                report_id = None
 
                 if doc:
+                    report_id = doc.get("report_id") or str(doc.get("_id", ""))
                     for host in doc.get("vulnerabilities_by_host") or []:
                         for v in (host.get("vulnerabilities") or []):
                             risk = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
@@ -496,6 +502,7 @@ class AdminVulnerabilitiesAPIView(APIView):
                             elif risk.startswith("low"):
                                 counts["low"] += 1
 
+                counts["report_id"] = report_id
                 return Response(counts, status=status.HTTP_200_OK)
 
         except Exception as e:
@@ -515,10 +522,18 @@ class AdminMitigationTimelineAPIView(APIView):
 
     def get(self, request):
         try:
+            admin_email = request.user.email
+            report_id = None
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email)
+                if doc:
+                    report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
             rc = _get_latest_riskcriteria_for_user(request.user)
 
             if not rc:
-                return Response({"detail": "Risk criteria not found"}, status=404)
+                return Response({"detail": "Risk criteria not found", "report_id": report_id}, status=404)
 
             critical_days = parse_timeline_to_days(rc.critical)
             high_days = parse_timeline_to_days(rc.high)
@@ -529,6 +544,7 @@ class AdminMitigationTimelineAPIView(APIView):
             total_hours = days_to_hours(total_days)
 
             payload = {
+                "report_id": report_id,
                 "critical": {
                     "raw": rc.critical,
                     "days": critical_days,
@@ -573,10 +589,18 @@ class AdminMeanTimeRemediateAPIView(APIView):
 
     def get(self, request):
         try:
+            admin_email = request.user.email
+            report_id = None
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email)
+                if doc:
+                    report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
             rc = _get_latest_riskcriteria_for_user(request.user)
 
             if not rc:
-                return Response({"detail": "Risk criteria not found"}, status=404)
+                return Response({"detail": "Risk criteria not found", "report_id": report_id}, status=404)
 
             critical_days = parse_timeline_to_days(rc.critical)
             high_days = parse_timeline_to_days(rc.high)
@@ -593,6 +617,7 @@ class AdminMeanTimeRemediateAPIView(APIView):
             mttr_wdh = hours_to_wdh(mttr_hours)
 
             payload = {
+                "report_id": report_id,
                 "risk_criteria": {
                     "critical": {
                         "raw": rc.critical,
@@ -643,8 +668,15 @@ class AdminVulnerabilitiesFixedAPIView(APIView):
     def get(self, request):
         try:
             admin_id = str(request.user.id)
+            admin_email = request.user.email
 
             with MongoContext() as db:
+                # Get report_id from latest report
+                doc = _load_latest_report_for_admin(db, admin_email)
+                report_id = None
+                if doc:
+                    report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
                 fix_coll = db[FIX_VULN_COLLECTION]
 
                 # Count fixed vulnerabilities by severity
@@ -669,6 +701,7 @@ class AdminVulnerabilitiesFixedAPIView(APIView):
                 total = counts["critical"] + counts["high"] + counts["medium"] + counts["low"]
 
                 return Response({
+                    "report_id": report_id,
                     "total_fixed": total,
                     "critical_fixed": counts["critical"],
                     "high_fixed": counts["high"],
@@ -694,8 +727,15 @@ class AdminSupportRequestsAPIView(APIView):
     def get(self, request):
         try:
             admin_id = str(request.user.id)
+            admin_email = request.user.email
 
             with MongoContext() as db:
+                # Get report_id from latest report
+                doc = _load_latest_report_for_admin(db, admin_email)
+                report_id = None
+                if doc:
+                    report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
                 support_coll = db[SUPPORT_REQUEST_COLLECTION]
 
                 # Count pending support requests
@@ -713,6 +753,7 @@ class AdminSupportRequestsAPIView(APIView):
                 total = pending_count + closed_count
 
                 return Response({
+                    "report_id": report_id,
                     "total": total,
                     "pending": pending_count,
                     "closed": closed_count
@@ -882,3 +923,46 @@ class AdminDashboardSummaryAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
+class AdminReportStatusAPIView(APIView):
+    """
+    Returns whether the admin has any uploaded reports.
+    Frontend should use this to decide whether to show dashboard or waiting screen.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_id = str(request.user.id)
+            admin_email = request.user.email
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email)
+
+                if doc:
+                    report_id = doc.get("report_id") or str(doc.get("_id", ""))
+                    return Response({
+                        "has_report": True,
+                        "show_dashboard": True,
+                        "admin_id": admin_id,
+                        "admin_email": admin_email,
+                        "report_id": report_id,
+                        "message": "Report available"
+                    }, status=status.HTTP_200_OK)
+                else:
+                    return Response({
+                        "has_report": False,
+                        "show_dashboard": False,
+                        "admin_id": admin_id,
+                        "admin_email": admin_email,
+                        "report_id": None,
+                        "message": "No report uploaded yet. Please wait for Super Admin to upload a report."
+                    }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "error occurred", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
