@@ -8,9 +8,41 @@ from .views import (
     AssetHoldAPIView,
     AssetUnholdAPIView,
     HoldAssetsByReportAPIView,
+    # Admin-level endpoints (auto-refresh from latest report)
+    AdminAssetsAPIView,
+    AdminAssetVulnerabilitiesAPIView,
+    AdminHoldAssetsAPIView,
 )
 
 urlpatterns = [
+    # ================== ADMIN-LEVEL ENDPOINTS ==================
+    # These automatically fetch data from the most recently uploaded report
+    # for the logged-in admin (similar to Admin Dashboard API)
+
+    # Get all assets from latest report (auto-refreshes when new report is uploaded)
+    path(
+        "assets/",
+        AdminAssetsAPIView.as_view(),
+        name="admin-assets",
+    ),
+
+    # Get held assets from latest report
+    path(
+        "assets/hold-list/",
+        AdminHoldAssetsAPIView.as_view(),
+        name="admin-held-assets",
+    ),
+
+    # Get vulnerabilities for a specific asset from latest report
+    path(
+        "assets/<path:host_name>/vulnerabilities/",
+        AdminAssetVulnerabilitiesAPIView.as_view(),
+        name="admin-asset-vulnerabilities",
+    ),
+
+    # ================== REPORT-SPECIFIC ENDPOINTS ==================
+    # These require a specific report_id
+
     # ---------------- ASSETS LIST ----------------
     path(
         "report/<str:report_id>/assets/",
