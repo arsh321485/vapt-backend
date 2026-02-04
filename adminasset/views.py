@@ -45,6 +45,57 @@ class MongoContext:
 
 
 # ---------------------- Helper ----------------------
+def validate_report_ownership(db, report_id, user):
+    """
+    Validate that the requesting user owns the report.
+
+    Args:
+        db: MongoDB database instance
+        report_id: The report ID to validate
+        user: The requesting user
+
+    Returns:
+        tuple: (is_valid, doc, error_response)
+            - is_valid: Boolean indicating if user has access
+            - doc: The report document if found, None otherwise
+            - error_response: Response object if validation fails, None otherwise
+    """
+    coll = db[NESSUS_COLLECTION]
+    doc = coll.find_one({"report_id": str(report_id)})
+
+    if not doc:
+        return False, None, Response(
+            {"detail": "Report not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # Super admin can access all reports
+    if getattr(user, 'is_superuser', False):
+        return True, doc, None
+
+    # Check ownership by admin_id
+    report_admin_id = doc.get("admin_id")
+    user_id = str(user.id)
+
+    if report_admin_id and report_admin_id != user_id:
+        return False, None, Response(
+            {"detail": "Access denied. You can only view assets from your own reports."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    # Fallback: check by admin_email if admin_id not present (for older reports)
+    if not report_admin_id:
+        report_admin_email = doc.get("admin_email")
+        user_email = getattr(user, 'email', None)
+        if report_admin_email and user_email and report_admin_email != user_email:
+            return False, None, Response(
+                {"detail": "Access denied. You can only view assets from your own reports."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    return True, doc, None
+
+
 def _iso(v):
     if not v:
         return None
@@ -83,11 +134,12 @@ class ReportAssetsAPIView(APIView):
             search_q = (request.query_params.get("q") or "").strip().lower()
 
             with MongoContext() as db:
-                coll = db[NESSUS_COLLECTION]
-                doc = coll.find_one({"report_id": str(report_id)})
-
-                if not doc:
-                    return Response({"detail": "report not found"}, status=404)
+                # Validate ownership - admin can only see their own reports
+                is_valid, doc, error_response = validate_report_ownership(
+                    db, report_id, request.user
+                )
+                if not is_valid:
+                    return error_response
 
                 uploaded_at = doc.get("uploaded_at")
                 member_type = doc.get("member_type")
@@ -173,12 +225,14 @@ class AssetDeleteAPIView(APIView):
         host_name = unquote(host_name)
         try:
             with MongoContext() as db:
-                coll = db[NESSUS_COLLECTION]
+                # Validate ownership - admin can only delete assets from their own reports
+                is_valid, doc, error_response = validate_report_ownership(
+                    db, report_id, request.user
+                )
+                if not is_valid:
+                    return error_response
 
-                # ensure report exists
-                doc = coll.find_one({"report_id": str(report_id)}, {"vulnerabilities_by_host": 1})
-                if not doc:
-                    return Response({"detail": "Report not found"}, status=status.HTTP_404_NOT_FOUND)
+                coll = db[NESSUS_COLLECTION]
 
                 # Use $pull to remove host entry by host_name OR host (handle both keys safely)
                 res = coll.update_one(
@@ -226,10 +280,12 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
         host_name = unquote(host_name)
         try:
             with MongoContext() as db:
-                coll = db[NESSUS_COLLECTION]
-                doc = coll.find_one({"report_id": str(report_id)})
-                if not doc:
-                    return Response({"detail": "report not found"}, status=status.HTTP_404_NOT_FOUND)
+                # Validate ownership - admin can only view vulnerabilities from their own reports
+                is_valid, doc, error_response = validate_report_ownership(
+                    db, report_id, request.user
+                )
+                if not is_valid:
+                    return error_response
 
                 # context fields
                 member_type = doc.get("member_type") or ""
@@ -295,22 +351,16 @@ class AssetHoldAPIView(APIView):
 
         try:
             with MongoContext() as db:
+                # Validate ownership - admin can only hold assets from their own reports
+                is_valid, doc, error_response = validate_report_ownership(
+                    db, report_id, request.user
+                )
+                if not is_valid:
+                    return error_response
+
                 coll = db[NESSUS_COLLECTION]
                 held_coll = db[HOLD_COLLECTION]
 
-                # Load report
-                doc = coll.find_one(
-                    {"report_id": str(report_id)},
-                    {"vulnerabilities_by_host": 1,
-                     "member_type": 1
-                    }
-                )
-                if not doc:
-                    return Response(
-                        {"detail": "Report not found"},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
-                
                 member_type = doc.get("member_type")
 
                 found = None
@@ -393,7 +443,7 @@ class AssetHoldAPIView(APIView):
             )
 
 
-# ----------------  ASSET UNHOLD ----------------  
+# ----------------  ASSET UNHOLD ----------------
 class AssetUnholdAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -402,6 +452,13 @@ class AssetUnholdAPIView(APIView):
 
         try:
             with MongoContext() as db:
+                # Validate ownership - admin can only unhold assets from their own reports
+                is_valid, doc, error_response = validate_report_ownership(
+                    db, report_id, request.user
+                )
+                if not is_valid:
+                    return error_response
+
                 coll = db[NESSUS_COLLECTION]
                 held_coll = db[HOLD_COLLECTION]
 
@@ -492,21 +549,22 @@ class AssetUnholdAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-# ----------------HOLD  ASSET LIST ----------------  
+# ----------------HOLD  ASSET LIST ----------------
 class HoldAssetsByReportAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, report_id):
         try:
             with MongoContext() as db:
-                held_coll = db[HOLD_COLLECTION]
-                report_coll = db[NESSUS_COLLECTION]
-
-                # 🔹 fetch report member_type as fallback
-                report_doc = report_coll.find_one(
-                    {"report_id": str(report_id)},
-                    {"member_type": 1}
+                # Validate ownership - admin can only view held assets from their own reports
+                is_valid, report_doc, error_response = validate_report_ownership(
+                    db, report_id, request.user
                 )
+                if not is_valid:
+                    return error_response
+
+                held_coll = db[HOLD_COLLECTION]
+
                 fallback_member_type = report_doc.get("member_type") if report_doc else None
 
                 cursor = held_coll.find({"report_id": str(report_id)})
@@ -654,4 +712,291 @@ class ClosedFixVulnerabilitiesByHostAPIView(APIView):
                     "results": results
                 },
                 status=status.HTTP_200_OK
+            )
+
+
+# ---------------------- Helper for Latest Report ----------------------
+def _load_latest_report_for_admin(db, admin_email, admin_id=None):
+    """
+    Load the most recently uploaded report for a specific admin.
+    Tries admin_id first (more reliable), falls back to admin_email.
+    """
+    coll = db[NESSUS_COLLECTION]
+
+    # Try by admin_id first (for newer reports)
+    if admin_id:
+        doc = coll.find_one(
+            {"admin_id": str(admin_id)},
+            sort=[("uploaded_at", -1)]
+        )
+        if doc:
+            return doc
+
+    # Fallback to admin_email (for older reports)
+    return coll.find_one(
+        {"admin_email": admin_email},
+        sort=[("uploaded_at", -1)]
+    )
+
+
+# ---------------------- ADMIN-LEVEL ASSETS API ----------------------
+class AdminAssetsAPIView(APIView):
+    """
+    GET /api/adminasset/assets/
+    Returns all assets from the most recently uploaded report for the logged-in admin.
+    This endpoint automatically refreshes when a new report is uploaded.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            search_q = (request.query_params.get("q") or "").strip().lower()
+            admin_email = request.user.email
+            admin_id = str(request.user.id)
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+
+                if not doc:
+                    return Response({
+                        "report_id": None,
+                        "member_type": None,
+                        "total_assets": 0,
+                        "assets": [],
+                        "message": "No reports found for this admin"
+                    }, status=status.HTTP_200_OK)
+
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
+                uploaded_at = doc.get("uploaded_at")
+                member_type = doc.get("member_type")
+
+                assets = {}
+
+                for host in doc.get("vulnerabilities_by_host", []):
+                    host_name = (host.get("host_name") or "").strip()
+                    if not host_name:
+                        continue
+
+                    # Apply search filter
+                    if search_q and search_q not in host_name.lower():
+                        continue
+
+                    if host_name not in assets:
+                        assets[host_name] = {
+                            "asset": host_name,
+                            "first_seen": uploaded_at,
+                            "last_seen": uploaded_at,
+                            "member_type": member_type,
+                            "total_vulnerabilities": 0,
+                            "severity_counts": {
+                                "critical": 0,
+                                "high": 0,
+                                "medium": 0,
+                                "low": 0
+                            },
+                            "host_information": host.get("host_information") or {}
+                        }
+
+                    entry = assets[host_name]
+
+                    for v in host.get("vulnerabilities", []):
+                        entry["total_vulnerabilities"] += 1
+                        risk = (v.get("risk_factor") or v.get("severity") or "").lower()
+
+                        if risk.startswith("crit"):
+                            entry["severity_counts"]["critical"] += 1
+                        elif risk.startswith("high"):
+                            entry["severity_counts"]["high"] += 1
+                        elif risk.startswith("med"):
+                            entry["severity_counts"]["medium"] += 1
+                        elif risk.startswith("low"):
+                            entry["severity_counts"]["low"] += 1
+
+                final = []
+                for a in assets.values():
+                    final.append({
+                        "asset": a["asset"],
+                        "member_type": a["member_type"],
+                        "first_seen": _iso(a["first_seen"]),
+                        "last_seen": _iso(a["last_seen"]),
+                        "total_vulnerabilities": a["total_vulnerabilities"],
+                        "severity_counts": a["severity_counts"],
+                        "host_information": a["host_information"],
+                    })
+
+                serializer = AdminAssetSerializer(final, many=True)
+
+                return Response({
+                    "report_id": report_id,
+                    "member_type": member_type,
+                    "total_assets": len(final),
+                    "assets": serializer.data
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class AdminAssetVulnerabilitiesAPIView(APIView):
+    """
+    GET /api/adminasset/assets/<host_name>/vulnerabilities/
+    Returns vulnerabilities for a specific asset from the most recently uploaded report.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, host_name):
+        host_name = unquote(host_name)
+        try:
+            admin_email = request.user.email
+            admin_id = str(request.user.id)
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+
+                if not doc:
+                    return Response(
+                        {"detail": "No reports found for this admin"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
+                member_type = doc.get("member_type") or ""
+                scan_info = doc.get("scan_info") or {}
+                organisation_name = (
+                    scan_info.get("organisation_name")
+                    or scan_info.get("organization")
+                    or scan_info.get("organisation")
+                    or ""
+                )
+
+                # Fallback to user table if no organisation_name
+                if not organisation_name and User is not None:
+                    organisation_name = getattr(request.user, "organisation_name", "") or ""
+
+                # Find host entry
+                host_entry = None
+                for h in (doc.get("vulnerabilities_by_host") or []):
+                    hn = (h.get("host_name") or h.get("host") or "").strip()
+                    if hn == host_name:
+                        host_entry = h
+                        break
+
+                if not host_entry:
+                    return Response(
+                        {"detail": "Asset not found in report"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+
+                out = []
+                for v in (host_entry.get("vulnerabilities") or []):
+                    item = {
+                        "asset": host_name,
+                        "exposure": member_type,
+                        "owner": organisation_name,
+                        "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
+                        "vul_name": v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                        "vendor_fix_available": "Yes",
+                        "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""),
+                        "description": _join_description(v),
+                    }
+                    out.append(item)
+
+                serializer = AssetHostVulnSerializer(out, many=True)
+                return Response({
+                    "report_id": report_id,
+                    "asset": host_name,
+                    "count": len(out),
+                    "vulnerabilities": serializer.data
+                }, status=status.HTTP_200_OK)
+
+        except pymongo.errors.ServerSelectionTimeoutError as e:
+            return Response(
+                {"detail": "Cannot connect to MongoDB", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "Unexpected error", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class AdminHoldAssetsAPIView(APIView):
+    """
+    GET /api/adminasset/assets/hold-list/
+    Returns all held assets from the most recently uploaded report for the logged-in admin.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_email = request.user.email
+            admin_id = str(request.user.id)
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+
+                if not doc:
+                    return Response({
+                        "report_id": None,
+                        "count": 0,
+                        "assets": [],
+                        "message": "No reports found for this admin"
+                    }, status=status.HTTP_200_OK)
+
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
+                fallback_member_type = doc.get("member_type")
+
+                held_coll = db[HOLD_COLLECTION]
+                cursor = held_coll.find({"report_id": str(report_id)})
+                results = []
+
+                for held_doc in cursor:
+                    host_entry = held_doc.get("host_entry") or {}
+                    vulns = host_entry.get("vulnerabilities", [])
+
+                    severity_counts = {
+                        "critical": 0,
+                        "high": 0,
+                        "medium": 0,
+                        "low": 0
+                    }
+
+                    for v in vulns:
+                        risk = (v.get("risk_factor") or "").lower()
+                        if risk.startswith("crit"):
+                            severity_counts["critical"] += 1
+                        elif risk.startswith("high"):
+                            severity_counts["high"] += 1
+                        elif risk.startswith("med"):
+                            severity_counts["medium"] += 1
+                        elif risk.startswith("low"):
+                            severity_counts["low"] += 1
+
+                    results.append({
+                        "asset": held_doc.get("host_name"),
+                        "member_type": held_doc.get("member_type") or fallback_member_type,
+                        "total_vulnerabilities": len(vulns),
+                        "severity_counts": severity_counts,
+                        "host_information": host_entry.get("host_information") or {},
+                        "held_at": held_doc.get("held_at"),
+                        "held_by": held_doc.get("held_by"),
+                    })
+
+                return Response({
+                    "report_id": report_id,
+                    "count": len(results),
+                    "assets": results
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "Failed to fetch held assets", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

@@ -147,11 +147,22 @@ class UploadReportView(APIView):
                 db = self._get_mongo_db(client)
                 
                 # Base document structure
+                # Fetch admin_id from admin_email for ownership validation
+                admin_id = None
+                if admin_email:
+                    try:
+                        admin_user = User.objects.filter(email=admin_email).first()
+                        if admin_user:
+                            admin_id = str(admin_user.id)
+                    except Exception:
+                        pass
+
                 document = {
                     "report_id": report_id,
                     "original_filename": original_filename,
                     "location_id": location_id,
                     "location_name": location_name,
+                    "admin_id": admin_id,  # Store admin_id for ownership validation
                     "admin_email": admin_email,
                     "member_type": member_type,
                     "uploaded_at": datetime.datetime.utcnow(),
