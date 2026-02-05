@@ -1,0 +1,2 @@
+The Super Admin updated the file for a particular Admin, but the updated data is not showing in the Admin Register app. Please check the issue.
+admin email id malibharti1702@gmail.com 

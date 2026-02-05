@@ -250,8 +250,128 @@ class VulnerabilityRegisterAPIView(APIView):
             return Response(
                 {"detail": "unexpected error", "error": str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )      
-              
+            )
+
+
+class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
+    """
+    Returns vulnerabilities from the LATEST file uploaded by Super Admin for the current Admin.
+
+    - Each Admin sees only their own data (filtered by admin_id)
+    - Shows vulnerabilities from the most recent file uploaded for this Admin
+    - When Super Admin uploads a new file for an Admin, it automatically reflects here
+    - Older files for the same Admin are ignored
+
+    GET /api/adminregister/register/latest/vulns/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # Get the current authenticated user's admin ID and email
+            current_admin_id = str(request.user.id)
+            current_admin_email = getattr(request.user, 'email', None)
+
+            with MongoContext() as db:
+                coll = db[NESSUS_COLLECTION]
+
+                # Build query to match by admin_id OR admin_email
+                query_conditions = [{"admin_id": current_admin_id}]
+                if current_admin_email:
+                    query_conditions.append({"admin_email": current_admin_email})
+
+                # Find the LATEST report for this specific Admin
+                # Uses $or to match by either admin_id or admin_email
+                latest_doc = coll.find_one(
+                    {"$or": query_conditions},
+                    sort=[("uploaded_at", pymongo.DESCENDING)]
+                )
+
+                if not latest_doc:
+                    return Response(
+                        {
+                            "detail": "No reports found for your account",
+                            "admin_id": current_admin_id,
+                            "admin_email": current_admin_email
+                        },
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+
+                report_id = latest_doc.get("report_id")
+                uploaded_at = latest_doc.get("uploaded_at")
+                admin_id = latest_doc.get("admin_id")
+                admin_email = latest_doc.get("admin_email")
+
+                rows = []
+
+                # Extract vulnerabilities from the latest report
+                for host in latest_doc.get("vulnerabilities_by_host", []):
+                    host_name = host.get("host_name") or host.get("host") or ""
+
+                    for v in host.get("vulnerabilities", []):
+                        plugin_name = (
+                            v.get("plugin_name")
+                            or v.get("pluginname")
+                            or v.get("name")
+                            or ""
+                        )
+
+                        risk_raw = (
+                            v.get("risk_factor")
+                            or v.get("severity")
+                            or v.get("risk")
+                            or ""
+                        )
+
+                        severity = (
+                            risk_raw.strip().title()
+                            if isinstance(risk_raw, str)
+                            else ""
+                        )
+
+                        first_obs = v.get("created_at") or uploaded_at
+                        second_obs = v.get("updated_at")
+
+                        rows.append({
+                            "vul_name": plugin_name,
+                            "asset": host_name,
+                            "severity": severity,
+                            "first_observation": _normalize_iso(first_obs),
+                            "second_observation": _normalize_iso(second_obs),
+                            "status": "open",
+                        })
+
+                serializer = AdminRegisterSimpleVulnSerializer(rows, many=True)
+
+                return Response(
+                    {
+                        "report_id": str(report_id),
+                        "uploaded_by": {
+                            "admin_id": admin_id,
+                            "admin_email": admin_email
+                        },
+                        "uploaded_at": _normalize_iso(uploaded_at),
+                        "count": len(rows),
+                        "rows": serializer.data
+                    },
+                    status=status.HTTP_200_OK
+                )
+
+        except pymongo.errors.ServerSelectionTimeoutError as e:
+            return Response(
+                {"detail": "cannot connect to MongoDB", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "unexpected error", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 # class FixVulnerabilityCreateAPIView(APIView):
 #     permission_classes = [permissions.IsAuthenticated]
 #     parser_classes = [JSONParser]
