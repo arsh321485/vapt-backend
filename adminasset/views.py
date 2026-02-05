@@ -19,6 +19,7 @@ except Exception:
 NESSUS_COLLECTION = "nessus_reports"
 HOLD_COLLECTION = "hold_assets"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
+DELETED_ASSETS_COLLECTION = "deleted_assets"
 
 # ---------------------- Mongo Context ----------------------
 class MongoContext:
@@ -212,20 +213,18 @@ class ReportAssetsAPIView(APIView):
             return Response({"detail": str(exc)}, status=500)
 
  
-# ----------------  ASSET DELETE ----------------    
+# ----------------  ASSET DELETE ----------------
 class AssetDeleteAPIView(APIView):
     """
     DELETE /api/adminasset/report/<report_id>/assets/<host_name>/
-    Removes the host (vulnerabilities_by_host entry with matching host_name) from the report.
+    Removes the host and stores in deleted_assets collection for history tracking.
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def delete(self, request, report_id, host_name):
-        # host_name may be URL-encoded path; unquote it
         host_name = unquote(host_name)
         try:
             with MongoContext() as db:
-                # Validate ownership - admin can only delete assets from their own reports
                 is_valid, doc, error_response = validate_report_ownership(
                     db, report_id, request.user
                 )
@@ -233,28 +232,61 @@ class AssetDeleteAPIView(APIView):
                     return error_response
 
                 coll = db[NESSUS_COLLECTION]
+                deleted_coll = db[DELETED_ASSETS_COLLECTION]
 
-                # Use $pull to remove host entry by host_name OR host (handle both keys safely)
+                # Find asset before deleting (for history)
+                asset_entry = None
+                for h in (doc.get("vulnerabilities_by_host") or []):
+                    hn = (h.get("host_name") or h.get("host") or "").strip()
+                    if hn == host_name:
+                        asset_entry = h
+                        break
+
+                if not asset_entry:
+                    return Response({"detail": "Asset not found in report"}, status=status.HTTP_404_NOT_FOUND)
+
+                # Calculate severity counts
+                severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                for v in asset_entry.get("vulnerabilities", []):
+                    risk = (v.get("risk_factor") or "").lower()
+                    if risk.startswith("crit"):
+                        severity_counts["critical"] += 1
+                    elif risk.startswith("high"):
+                        severity_counts["high"] += 1
+                    elif risk.startswith("med"):
+                        severity_counts["medium"] += 1
+                    elif risk.startswith("low"):
+                        severity_counts["low"] += 1
+
+                # Store in deleted_assets history
+                deleted_coll.insert_one({
+                    "report_id": str(report_id),
+                    "admin_id": doc.get("admin_id"),
+                    "admin_email": doc.get("admin_email"),
+                    "host_name": host_name,
+                    "member_type": doc.get("member_type"),
+                    "total_vulnerabilities": len(asset_entry.get("vulnerabilities", [])),
+                    "severity_counts": severity_counts,
+                    "host_information": asset_entry.get("host_information") or {},
+                    "deleted_at": timezone.now(),
+                    "deleted_by": getattr(request.user, "email", str(request.user.id)),
+                })
+
+                # Remove from report
                 res = coll.update_one(
                     {"report_id": str(report_id)},
                     {"$pull": {"vulnerabilities_by_host": {"$or": [{"host_name": host_name}, {"host": host_name}]}}}
                 )
 
-                # For safety, check if host still exists
-                remaining = coll.find_one({"report_id": str(report_id), "$or": [{"vulnerabilities_by_host.host_name": host_name}, {"vulnerabilities_by_host.host": host_name}]}, {"_id": 1})
-                if remaining:
-                    return Response({"detail": "delete attempted but host still present; check host_name formatting"}, status=500)
-
-                if res.matched_count == 0:
-                    return Response({"detail": "Report not found"}, status=status.HTTP_404_NOT_FOUND)
                 if res.modified_count == 0:
-                    return Response({"detail": "Asset not found in report"}, status=status.HTTP_404_NOT_FOUND)
+                    return Response({"detail": "Failed to remove asset"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
                 return Response({"detail": "Asset removed from report"}, status=status.HTTP_200_OK)
 
         except Exception as exc:
-            import traceback; traceback.print_exc()
-            return Response({"detail": "Delete failed", "error": str(exc)}, status=500)
+            import traceback
+            traceback.print_exc()
+            return Response({"detail": "Delete failed", "error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         
         

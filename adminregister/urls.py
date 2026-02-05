@@ -2,6 +2,7 @@
 from django.urls import path
 from .views import (
     VulnerabilityRegisterAPIView,
+    LatestSuperAdminVulnerabilityRegisterAPIView,
     FixVulnerabilityCreateAPIView,
     RaiseSupportRequestAPIView,
     SupportRequestByReportAPIView,
@@ -16,6 +17,10 @@ from .views import (
  )
                     
 urlpatterns = [
+    # Fetch vulnerabilities from the LATEST Super Admin upload (no report_id needed)
+    path('register/latest/vulns/', LatestSuperAdminVulnerabilityRegisterAPIView.as_view(), name='latest-superadmin-vulns'),
+
+    # Fetch vulnerabilities by specific report_id
     path('register/<str:report_id>/vulns/', VulnerabilityRegisterAPIView.as_view(), name='report-vulns-by-id'),
 
     path(
