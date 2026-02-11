@@ -1,13 +1,17 @@
 # adminregister/urls.py
 from django.urls import path
 from .views import (
-    VulnerabilityRegisterAPIView,
+    # VulnerabilityRegisterAPIView,
     LatestSuperAdminVulnerabilityRegisterAPIView,
+    VulnerabilitiesByHostListAPIView,
+    VulnerabilitiesByHostDetailAPIView,
     FixVulnerabilityCreateAPIView,
     RaiseSupportRequestAPIView,
     SupportRequestByReportAPIView,
     FixVulnerabilityStepsAPIView,
-    # FixVulnerabilityFeedbackAPIView,
+    FixStepFeedbackAPIView,
+    FixVulnerabilityFinalFeedbackAPIView,
+    FixVulnerabilityDetailAPIView,
     RaiseSupportRequestByVulnerabilityAPIView,
     CreateTicketAPIView,
     TicketByReportAPIView,
@@ -21,7 +25,13 @@ urlpatterns = [
     path('register/latest/vulns/', LatestSuperAdminVulnerabilityRegisterAPIView.as_view(), name='latest-superadmin-vulns'),
 
     # Fetch vulnerabilities by specific report_id
-    path('register/<str:report_id>/vulns/', VulnerabilityRegisterAPIView.as_view(), name='report-vulns-by-id'),
+    # path('register/<str:report_id>/vulns/', VulnerabilityRegisterAPIView.as_view(), name='report-vulns-by-id'),
+
+    # Get list of hosts with vulnerability counts by risk factor
+    path('register/hosts/', VulnerabilitiesByHostListAPIView.as_view(), name='vulnerabilities-by-host-list'),
+
+    # Get vulnerabilities for a specific host, grouped by risk factor
+    path('register/host/<str:host_name>/vulns/', VulnerabilitiesByHostDetailAPIView.as_view(), name='vulnerabilities-by-host-detail'),
 
     path(
         "fix-vulnerability/report/<str:report_id>/asset/<str:host_name>/create/",
@@ -31,13 +41,30 @@ urlpatterns = [
     path(
         "fix-vulnerability/<str:fix_vuln_id>/step-complete/",
         FixVulnerabilityStepsAPIView.as_view(),
+        name="fix-vulnerability-steps"
     ),
-    
-    # path(
-    # "fix-vulnerability/<str:fix_vuln_id>/feedback/",
-    # FixVulnerabilityFeedbackAPIView.as_view(),
-    # name="fix-vulnerability-feedback"
-    # ),
+
+    # Feedback API for fix steps (per-step feedback)
+    path(
+        "fix-vulnerability/<str:fix_vuln_id>/feedback/",
+        FixStepFeedbackAPIView.as_view(),
+        name="fix-step-feedback"
+    ),
+
+    # Final Feedback API (ONLY after vulnerability is CLOSED)
+    path(
+        "fix-vulnerability/<str:fix_vuln_id>/final-feedback/",
+        FixVulnerabilityFinalFeedbackAPIView.as_view(),
+        name="fix-vulnerability-final-feedback"
+    ),
+
+    # Get complete fix vulnerability details for Fix Now card
+    path(
+        "fix-vulnerability/<str:fix_vuln_id>/detail/",
+        FixVulnerabilityDetailAPIView.as_view(),
+        name="fix-vulnerability-detail"
+    ),
+
     path(
     "support-requests/raise/report/<str:report_id>/vulnerability/<str:vulnerability_id>/",
     RaiseSupportRequestAPIView.as_view(),
