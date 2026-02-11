@@ -16,8 +16,34 @@ class AdminRegisterSimpleVulnSerializer(serializers.Serializer):
 
     
 
-class FixVulnerabilitySerializer(serializers.Serializer):
-    pass
+class FixVulnerabilityCreateSerializer(serializers.Serializer):
+    """
+    Serializer for creating a fix vulnerability with required and optional fields.
+    """
+    plugin_id = serializers.CharField(required=True)
+    plugin_name = serializers.CharField(required=True)
+    risk_factor = serializers.CharField(required=True)
+    port = serializers.CharField(required=False, allow_blank=True, default="")
+    status = serializers.ChoiceField(
+        choices=["open", "in_progress", "closed"],
+        default="open",
+        required=False
+    )
+    vulnerability_type = serializers.CharField(
+        default="SQL Injection",
+        required=False,
+        allow_blank=True
+    )
+    affected_ports_ranges = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default=""
+    )
+    file_path = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="N/A"
+    )
     
 
 class RaiseSupportRequestSerializer(serializers.Serializer):

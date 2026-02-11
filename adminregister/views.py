@@ -11,7 +11,7 @@ from rest_framework.parsers import JSONParser
 from bson import ObjectId
 from rest_framework.permissions import IsAuthenticated
 
-from .serializers import AdminRegisterSimpleVulnSerializer,FixVulnerabilitySerializer,RaiseSupportRequestSerializer,CreateTicketSerializer
+from .serializers import AdminRegisterSimpleVulnSerializer,FixVulnerabilityCreateSerializer,RaiseSupportRequestSerializer,CreateTicketSerializer
 SUPPORT_REQUEST_COLLECTION = "support_requests"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
 NESSUS_COLLECTION = "nessus_reports"
@@ -253,11 +253,13 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 rows = []
 
                 # Extract vulnerabilities from the latest report
+                # plugin_id is the default unique identifier
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
 
                     for v in host.get("vulnerabilities", []):
-                        plugin_id = v.get("plugin_id", "")
+                        plugin_id = str(v.get("plugin_id", ""))
+
                         plugin_name = (
                             v.get("plugin_name")
                             or v.get("pluginname")
@@ -285,7 +287,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                         second_obs = v.get("updated_at")
 
                         rows.append({
-                            "plugin_id": plugin_id,  # Unique identifier for Fix Now
+                            "plugin_id": plugin_id,  # Default unique identifier
                             "vul_name": plugin_name,
                             "asset": host_name,
                             "severity": severity,
@@ -598,54 +600,83 @@ class VulnerabilitiesByHostDetailAPIView(APIView):
     
 class FixVulnerabilityCreateAPIView(APIView):
     """
-    Create a fix record for a selected vulnerability.
+    Create and List fix records for selected vulnerabilities.
     Data is fetched ONLY from the latest Super Admin uploaded report.
 
     POST /api/admin/adminregister/fix-vulnerability/report/{report_id}/asset/{host_name}/create/
+        Required body:
+            - plugin_id: Unique vulnerability identifier
+            - plugin_name: Vulnerability name
+            - risk_factor: Severity level
+        Optional body:
+            - port: Port number for additional uniqueness
+            - status: Vulnerability status (default: fetched from latest report = "open")
+            - vulnerability_type: Type of vulnerability (default: "Network Vulnerability")
+            - affected_ports_ranges: Port/range info (default: auto-built from port/protocol)
+            - file_path: File path related to vulnerability (default: "N/A")
 
-    Required body:
-        - plugin_id: Unique vulnerability identifier (required for distinguishing same-name vulnerabilities)
-        - plugin_name: Vulnerability name
-        - risk_factor: Severity level
-        - port: (optional) Port number for additional uniqueness
-
-    Response includes:
-        - Vulnerability name
-        - Asset (host)
-        - Severity
-        - Description
-        - Assigned team and team members
+    GET /api/admin/adminregister/fix-vulnerability/report/{report_id}/asset/{host_name}/create/
+        Returns all fix vulnerabilities for the given report and host.
     """
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]
+
+    def _get_status_from_latest_report(self, db, admin_id, admin_email, report_id, host_name, plugin_id):
+        """
+        Fetch the status field from the LatestSuperAdminVulnerabilityRegisterAPIView data.
+        Looks up the vulnerability in the latest Nessus report and returns its status.
+        """
+        nessus_coll = db[NESSUS_COLLECTION]
+
+        query_conditions = [{"admin_id": admin_id}]
+        if admin_email:
+            query_conditions.append({"admin_email": admin_email})
+
+        latest_doc = nessus_coll.find_one(
+            {"$or": query_conditions},
+            sort=[("uploaded_at", pymongo.DESCENDING)]
+        )
+
+        if not latest_doc:
+            return "open"
+
+        # Search for the vulnerability status in the latest report
+        for host in latest_doc.get("vulnerabilities_by_host", []):
+            current_host = host.get("host_name") or host.get("host") or ""
+            if current_host != host_name:
+                continue
+
+            for vuln in host.get("vulnerabilities", []):
+                if str(vuln.get("plugin_id", "")) == str(plugin_id):
+                    return vuln.get("status", "open")
+
+        return "open"
 
     def post(self, request, report_id, host_name):
         admin_id = str(request.user.id)
         admin_email = getattr(request.user, 'email', None)
 
-        plugin_id_req = request.data.get("plugin_id")
-        plugin_name_req = request.data.get("plugin_name")
-        risk_factor_req = request.data.get("risk_factor")
-        port_req = request.data.get("port", "")
+        # Validate using serializer
+        serializer = FixVulnerabilityCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
 
-        # Validate required fields
-        if not plugin_id_req:
-            return Response(
-                {"detail": "plugin_id is required to uniquely identify the vulnerability"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        plugin_id_req = validated["plugin_id"]
+        plugin_name_req = validated["plugin_name"]
+        risk_factor_req = validated["risk_factor"]
+        port_req = validated.get("port", "")
 
-        if not plugin_name_req or not risk_factor_req:
-            return Response(
-                {"detail": "plugin_name and risk_factor are required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Optional fields from request body
+        req_status = validated.get("status", "")
+        req_vulnerability_type = validated.get("vulnerability_type", "Network Vulnerability")
+        req_affected_ports_ranges = validated.get("affected_ports_ranges", "")
+        req_file_path = validated.get("file_path", "N/A")
 
         with MongoContext() as db:
             nessus_coll = db[NESSUS_COLLECTION]
             fix_coll = db[FIX_VULN_COLLECTION]
 
-            # 1️⃣ VALIDATE: Report must be from the LATEST upload for this admin
+            # 1. VALIDATE: Report must be from the LATEST upload for this admin
             query_conditions = [{"admin_id": admin_id}]
             if admin_email:
                 query_conditions.append({"admin_email": admin_email})
@@ -671,7 +702,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # 2️⃣ DUPLICATE CHECK using plugin_id + host_name + port (unique combination)
+            # 2. DUPLICATE CHECK using plugin_id + host_name + port (unique combination)
             duplicate_query = {
                 "report_id": str(report_id),
                 "host_name": host_name,
@@ -697,25 +728,13 @@ class FixVulnerabilityCreateAPIView(APIView):
 
             selected_vuln = None
 
-            # 3️⃣ MATCH HOST → PLUGIN_ID → PLUGIN_NAME → RISK from the latest report
+            # 3. MATCH HOST -> PLUGIN_ID from the latest report
             for host in latest_doc.get("vulnerabilities_by_host", []):
                 if (host.get("host_name") or host.get("host")) != host_name:
                     continue
 
                 for vuln in host.get("vulnerabilities", []):
                     db_plugin_id = str(vuln.get("plugin_id", ""))
-                    db_plugin = (
-                        vuln.get("plugin_name")
-                        or vuln.get("pluginname")
-                        or vuln.get("name")
-                        or ""
-                    )
-                    db_risk = (
-                        vuln.get("risk_factor")
-                        or vuln.get("severity")
-                        or vuln.get("risk")
-                        or ""
-                    )
                     db_port = str(vuln.get("port", ""))
 
                     # Match by plugin_id (primary) and optionally port
@@ -739,7 +758,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # 4️⃣ ASSIGN TEAM
+            # 4. ASSIGN TEAM
             assigned_team = get_assigned_team_by_host(host_name)
             assigned_team_members = get_team_members(
                 db=db,
@@ -747,7 +766,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                 admin_id=admin_id
             )
 
-            # 5️⃣ Extract vulnerability details
+            # 5. Extract vulnerability details
             description = selected_vuln.get("description", "")
             description_points = selected_vuln.get("description_points", [])
             if isinstance(description_points, list):
@@ -758,17 +777,28 @@ class FixVulnerabilityCreateAPIView(APIView):
             port = selected_vuln.get("port", "")
             protocol = selected_vuln.get("protocol", "")
 
-            # Build affected ports/ranges
-            affected_ports = f"{port}/{protocol}" if port and protocol else "N/A"
+            # Build affected ports/ranges (use request value if provided, else auto-build)
+            if req_affected_ports_ranges:
+                affected_ports = req_affected_ports_ranges
+            else:
+                affected_ports = f"{port}/{protocol}" if port and protocol else "N/A"
 
-            # 6️⃣ CREATE FIX VULNERABILITY
+            # Fetch status from LatestSuperAdmin report if not explicitly provided
+            if req_status:
+                vuln_status = req_status
+            else:
+                vuln_status = self._get_status_from_latest_report(
+                    db, admin_id, admin_email, report_id, host_name, plugin_id_req
+                )
+
+            # 6. CREATE FIX VULNERABILITY
             doc = {
                 "report_id": str(report_id),
                 "host_name": host_name,
-                "plugin_id": plugin_id_req,  # Unique identifier
+                "plugin_id": plugin_id_req,
                 "plugin_name": plugin_name_req,
                 "risk_factor": risk_factor_req,
-                "port": port,  # Store port for uniqueness
+                "port": port,
                 "protocol": protocol,
 
                 # Detailed description
@@ -777,16 +807,16 @@ class FixVulnerabilityCreateAPIView(APIView):
                 "synopsis": synopsis,
                 "solution": solution,
 
-                # Port/protocol info
-                "vulnerability_type": "Network Vulnerability",
+                # New fields
+                "status": vuln_status,
+                "vulnerability_type": req_vulnerability_type,
                 "affected_ports_ranges": affected_ports,
-                "file_path": "N/A",
+                "file_path": req_file_path,
 
                 "vendor_fix_available": bool(solution),
                 "assigned_team": assigned_team,
                 "assigned_team_members": assigned_team_members,
 
-                "status": "open",
                 "created_at": datetime.utcnow(),
                 "created_by": admin_id
             }
@@ -797,7 +827,7 @@ class FixVulnerabilityCreateAPIView(APIView):
             # Get admin email
             admin_email = getattr(request.user, 'email', '')
 
-            # 7️⃣ Format response for Fix Now card
+            # 7. Format response for Fix Now card
             response_data = {
                 "_id": str(result.inserted_id),
                 "report_id": str(report_id),
@@ -812,7 +842,10 @@ class FixVulnerabilityCreateAPIView(APIView):
                 "assigned_team": assigned_team,
                 "assigned_team_members": assigned_team_members,
                 "solution": solution,
-                "status": "open",
+                "status": vuln_status,
+                "vulnerability_type": req_vulnerability_type,
+                "affected_ports_ranges": affected_ports,
+                "file_path": req_file_path,
                 "created_at": doc["created_at"].isoformat() if doc["created_at"] else None
             }
 
@@ -822,6 +855,62 @@ class FixVulnerabilityCreateAPIView(APIView):
                     "data": response_data
                 },
                 status=status.HTTP_201_CREATED
+            )
+
+    def get(self, request, report_id, host_name):
+        """
+        GET API: Retrieve all fix vulnerabilities for a given report and host.
+        Returns all fields including status, vulnerability_type, affected_ports_ranges, file_path.
+        """
+        admin_id = str(request.user.id)
+        admin_email = getattr(request.user, 'email', '')
+
+        with MongoContext() as db:
+            fix_coll = db[FIX_VULN_COLLECTION]
+
+            # Find all fix vulnerabilities for this report + host
+            cursor = fix_coll.find({
+                "report_id": str(report_id),
+                "host_name": host_name,
+                "created_by": admin_id
+            }).sort("created_at", -1)
+
+            results = []
+            for doc in cursor:
+                results.append({
+                    "_id": str(doc.get("_id")),
+                    "report_id": doc.get("report_id"),
+                    "admin_id": admin_id,
+                    "admin_email": admin_email,
+                    "plugin_id": doc.get("plugin_id"),
+                    "vulnerability_name": doc.get("plugin_name"),
+                    "asset": doc.get("host_name"),
+                    "severity": doc.get("risk_factor"),
+                    "port": doc.get("port", ""),
+                    "protocol": doc.get("protocol", ""),
+                    "description": doc.get("description", "") or doc.get("description_points", "") or doc.get("synopsis", ""),
+                    "synopsis": doc.get("synopsis", ""),
+                    "solution": doc.get("solution", ""),
+                    "status": doc.get("status", "open"),
+                    "vulnerability_type": doc.get("vulnerability_type", "Network Vulnerability"),
+                    "affected_ports_ranges": doc.get("affected_ports_ranges", "N/A"),
+                    "file_path": doc.get("file_path", "N/A"),
+                    "vendor_fix_available": doc.get("vendor_fix_available", False),
+                    "assigned_team": doc.get("assigned_team", ""),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    "created_at": _normalize_iso(doc.get("created_at")),
+                    "created_by": doc.get("created_by")
+                })
+
+            return Response(
+                {
+                    "message": "Fix vulnerabilities fetched successfully",
+                    "report_id": str(report_id),
+                    "host_name": host_name,
+                    "count": len(results),
+                    "results": results
+                },
+                status=status.HTTP_200_OK
             )
 
 #
