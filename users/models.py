@@ -27,17 +27,6 @@ class UserManager(BaseUserManager):
 
 
 class User(AbstractBaseUser, PermissionsMixin):
-    TESTING_TYPE_CHOICES = (
-        ("white_box", "White Box"),
-        ("grey_box", "Grey Box"),
-        ("black_box", "Black Box"),
-    )
-     
-    testing_type = models.JSONField(
-        default=list,
-        blank=True
-    )
-    
     id = models.CharField(
         primary_key=True,
         default=uuid.uuid4,
@@ -48,13 +37,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(
         unique=True,
         validators=[EmailValidator()]
-    )
-    
-    testing_type = models.CharField(
-        max_length=20,
-        choices=TESTING_TYPE_CHOICES,
-        null=True,
-        blank=True
     )
 
     is_active = models.BooleanField(default=True)

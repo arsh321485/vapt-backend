@@ -35,22 +35,28 @@ from .utils import (
 
 class ScopeCreateAPIView(APIView):
     """
-    POST /api/admin/scope/create/?current_testing_box=white_box
+    POST /api/admin/scope/create/
 
     Create a new scope with either:
     - File upload (file field)
     - Manual targets (targets field)
 
-    Required: name
+    Required: name, testing_type
     Optional: expand_subnets (default: true)
     """
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        # Get testing_type from query param
-        testing_type = request.query_params.get("current_testing_box", "black_box")
+        # Get testing_type from request body
+        testing_type = request.data.get("testing_type", "").strip()
         valid_types = ["white_box", "grey_box", "black_box"]
+
+        if not testing_type:
+            return Response(
+                {"message": "testing_type is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if testing_type not in valid_types:
             return Response(

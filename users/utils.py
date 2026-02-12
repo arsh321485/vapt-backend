@@ -15,7 +15,8 @@ class Util:
     @staticmethod
     def send_mail(data):
         """
-        Send email using SendGrid API
+        Send email using SendGrid API.
+        Returns (True, None) on success or (False, error_message) on failure.
         """
         try:
             sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
@@ -27,10 +28,15 @@ class Util:
             )
             response = sg.send(mail)
             logger.info(f"SendGrid response: {response.status_code}")
-            return response.status_code in [200, 201, 202]
+            if response.status_code in [200, 201, 202]:
+                return True, None
+            error_msg = f"SendGrid returned status {response.status_code}: {response.body}"
+            logger.error(error_msg)
+            return False, error_msg
         except Exception as e:
-            logger.error(f"SendGrid send error: {str(e)}")
-            return False
+            error_msg = f"SendGrid send error: {str(e)}"
+            logger.error(error_msg)
+            return False, error_msg
         
         # ✅ ADMIN FIRST-TIME SIGNUP EMAIL
     # ADMIN OTP EMAIL (SIGNUP)
@@ -49,10 +55,11 @@ class Util:
 
         data = {
             "to_email": email,
-            "subject": "VAPTFIX Signup OTP", 
+            "subject": "VAPTFIX Signup OTP",
             "body": body,
         }
-        Util.send_mail(data)
+        success, error = Util.send_mail(data)
+        return success, error
 
    
    

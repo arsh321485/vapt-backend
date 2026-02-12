@@ -110,13 +110,6 @@ class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
 
-    testing_type = serializers.ListField(
-        child=serializers.ChoiceField(
-            choices=["white_box", "grey_box", "black_box"]
-        ),
-        allow_empty=False
-    )
-
     def validate(self, attrs):
         email = attrs["email"].strip().lower()
         password = attrs["password"]
