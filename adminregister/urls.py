@@ -65,19 +65,21 @@ urlpatterns = [
         name="fix-vulnerability-detail"
     ),
 
+    #create raise support request
     path(
     "support-requests/raise/report/<str:report_id>/vulnerability/<str:vulnerability_id>/",
     RaiseSupportRequestAPIView.as_view(),
     name="raise-support-request"
     ),
     
+    #Get raise support request by (vulnerbility id by)
     path(
         "raise-support-requests/vulnerability/<str:vulnerability_id>/",
         RaiseSupportRequestByVulnerabilityAPIView.as_view(),
         name="support-request-by-vulnerability"
     ),
 
-
+    # Get support requests by report_id
     path(
     "support-requests/report/<str:report_id>/",
     SupportRequestByReportAPIView.as_view(),
@@ -109,7 +111,7 @@ urlpatterns = [
     ),
     
     path(
-    "tickets/<str:ticket_id>/",
+    "tickets/fix/<str:fix_vulnerability_id>/ticket/<str:ticket_id>/",
     TicketDetailAPIView.as_view(),
     name="get-ticket-detail"
 ),

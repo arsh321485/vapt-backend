@@ -1,0 +1,25 @@
+
+path(
+    "tickets/report/<str:report_id>/",
+    TicketByReportAPIView.as_view(),
+    name="all-tickets-by-report"
+),
+
+path(
+    "reports/<str:report_id>/tickets/open/",
+    TicketOpenListAPIView.as_view(),
+    name="tickets-open"
+),
+
+path(
+    "reports/<str:report_id>/tickets/closed/",
+    TicketClosedListAPIView.as_view(),
+    name="tickets-closed"
+),
+I want to update the response of these APIs.
+
+Please add the following fields to the response:
+
+assigned_team
+
+assigned_team_members

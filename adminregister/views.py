@@ -2011,16 +2011,29 @@ class TicketByReportAPIView(APIView):
 
         with MongoContext() as db:
             ticket_coll = db[TICKETS_COLLECTION]
+            fix_coll = db[FIX_VULN_COLLECTION]
 
-            cursor = ticket_coll.find(
+            tickets = list(ticket_coll.find(
                 {
                     "report_id": report_id,
                     "admin_id": admin_id
                 }
-            ).sort("created_at", -1)
+            ).sort("created_at", -1))
+
+            # Batch-fetch fix vulnerabilities for assigned_team data
+            fix_vuln_ids = [
+                ObjectId(doc["fix_vulnerability_id"])
+                for doc in tickets
+                if doc.get("fix_vulnerability_id")
+            ]
+            fix_map = {}
+            if fix_vuln_ids:
+                for fix_doc in fix_coll.find({"_id": {"$in": fix_vuln_ids}}):
+                    fix_map[str(fix_doc["_id"])] = fix_doc
 
             results = []
-            for doc in cursor:
+            for doc in tickets:
+                fix_doc = fix_map.get(doc.get("fix_vulnerability_id"), {})
                 results.append({
                     "_id": str(doc.get("_id")),
                     "report_id": doc.get("report_id"),
@@ -2032,6 +2045,8 @@ class TicketByReportAPIView(APIView):
                     "description": doc.get("description"),
                     "status": doc.get("status", "open"),
                     "created_at": doc.get("created_at"),
+                    "assigned_team": fix_doc.get("assigned_team", ""),
+                    "assigned_team_members": fix_doc.get("assigned_team_members", []),
                 })
 
             return Response(
@@ -2053,17 +2068,30 @@ class TicketOpenListAPIView(APIView):
 
         with MongoContext() as db:
             ticket_coll = db[TICKETS_COLLECTION]
+            fix_coll = db[FIX_VULN_COLLECTION]
 
-            cursor = ticket_coll.find(
+            tickets = list(ticket_coll.find(
                 {
                     "report_id": report_id,
                     "admin_id": admin_id,
                     "status": "open"
                 }
-            ).sort("created_at", -1)
+            ).sort("created_at", -1))
+
+            # Batch-fetch fix vulnerabilities for assigned_team data
+            fix_vuln_ids = [
+                ObjectId(doc["fix_vulnerability_id"])
+                for doc in tickets
+                if doc.get("fix_vulnerability_id")
+            ]
+            fix_map = {}
+            if fix_vuln_ids:
+                for fix_doc in fix_coll.find({"_id": {"$in": fix_vuln_ids}}):
+                    fix_map[str(fix_doc["_id"])] = fix_doc
 
             results = []
-            for doc in cursor:
+            for doc in tickets:
+                fix_doc = fix_map.get(doc.get("fix_vulnerability_id"), {})
                 results.append({
                     "_id": str(doc["_id"]),
                     "report_id": doc.get("report_id"),
@@ -2075,6 +2103,8 @@ class TicketOpenListAPIView(APIView):
                     "description": doc.get("description"),
                     "status": doc.get("status"),
                     "created_at": doc.get("created_at"),
+                    "assigned_team": fix_doc.get("assigned_team", ""),
+                    "assigned_team_members": fix_doc.get("assigned_team_members", []),
                 })
 
             return Response(
@@ -2097,17 +2127,30 @@ class TicketClosedListAPIView(APIView):
 
         with MongoContext() as db:
             ticket_coll = db[TICKETS_COLLECTION]
+            fix_coll = db[FIX_VULN_COLLECTION]
 
-            cursor = ticket_coll.find(
+            tickets = list(ticket_coll.find(
                 {
                     "report_id": report_id,
                     "admin_id": admin_id,
                     "status": "closed"
                 }
-            ).sort("closed_at", -1)
+            ).sort("closed_at", -1))
+
+            # Batch-fetch fix vulnerabilities for assigned_team data
+            fix_vuln_ids = [
+                ObjectId(doc["fix_vulnerability_id"])
+                for doc in tickets
+                if doc.get("fix_vulnerability_id")
+            ]
+            fix_map = {}
+            if fix_vuln_ids:
+                for fix_doc in fix_coll.find({"_id": {"$in": fix_vuln_ids}}):
+                    fix_map[str(fix_doc["_id"])] = fix_doc
 
             results = []
-            for doc in cursor:
+            for doc in tickets:
+                fix_doc = fix_map.get(doc.get("fix_vulnerability_id"), {})
                 results.append({
                     "_id": str(doc["_id"]),
                     "report_id": doc.get("report_id"),
@@ -2121,6 +2164,8 @@ class TicketClosedListAPIView(APIView):
                     "created_at": doc.get("created_at"),
                     "closed_at": doc.get("closed_at"),
                     "close_comment": doc.get("close_comment"),
+                    "assigned_team": fix_doc.get("assigned_team", ""),
+                    "assigned_team_members": fix_doc.get("assigned_team_members", []),
                 })
 
             return Response(
@@ -2138,7 +2183,7 @@ class TicketClosedListAPIView(APIView):
 class TicketDetailAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, ticket_id):
+    def get(self, request, fix_vulnerability_id, ticket_id):
         admin_id = str(request.user.id)
 
         try:
@@ -2149,12 +2194,21 @@ class TicketDetailAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        try:
+            ObjectId(fix_vulnerability_id)
+        except Exception:
+            return Response(
+                {"detail": "Invalid fix_vulnerability_id"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         with MongoContext() as db:
             ticket_coll = db[TICKETS_COLLECTION]
 
             ticket = ticket_coll.find_one({
                 "_id": ticket_obj_id,
-                "admin_id": admin_id
+                "admin_id": admin_id,
+                "fix_vulnerability_id": fix_vulnerability_id
             })
 
             if not ticket:
@@ -2163,6 +2217,11 @@ class TicketDetailAPIView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
+            # Fetch severity from the fix vulnerability
+            fix_coll = db[FIX_VULN_COLLECTION]
+            fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vulnerability_id)})
+            severity = fix_doc.get("risk_factor", "") if fix_doc else ""
+
             response_data = {
                 "_id": str(ticket["_id"]),
                 "report_id": ticket.get("report_id"),
@@ -2170,6 +2229,7 @@ class TicketDetailAPIView(APIView):
 
                 "host_name": ticket.get("host_name"),
                 "plugin_name": ticket.get("plugin_name"),
+                "severity": severity,
 
                 "category": ticket.get("category"),
                 "subject": ticket.get("subject"),
