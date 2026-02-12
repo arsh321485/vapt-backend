@@ -180,10 +180,7 @@ class UserLoginView(generics.GenericAPIView):
         serializer.is_valid(raise_exception=True)
 
         user = serializer.validated_data["user"]
-        testing_type = serializer.validated_data["testing_type"]
 
-        # ✅ Save multiple testing types
-        user.testing_type = testing_type
         user.last_login = timezone.now()
         user.save()
 
@@ -194,7 +191,6 @@ class UserLoginView(generics.GenericAPIView):
             "user": {
                 "id": user.id,
                 "email": user.email,
-                "testing_type": user.testing_type
             },
             "tokens": {
                 "refresh": str(refresh),
@@ -243,7 +239,11 @@ class AdminSignupSendOTPView(APIView):
         cache.set(f"signup_data_{email}", cache_data, timeout=300)
 
         # Send OTP email
-        Util.send_signup_otp(email, otp)  # Pass OTP explicitly
+        email_sent, email_error = Util.send_signup_otp(email, otp)
+
+        if not email_sent:
+            logger.error(f"Signup OTP email failed for {email}: {email_error}")
+            return Response({"error": "Failed to send OTP email. Please try again.", "detail": email_error}, status=500)
 
         return Response({"message": "OTP sent to your email"}, status=200)
 
@@ -465,7 +465,8 @@ class SendPasswordResetEmailView(generics.GenericAPIView):
                 "body": f"Click the link to reset your password: {reset_link}"
             }
 
-            if Util.send_mail(data):
+            success, _ = Util.send_mail(data)
+            if success:
                 return Response(
                     {"msg": "Password reset link sent. Please check your email."},
                     status=status.HTTP_200_OK
