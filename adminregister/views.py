@@ -1930,7 +1930,53 @@ class SupportRequestByReportAPIView(APIView):
                 },
                 status=status.HTTP_200_OK
             )
-            
+
+
+class SupportRequestByHostNameAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, host_name):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            support_coll = db["support_requests"]
+
+            cursor = support_coll.find(
+                {
+                    "host_name": host_name,
+                    "admin_id": admin_id
+                }
+            ).sort("requested_at", -1)
+
+            results = []
+
+            for doc in cursor:
+                results.append({
+                    "_id": str(doc.get("_id")),
+                    "report_id": doc.get("report_id"),
+                    "admin_id": doc.get("admin_id"),
+                    "vulnerability_id": doc.get("vulnerability_id"),
+                    "vul_name": doc.get("vul_name"),
+                    "host_name": doc.get("host_name"),
+                    "assigned_team": doc.get("assigned_team"),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    "step_requested": doc.get("step_requested"),
+                    "description": doc.get("description"),
+                    "status": doc.get("status"),
+                    "requested_by": doc.get("requested_by"),
+                    "requested_at": doc.get("requested_at"),
+                })
+
+            return Response(
+                {
+                    "message": "Support requests fetched successfully",
+                    "host_name": host_name,
+                    "count": len(results),
+                    "results": results
+                },
+                status=status.HTTP_200_OK
+            )
+
 
 class CreateTicketAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
