@@ -8,6 +8,7 @@ from .views import (
     FixVulnerabilityCreateAPIView,
     RaiseSupportRequestAPIView,
     SupportRequestByReportAPIView,
+    SupportRequestByHostNameAPIView,
     FixVulnerabilityStepsAPIView,
     FixStepFeedbackAPIView,
     FixVulnerabilityFinalFeedbackAPIView,
@@ -23,9 +24,6 @@ from .views import (
 urlpatterns = [
     # Fetch vulnerabilities from the LATEST Super Admin upload (no report_id needed)
     path('register/latest/vulns/', LatestSuperAdminVulnerabilityRegisterAPIView.as_view(), name='latest-superadmin-vulns'),
-
-    # Fetch vulnerabilities by specific report_id
-    # path('register/<str:report_id>/vulns/', VulnerabilityRegisterAPIView.as_view(), name='report-vulns-by-id'),
 
     # Get list of hosts with vulnerability counts by risk factor
     path('register/hosts/', VulnerabilitiesByHostListAPIView.as_view(), name='vulnerabilities-by-host-list'),
@@ -83,7 +81,14 @@ urlpatterns = [
     path(
     "support-requests/report/<str:report_id>/",
     SupportRequestByReportAPIView.as_view(),
-    name="support-requests-by-report"    
+    name="support-requests-by-report"
+    ),
+
+    # Get support requests by host_name
+    path(
+        "support-requests/host/<str:host_name>/",
+        SupportRequestByHostNameAPIView.as_view(),
+        name="support-requests-by-host"
     ),
  
     path(
