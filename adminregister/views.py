@@ -5,6 +5,7 @@ from django.conf import settings
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 import pymongo
+import uuid
 from urllib.parse import urlparse
 import re
 from rest_framework.parsers import JSONParser
@@ -258,7 +259,6 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                     host_name = host.get("host_name") or host.get("host") or ""
 
                     for v in host.get("vulnerabilities", []):
-                        plugin_id = str(v.get("plugin_id", ""))
 
                         plugin_name = (
                             v.get("plugin_name")
@@ -287,7 +287,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                         second_obs = v.get("updated_at")
 
                         rows.append({
-                            "plugin_id": plugin_id,  # Default unique identifier
+                            "id": str(uuid.uuid4()),
                             "vul_name": plugin_name,
                             "asset": host_name,
                             "severity": severity,
@@ -331,6 +331,8 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 {"detail": "unexpected error", "error": str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
 
 
 class VulnerabilitiesByHostListAPIView(APIView):
@@ -605,7 +607,7 @@ class FixVulnerabilityCreateAPIView(APIView):
 
     POST /api/admin/adminregister/fix-vulnerability/report/{report_id}/asset/{host_name}/create/
         Required body:
-            - plugin_id: Unique vulnerability identifier
+            - id: Unique vulnerability identifier (UUID from LatestSuperAdminVulnerabilityRegisterAPIView)
             - plugin_name: Vulnerability name
             - risk_factor: Severity level
         Optional body:
@@ -621,7 +623,7 @@ class FixVulnerabilityCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]
 
-    def _get_status_from_latest_report(self, db, admin_id, admin_email, report_id, host_name, plugin_id):
+    def _get_status_from_latest_report(self, db, admin_id, admin_email, report_id, host_name, plugin_name):
         """
         Fetch the status field from the LatestSuperAdminVulnerabilityRegisterAPIView data.
         Looks up the vulnerability in the latest Nessus report and returns its status.
@@ -647,7 +649,13 @@ class FixVulnerabilityCreateAPIView(APIView):
                 continue
 
             for vuln in host.get("vulnerabilities", []):
-                if str(vuln.get("plugin_id", "")) == str(plugin_id):
+                db_name = (
+                    vuln.get("plugin_name")
+                    or vuln.get("pluginname")
+                    or vuln.get("name")
+                    or ""
+                )
+                if db_name == str(plugin_name):
                     return vuln.get("status", "open")
 
         return "open"
@@ -661,7 +669,7 @@ class FixVulnerabilityCreateAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         validated = serializer.validated_data
 
-        plugin_id_req = validated["plugin_id"]
+        id_req = validated["id"]
         plugin_name_req = validated["plugin_name"]
         risk_factor_req = validated["risk_factor"]
         port_req = validated.get("port", "")
@@ -702,43 +710,43 @@ class FixVulnerabilityCreateAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # 2. DUPLICATE CHECK using plugin_id + host_name + port (unique combination)
+            # 2. DUPLICATE CHECK using id + host_name (unique combination)
             duplicate_query = {
                 "report_id": str(report_id),
                 "host_name": host_name,
-                "plugin_id": plugin_id_req
+                "id": id_req
             }
-
-            # If port is provided, include it in duplicate check
-            if port_req:
-                duplicate_query["port"] = port_req
 
             existing_fix = fix_coll.find_one(duplicate_query)
 
             if existing_fix:
                 return Response(
                     {
-                        "detail": "Fix vulnerability already exists for this plugin_id",
+                        "detail": "Fix vulnerability already exists for this id",
                         "fix_vulnerability_id": str(existing_fix["_id"]),
-                        "plugin_id": plugin_id_req,
-                        "port": existing_fix.get("port", "")
+                        "id": id_req,
                     },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
             selected_vuln = None
 
-            # 3. MATCH HOST -> PLUGIN_ID from the latest report
+            # 3. MATCH HOST -> PLUGIN_NAME from the latest report
             for host in latest_doc.get("vulnerabilities_by_host", []):
                 if (host.get("host_name") or host.get("host")) != host_name:
                     continue
 
                 for vuln in host.get("vulnerabilities", []):
-                    db_plugin_id = str(vuln.get("plugin_id", ""))
+                    db_plugin_name = (
+                        vuln.get("plugin_name")
+                        or vuln.get("pluginname")
+                        or vuln.get("name")
+                        or ""
+                    )
                     db_port = str(vuln.get("port", ""))
 
-                    # Match by plugin_id (primary) and optionally port
-                    if db_plugin_id == str(plugin_id_req):
+                    # Match by plugin_name (primary) and optionally port
+                    if db_plugin_name == str(plugin_name_req):
                         # If port was provided, also match port
                         if port_req and db_port != str(port_req):
                             continue
@@ -752,7 +760,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                 return Response(
                     {
                         "detail": "Matching vulnerability not found in the latest upload",
-                        "plugin_id": plugin_id_req,
+                        "id": id_req,
                         "host_name": host_name
                     },
                     status=status.HTTP_404_NOT_FOUND
@@ -788,14 +796,14 @@ class FixVulnerabilityCreateAPIView(APIView):
                 vuln_status = req_status
             else:
                 vuln_status = self._get_status_from_latest_report(
-                    db, admin_id, admin_email, report_id, host_name, plugin_id_req
+                    db, admin_id, admin_email, report_id, host_name, plugin_name_req
                 )
 
             # 6. CREATE FIX VULNERABILITY
             doc = {
                 "report_id": str(report_id),
                 "host_name": host_name,
-                "plugin_id": plugin_id_req,
+                "id": id_req,
                 "plugin_name": plugin_name_req,
                 "risk_factor": risk_factor_req,
                 "port": port,
@@ -833,7 +841,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                 "report_id": str(report_id),
                 "admin_id": admin_id,
                 "admin_email": admin_email,
-                "plugin_id": plugin_id_req,
+                "id": id_req,
                 "vulnerability_name": plugin_name_req,
                 "asset": host_name,
                 "severity": risk_factor_req,
@@ -882,7 +890,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                     "report_id": doc.get("report_id"),
                     "admin_id": admin_id,
                     "admin_email": admin_email,
-                    "plugin_id": doc.get("plugin_id"),
+                    "id": doc.get("id"),
                     "vulnerability_name": doc.get("plugin_name"),
                     "asset": doc.get("host_name"),
                     "severity": doc.get("risk_factor"),
@@ -912,6 +920,202 @@ class FixVulnerabilityCreateAPIView(APIView):
                 },
                 status=status.HTTP_200_OK
             )
+
+class FixVulnerabilityCardAPIView(APIView):
+    """
+    GET /api/admin/adminregister/fix-vulnerability/<fix_vuln_id>/card/
+        Returns single fix card details by its _id.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, fix_vuln_id):
+        admin_id = str(request.user.id)
+        admin_email = getattr(request.user, 'email', '')
+
+        with MongoContext() as db:
+            fix_coll = db[FIX_VULN_COLLECTION]
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+            # Check active collection
+            doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+            card_status = "open"
+
+            if not doc:
+                # Check closed collection
+                doc = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
+                if not doc:
+                    return Response(
+                        {"detail": "Fix vulnerability not found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+                card_status = "closed"
+
+            response_data = {
+                "_id": str(doc.get("_id", fix_vuln_id)),
+                "report_id": doc.get("report_id"),
+                "admin_id": admin_id,
+                "admin_email": admin_email,
+                "id": doc.get("id"),
+                "vulnerability_name": doc.get("plugin_name"),
+                "asset": doc.get("host_name"),
+                "severity": doc.get("risk_factor"),
+                "port": doc.get("port", ""),
+                "protocol": doc.get("protocol", ""),
+                "description": doc.get("description", "") or doc.get("description_points", "") or doc.get("synopsis", ""),
+                "synopsis": doc.get("synopsis", ""),
+                "solution": doc.get("solution", ""),
+                "status": card_status,
+                "vulnerability_type": doc.get("vulnerability_type", "Network Vulnerability"),
+                "affected_ports_ranges": doc.get("affected_ports_ranges", "N/A"),
+                "file_path": doc.get("file_path", "N/A"),
+                "vendor_fix_available": doc.get("vendor_fix_available", False),
+                "assigned_team": doc.get("assigned_team", ""),
+                "assigned_team_members": doc.get("assigned_team_members", []),
+                "created_at": _normalize_iso(doc.get("created_at")),
+                "created_by": doc.get("created_by")
+            }
+
+            return Response(
+                {
+                    "message": "Fix card details fetched successfully",
+                    "data": response_data
+                },
+                status=status.HTTP_200_OK
+            )
+
+
+class ClosedVulnerabilitiesByAssetAPIView(APIView):
+    """
+    GET /api/admin/adminregister/closed-vulnerabilities/report/<report_id>/asset/<host_name>/
+        Returns all closed fix vulnerabilities for a given report and asset,
+        with all related data (steps, step feedback, final feedback).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id, host_name):
+        admin_id = str(request.user.id)
+        admin_email = getattr(request.user, 'email', '')
+
+        with MongoContext() as db:
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+            steps_coll = db[FIX_VULN_STEPS_COLLECTION]
+            feedback_coll = db[FIX_STEP_FEEDBACK_COLLECTION]
+            final_feedback_coll = db[FIX_FINAL_FEEDBACK_COLLECTION]
+
+            # Fetch all closed vulnerabilities for this report + asset
+            closed_cursor = closed_coll.find({
+                "report_id": str(report_id),
+                "host_name": host_name,
+                "closed_by": admin_id
+            }).sort("closed_at", -1)
+
+            results = []
+            for doc in closed_cursor:
+                fix_vuln_id = doc.get("fix_vulnerability_id", str(doc.get("_id", "")))
+
+                # Fetch steps for this vulnerability
+                existing_steps = list(
+                    steps_coll.find({
+                        "fix_vulnerability_id": fix_vuln_id
+                    }).sort("step_number", 1)
+                )
+
+                steps = []
+                for step in existing_steps:
+                    step_num = step.get("step_number")
+
+                    # Get feedback for this step
+                    feedback = feedback_coll.find_one({
+                        "fix_vulnerability_id": fix_vuln_id,
+                        "step_number": step_num
+                    })
+
+                    step_entry = {
+                        "_id": str(step.get("_id", "")),
+                        "step_number": step_num,
+                        "step_description": step.get(
+                            "step_description",
+                            FixVulnerabilityStepsAPIView.DEFAULT_STEP_DESCRIPTIONS.get(
+                                step_num, f"Step {step_num}"
+                            )
+                        ),
+                        "status": step.get("status", "pending"),
+                        "deadline": step.get("deadline"),
+                        "comment": step.get("comment", ""),
+                        "created_at": _normalize_iso(step.get("created_at")),
+                        "updated_at": _normalize_iso(step.get("updated_at")),
+                        "feedback": None
+                    }
+
+                    if feedback:
+                        step_entry["feedback"] = {
+                            "feedback_id": str(feedback["_id"]),
+                            "feedback_comment": feedback.get("feedback_comment", ""),
+                            "fix_status": feedback.get("fix_status", ""),
+                            "submitted_at": _normalize_iso(feedback.get("submitted_at")),
+                            "submitted_by": feedback.get("submitted_by")
+                        }
+
+                    steps.append(step_entry)
+
+                completed_count = sum(1 for s in steps if s["status"] == "completed")
+
+                # Get final feedback
+                final_feedback = None
+                final_fb = final_feedback_coll.find_one({
+                    "fix_vulnerability_id": fix_vuln_id
+                })
+                if final_fb:
+                    final_feedback = {
+                        "feedback_id": str(final_fb["_id"]),
+                        "feedback_comment": final_fb.get("feedback_comment", ""),
+                        "fix_result": final_fb.get("fix_result", ""),
+                        "submitted_by": final_fb.get("submitted_by"),
+                        "submitted_at": _normalize_iso(final_fb.get("submitted_at"))
+                    }
+
+                results.append({
+                    "_id": str(doc.get("_id", "")),
+                    "fix_vulnerability_id": fix_vuln_id,
+                    "id": doc.get("id"),
+                    "report_id": doc.get("report_id"),
+                    "admin_id": admin_id,
+                    "admin_email": admin_email,
+                    "vulnerability_name": doc.get("plugin_name", ""),
+                    "asset": doc.get("host_name", ""),
+                    "severity": doc.get("risk_factor", ""),
+                    "port": doc.get("port", ""),
+                    "protocol": doc.get("protocol", ""),
+                    "description": doc.get("description", "") or doc.get("description_points", "") or doc.get("synopsis", ""),
+                    "synopsis": doc.get("synopsis", ""),
+                    "solution": doc.get("solution", ""),
+                    "status": "closed",
+                    "vulnerability_type": doc.get("vulnerability_type", "Network Vulnerability"),
+                    "affected_ports_ranges": doc.get("affected_ports_ranges", "N/A"),
+                    "file_path": doc.get("file_path", "N/A"),
+                    "vendor_fix_available": doc.get("vendor_fix_available", False),
+                    "assigned_team": doc.get("assigned_team", ""),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    "completed_steps": completed_count,
+                    "total_steps": 6,
+                    "steps": steps,
+                    "final_feedback": final_feedback,
+                    "created_at": _normalize_iso(doc.get("created_at")),
+                    "closed_at": _normalize_iso(doc.get("closed_at")),
+                    "closed_by": doc.get("closed_by")
+                })
+
+            return Response(
+                {
+                    "message": "Closed vulnerabilities fetched successfully",
+                    "report_id": str(report_id),
+                    "host_name": host_name,
+                    "count": len(results),
+                    "results": results
+                },
+                status=status.HTTP_200_OK
+            )
+
 
 #
 class FixVulnerabilityStepsAPIView(APIView):
@@ -979,15 +1183,12 @@ class FixVulnerabilityStepsAPIView(APIView):
                 ).sort("step_number", 1)
             )
 
-            # Create a map of step_number -> step data
-            step_map = {s.get("step_number"): s for s in existing_steps}
-
-            # Build complete steps list (1-6) with all required info
+            # Build steps list — only include steps that exist in the database
             steps = []
             previous_completed = True  # Step 1 has no previous step
 
-            for step_num in range(1, 7):
-                existing_step = step_map.get(step_num, {})
+            for existing_step in existing_steps:
+                step_num = existing_step.get("step_number")
                 current_status = existing_step.get("status", "pending")
 
                 # Get feedback for this step
@@ -1000,6 +1201,7 @@ class FixVulnerabilityStepsAPIView(APIView):
                 is_locked = not previous_completed and current_status != "completed"
 
                 step_data = {
+                    "_id": str(existing_step.get("_id", "")),
                     "step_number": step_num,
                     "step_description": existing_step.get(
                         "step_description",
@@ -1016,7 +1218,7 @@ class FixVulnerabilityStepsAPIView(APIView):
                     ],
                     "deadline": existing_step.get("deadline"),
                     "status": current_status,
-                    "is_locked": is_locked,  # True if previous step not completed
+                    "is_locked": is_locked,
                     "comment": existing_step.get("comment", ""),
                     "created_at": _normalize_iso(existing_step.get("created_at")),
                     "updated_at": _normalize_iso(existing_step.get("updated_at")),
@@ -1048,6 +1250,7 @@ class FixVulnerabilityStepsAPIView(APIView):
 
             return Response(
                 {
+                    "message": "Steps fetched successfully",
                     "report_id": fix_doc.get("report_id", ""),
                     "fix_vulnerability_id": fix_vuln_id,
                     "admin_id": admin_id,
@@ -1168,6 +1371,13 @@ class FixVulnerabilityStepsAPIView(APIView):
                 upsert=True
             )
 
+            # Fetch the step document to get its _id
+            step_doc = steps_coll.find_one({
+                "fix_vulnerability_id": fix_vuln_id,
+                "step_number": step_number
+            })
+            step_id = str(step_doc["_id"]) if step_doc else ""
+
             # ✅ Count completed steps
             completed_steps = steps_coll.count_documents({
                 "fix_vulnerability_id": fix_vuln_id,
@@ -1197,6 +1407,8 @@ class FixVulnerabilityStepsAPIView(APIView):
                         "status": "closed",
                         "completed_steps": completed_steps,
                         "step_saved": {
+                            "fix_vulnerability_id": fix_vuln_id,
+                            "fix_vulnerability_step_id": step_id,
                             "step_number": step_number,
                             "status": step_status,
                             "assigned_team": fix_doc.get("assigned_team", "")
@@ -1211,6 +1423,8 @@ class FixVulnerabilityStepsAPIView(APIView):
                     "status": "open",
                     "completed_steps": completed_steps,
                     "step_saved": {
+                        "fix_vulnerability_id": fix_vuln_id,
+                        "fix_vulnerability_step_id": step_id,
                         "step_number": step_number,
                         "status": step_status,
                         "assigned_team": fix_doc.get("assigned_team", "")

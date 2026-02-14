@@ -660,8 +660,8 @@ class AdminMeanTimeRemediateAPIView(APIView):
 
 class AdminVulnerabilitiesFixedAPIView(APIView):
     """
-    Returns count of fixed vulnerabilities by severity for the logged-in admin.
-    Queries the fix_vulnerabilities collection where status is 'close'.
+    Returns count of fixed (closed) vulnerabilities by severity for the logged-in admin.
+    Queries the fix_vulnerabilities_closed collection, filtered by report.
     """
     permission_classes = [IsAuthenticated]
 
@@ -677,13 +677,18 @@ class AdminVulnerabilitiesFixedAPIView(APIView):
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
-                fix_coll = db[FIX_VULN_COLLECTION]
+                closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
 
-                # Count fixed vulnerabilities by severity
-                fixed_vulns = list(fix_coll.find({
+                # Build query for closed (fixed) vulnerabilities
+                closed_query = {
                     "created_by": admin_id,
-                    "status": "close"
-                }))
+                    "status": "closed"
+                }
+                if report_id:
+                    closed_query["report_id"] = str(report_id)
+
+                # Count closed vulnerabilities by severity
+                fixed_vulns = list(closed_coll.find(closed_query))
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
@@ -738,15 +743,20 @@ class AdminSupportRequestsAPIView(APIView):
 
                 support_coll = db[SUPPORT_REQUEST_COLLECTION]
 
+                # Build base query filtered by admin and report
+                base_query = {"admin_id": admin_id}
+                if report_id:
+                    base_query["report_id"] = str(report_id)
+
                 # Count pending support requests
                 pending_count = support_coll.count_documents({
-                    "admin_id": admin_id,
+                    **base_query,
                     "status": {"$ne": "closed"}
                 })
 
                 # Count closed support requests
                 closed_count = support_coll.count_documents({
-                    "admin_id": admin_id,
+                    **base_query,
                     "status": "closed"
                 })
 
