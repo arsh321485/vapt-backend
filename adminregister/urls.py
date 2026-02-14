@@ -6,6 +6,8 @@ from .views import (
     VulnerabilitiesByHostListAPIView,
     VulnerabilitiesByHostDetailAPIView,
     FixVulnerabilityCreateAPIView,
+    FixVulnerabilityCardAPIView,
+    ClosedVulnerabilitiesByAssetAPIView,
     RaiseSupportRequestAPIView,
     SupportRequestByReportAPIView,
     SupportRequestByHostNameAPIView,
@@ -34,6 +36,20 @@ urlpatterns = [
     path(
         "fix-vulnerability/report/<str:report_id>/asset/<str:host_name>/create/",
         FixVulnerabilityCreateAPIView.as_view(),
+    ),
+
+    # Get single fix card details by _id
+    path(
+        "fix-vulnerability/<str:fix_vuln_id>/card/",
+        FixVulnerabilityCardAPIView.as_view(),
+        name="fix-vulnerability-card"
+    ),
+
+    # Get all closed vulnerabilities for a report + asset
+    path(
+        "closed-vulnerabilities/report/<str:report_id>/asset/<str:host_name>/",
+        ClosedVulnerabilitiesByAssetAPIView.as_view(),
+        name="closed-vulnerabilities-by-asset"
     ),
 
     path(

@@ -20,7 +20,7 @@ class FixVulnerabilityCreateSerializer(serializers.Serializer):
     """
     Serializer for creating a fix vulnerability with required and optional fields.
     """
-    plugin_id = serializers.CharField(required=True)
+    id = serializers.CharField(required=True)
     plugin_name = serializers.CharField(required=True)
     risk_factor = serializers.CharField(required=True)
     port = serializers.CharField(required=False, allow_blank=True, default="")
