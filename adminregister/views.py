@@ -256,7 +256,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 # Using port ensures only the specific record is marked closed
                 closed_vulns = set()
                 for doc in closed_coll.find(
-                    {"report_id": str(report_id), "admin_id": admin_id}
+                    {"report_id": str(report_id), "created_by": admin_id}
                 ):
                     key = (
                         doc.get("plugin_name", ""),
