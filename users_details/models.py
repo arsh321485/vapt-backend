@@ -17,5 +17,9 @@ class UserDetail(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = "Team"
+        verbose_name_plural = "Teams"
+
     def __str__(self):
         return f"{self.first_name} {self.last_name} ({self.email})"

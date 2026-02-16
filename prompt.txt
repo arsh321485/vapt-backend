@@ -1,3 +1,7 @@
-remove  the both button 
-1 . save and add another
-2. save and continue editing 
+
+user_details app 
+
+On the Super Admin panel, the 'User Details' section should be renamed to 'Team'
+
+Users should be displayed according to the particular admin
+
