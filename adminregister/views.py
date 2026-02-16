@@ -266,7 +266,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 rows = []
 
                 # Extract vulnerabilities from the latest report
-                # Only include those whose status is 'Closed'
+                # Show both Open and Closed vulnerabilities with correct status
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
 
@@ -279,9 +279,12 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             or ""
                         )
 
-                        # Only return vulnerabilities that are closed
-                        if (plugin_name, host_name) not in closed_vulns:
-                            continue
+                        # Determine status based on closed collection
+                        vuln_status = (
+                            "closed"
+                            if (plugin_name, host_name) in closed_vulns
+                            else "open"
+                        )
 
                         risk_raw = (
                             v.get("risk_factor")
@@ -311,7 +314,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             "protocol": protocol,
                             "first_observation": _normalize_iso(first_obs),
                             "second_observation": _normalize_iso(second_obs),
-                            "status": "closed",
+                            "status": vuln_status,
                         })
 
                 # Current user's admin info
