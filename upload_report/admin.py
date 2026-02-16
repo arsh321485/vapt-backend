@@ -49,12 +49,11 @@ class UploadReportAdminForm(forms.ModelForm):
         choices=[],
         required=True,
         label="Select Admin",
-        help_text="Select the admin for this report (required)"
     )
 
     class Meta:
         model = UploadReport
-        fields = ['file', 'member_type', 'status']
+        fields = ['file']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -98,11 +97,11 @@ class UploadReportAdminForm(forms.ModelForm):
 class UploadReportAdmin(admin.ModelAdmin):
     form = UploadReportAdminForm
 
-    list_display = ('_id', 'file', 'member_type', 'get_admin_id', 'get_admin_email', 'uploaded_at', 'status')
-    search_fields = ('file', 'status', 'member_type')
-    list_filter = ('uploaded_at', 'status', 'member_type')
+    list_display = ('_id', 'file', 'get_admin_id', 'get_admin_email', 'uploaded_at')
+    search_fields = ('file',)
+    list_filter = ('uploaded_at',)
     readonly_fields = ()
-    exclude = ('file_hash', 'location', 'admin', 'uploaded_at', 'created_at', 'updated_at', 'parsed_count')
+    exclude = ('file_hash', 'location', 'admin', 'uploaded_at', 'created_at', 'updated_at', 'parsed_count', 'member_type', 'status')
 
     def get_admin_id(self, obj):
         return getattr(obj.admin, "id", None)
@@ -171,11 +170,22 @@ class UploadReportAdmin(admin.ModelAdmin):
             with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as client:
                 db = self._get_mongo_db(client)
 
+                # Resolve admin_id from admin_email
+                admin_id = None
+                if admin_email:
+                    try:
+                        admin_user = User.objects.filter(email=admin_email).first()
+                        if admin_user:
+                            admin_id = str(admin_user.id)
+                    except Exception:
+                        pass
+
                 document = {
                     "report_id": report_id,
                     "original_filename": original_filename,
                     "location_id": "",
                     "location_name": "",
+                    "admin_id": admin_id,
                     "admin_email": admin_email,
                     "member_type": member_type,
                     "uploaded_at": datetime.datetime.utcnow(),
