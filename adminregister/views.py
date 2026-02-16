@@ -223,6 +223,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
 
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
+                closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
 
                 # Build query to match by admin_id OR admin_email
                 query_conditions = [{"admin_id": current_admin_id}]
@@ -251,10 +252,21 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 admin_id = latest_doc.get("admin_id")
                 admin_email = latest_doc.get("admin_email")
 
+                # Build a set of closed vulnerability keys (plugin_name, host_name)
+                closed_vulns = set()
+                for doc in closed_coll.find(
+                    {"report_id": str(report_id), "admin_id": admin_id}
+                ):
+                    key = (
+                        doc.get("plugin_name", ""),
+                        doc.get("host_name", "")
+                    )
+                    closed_vulns.add(key)
+
                 rows = []
 
                 # Extract vulnerabilities from the latest report
-                # plugin_id is the default unique identifier
+                # Only include those whose status is 'Closed'
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
 
@@ -266,6 +278,10 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             or v.get("name")
                             or ""
                         )
+
+                        # Only return vulnerabilities that are closed
+                        if (plugin_name, host_name) not in closed_vulns:
+                            continue
 
                         risk_raw = (
                             v.get("risk_factor")
@@ -295,7 +311,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             "protocol": protocol,
                             "first_observation": _normalize_iso(first_obs),
                             "second_observation": _normalize_iso(second_obs),
-                            "status": "open",
+                            "status": "closed",
                         })
 
                 # Current user's admin info
