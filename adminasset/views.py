@@ -352,7 +352,7 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
                 admin_id = doc.get("admin_id") or str(request.user.id)
                 closed_vulns = set()
                 for cdoc in closed_coll.find(
-                    {"report_id": str(report_id), "admin_id": admin_id}
+                    {"report_id": str(report_id), "created_by": admin_id}
                 ):
                     key = (
                         cdoc.get("plugin_name", ""),
@@ -397,6 +397,7 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
             import traceback; traceback.print_exc()
             return Response({"detail": "unexpected error", "error": str(exc)}, status=500)        
   
+
 # ----------------  ASSET HOLD ----------------        
 class AssetHoldAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
