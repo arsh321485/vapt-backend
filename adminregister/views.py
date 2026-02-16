@@ -252,14 +252,16 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 admin_id = latest_doc.get("admin_id")
                 admin_email = latest_doc.get("admin_email")
 
-                # Build a set of closed vulnerability keys (plugin_name, host_name)
+                # Build a set of closed vulnerability keys (plugin_name, host_name, port)
+                # Using port ensures only the specific record is marked closed
                 closed_vulns = set()
                 for doc in closed_coll.find(
                     {"report_id": str(report_id), "admin_id": admin_id}
                 ):
                     key = (
                         doc.get("plugin_name", ""),
-                        doc.get("host_name", "")
+                        doc.get("host_name", ""),
+                        str(doc.get("port", ""))
                     )
                     closed_vulns.add(key)
 
@@ -279,10 +281,12 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             or ""
                         )
 
-                        # Determine status based on closed collection
+                        port = v.get("port", "")
+
+                        # Determine status: only the exact record (plugin+host+port) is closed
                         vuln_status = (
                             "closed"
-                            if (plugin_name, host_name) in closed_vulns
+                            if (plugin_name, host_name, str(port)) in closed_vulns
                             else "open"
                         )
 
@@ -299,7 +303,6 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             else ""
                         )
 
-                        port = v.get("port", "")
                         protocol = v.get("protocol", "")
 
                         first_obs = v.get("created_at") or uploaded_at
@@ -729,7 +732,29 @@ class FixVulnerabilityCreateAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # 2. DUPLICATE CHECK using id + host_name (unique combination)
+            # 2. CLOSED CHECK - block creation if vulnerability is already closed
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+            closed_query = {
+                "report_id": str(report_id),
+                "host_name": host_name,
+                "plugin_name": plugin_name_req,
+            }
+            if port_req:
+                closed_query["port"] = str(port_req)
+
+            existing_closed = closed_coll.find_one(closed_query)
+            if existing_closed:
+                return Response(
+                    {
+                        "detail": "Cannot create fix — vulnerability is already Closed",
+                        "fix_vulnerability_id": existing_closed.get("fix_vulnerability_id", ""),
+                        "plugin_name": plugin_name_req,
+                        "status": "closed",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # 3. DUPLICATE CHECK using id + host_name (unique combination)
             duplicate_query = {
                 "report_id": str(report_id),
                 "host_name": host_name,

@@ -18,6 +18,7 @@ class AssetHostVulnSerializer(serializers.Serializer):
     vendor_fix_available = serializers.CharField()   # will be "Yes"
     cvss_score = serializers.CharField(allow_blank=True, allow_null=True)
     description = serializers.CharField(allow_blank=True)
+    status = serializers.CharField()
     
 
 class HoldAssetSerializer(serializers.Serializer):
