@@ -12,32 +12,9 @@ import pymongo
 
 
 def check_admin_has_locked_scope(admin_id):
-    """Check if admin has at least one locked scope using direct MongoDB query."""
+    """Check if admin has at least one locked scope using Django ORM."""
     try:
-        mongo_uri = settings.DATABASES['default']['CLIENT']['host']
-    except Exception:
-        mongo_uri = getattr(settings, "MONGO_DB_URL", None)
-
-    if not mongo_uri:
-        return False
-
-    try:
-        with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as client:
-            try:
-                db = client.get_default_database()
-            except Exception:
-                try:
-                    dbname = settings.DATABASES['default'].get('NAME')
-                    db = client[dbname] if dbname else client["vaptfix"]
-                except Exception:
-                    db = client["vaptfix"]
-
-            # Query scopes collection for locked scope with this admin_id
-            locked_scope = db["scopes"].find_one({
-                "admin_id": str(admin_id),
-                "is_locked": True
-            })
-            return locked_scope is not None
+        return Scope.objects.filter(admin_id=admin_id, is_locked=True).exists()
     except Exception:
         return False
 
@@ -211,6 +188,12 @@ class UploadReportAdmin(admin.ModelAdmin):
         except Exception as e:
             print(f"MongoDB storage error: {e}")
             return False
+
+    def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
+        extra_context = extra_context or {}
+        extra_context['show_save_and_add_another'] = False
+        extra_context['show_save_and_continue'] = False
+        return super().changeform_view(request, object_id, form_url, extra_context)
 
     def save_model(self, request, obj, form, change):
         """Save model and parse/store file data in MongoDB."""
