@@ -19,6 +19,7 @@ except Exception:
 NESSUS_COLLECTION = "nessus_reports"
 HOLD_COLLECTION = "hold_assets"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
+FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 DELETED_ASSETS_COLLECTION = "deleted_assets"
 
 # ---------------------- Mongo Context ----------------------
@@ -346,17 +347,39 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
                 if not host_entry:
                     return Response({"detail": "Asset not found in report"}, status=status.HTTP_404_NOT_FOUND)
 
+                # Build a set of closed vulnerability keys to exclude them
+                closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+                admin_id = doc.get("admin_id") or str(request.user.id)
+                closed_vulns = set()
+                for cdoc in closed_coll.find(
+                    {"report_id": str(report_id), "admin_id": admin_id}
+                ):
+                    key = (
+                        cdoc.get("plugin_name", ""),
+                        cdoc.get("host_name", ""),
+                        str(cdoc.get("port", ""))
+                    )
+                    closed_vulns.add(key)
+
                 out = []
                 for v in (host_entry.get("vulnerabilities") or []):
+                    plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                    port = str(v.get("port", ""))
+
+                    # Only display vulnerabilities with status 'Open'
+                    if (plugin_name, host_name, port) in closed_vulns:
+                        continue
+
                     item = {
                         "asset": host_name,
                         "exposure": member_type,
                         "owner": organisation_name,
                         "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
-                        "vul_name": v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                        "vul_name": plugin_name,
                         "vendor_fix_available": "Yes",
                         "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""),
                         "description": _join_description(v),
+                        "status": "open",
                     }
                     out.append(item)
 

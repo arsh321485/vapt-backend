@@ -1,3 +1,2 @@
 
-"In LatestSuperAdminVulnerabilityRegisterAPIView, both Open and Closed vulnerabilities should be displayed.
-
+AssetVulnerabilitiesByHostAPIView should include the status field in the response, and only vulnerabilities with status 'Open' should be displayed
