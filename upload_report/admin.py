@@ -11,11 +11,57 @@ import datetime
 import pymongo
 
 
-def check_admin_has_locked_scope(admin_id):
-    """Check if admin has at least one locked scope using Django ORM."""
+def check_admin_has_locked_scope(admin_user):
+    """Check if admin has at least one locked scope."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    admin_id = str(admin_user.id)
+
+    # Try Django ORM first
     try:
-        return Scope.objects.filter(admin_id=admin_id, is_locked=True).exists()
+        result = Scope.objects.filter(admin=admin_user, is_locked=True).exists()
+        logger.info(f"[ScopeCheck] ORM check for admin {admin_id}: {result}")
+        if result:
+            return True
+    except Exception as e:
+        logger.warning(f"[ScopeCheck] ORM failed: {e}")
+
+    # Fallback: direct MongoDB query - fetch all scopes for this admin and check is_locked in Python
+    try:
+        mongo_uri = settings.DATABASES['default']['CLIENT']['host']
     except Exception:
+        mongo_uri = getattr(settings, "MONGO_DB_URL", None)
+
+    if not mongo_uri:
+        logger.warning("[ScopeCheck] No MongoDB URI found")
+        return False
+
+    try:
+        with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as client:
+            try:
+                db = client.get_default_database()
+            except Exception:
+                try:
+                    dbname = settings.DATABASES['default'].get('NAME')
+                    db = client[dbname] if dbname else client["vaptfix"]
+                except Exception:
+                    db = client["vaptfix"]
+
+            # Fetch ALL scopes for this admin and check is_locked in Python
+            scopes = list(db["scopes"].find({"admin_id": admin_id}))
+            logger.info(f"[ScopeCheck] Found {len(scopes)} scopes for admin {admin_id}")
+
+            for scope in scopes:
+                is_locked_val = scope.get("is_locked")
+                logger.info(f"[ScopeCheck] Scope '{scope.get('name')}' is_locked={is_locked_val} (type={type(is_locked_val).__name__})")
+                # Check all possible truthy representations
+                if is_locked_val is True or is_locked_val == "True" or is_locked_val == "true" or is_locked_val == 1:
+                    return True
+
+            return False
+    except Exception as e:
+        logger.error(f"[ScopeCheck] MongoDB fallback failed: {e}")
         return False
 
 
@@ -58,8 +104,8 @@ class UploadReportAdminForm(forms.ModelForm):
         except User.DoesNotExist:
             raise forms.ValidationError("Selected admin does not exist.")
 
-        # Check if the admin has at least one locked scope using direct MongoDB query
-        has_locked_scope = check_admin_has_locked_scope(admin_id)
+        # Check if the admin has at least one locked scope
+        has_locked_scope = check_admin_has_locked_scope(admin_user)
 
         if not has_locked_scope:
             raise forms.ValidationError(
