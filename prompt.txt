@@ -1,0 +1,2 @@
+
+The super admin panel is working properly on the local server, but it is not working on the hosted website. The UI is not loading from the backend base URL
