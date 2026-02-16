@@ -1,2 +1,3 @@
 
-"I want the admin panel to be accessible at https://vaptbackend.secureitlab.com/admin, not under the /api/admin path."
+LatestSuperAdminVulnerabilityRegisterAPIView should return only those vulnerabilities whose status is marked as 'Closed'
+
