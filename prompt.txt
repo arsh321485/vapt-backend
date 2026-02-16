@@ -1,2 +1,2 @@
 
-The super admin panel is working properly on the local server, but it is not working on the hosted website. The UI is not loading from the backend base URL
+"I want the admin panel to be accessible at https://vaptbackend.secureitlab.com/admin, not under the /api/admin path."
