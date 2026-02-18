@@ -27,6 +27,14 @@ class UserManager(BaseUserManager):
 
 
 class User(AbstractBaseUser, PermissionsMixin):
+    LOGIN_PROVIDER_CHOICES = [
+        ('email', 'Email'),
+        ('google', 'Google'),
+        ('microsoft_teams', 'Microsoft Teams'),
+        ('slack', 'Slack'),
+        ('jira', 'Jira'),
+    ]
+
     id = models.CharField(
         primary_key=True,
         default=uuid.uuid4,
@@ -37,6 +45,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(
         unique=True,
         validators=[EmailValidator()]
+    )
+
+    login_provider = models.CharField(
+        max_length=50,
+        choices=LOGIN_PROVIDER_CHOICES,
+        default='email',
+        blank=True
     )
 
     is_active = models.BooleanField(default=True)
