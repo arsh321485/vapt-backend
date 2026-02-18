@@ -1,7 +1,12 @@
 
-user_details app 
+this one error face me 
 
-On the Super Admin panel, the 'User Details' section should be renamed to 'Team'
 
-Users should be displayed according to the particular admin
+{"error": "'utf-8' codec can't decode byte 0xee in position 0: invalid continuation byte"}
 
+
+
+ 
+ GET https://vaptbackend.secureitlab.com/api/admin/users/microsoft-teams/callbac…m3Uk_&state=7ulxu1f6sz4&session_state=001145fa-6ee1-807d-4f26-55a69d18cc0d 500 (Internal Server Error)
+loginWithMicrosoft	@	127.0.0.1:3000/index.html:39
+onclick	@	127.0.0.1:3000/index.html:21

@@ -14,10 +14,11 @@ class UserDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserDetail
         fields = [
-            "_id", "admin_id", 
+            "_id", "admin_id",
             "first_name", "last_name",
-            "user_type", "email", 
-            "Member_role", "created_at", "updated_at"
+            "user_type", "email",
+            "Member_role", "team_id", "team_name",
+            "created_at", "updated_at"
         ]
         read_only_fields = ["_id", "created_at", "updated_at"]
 
@@ -75,7 +76,9 @@ class UserDetailCreateSerializer(serializers.ModelSerializer):
             "last_name",
             "user_type",
             "email",
-            "Member_role"
+            "Member_role",
+            "team_id",
+            "team_name"
         ]
 
     def validate_admin_id(self, value):
@@ -147,7 +150,9 @@ class UserDetailUpdateSerializer(serializers.ModelSerializer):
             "last_name",
             "user_type",
             "email",
-            "Member_role"
+            "Member_role",
+            "team_id",
+            "team_name"
         ]
 
     def validate_admin_id(self, value):

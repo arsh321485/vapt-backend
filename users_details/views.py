@@ -164,14 +164,8 @@ class UserDetailListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        admin_id = self.request.query_params.get("admin_id")
-
-        queryset = UserDetail.objects.all().order_by("-created_at")
-
-        if admin_id:
-            queryset = queryset.filter(admin__id=admin_id)
-
-        return queryset
+        # Restrict to only the logged-in admin's own team members
+        return UserDetail.objects.filter(admin=self.request.user).order_by("-created_at")
 
 
 class UserDetailView(generics.RetrieveAPIView):
@@ -400,21 +394,9 @@ class UserDetailSearchView(generics.ListAPIView):
     filter_backends = [filters.SearchFilter]
     search_fields = ["first_name", "last_name", "email", "Member_role", "user_type"]
 
-    # optional: filter by admin_id & location_id along with search
     def get_queryset(self):
-        queryset = super().get_queryset()
-        admin_id = self.request.query_params.get("admin_id")
-        location_id = self.request.query_params.get("location_id")
-
-        if admin_id:
-            queryset = queryset.filter(admin__id=admin_id)
-        if location_id:
-            try:
-                queryset = queryset.filter(location__id=ObjectId(location_id))
-            except Exception:
-                pass
-
-        return queryset
+        # Restrict to only the logged-in admin's own team members
+        return UserDetail.objects.filter(admin=self.request.user).order_by("-created_at")
     
     
 class UserDetailRoleUpdateView(generics.GenericAPIView):
@@ -582,6 +564,7 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
 class UserDetailByAdminAPIView(generics.ListAPIView):
     """
     List all UserDetails created by a specific admin.
+    Only the logged-in admin can view their own team members.
     """
     serializer_class = UserDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -589,14 +572,22 @@ class UserDetailByAdminAPIView(generics.ListAPIView):
     def get_queryset(self):
         admin_id = self.kwargs.get("admin_id")
 
-        try:
-            admin = User.objects.get(id=admin_id)
-        except User.DoesNotExist:
+        # Restrict: logged-in user can only view their own team members
+        if str(self.request.user.id) != str(admin_id):
             return UserDetail.objects.none()
 
-        return UserDetail.objects.filter(admin=admin).order_by("-created_at")
+        return UserDetail.objects.filter(admin=self.request.user).order_by("-created_at")
 
     def list(self, request, *args, **kwargs):
+        admin_id = self.kwargs.get("admin_id")
+
+        # Return 403 if trying to access another admin's data
+        if str(request.user.id) != str(admin_id):
+            return Response(
+                {"detail": "You can only view your own team members."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         queryset = self.get_queryset()
 
         if not queryset.exists():
@@ -613,7 +604,7 @@ class UserDetailByAdminAPIView(generics.ListAPIView):
         return Response(
             {
                 "count": queryset.count(),
-                "admin_id": self.kwargs.get("admin_id"),
+                "admin_id": admin_id,
                 "results": serializer.data
             },
             status=status.HTTP_200_OK

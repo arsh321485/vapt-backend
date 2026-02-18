@@ -17,6 +17,8 @@ import requests
 import secrets
 import traceback
 import json
+import time
+import re
 from urllib.parse import urljoin
 import logging
 import uuid
@@ -182,6 +184,7 @@ class UserLoginView(generics.GenericAPIView):
         user = serializer.validated_data["user"]
 
         user.last_login = timezone.now()
+        user.login_provider = 'email'
         user.save()
 
         refresh = RefreshToken.for_user(user)
@@ -530,6 +533,9 @@ class GoogleOAuthView(generics.GenericAPIView):
 
         user, is_new_user = serializer.create_or_get_user(google_user_data)
 
+        user.login_provider = 'google'
+        user.save(update_fields=['login_provider'])
+
         login(request, user)
 
         refresh = RefreshToken.for_user(user)
@@ -782,10 +788,16 @@ class MicrosoftTeamsCallbackView(APIView):
                 return JsonResponse({"error": "Missing state"}, status=400)
 
             # Decode state (to get frontend redirect)
-            decoded_state = base64.urlsafe_b64decode(state + "==").decode()
-            state_data = json.loads(decoded_state)
-            frontend_redirect = state_data.get("redirect_uri")
-            print("🌐 Frontend redirect:", frontend_redirect)
+            # State can be either base64-encoded JSON or a plain random string
+            frontend_redirect = settings.FRONTEND_URL if hasattr(settings, 'FRONTEND_URL') else "http://localhost:3000"
+            try:
+                decoded_state = base64.urlsafe_b64decode(state + "==").decode()
+                state_data = json.loads(decoded_state)
+                frontend_redirect = state_data.get("redirect_uri", frontend_redirect)
+            except (UnicodeDecodeError, json.JSONDecodeError, Exception):
+                # State is a plain string (not base64-encoded JSON), use default redirect
+                logger.info(f"State is plain string: {state}, using default redirect: {frontend_redirect}")
+            print("Frontend redirect:", frontend_redirect)
 
             # Exchange code for tokens
             token_payload = {
@@ -824,17 +836,19 @@ class MicrosoftTeamsCallbackView(APIView):
                 user, created = User.objects.get_or_create(
                     email=email,
                     defaults={
-                        "firstname": firstname,
-                        "lastname": lastname,
                         "password": make_password(None),
+                        "login_provider": "microsoft_teams",
                     },
                 )
+                if not created:
+                    user.login_provider = 'microsoft_teams'
+                    user.save(update_fields=['login_provider'])
                 user_data = {
                     "email": user.email,
-                    "firstname": user.firstname,
-                    "lastname": user.lastname,
+                    "id": str(user.id),
+                    "displayName": full_name,
                 }
-                logger.info(f"✅ Microsoft user {'created' if created else 'exists'}: {email}")
+                logger.info(f"Microsoft user {'created' if created else 'exists'}: {email}")
 
             # ✅ HTML response that posts data back to frontend and closes popup
             html = f"""
@@ -874,7 +888,10 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                 access_token = serializer.validated_data.get('access_token')
                 microsoft_user_data = serializer.get_microsoft_user_data(access_token)
                 user = serializer.create_or_get_user(microsoft_user_data)
-                
+
+                user.login_provider = 'microsoft_teams'
+                user.save(update_fields=['login_provider'])
+
                 login(request, user)
                 refresh = RefreshToken.for_user(user)
                 
@@ -1251,10 +1268,75 @@ class CreateTeamView(generics.GenericAPIView):
             logger.warning(f"Error checking for duplicate teams: {str(e)}")
             return False, "Duplicate check failed but proceeding"
 
+    DEFAULT_CHANNELS = [
+        "Patch Management",
+        "Configuration Management",
+        "Network Security",
+        "Architectural Flaws",
+    ]
+
+    def create_default_channels(self, access_token, team_id):
+        """Create 4 default channels in the newly created team."""
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels"
+        results = []
+        for channel_name in self.DEFAULT_CHANNELS:
+            payload = {
+                "displayName": channel_name,
+                "description": f"{channel_name} channel",
+                "membershipType": "standard"
+            }
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=15)
+                if resp.status_code in (200, 201):
+                    channel_data = resp.json()
+                    results.append({
+                        "channelName": channel_name,
+                        "channelId": channel_data.get("id"),
+                        "status": "created"
+                    })
+                else:
+                    results.append({
+                        "channelName": channel_name,
+                        "status": "failed",
+                        "error": resp.text
+                    })
+            except Exception as e:
+                results.append({
+                    "channelName": channel_name,
+                    "status": "failed",
+                    "error": str(e)
+                })
+        return results
+
+    def wait_for_team_and_create_channels(self, access_token, team_id, max_retries=5, delay=10):
+        """Wait for async team provisioning to complete, then create default channels."""
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        for attempt in range(max_retries):
+            time.sleep(delay)
+            try:
+                resp = requests.get(
+                    f"https://graph.microsoft.com/v1.0/teams/{team_id}",
+                    headers=headers,
+                    timeout=10
+                )
+                if resp.status_code == 200:
+                    return self.create_default_channels(access_token, team_id)
+            except Exception:
+                pass
+            logger.info(f"Team {team_id} not ready yet, retry {attempt + 1}/{max_retries}")
+        return [{"status": "failed", "error": "Team provisioning timed out. Channels were not created."}]
+
     def post(self, request, *args, **kwargs):
         try:
             serializer = self.get_serializer(data=request.data)
-            
+
             if serializer.is_valid(raise_exception=True):
                 access_token = serializer.validated_data['access_token']
                 team_name = serializer.validated_data['team_name']
@@ -1327,15 +1409,19 @@ class CreateTeamView(generics.GenericAPIView):
                 if response.status_code == 201:
                     # Team creation is successful and completed immediately
                     team_location = response.headers.get('Location')
-                    
+
                     # Extract team ID from location header
                     team_id = None
                     if team_location:
-                        import re
                         match = re.search(r"teams\('([^']+)'\)", team_location)
                         if match:
                             team_id = match.group(1)
-                    
+
+                    # Auto-create default channels
+                    channels_result = []
+                    if team_id:
+                        channels_result = self.create_default_channels(access_token, team_id)
+
                     return Response({
                         "message": "Team created successfully",
                         "status": "completed",
@@ -1345,36 +1431,45 @@ class CreateTeamView(generics.GenericAPIView):
                             "description": description,
                             "visibility": visibility,
                             "location": team_location
-                        }
+                        },
+                        "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
                     
                 elif response.status_code == 202:
                     # Team creation is being processed asynchronously
                     team_location = response.headers.get('Location')
-                    
+
                     # Extract team ID from location header for 202 responses
                     team_id = None
                     if team_location:
-                        import re
-                        # Pattern for location like: /teams('team-id')/operations('operation-id')
                         team_match = re.search(r"teams\('([^']+)'\)", team_location)
                         if team_match:
                             team_id = team_match.group(1)
-                    
+
+                    # Wait for team provisioning, then create default channels
+                    channels_result = []
+                    if team_id:
+                        channels_result = self.wait_for_team_and_create_channels(access_token, team_id)
+
                     return Response({
-                        "message": "Team creation initiated. Processing may take a few minutes.",
-                        "status": "processing",
+                        "message": "Team creation initiated and default channels created.",
+                        "status": "completed",
                         "team_id": team_id,
                         "location": team_location,
-                        "note": "You can check the status using the location URL"
-                    }, status=status.HTTP_202_ACCEPTED)
+                        "default_channels": channels_result
+                    }, status=status.HTTP_201_CREATED)
                     
                 elif response.status_code == 200:
                     # Sometimes Microsoft Graph returns 200 for successful operations
                     try:
                         response_data = response.json()
                         team_id = response_data.get('id')
-                        
+
+                        # Auto-create default channels
+                        channels_result = []
+                        if team_id:
+                            channels_result = self.create_default_channels(access_token, team_id)
+
                         return Response({
                             "message": "Team created successfully",
                             "status": "completed",
@@ -1384,9 +1479,10 @@ class CreateTeamView(generics.GenericAPIView):
                                 "description": description,
                                 "visibility": visibility,
                                 "data": response_data
-                            }
+                            },
+                            "default_channels": channels_result
                         }, status=status.HTTP_201_CREATED)
-                    except:
+                    except Exception:
                         return Response({
                             "message": "Team creation may have succeeded but response format is unexpected",
                             "status": "unknown",
@@ -2426,6 +2522,7 @@ class SlackLoginView(APIView):
                     "password": "",
                     "last_login": timezone.now(),
                     "login_source": "slack",      # ✅ TRACKS SLACK LOGIN
+                    "login_provider": "slack",
                     "slack_user_id": slack_user_id, # ✅ SLACK USER ID
                     "slack_team_id": slack_team.get("id") # ✅ SLACK TEAM ID
                 }
@@ -2435,6 +2532,7 @@ class SlackLoginView(APIView):
             if not created:
                 user.last_login = timezone.now()
                 user.login_source = "slack"        # ✅ MARK as Slack login
+                user.login_provider = "slack"
                 user.slack_user_id = slack_user_id # ✅ Link Slack ID
                 user.slack_team_id = slack_team.get("id")
                 user.save()
@@ -3438,12 +3536,14 @@ class JiraOAuthView(APIView):
                     'username': user_data['email'],
                     'full_name': user_data.get('name', ''),
                     'is_active': True,
+                    'login_provider': 'jira',
                     'jira_access_token': tokens['access_token'],
                     'jira_refresh_token': tokens.get('refresh_token', '')
                 }
             )
 
             if not created:
+                user.login_provider = 'jira'
                 user.jira_access_token = tokens['access_token']
                 user.jira_refresh_token = tokens.get('refresh_token', '')
                 user.save()
