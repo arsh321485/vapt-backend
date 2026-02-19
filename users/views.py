@@ -628,6 +628,7 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 f"&redirect_uri={backend_redirect}"
                 f"&response_mode=query"
                 f"&scope=https://graph.microsoft.com/User.Read offline_access openid email profile"
+                f"&prompt=select_account"
                 f"&state={state}"
             )
 
@@ -850,20 +851,35 @@ class MicrosoftTeamsCallbackView(APIView):
                 }
                 logger.info(f"Microsoft user {'created' if created else 'exists'}: {email}")
 
-            # ✅ HTML response that posts data back to frontend and closes popup
+            # HTML response: log access token to console and redirect to frontend
             html = f"""
             <html>
             <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
-                <h2>✅ Microsoft Teams Login Successful</h2>
+                <h2>Microsoft Teams Login Successful</h2>
+                <p>Redirecting...</p>
                 <script>
-                    window.opener?.postMessage({{
-                        success: true,
-                        code: "{code}",
-                        state: "{state}",
-                        user: {json.dumps(user_data)},
-                        tokens: {json.dumps(token_data)}
-                    }}, "{frontend_redirect}");
-                    window.close();
+                    console.log("=== Microsoft Teams Access Token ===");
+                    console.log("{token_data.get('access_token', '')}");
+                    console.log("=== Token Data ===");
+                    console.log({json.dumps(token_data)});
+                    console.log("=== User Data ===");
+                    console.log({json.dumps(user_data)});
+
+                    // Post message to opener if popup
+                    if (window.opener) {{
+                        window.opener.postMessage({{
+                            success: true,
+                            code: "{code}",
+                            state: "{state}",
+                            user: {json.dumps(user_data)},
+                            tokens: {json.dumps(token_data)}
+                        }}, "{frontend_redirect}");
+                    }}
+
+                    // Redirect to frontend main page
+                    setTimeout(function() {{
+                        window.location.href = "{frontend_redirect}";
+                    }}, 1500);
                 </script>
             </body>
             </html>
