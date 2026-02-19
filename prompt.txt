@@ -1,12 +1,4 @@
 
-this one error face me 
+After successful login, the access token should be printed in the console.
 
-
-{"error": "'utf-8' codec can't decode byte 0xee in position 0: invalid continuation byte"}
-
-
-
- 
- GET https://vaptbackend.secureitlab.com/api/admin/users/microsoft-teams/callbac…m3Uk_&state=7ulxu1f6sz4&session_state=001145fa-6ee1-807d-4f26-55a69d18cc0d 500 (Internal Server Error)
-loginWithMicrosoft	@	127.0.0.1:3000/index.html:39
-onclick	@	127.0.0.1:3000/index.html:21
+After login, the user should be redirected to the main Microsoft Teams page.
