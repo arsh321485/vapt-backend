@@ -856,7 +856,7 @@ def auto_create_vaptfix_team(access_token):
             ch_payload = {
                 "displayName": channel_name,
                 "description": f"{channel_name} channel",
-                "membershipType": "standard"
+                "membershipType": "private"
             }
             try:
                 ch_resp = requests.post(channels_url, headers=headers, json=ch_payload, timeout=15)
@@ -1497,7 +1497,7 @@ class CreateTeamView(generics.GenericAPIView):
             payload = {
                 "displayName": channel_name,
                 "description": f"{channel_name} channel",
-                "membershipType": "standard"
+                "membershipType": "private"
             }
             try:
                 resp = requests.post(url, headers=headers, json=payload, timeout=15)
