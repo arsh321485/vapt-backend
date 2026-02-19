@@ -1057,6 +1057,76 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                 "error": "Microsoft Teams authentication failed. Please try again."
             }, status=status.HTTP_400_BAD_REQUEST)
 
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MicrosoftTeamsTokenExchangeView(APIView):
+    """
+    Exchange Microsoft authorization code for a delegated access token.
+    Frontend sends the authorization code, backend exchanges it for tokens.
+
+    Step 1 (Frontend): Redirect user to Microsoft OAuth URL to get authorization code
+    Step 2 (Frontend): Send the code to this endpoint
+    Step 3 (Backend): Exchange code for delegated access token and return it
+
+    Usage in Postman:
+      1. GET /api/admin/users/microsoft-teams/oauth-url/?redirect_uri=http://localhost:3000
+         → Copy the auth_url, open in browser, login, get code from redirect URL
+      2. POST /api/admin/users/microsoft-teams/token-exchange/
+         Body: {"code": "<authorization_code>", "redirect_uri": "http://localhost:3000"}
+         → Returns delegated access_token
+      3. Use that access_token in /api/admin/users/microsoft-teams-oauth/
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            code = request.data.get('code')
+            redirect_uri = request.data.get('redirect_uri')
+
+            if not code:
+                return Response({
+                    "error": "Authorization code is required",
+                    "hint": "First get the code by visiting the OAuth URL from /microsoft-teams/oauth-url/"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Use the backend redirect URI (must match Azure App Registration)
+            token_redirect_uri = redirect_uri or settings.MICROSOFT_REDIRECT_URI
+
+            token_payload = {
+                "grant_type": "authorization_code",
+                "client_id": settings.MICROSOFT_CLIENT_ID,
+                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": token_redirect_uri,
+                "scope": "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Team.Create https://graph.microsoft.com/Group.ReadWrite.All https://graph.microsoft.com/Channel.Create offline_access"
+            }
+
+            token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
+            token_data = token_response.json()
+
+            if token_response.status_code != 200 or "access_token" not in token_data:
+                return Response({
+                    "error": "Token exchange failed",
+                    "details": token_data
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({
+                "message": "Token exchange successful. Use this access_token in /microsoft-teams-oauth/",
+                "access_token": token_data.get("access_token"),
+                "refresh_token": token_data.get("refresh_token", ""),
+                "expires_in": token_data.get("expires_in"),
+                "token_type": token_data.get("token_type"),
+                "scope": token_data.get("scope", "")
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Microsoft token exchange error: {str(e)}")
+            return Response({
+                "error": "Token exchange failed",
+                "detail": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class CreateTeamsChannelView(generics.GenericAPIView):
     serializer_class = CreateChannelSerializer
