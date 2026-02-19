@@ -10,8 +10,92 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from django.conf import settings
 import logging
+import requests
 
 logger = logging.getLogger('users_details')
+
+
+def sync_member_to_teams_channels(access_token, team_id, user_email, member_roles):
+    """
+    Add a user to the matching Teams channels based on their Member_role.
+    Channel names must match: Patch Management, Configuration Management, Network Security, Architectural Flaws.
+    """
+    if not access_token or not team_id:
+        return []
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+
+    results = []
+
+    try:
+        # Get all channels in the team
+        channels_resp = requests.get(
+            f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
+            headers=headers, timeout=10
+        )
+        if channels_resp.status_code != 200:
+            return [{"error": "Failed to list channels", "detail": channels_resp.text}]
+
+        channels = channels_resp.json().get('value', [])
+        channel_map = {ch['displayName']: ch['id'] for ch in channels}
+
+        # Get user's Azure AD ID by email
+        user_resp = requests.get(
+            f"https://graph.microsoft.com/v1.0/users/{user_email}",
+            headers=headers, timeout=10
+        )
+        if user_resp.status_code != 200:
+            return [{"error": f"Could not find user {user_email} in Azure AD", "detail": user_resp.text}]
+
+        user_id = user_resp.json().get('id')
+
+        # First add user as team member
+        team_member_payload = {
+            "@odata.type": "#microsoft.graph.aadUserConversationMember",
+            "roles": [],
+            "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
+        }
+        team_member_resp = requests.post(
+            f"https://graph.microsoft.com/v1.0/teams/{team_id}/members",
+            headers=headers, json=team_member_payload, timeout=10
+        )
+        if team_member_resp.status_code in (200, 201):
+            results.append({"action": "added_to_team", "status": "success"})
+        elif team_member_resp.status_code == 409:
+            results.append({"action": "added_to_team", "status": "already_member"})
+        else:
+            results.append({"action": "added_to_team", "status": "failed", "error": team_member_resp.text})
+
+        # Add user to each matching channel
+        for role in member_roles:
+            channel_id = channel_map.get(role)
+            if not channel_id:
+                results.append({"channel": role, "status": "channel_not_found"})
+                continue
+
+            add_payload = {
+                "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                "roles": [],
+                "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
+            }
+            add_resp = requests.post(
+                f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/members",
+                headers=headers, json=add_payload, timeout=10
+            )
+            if add_resp.status_code in (200, 201):
+                results.append({"channel": role, "status": "added"})
+            elif add_resp.status_code == 409:
+                results.append({"channel": role, "status": "already_member"})
+            else:
+                results.append({"channel": role, "status": "failed", "error": add_resp.text})
+
+    except Exception as e:
+        results.append({"error": str(e)})
+
+    return results
 User = get_user_model()
 class UserDetailCreateView(generics.CreateAPIView):
     serializer_class = UserDetailCreateSerializer
@@ -97,38 +181,51 @@ class UserDetailCreateView(generics.CreateAPIView):
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             user_detail = serializer.save()
-            
+
             # Extract data to send email
             email = user_detail.email
             first_name = user_detail.first_name or ""
             last_name = user_detail.last_name or ""
             roles = user_detail.Member_role or []
-            # location = user_detail.select_location or "N/A"
-            
+
             logger.info(f"Creating user detail for {email} with roles: {roles}")
-            
+
             # Send Email
             email_sent, error = self.send_welcome_email(
                 email=email,
                 first_name=first_name,
                 last_name=last_name,
                 roles=roles,
-                # location=location
             )
-            
+
+            # Sync with Microsoft Teams channels if access_token and team_id provided
+            teams_sync_result = []
+            ms_access_token = request.data.get("access_token")
+            team_id = user_detail.team_id or request.data.get("team_id")
+            if ms_access_token and team_id and roles:
+                teams_sync_result = sync_member_to_teams_channels(
+                    access_token=ms_access_token,
+                    team_id=team_id,
+                    user_email=email,
+                    member_roles=roles
+                )
+
             response_data = {
                 "message": "User detail created successfully",
                 "email_sent": email_sent,
                 "data": UserDetailSerializer(user_detail).data
             }
-            
+
+            if teams_sync_result:
+                response_data["teams_sync"] = teams_sync_result
+
             # Only include error if email failed
             if not email_sent:
                 response_data["email_error"] = error
                 logger.warning(f"User created but email failed for {email}: {error}")
             else:
                 logger.info(f"User created and email sent successfully for {email}")
-            
+
             return Response(response_data, status=status.HTTP_201_CREATED)
             
         except Exception as e:
@@ -549,16 +646,29 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
         instance.Member_role = updated_roles
         instance.save()
 
+        # Sync new roles with Teams channels if access_token and team_id provided
+        teams_sync_result = []
+        ms_access_token = request.data.get("access_token")
+        team_id = instance.team_id or request.data.get("team_id")
+        if ms_access_token and team_id and normalized_new:
+            teams_sync_result = sync_member_to_teams_channels(
+                access_token=ms_access_token,
+                team_id=team_id,
+                user_email=instance.email,
+                member_roles=normalized_new
+            )
+
         member_name = f"{instance.first_name or ''} {instance.last_name or ''}".strip()
-        return Response(
-            {
-                "message": f"Roles {normalized_new} added successfully to {member_name}.",
-                "action": action,
-                "updated_roles": updated_roles,
-                "member_name": member_name,
-            },
-            status=status.HTTP_200_OK
-        )
+        response_data = {
+            "message": f"Roles {normalized_new} added successfully to {member_name}.",
+            "action": action,
+            "updated_roles": updated_roles,
+            "member_name": member_name,
+        }
+        if teams_sync_result:
+            response_data["teams_sync"] = teams_sync_result
+
+        return Response(response_data, status=status.HTTP_200_OK)
         
         
 class UserDetailByAdminAPIView(generics.ListAPIView):

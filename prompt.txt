@@ -1,4 +1,18 @@
 
-After successful login, the access token should be printed in the console.
+microsoft team me 
 
-After login, the user should be redirected to the main Microsoft Teams page.
+team automatically create honi chahihe VAPTFIX ke name se 
+uske under 4  channel create hone chahihe 
+1)Patch Management
+2)Configuration Management
+3)Network Security
+4)Architectural Flaws
+
+or ye connect hona chahihe user_details table ke sath jb user_details me ye particular admin ke according  channel me jo bhi user ye o channel ke according show hona chahihe jb hum team me change kre to yha bhi hona chahihe or yha kre to team me bhi hona chahihe 
+
+
+
+microsoft team login krte hai to uska access token consol me print krna hai 
+
+
+or login hone ke bad microsoft team ke website pr direct hona chahihe 
