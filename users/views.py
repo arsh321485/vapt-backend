@@ -773,6 +773,122 @@ class MicrosoftTeamsOAuthUrlView(APIView):
             return JsonResponse({"error": str(e)}, status=500)
 
 
+def auto_create_vaptfix_team(access_token):
+    """
+    Auto-create a team named 'VAPTFIX' with 4 default channels if it doesn't already exist.
+    Returns dict with team_id, team_name, and channels info.
+    """
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+
+    # Step 1: Check if VAPTFIX team already exists
+    try:
+        search_url = "https://graph.microsoft.com/v1.0/me/joinedTeams"
+        resp = requests.get(search_url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            teams = resp.json().get('value', [])
+            for team in teams:
+                if team.get('displayName') == 'VAPTFIX':
+                    logger.info(f"VAPTFIX team already exists: {team.get('id')}")
+                    return {
+                        "team_id": team.get('id'),
+                        "team_name": "VAPTFIX",
+                        "status": "already_exists",
+                        "channels": []
+                    }
+    except Exception as e:
+        logger.warning(f"Error checking existing teams: {str(e)}")
+
+    # Step 2: Create VAPTFIX team
+    try:
+        create_url = "https://graph.microsoft.com/v1.0/teams"
+        payload = {
+            "template@odata.bind": "https://graph.microsoft.com/v1.0/teamsTemplates('standard')",
+            "displayName": "VAPTFIX",
+            "description": "VAPTFIX Security Management Team",
+            "visibility": "private",
+        }
+        resp = requests.post(create_url, headers=headers, json=payload, timeout=30)
+
+        team_id = None
+        if resp.status_code in (200, 201):
+            team_location = resp.headers.get('Location', '')
+            match = re.search(r"teams\('([^']+)'\)", team_location)
+            if match:
+                team_id = match.group(1)
+            elif resp.status_code == 200:
+                team_id = resp.json().get('id')
+        elif resp.status_code == 202:
+            team_location = resp.headers.get('Location', '')
+            match = re.search(r"teams\('([^']+)'\)", team_location)
+            if match:
+                team_id = match.group(1)
+            # Wait for team to be provisioned
+            if team_id:
+                for attempt in range(5):
+                    time.sleep(10)
+                    check = requests.get(
+                        f"https://graph.microsoft.com/v1.0/teams/{team_id}",
+                        headers=headers, timeout=10
+                    )
+                    if check.status_code == 200:
+                        break
+                    logger.info(f"VAPTFIX team not ready, retry {attempt + 1}/5")
+        else:
+            logger.error(f"Failed to create VAPTFIX team: {resp.status_code} {resp.text}")
+            return {"team_id": None, "team_name": "VAPTFIX", "status": "creation_failed", "error": resp.text, "channels": []}
+
+        if not team_id:
+            return {"team_id": None, "team_name": "VAPTFIX", "status": "creation_failed", "error": "Could not extract team ID", "channels": []}
+
+        # Step 3: Create 4 default channels
+        default_channels = ["Patch Management", "Configuration Management", "Network Security", "Architectural Flaws"]
+        channels_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels"
+        channels_result = []
+
+        for channel_name in default_channels:
+            ch_payload = {
+                "displayName": channel_name,
+                "description": f"{channel_name} channel",
+                "membershipType": "standard"
+            }
+            try:
+                ch_resp = requests.post(channels_url, headers=headers, json=ch_payload, timeout=15)
+                if ch_resp.status_code in (200, 201):
+                    ch_data = ch_resp.json()
+                    channels_result.append({
+                        "channelName": channel_name,
+                        "channelId": ch_data.get("id"),
+                        "status": "created"
+                    })
+                else:
+                    channels_result.append({
+                        "channelName": channel_name,
+                        "status": "failed",
+                        "error": ch_resp.text
+                    })
+            except Exception as e:
+                channels_result.append({
+                    "channelName": channel_name,
+                    "status": "failed",
+                    "error": str(e)
+                })
+
+        logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
+        return {
+            "team_id": team_id,
+            "team_name": "VAPTFIX",
+            "status": "created",
+            "channels": channels_result
+        }
+
+    except Exception as e:
+        logger.error(f"Auto-create VAPTFIX team error: {str(e)}")
+        return {"team_id": None, "team_name": "VAPTFIX", "status": "error", "error": str(e), "channels": []}
+
+
 class MicrosoftTeamsCallbackView(APIView):
     permission_classes = [AllowAny]
 
@@ -851,12 +967,16 @@ class MicrosoftTeamsCallbackView(APIView):
                 }
                 logger.info(f"Microsoft user {'created' if created else 'exists'}: {email}")
 
-            # HTML response: log access token to console and redirect to frontend
+            # Auto-create VAPTFIX team with 4 channels
+            vaptfix_team = auto_create_vaptfix_team(access_token)
+            logger.info(f"VAPTFIX team result: {vaptfix_team}")
+
+            # HTML response: log access token to console and redirect to MS Teams
             html = f"""
             <html>
             <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
                 <h2>Microsoft Teams Login Successful</h2>
-                <p>Redirecting...</p>
+                <p>Redirecting to Microsoft Teams...</p>
                 <script>
                     console.log("=== Microsoft Teams Access Token ===");
                     console.log("{token_data.get('access_token', '')}");
@@ -864,6 +984,8 @@ class MicrosoftTeamsCallbackView(APIView):
                     console.log({json.dumps(token_data)});
                     console.log("=== User Data ===");
                     console.log({json.dumps(user_data)});
+                    console.log("=== VAPTFIX Team ===");
+                    console.log({json.dumps(vaptfix_team)});
 
                     // Post message to opener if popup
                     if (window.opener) {{
@@ -872,13 +994,14 @@ class MicrosoftTeamsCallbackView(APIView):
                             code: "{code}",
                             state: "{state}",
                             user: {json.dumps(user_data)},
-                            tokens: {json.dumps(token_data)}
+                            tokens: {json.dumps(token_data)},
+                            vaptfix_team: {json.dumps(vaptfix_team)}
                         }}, "{frontend_redirect}");
                     }}
 
-                    // Redirect to frontend main page
+                    // Redirect to Microsoft Teams website
                     setTimeout(function() {{
-                        window.location.href = "{frontend_redirect}";
+                        window.location.href = "https://teams.microsoft.com";
                     }}, 1500);
                 </script>
             </body>
@@ -910,9 +1033,12 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
 
                 login(request, user)
                 refresh = RefreshToken.for_user(user)
-                
+
+                # Auto-create VAPTFIX team with 4 channels
+                vaptfix_team = auto_create_vaptfix_team(access_token)
+
                 logger.info(f"Microsoft Teams OAuth login successful: {user.email}")
-                
+
                 return Response({
                     "message": "Microsoft Teams login successful",
                     "user": UserProfileSerializer(user).data,
@@ -920,8 +1046,9 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                         "refresh": str(refresh),
                         "access": str(refresh.access_token),
                     },
-                    "access_token":str(access_token),
-                    "is_new_user": False
+                    "access_token": str(access_token),
+                    "is_new_user": False,
+                    "vaptfix_team": vaptfix_team
                 }, status=status.HTTP_200_OK)
                 
         except Exception as e:
