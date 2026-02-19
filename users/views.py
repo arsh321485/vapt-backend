@@ -975,30 +975,14 @@ class MicrosoftTeamsCallbackView(APIView):
             vaptfix_team = auto_create_vaptfix_team(access_token)
             logger.info(f"VAPTFIX team result: {vaptfix_team}")
 
-            # HTML response: show access token clearly and redirect to MS Teams
-            access_token_display = token_data.get('access_token', '')
+            # HTML response: log access token to console and redirect immediately to MS Teams
             html = f"""
             <html>
-            <body style="font-family:sans-serif; max-width:900px; margin:40px auto; padding:20px; background:#f4f6f9;">
-                <div style="background:white; padding:30px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.1);">
-                    <h2 style="color:#0078d4;">Microsoft Teams Login Successful</h2>
-
-                    <div style="background:#d4edda; color:#155724; padding:15px; border-radius:6px; margin:20px 0;">
-                        <strong>User:</strong> {user_data.get('email', 'N/A') if user_data else 'N/A'}<br>
-                        <strong>VAPTFIX Team:</strong> {vaptfix_team.get('status', 'N/A')} (ID: {vaptfix_team.get('team_id', 'N/A')})
-                    </div>
-
-                    <h3>Access Token (copy for Postman):</h3>
-                    <textarea id="tokenBox" readonly style="width:100%; height:120px; font-family:monospace; font-size:11px; padding:10px; border:1px solid #ddd; border-radius:6px; background:#f8f9fa;">{access_token_display}</textarea>
-                    <br><br>
-                    <button onclick="navigator.clipboard.writeText(document.getElementById('tokenBox').value); this.textContent='Copied!'" style="background:#0078d4; color:white; padding:10px 24px; border:none; border-radius:6px; cursor:pointer; font-size:14px;">Copy Access Token</button>
-
-                    <p style="margin-top:20px; color:#666;">Redirecting to Microsoft Teams in 10 seconds... <a href="https://teams.microsoft.com">Click here</a> to go now.</p>
-                </div>
-
+            <head><title>Redirecting...</title></head>
+            <body>
                 <script>
                     console.log("=== Microsoft Teams Access Token ===");
-                    console.log("{access_token_display}");
+                    console.log("{token_data.get('access_token', '')}");
                     console.log("=== User Data ===");
                     console.log({json.dumps(user_data)});
                     console.log("=== VAPTFIX Team ===");
@@ -1008,18 +992,14 @@ class MicrosoftTeamsCallbackView(APIView):
                     if (window.opener) {{
                         window.opener.postMessage({{
                             success: true,
-                            code: "{code}",
-                            state: "{state}",
                             user: {json.dumps(user_data)},
                             tokens: {json.dumps(token_data)},
                             vaptfix_team: {json.dumps(vaptfix_team)}
                         }}, "{frontend_redirect}");
                     }}
 
-                    // Redirect to Microsoft Teams website after 10 seconds
-                    setTimeout(function() {{
-                        window.location.href = "https://teams.microsoft.com";
-                    }}, 10000);
+                    // Redirect immediately to Microsoft Teams website
+                    window.location.href = "https://teams.microsoft.com";
                 </script>
             </body>
             </html>

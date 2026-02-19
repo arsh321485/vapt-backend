@@ -11,7 +11,7 @@ class UserDetail(models.Model):
     first_name = models.CharField(max_length=255)
     last_name = models.CharField(max_length=255)
     user_type = models.CharField(max_length=255)
-    email = models.EmailField(unique=True)
+    email = models.EmailField()
     # select_location = models.CharField(max_length=255)
     Member_role = models.JSONField(default=list)
     team_id = models.CharField(max_length=255, blank=True, null=True)
@@ -22,6 +22,7 @@ class UserDetail(models.Model):
     class Meta:
         verbose_name = "Team"
         verbose_name_plural = "Teams"
+        unique_together = [['admin', 'email']]
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} ({self.email})"

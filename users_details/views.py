@@ -17,8 +17,11 @@ logger = logging.getLogger('users_details')
 
 def sync_member_to_teams_channels(access_token, team_id, user_email, member_roles):
     """
-    Add a user to the matching Teams channels based on their Member_role.
-    Channel names must match: Patch Management, Configuration Management, Network Security, Architectural Flaws.
+    Add a user to the VAPTFIX team. Once added to the team, the user automatically
+    gets access to all standard channels (Patch Management, Configuration Management,
+    Network Security, Architectural Flaws).
+
+    For private/shared channels, members are added individually.
     """
     if not access_token or not team_id:
         return []
@@ -31,17 +34,6 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
     results = []
 
     try:
-        # Get all channels in the team
-        channels_resp = requests.get(
-            f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
-            headers=headers, timeout=10
-        )
-        if channels_resp.status_code != 200:
-            return [{"error": "Failed to list channels", "detail": channels_resp.text}]
-
-        channels = channels_resp.json().get('value', [])
-        channel_map = {ch['displayName']: ch['id'] for ch in channels}
-
         # Get user's Azure AD ID by email
         user_resp = requests.get(
             f"https://graph.microsoft.com/v1.0/users/{user_email}",
@@ -52,7 +44,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
 
         user_id = user_resp.json().get('id')
 
-        # First add user as team member
+        # Add user as team member — this gives access to ALL standard channels automatically
         team_member_payload = {
             "@odata.type": "#microsoft.graph.aadUserConversationMember",
             "roles": [],
@@ -69,28 +61,42 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
         else:
             results.append({"action": "added_to_team", "status": "failed", "error": team_member_resp.text})
 
-        # Add user to each matching channel
-        for role in member_roles:
-            channel_id = channel_map.get(role)
-            if not channel_id:
-                results.append({"channel": role, "status": "channel_not_found"})
-                continue
+        # For standard channels, team membership = channel access (no individual add needed)
+        # Only add to private/shared channels individually
+        channels_resp = requests.get(
+            f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
+            headers=headers, timeout=10
+        )
+        if channels_resp.status_code == 200:
+            channels = channels_resp.json().get('value', [])
+            for role in member_roles:
+                # Find the matching channel
+                matching_channel = next((ch for ch in channels if ch['displayName'] == role), None)
+                if not matching_channel:
+                    results.append({"channel": role, "status": "channel_not_found"})
+                    continue
 
-            add_payload = {
-                "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                "roles": [],
-                "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
-            }
-            add_resp = requests.post(
-                f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/members",
-                headers=headers, json=add_payload, timeout=10
-            )
-            if add_resp.status_code in (200, 201):
-                results.append({"channel": role, "status": "added"})
-            elif add_resp.status_code == 409:
-                results.append({"channel": role, "status": "already_member"})
-            else:
-                results.append({"channel": role, "status": "failed", "error": add_resp.text})
+                membership_type = matching_channel.get('membershipType', 'standard')
+                if membership_type == 'standard':
+                    # Standard channels: user gets access via team membership
+                    results.append({"channel": role, "status": "auto_access_via_team_membership"})
+                else:
+                    # Private/shared channels: add member individually
+                    add_payload = {
+                        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                        "roles": [],
+                        "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
+                    }
+                    add_resp = requests.post(
+                        f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{matching_channel['id']}/members",
+                        headers=headers, json=add_payload, timeout=10
+                    )
+                    if add_resp.status_code in (200, 201):
+                        results.append({"channel": role, "status": "added"})
+                    elif add_resp.status_code == 409:
+                        results.append({"channel": role, "status": "already_member"})
+                    else:
+                        results.append({"channel": role, "status": "failed", "error": add_resp.text})
 
     except Exception as e:
         results.append({"error": str(e)})
@@ -177,6 +183,16 @@ class UserDetailCreateView(generics.CreateAPIView):
 
     def create(self, request, *args, **kwargs):
         try:
+            # Check for duplicate: same admin + same email
+            admin_id = request.data.get("admin_id")
+            email = request.data.get("email")
+            if admin_id and email:
+                if UserDetail.objects.filter(admin__id=admin_id, email=email).exists():
+                    return Response(
+                        {"error": f"User with email '{email}' already exists for this admin."},
+                        status=status.HTTP_409_CONFLICT
+                    )
+
             # Validate and create user detail
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
