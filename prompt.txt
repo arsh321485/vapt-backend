@@ -1,18 +1,5 @@
 
-microsoft team me 
-
-team automatically create honi chahihe VAPTFIX ke name se 
-uske under 4  channel create hone chahihe 
-1)Patch Management
-2)Configuration Management
-3)Network Security
-4)Architectural Flaws
-
-or ye connect hona chahihe user_details table ke sath jb user_details me ye particular admin ke according  channel me jo bhi user ye o channel ke according show hona chahihe jb hum team me change kre to yha bhi hona chahihe or yha kre to team me bhi hona chahihe 
+again same issue the code ka jo url me aata hai na o srceen ruk nai rhi hai direct jo image aapko share ki hai o show ho rhi hai 
 
 
-
-microsoft team login krte hai to uska access token consol me print krna hai 
-
-
-or login hone ke bad microsoft team ke website pr direct hona chahihe 
+to eska solution btao
