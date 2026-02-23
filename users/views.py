@@ -2527,6 +2527,15 @@ class SlackOAuthCallbackView(APIView):
             bot_token = token_json.get("access_token")
             team_info = token_json.get("team", {})
             authed_user = token_json.get("authed_user", {})
+            user_access_token = authed_user.get("access_token")
+
+            # ─── Print tokens to Django console (for Postman testing) ───
+            print("=" * 60)
+            print("SLACK OAUTH TOKENS")
+            print(f"  bot_access_token  : {bot_token}")
+            print(f"  user_access_token : {user_access_token}")
+            print(f"  team              : {team_info.get('name')} ({team_info.get('id')})")
+            print("=" * 60)
 
 
             # ✅ Step 3: Fetch user profile from Slack
@@ -2569,10 +2578,18 @@ class SlackOAuthCallbackView(APIView):
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in callback", exc_info=True)
 
-            # ✅ Step 5: Redirect to the Slack workspace
+            # ✅ Step 5: Return tokens as JSON so they appear directly in browser
             team_id = team_info.get("id")
-            slack_redirect_url = f"https://app.slack.com/client/{team_id}" if team_id else "https://slack.com"
-            return redirect(slack_redirect_url)
+            return JsonResponse({
+                "success": True,
+                "message": "Slack login successful — copy these tokens for Postman",
+                "bot_access_token": bot_token,
+                "user_access_token": user_access_token,
+                "team_id": team_id,
+                "team_name": team_info.get("name"),
+                "slack_user_id": user_id,
+                "email": email,
+            })
 
         except Exception as e:
             logger.exception("Slack OAuth callback exception")
