@@ -19,6 +19,8 @@ import traceback
 import json
 import time
 import re
+import hashlib
+import hmac
 from urllib.parse import urljoin
 import logging
 import uuid
@@ -2361,9 +2363,77 @@ class DeleteTeamView(generics.GenericAPIView):
             return Response({
                 "error": f"Failed to delete team: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-     
-       
-       
+
+
+
+# ─── Slack workspace / channel helpers ───────────────────────────────────────
+
+VAPTFIX_WORKSPACE_NAME = "vaptfix"
+
+VAPTFIX_CHANNELS = [
+    "patch-management",
+    "configuration-management",
+    "network-security",
+    "architectural-flaws",
+]
+
+
+def _verify_vaptfix_workspace(team_name):
+    """Returns True if workspace name matches 'vaptfix' (case-insensitive)."""
+    return (team_name or "").strip().lower() == VAPTFIX_WORKSPACE_NAME
+
+
+def ensure_vaptfix_channels(bot_token, slack_user_id=None):
+    """
+    Ensures the 4 vaptfix Slack channels exist.
+    Creates any that are missing, bot joins them, and optionally invites the user.
+    Returns dict of {channel_name: channel_id}.
+    """
+    headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
+
+    # List existing channels
+    resp = requests.get(
+        "https://slack.com/api/conversations.list",
+        headers=headers,
+        params={"types": "public_channel", "limit": 200},
+    )
+    existing = {ch["name"]: ch["id"] for ch in resp.json().get("channels", [])}
+
+    channel_ids = {}
+    for name in VAPTFIX_CHANNELS:
+        if name in existing:
+            channel_ids[name] = existing[name]
+        else:
+            create_resp = requests.post(
+                "https://slack.com/api/conversations.create",
+                headers=headers,
+                json={"name": name, "is_private": False},
+            )
+            ch = create_resp.json().get("channel", {})
+            channel_ids[name] = ch.get("id")
+
+        channel_id = channel_ids[name]
+        if not channel_id:
+            continue
+
+        # Bot joins channel
+        requests.post(
+            "https://slack.com/api/conversations.join",
+            headers=headers,
+            json={"channel": channel_id},
+        )
+
+        # Invite the logged-in Slack user
+        if slack_user_id:
+            requests.post(
+                "https://slack.com/api/conversations.invite",
+                headers=headers,
+                json={"channel": channel_id, "users": slack_user_id},
+            )
+
+    return channel_ids
+
+
 class SlackOAuthUrlView(APIView):
     """
     Dynamically generates Slack OAuth authorization URL
@@ -2372,22 +2442,23 @@ class SlackOAuthUrlView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        base_url = request.data.get("base_url", "")
         state = str(uuid.uuid4())
 
-        # ✅ Auto-detect ngrok public URL if base_url not provided
-        if not base_url:
-            try:
-                ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
-                https_tunnel = next(
-                    (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
-                    None
-                )
-                base_url = https_tunnel["public_url"] if https_tunnel else request.build_absolute_uri("/").rstrip("/")
-            except Exception:
-                base_url = request.build_absolute_uri("/").rstrip("/")
-
-        redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback/"
+        # Use SLACK_REDIRECT_URI from settings if configured, otherwise detect dynamically
+        redirect_uri = getattr(settings, "SLACK_REDIRECT_URI", "")
+        if not redirect_uri:
+            base_url = request.data.get("base_url", "")
+            if not base_url:
+                try:
+                    ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
+                    https_tunnel = next(
+                        (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
+                        None
+                    )
+                    base_url = https_tunnel["public_url"] if https_tunnel else request.build_absolute_uri("/").rstrip("/")
+                except Exception:
+                    base_url = request.build_absolute_uri("/").rstrip("/")
+            redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback/"
         client_id = settings.SLACK_CLIENT_ID
 
         slack_url = (
@@ -2423,18 +2494,19 @@ class SlackOAuthCallbackView(APIView):
             if not code:
                 return self._html_response(success=False, error="Missing code from Slack")
 
-            # ✅ Auto-detect base URL (ngrok / production safe)
-            try:
-                ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
-                https_tunnel = next(
-                    (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
-                    None
-                )
-                base_url = https_tunnel["public_url"] if https_tunnel else request.build_absolute_uri("/").rstrip("/")
-            except Exception:
-                base_url = request.build_absolute_uri("/").rstrip("/")
-
-            redirect_uri = f"{base_url}/api/admin/users/slack/callback/"
+            # Use SLACK_REDIRECT_URI from settings if configured, otherwise detect dynamically
+            redirect_uri = getattr(settings, "SLACK_REDIRECT_URI", "")
+            if not redirect_uri:
+                try:
+                    ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
+                    https_tunnel = next(
+                        (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
+                        None
+                    )
+                    base_url = https_tunnel["public_url"] if https_tunnel else request.build_absolute_uri("/").rstrip("/")
+                except Exception:
+                    base_url = request.build_absolute_uri("/").rstrip("/")
+                redirect_uri = f"{base_url}/api/admin/users/slack/callback/"
             logger.info(f"Slack callback received: code={code}, redirect_uri={redirect_uri}")
 
             # ✅ Step 1: Exchange code for access tokens
@@ -2463,6 +2535,13 @@ class SlackOAuthCallbackView(APIView):
             team_info = token_json.get("team", {})
             authed_user = token_json.get("authed_user", {})
 
+            # ✅ Workspace verification
+            if not _verify_vaptfix_workspace(team_info.get("name")):
+                return self._html_response(
+                    success=False,
+                    error="This workspace is not authorized. Please use the 'vaptfix' workspace.",
+                )
+
             # ✅ Step 3: Fetch user profile from Slack
             user_id = authed_user.get("id")
             user_info = requests.get(
@@ -2481,26 +2560,32 @@ class SlackOAuthCallbackView(APIView):
             firstname = name.split()[0]
             lastname = " ".join(name.split()[1:]) if len(name.split()) > 1 else ""
 
-            # ✅ Step 4: Create or update user (no model change)
+            # ✅ Step 4: Create or update user
             user, created = User.objects.get_or_create(
                 email=email,
-                defaults={"firstname": firstname, "lastname": lastname, "password": ""},
+                defaults={"login_provider": "slack", "password": ""},
             )
+            if not created:
+                user.login_provider = "slack"
+                user.slack_user_id = user_id
+                user.slack_team_id = team_info.get("id")
+                user.save()
+            else:
+                user.slack_user_id = user_id
+                user.slack_team_id = team_info.get("id")
+                user.save()
 
-            # ✅ Step 5: Prepare response payload
-            data = {
-                "success": True,
-                "message": "Slack login successful",
-                "user_email": email,
-                "user_name": name,
-                "team": team_info.get("name"),
-                "team_id": team_info.get("id"),
-                "bot_access_token": bot_token,
-                "user_access_token": authed_user.get("access_token"),
-            }
+            # ✅ Step 4b: Ensure vaptfix channels exist and invite user
+            channels = {}
+            try:
+                channels = ensure_vaptfix_channels(bot_token, slack_user_id=user_id)
+            except Exception:
+                logger.warning("ensure_vaptfix_channels failed in callback", exc_info=True)
 
-            # ✅ Step 6: Return HTML that closes popup and sends message
-            return self._html_response(success=True, data=data)
+            # ✅ Step 5: Redirect to the Slack workspace
+            team_id = team_info.get("id")
+            slack_redirect_url = f"https://app.slack.com/client/{team_id}" if team_id else "https://slack.com"
+            return redirect(slack_redirect_url)
 
         except Exception as e:
             logger.exception("Slack OAuth callback exception")
@@ -2688,6 +2773,8 @@ class SlackLoginView(APIView):
             slack_email = None
             slack_name = None
             slack_team = {}
+            bot_response = None
+            profile = {}
 
             if user_identity.get("ok"):
                 slack_user = user_identity.get("user", {})
@@ -2701,13 +2788,13 @@ class SlackLoginView(APIView):
                     "https://slack.com/api/auth.test",
                     headers={"Authorization": f"Bearer {bot_token}"}
                 ).json()
-                
+
                 user_info = requests.get(
                     "https://slack.com/api/users.info",
                     headers={"Authorization": f"Bearer {bot_token}"},
                     params={"user": bot_response.get("user_id")}
                 ).json()
-                
+
                 slack_user = user_info.get("user", {}) if user_info.get("ok") else {}
                 profile = slack_user.get("profile", {})
                 slack_team = {"id": bot_response.get("team_id"), "name": bot_response.get("team")}
@@ -2722,6 +2809,13 @@ class SlackLoginView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+            # ✅ Workspace verification
+            if not _verify_vaptfix_workspace(slack_team.get("name")):
+                return Response(
+                    {"success": False, "error": "Unauthorized workspace. Use the 'vaptfix' Slack workspace."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
             # 2. IDENTIFY existing user OR create new
             user, created = User.objects.get_or_create(
                 email=slack_email,
@@ -2731,21 +2825,26 @@ class SlackLoginView(APIView):
                     "is_superuser": True,
                     "password": "",
                     "last_login": timezone.now(),
-                    "login_source": "slack",      # ✅ TRACKS SLACK LOGIN
                     "login_provider": "slack",
-                    "slack_user_id": slack_user_id, # ✅ SLACK USER ID
-                    "slack_team_id": slack_team.get("id") # ✅ SLACK TEAM ID
+                    "slack_user_id": slack_user_id,
+                    "slack_team_id": slack_team.get("id"),
                 }
             )
 
             # 3. Update existing users
             if not created:
                 user.last_login = timezone.now()
-                user.login_source = "slack"        # ✅ MARK as Slack login
                 user.login_provider = "slack"
-                user.slack_user_id = slack_user_id # ✅ Link Slack ID
+                user.slack_user_id = slack_user_id
                 user.slack_team_id = slack_team.get("id")
                 user.save()
+
+            # 3b. Ensure vaptfix channels exist and invite user
+            channels = {}
+            try:
+                channels = ensure_vaptfix_channels(bot_token, slack_user_id=slack_user_id)
+            except Exception:
+                logger.warning("ensure_vaptfix_channels failed in login", exc_info=True)
 
             # 4. PERFECT RESPONSE FORMAT
             return Response({
@@ -2753,20 +2852,21 @@ class SlackLoginView(APIView):
                 "message": "Slack login successful",
                 "data": {
                     "bot_access_token": bot_token,
-                    "bot_user_id": bot_response.get("user_id") if 'bot_response' in locals() else None,
+                    "bot_user_id": bot_response.get("user_id") if bot_response else None,
                     "team": slack_team,
                     "user_access_token": user_token,
+                    "channels": channels,
                     "user": {
                         "id": slack_user_id,
                         "name": slack_name or "Slack User",
                         "display_name": slack_name,
                         "email": slack_email,
-                        "image": profile.get("image_192") if 'profile' in locals() else ""
+                        "image": profile.get("image_192", ""),
                     },
                     "local_user": {
                         "id": str(user.id),
                         "email": user.email,
-                        "login_source": user.login_source,  # ✅ "slack"
+                        "login_provider": user.login_provider,
                         "is_superuser": user.is_superuser,
                         "slack_user_id": user.slack_user_id,
                         "last_login": user.last_login.isoformat() if user.last_login else None
@@ -4176,3 +4276,83 @@ class JiraAddCommentView(APIView):
             return Response({'error': 'Failed to add comment', 'detail': str(e)},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+class SlackEventsView(APIView):
+    """
+    Receives Slack event callbacks.
+    Handles: url_verification, channel_created/rename/deleted/archive/unarchive,
+             member_joined_channel, member_left_channel.
+    Verifies requests using SLACK_SIGNING_SECRET.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        if not self._verify_signature(request):
+            return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
+
+        payload = request.data
+        event_type = payload.get("type")
+
+        # URL verification challenge
+        if event_type == "url_verification":
+            return Response({"challenge": payload.get("challenge")})
+
+        # Handle event callbacks
+        if event_type == "event_callback":
+            event = payload.get("event", {})
+            self._handle_event(event)
+
+        return Response({"ok": True})
+
+    def _verify_signature(self, request):
+        signing_secret = getattr(settings, "SLACK_SIGNING_SECRET", "")
+        if not signing_secret:
+            return True  # skip verification if not configured
+        timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+        signature = request.headers.get("X-Slack-Signature", "")
+        # Reject requests older than 5 minutes
+        try:
+            if abs(time.time() - int(timestamp)) > 300:
+                return False
+        except (ValueError, TypeError):
+            return False
+        body = request.body.decode("utf-8")
+        base = f"v0:{timestamp}:{body}"
+        computed = "v0=" + hmac.new(
+            signing_secret.encode(), base.encode(), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(computed, signature)
+
+    def _handle_event(self, event):
+        from users_details.models import UserDetail
+        etype = event.get("type")
+
+        if etype == "channel_created":
+            logger.info(f"Slack channel_created: {event.get('channel', {}).get('name')}")
+
+        elif etype == "channel_rename":
+            ch = event.get("channel", {})
+            new_id = ch.get("id")
+            new_name = ch.get("name")
+            for ud in UserDetail.objects.filter(slack_channel_ids__contains=new_id):
+                logger.info(f"Slack channel renamed to {new_name}, updated UserDetail {ud._id}")
+
+        elif etype in ("channel_deleted", "channel_archive"):
+            ch_id = event.get("channel")
+            logger.info(f"Slack channel {etype}: {ch_id}")
+            for ud in UserDetail.objects.all():
+                ids = ud.slack_channel_ids or []
+                if ch_id in ids:
+                    ids.remove(ch_id)
+                    ud.slack_channel_ids = ids
+                    ud.save()
+
+        elif etype == "channel_unarchive":
+            logger.info(f"Slack channel unarchived: {event.get('channel')}")
+
+        elif etype == "member_joined_channel":
+            logger.info(f"Slack member {event.get('user')} joined {event.get('channel')}")
+
+        elif etype == "member_left_channel":
+            logger.info(f"Slack member {event.get('user')} left {event.get('channel')}")

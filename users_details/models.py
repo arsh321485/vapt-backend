@@ -16,6 +16,7 @@ class UserDetail(models.Model):
     Member_role = models.JSONField(default=list)
     team_id = models.CharField(max_length=255, blank=True, null=True)
     team_name = models.CharField(max_length=255, blank=True, null=True)
+    slack_channel_ids = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
