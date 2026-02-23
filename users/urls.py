@@ -48,6 +48,7 @@ from .views import (
     AddUserToSlackChannelView,
     SlackUserListView,
     SlackInviteUserView,
+    SlackEventsView,
     JiraOAuthUrlView,
     JiraOAuthCallbackView,
     JiraOAuthView,
@@ -135,6 +136,7 @@ urlpatterns = [
     path('slack/channel/add-user/', AddUserToSlackChannelView.as_view(), name='slack-add-user'),
     path("slack/users/list/", SlackUserListView.as_view(), name="slack-users-list"),
     path("slack/channel/invite/", SlackInviteUserView.as_view(), name="slack-invite-user"),
+    path("slack/events/", SlackEventsView.as_view(), name="slack-events"),
     
     
     path('jira/oauth-url/', JiraOAuthUrlView.as_view(), name='jira-oauth-url'),

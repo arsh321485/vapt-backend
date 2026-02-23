@@ -54,6 +54,9 @@ class User(AbstractBaseUser, PermissionsMixin):
         blank=True
     )
 
+    slack_user_id = models.CharField(max_length=50, blank=True, null=True)
+    slack_team_id = models.CharField(max_length=50, blank=True, null=True)
+
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)

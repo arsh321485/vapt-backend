@@ -747,7 +747,7 @@ class SlackMessageSerializer(serializers.Serializer):
         help_text="Slack Block Kit blocks for rich formatting"
     )
 
-class SlackOAuthSerializer(serializers.Serializer):
+class SlackOAuthCodeSerializer(serializers.Serializer):
     code = serializers.CharField(required=True)
     redirect_uri = serializers.CharField(required=False, allow_blank=True)
 

@@ -15,6 +15,57 @@ import requests
 logger = logging.getLogger('users_details')
 
 
+ROLE_TO_SLACK_CHANNEL = {
+    "Patch Management": "patch-management",
+    "Configuration Management": "configuration-management",
+    "Network Security": "network-security",
+    "Architectural Flaws": "architectural-flaws",
+}
+
+
+def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
+    """
+    Invite a Slack user to the channels matching their Member_roles.
+    Returns (results list, added_channel_ids list).
+    """
+    if not bot_token or not slack_user_id:
+        return [], []
+
+    headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
+    results = []
+    added_channel_ids = []
+
+    # Fetch existing channel list once
+    resp = requests.get(
+        "https://slack.com/api/conversations.list",
+        headers=headers,
+        params={"types": "public_channel", "limit": 200},
+    )
+    channel_map = {ch["name"]: ch["id"] for ch in resp.json().get("channels", [])}
+
+    for role in member_roles:
+        slack_name = ROLE_TO_SLACK_CHANNEL.get(role)
+        if not slack_name:
+            continue
+        channel_id = channel_map.get(slack_name)
+        if not channel_id:
+            results.append({"role": role, "status": "channel_not_found"})
+            continue
+        invite_resp = requests.post(
+            "https://slack.com/api/conversations.invite",
+            headers=headers,
+            json={"channel": channel_id, "users": slack_user_id},
+        )
+        invite_data = invite_resp.json()
+        if invite_data.get("ok") or invite_data.get("error") == "already_in_channel":
+            results.append({"role": role, "status": "invited", "channel_id": channel_id})
+            added_channel_ids.append(channel_id)
+        else:
+            results.append({"role": role, "status": "failed", "error": invite_data.get("error")})
+
+    return results, added_channel_ids
+
+
 def sync_member_to_teams_channels(access_token, team_id, user_email, member_roles):
     """
     Add a user to the VAPTFIX team. Once added to the team, the user automatically
@@ -226,6 +277,21 @@ class UserDetailCreateView(generics.CreateAPIView):
                     member_roles=roles
                 )
 
+            # Sync with Slack channels if slack_bot_token and slack_user_id provided
+            slack_sync_result = []
+            slack_bot_token = request.data.get("slack_bot_token")
+            slack_user_id = request.data.get("slack_user_id")
+            if slack_bot_token and slack_user_id and roles:
+                slack_results, channel_ids = sync_member_to_slack_channels(
+                    bot_token=slack_bot_token,
+                    slack_user_id=slack_user_id,
+                    member_roles=roles,
+                )
+                slack_sync_result = slack_results
+                if channel_ids:
+                    user_detail.slack_channel_ids = channel_ids
+                    user_detail.save()
+
             response_data = {
                 "message": "User detail created successfully",
                 "email_sent": email_sent,
@@ -234,6 +300,9 @@ class UserDetailCreateView(generics.CreateAPIView):
 
             if teams_sync_result:
                 response_data["teams_sync"] = teams_sync_result
+
+            if slack_sync_result:
+                response_data["slack_sync"] = slack_sync_result
 
             # Only include error if email failed
             if not email_sent:
@@ -674,6 +743,22 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
                 member_roles=normalized_new
             )
 
+        # Sync new roles with Slack channels if slack_bot_token and slack_user_id provided
+        slack_sync_result = []
+        slack_bot_token = request.data.get("slack_bot_token")
+        slack_user_id = request.data.get("slack_user_id")
+        if slack_bot_token and slack_user_id and normalized_new:
+            slack_results, channel_ids = sync_member_to_slack_channels(
+                bot_token=slack_bot_token,
+                slack_user_id=slack_user_id,
+                member_roles=normalized_new,
+            )
+            slack_sync_result = slack_results
+            if channel_ids:
+                existing_ids = instance.slack_channel_ids or []
+                instance.slack_channel_ids = list(set(existing_ids + channel_ids))
+                instance.save()
+
         member_name = f"{instance.first_name or ''} {instance.last_name or ''}".strip()
         response_data = {
             "message": f"Roles {normalized_new} added successfully to {member_name}.",
@@ -683,6 +768,9 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
         }
         if teams_sync_result:
             response_data["teams_sync"] = teams_sync_result
+
+        if slack_sync_result:
+            response_data["slack_sync"] = slack_sync_result
 
         return Response(response_data, status=status.HTTP_200_OK)
         
