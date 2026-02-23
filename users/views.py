@@ -3009,6 +3009,17 @@ class SlackValidateTokenView(APIView):
             
             if user_data.get('ok'):
                 user_profile = user_data.get('user', {}).get('profile', {})
+                email = user_profile.get('email')
+
+                # If email is null (bot token used), try users.identity for human user email
+                if not email:
+                    identity_resp = requests.get(
+                        'https://slack.com/api/users.identity',
+                        headers=headers
+                    ).json()
+                    if identity_resp.get('ok'):
+                        email = identity_resp.get('user', {}).get('email')
+
                 return Response({
                     'success': True,
                     'message': 'Token is valid',
@@ -3019,7 +3030,7 @@ class SlackValidateTokenView(APIView):
                             'id': user_id,
                             'name': user_profile.get('real_name'),
                             'display_name': user_profile.get('display_name'),
-                            'email': user_profile.get('email'),
+                            'email': email,
                             'image': user_profile.get('image_192')
                         },
                         'bot_id': auth_test_data.get('bot_id')
