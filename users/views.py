@@ -2368,19 +2368,12 @@ class DeleteTeamView(generics.GenericAPIView):
 
 # ─── Slack workspace / channel helpers ───────────────────────────────────────
 
-VAPTFIX_WORKSPACE_NAME = "vaptfix"
-
 VAPTFIX_CHANNELS = [
     "patch-management",
     "configuration-management",
     "network-security",
     "architectural-flaws",
 ]
-
-
-def _verify_vaptfix_workspace(team_name):
-    """Returns True if workspace name matches 'vaptfix' (case-insensitive)."""
-    return (team_name or "").strip().lower() == VAPTFIX_WORKSPACE_NAME
 
 
 def ensure_vaptfix_channels(bot_token, slack_user_id=None):
@@ -2535,12 +2528,6 @@ class SlackOAuthCallbackView(APIView):
             team_info = token_json.get("team", {})
             authed_user = token_json.get("authed_user", {})
 
-            # ✅ Workspace verification
-            if not _verify_vaptfix_workspace(team_info.get("name")):
-                return self._html_response(
-                    success=False,
-                    error="This workspace is not authorized. Please use the 'vaptfix' workspace.",
-                )
 
             # ✅ Step 3: Fetch user profile from Slack
             user_id = authed_user.get("id")
@@ -2807,13 +2794,6 @@ class SlackLoginView(APIView):
                 return Response(
                     {"success": False, "error": "No email found in Slack profile"},
                     status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # ✅ Workspace verification
-            if not _verify_vaptfix_workspace(slack_team.get("name")):
-                return Response(
-                    {"success": False, "error": "Unauthorized workspace. Use the 'vaptfix' Slack workspace."},
-                    status=status.HTTP_403_FORBIDDEN,
                 )
 
             # 2. IDENTIFY existing user OR create new
