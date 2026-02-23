@@ -2578,18 +2578,23 @@ class SlackOAuthCallbackView(APIView):
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in callback", exc_info=True)
 
-            # ✅ Step 5: Return tokens as JSON so they appear directly in browser
+            # ✅ Step 5: Log tokens to browser console, then redirect to Slack
             team_id = team_info.get("id")
-            return JsonResponse({
-                "success": True,
-                "message": "Slack login successful — copy these tokens for Postman",
-                "bot_access_token": bot_token,
-                "user_access_token": user_access_token,
-                "team_id": team_id,
-                "team_name": team_info.get("name"),
-                "slack_user_id": user_id,
-                "email": email,
-            })
+            slack_redirect_url = f"https://app.slack.com/client/{team_id}" if team_id else "https://slack.com"
+            html = f"""<!DOCTYPE html>
+<html><head><title>Slack Auth</title></head>
+<body>
+<script>
+    console.log('=== SLACK TOKENS ===');
+    console.log('bot_access_token:', '{bot_token}');
+    console.log('user_access_token:', '{user_access_token}');
+    console.log('slack_user_id:', '{user_id}');
+    console.log('email:', '{email}');
+    console.log('====================');
+    window.location.href = '{slack_redirect_url}';
+</script>
+</body></html>"""
+            return HttpResponse(html)
 
         except Exception as e:
             logger.exception("Slack OAuth callback exception")
