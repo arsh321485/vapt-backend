@@ -2578,20 +2578,41 @@ class SlackOAuthCallbackView(APIView):
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in callback", exc_info=True)
 
-            # ✅ Step 5: Log tokens to browser console, then redirect to Slack
+            # ✅ Step 4c: Generate Django JWT tokens for the user
+            refresh = RefreshToken.for_user(user)
+            django_access_token = str(refresh.access_token)
+            django_refresh_token = str(refresh)
+
+            # ✅ Step 5: Log all tokens to browser console, then redirect to Slack
             team_id = team_info.get("id")
             slack_redirect_url = f"https://app.slack.com/client/{team_id}" if team_id else "https://slack.com"
             html = f"""<!DOCTYPE html>
 <html><head><title>Slack Auth</title></head>
-<body>
+<body style="font-family:Arial,sans-serif;text-align:center;margin-top:60px;background:#f0f4f8;">
+    <h2 style="color:#2eb67d;">&#10003; Slack Login Successful</h2>
+    <p style="color:#555;">Check your browser console (F12) for tokens.</p>
+    <p style="color:#888;">Redirecting to Slack in <strong id="countdown">50</strong> seconds...</p>
 <script>
-    console.log('=== SLACK TOKENS ===');
+    console.log('=== DJANGO JWT (use this for all API calls) ===');
+    console.log('access_token (Django):', '{django_access_token}');
+    console.log('refresh_token (Django):', '{django_refresh_token}');
+    console.log('');
+    console.log('=== SLACK TOKENS (use for /slack/login/) ===');
     console.log('bot_access_token:', '{bot_token}');
     console.log('user_access_token:', '{user_access_token}');
     console.log('slack_user_id:', '{user_id}');
     console.log('email:', '{email}');
-    console.log('====================');
-    window.location.href = '{slack_redirect_url}';
+    console.log('================================================');
+
+    var seconds = 50;
+    var timer = setInterval(function() {{
+        seconds--;
+        document.getElementById('countdown').innerText = seconds;
+        if (seconds <= 0) {{
+            clearInterval(timer);
+            window.location.href = '{slack_redirect_url}';
+        }}
+    }}, 1000);
 </script>
 </body></html>"""
             return HttpResponse(html)
