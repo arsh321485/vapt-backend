@@ -16,10 +16,10 @@ logger = logging.getLogger('users_details')
 
 
 ROLE_TO_SLACK_CHANNEL = {
-    "Patch Management": "Patch-Management",
-    "Configuration Management": "Configuration-Management",
-    "Network Security": "Network-Security",
-    "Architectural Flaws": "Architectural-Flaws",
+    "Patch Management": "patch-management",
+    "Configuration Management": "configuration-management",
+    "Network Security": "network-security",
+    "Architectural Flaws": "architectural-flaws",
 }
 
 
@@ -35,13 +35,13 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
     results = []
     added_channel_ids = []
 
-    # Fetch existing channel list once
+    # Fetch existing channel list — Slack stores names as lowercase
     resp = requests.get(
         "https://slack.com/api/conversations.list",
         headers=headers,
-        params={"types": "public_channel", "limit": 200},
+        params={"types": "public_channel", "limit": 1000},
     )
-    channel_map = {ch["name"]: ch["id"] for ch in resp.json().get("channels", [])}
+    channel_map = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
 
     for role in member_roles:
         slack_name = ROLE_TO_SLACK_CHANNEL.get(role)
@@ -257,7 +257,7 @@ class UserDetailCreateView(generics.CreateAPIView):
 
             logger.info(f"Creating user detail for {email} with roles: {roles}")
 
-            # Send Email
+            # Send welcome email
             email_sent, error = self.send_welcome_email(
                 email=email,
                 first_name=first_name,
@@ -265,64 +265,12 @@ class UserDetailCreateView(generics.CreateAPIView):
                 roles=roles,
             )
 
-            # Sync with Microsoft Teams channels
-            # Use token from request, or fall back to admin's stored token
-            teams_sync_result = []
-            ms_access_token = request.data.get("access_token") or getattr(request.user, 'ms_access_token', None)
-            team_id = user_detail.team_id or request.data.get("team_id")
-            if ms_access_token and team_id and roles:
-                teams_sync_result = sync_member_to_teams_channels(
-                    access_token=ms_access_token,
-                    team_id=team_id,
-                    user_email=email,
-                    member_roles=roles
-                )
-
-            # Sync with Slack channels
-            # Use token from request, or fall back to admin's stored bot token
-            slack_sync_result = []
-            slack_bot_token = request.data.get("slack_bot_token") or getattr(request.user, 'slack_bot_token', None)
-            slack_user_id = request.data.get("slack_user_id")
-
-            # Auto-lookup Slack user ID by email if not provided but bot token available
-            if slack_bot_token and not slack_user_id and email:
-                try:
-                    lookup_resp = requests.get(
-                        "https://slack.com/api/users.lookupByEmail",
-                        params={"email": email},
-                        headers={"Authorization": f"Bearer {slack_bot_token}"},
-                        timeout=5
-                    )
-                    lookup_data = lookup_resp.json()
-                    if lookup_data.get("ok"):
-                        slack_user_id = lookup_data.get("user", {}).get("id")
-                except Exception:
-                    pass
-
-            if slack_bot_token and slack_user_id and roles:
-                slack_results, channel_ids = sync_member_to_slack_channels(
-                    bot_token=slack_bot_token,
-                    slack_user_id=slack_user_id,
-                    member_roles=roles,
-                )
-                slack_sync_result = slack_results
-                if channel_ids:
-                    user_detail.slack_channel_ids = channel_ids
-                    user_detail.save()
-
             response_data = {
                 "message": "User detail created successfully",
                 "email_sent": email_sent,
                 "data": UserDetailSerializer(user_detail).data
             }
 
-            if teams_sync_result:
-                response_data["teams_sync"] = teams_sync_result
-
-            if slack_sync_result:
-                response_data["slack_sync"] = slack_sync_result
-
-            # Only include error if email failed
             if not email_sent:
                 response_data["email_error"] = error
                 logger.warning(f"User created but email failed for {email}: {error}")
@@ -330,7 +278,7 @@ class UserDetailCreateView(generics.CreateAPIView):
                 logger.info(f"User created and email sent successfully for {email}")
 
             return Response(response_data, status=status.HTTP_201_CREATED)
-            
+
         except Exception as e:
             logger.error(f"Error creating user detail: {str(e)}", exc_info=True)
             return Response(
