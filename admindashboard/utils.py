@@ -1,5 +1,6 @@
 # utilities: get mongo uri, db, parse floats, context manager
 import re
+import threading
 from typing import Optional, Any
 from django.conf import settings
 import pymongo
@@ -96,19 +97,35 @@ def humanize_hours(hours: float) -> str:
         return f"{days}d"
     return f"{rem} hrs" if rem else "0 hrs"
 
+_mongo_client: Optional[pymongo.MongoClient] = None
+_mongo_lock = threading.Lock()
+
+
+def get_mongo_client() -> pymongo.MongoClient:
+    """Return a shared, pooled MongoClient (created once, reused across all requests)."""
+    global _mongo_client
+    if _mongo_client is None:
+        with _mongo_lock:
+            if _mongo_client is None:
+                uri = get_mongo_uri()
+                if not uri:
+                    raise RuntimeError("MongoDB URI not configured. Set MONGO_DB_URL or DATABASES['default']['CLIENT']['host'].")
+                _mongo_client = pymongo.MongoClient(
+                    uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                    socketTimeoutMS=10000,
+                    maxPoolSize=50,
+                    minPoolSize=5,
+                    retryWrites=True,
+                )
+    return _mongo_client
+
+
 class MongoContext:
-    """Context manager for short-lived MongoDB client"""
-    def __init__(self):
-        self.uri = get_mongo_uri()
-        self.client = None
+    """Context manager using a shared MongoDB connection pool."""
     def __enter__(self):
-        if not self.uri:
-            raise RuntimeError("MongoDB URI not configured. Set MONGO_DB_URL or DATABASES['default']['CLIENT']['host'].")
-        self.client = pymongo.MongoClient(self.uri, serverSelectionTimeoutMS=5000)
-        return get_mongo_db(self.client)
+        return get_mongo_db(get_mongo_client())
+
     def __exit__(self, exc_type, exc, tb):
-        if self.client:
-            try:
-                self.client.close()
-            except Exception:
-                pass
+        pass  # Connection is pooled — do not close

@@ -5,7 +5,10 @@ from .views import (
     UploadReportDetailAPIView,
     serve_report_file,
     UploadReportListByAdminAPIView,
-    UploadReportDeleteAPIView
+    UploadReportDeleteAPIView,
+    GenerateVulnerabilityCardView,
+    VulnerabilityCardListView,
+    VulnerabilityCardDetailView,
 )
 
 app_name = 'upload_report'
@@ -36,5 +39,21 @@ urlpatterns = [
      
      
      path("media/<path:path>", serve_report_file),
-    
+
+    # Vulnerability Card endpoints
+    path(
+        "vulnerability-cards/generate/",
+        GenerateVulnerabilityCardView.as_view(),
+        name="vulnerability_card_generate",
+    ),
+    path(
+        "vulnerability-cards/",
+        VulnerabilityCardListView.as_view(),
+        name="vulnerability_card_list",
+    ),
+    path(
+        "vulnerability-cards/<str:card_id>/",
+        VulnerabilityCardDetailView.as_view(),
+        name="vulnerability_card_detail",
+    ),
 ]

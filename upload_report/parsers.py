@@ -282,7 +282,7 @@ def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
                 # We prefer direct attributes for plugin id/name etc.
                 vuln = {
                     "plugin_id": elem.get("pluginID") or elem.get("pluginid") or None,
-                    "plugin_name": elem.get("pluginName") or elem.get("pluginname") or None,
+                    "plugin_name": ((elem.get("pluginName") or elem.get("pluginname") or "").rstrip(" -").strip()) or None,
                     "port": elem.get("port"),
                     "protocol": elem.get("protocol"),
                     "severity": elem.get("severity"),
@@ -297,6 +297,7 @@ def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
                     "plugin_information": _safe_text(elem, "plugin_publication_date") or _safe_text(elem, "plugin_publication") or "",
                     # plugin_output may be large; keep limited
                     "plugin_output": (_safe_text(elem, "plugin_output") or "")[:20000],
+                    "plugin_output_url": None,  # extracted URL from plugin_output (if present)
                 }
 
                 # Try to extract multiple <see_also> children (if present)
@@ -307,6 +308,16 @@ def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
                         if text:
                             see_also_list.append(text)
                 vuln["see_also"] = see_also_list
+
+                # Extract URL from plugin_output if present (e.g. "URL : https://...")
+                po_text = vuln.get("plugin_output") or ""
+                if po_text:
+                    import re as _re
+                    url_match = _re.search(r'URL\s*:\s*(https?://\S+)', po_text)
+                    if not url_match:
+                        url_match = _re.search(r'(https?://[^\s\n\r]+)', po_text)
+                    if url_match:
+                        vuln["plugin_output_url"] = url_match.group(1).rstrip('.,;)')
 
                 # Turn description into bullet points if multi-line
                 desc = vuln["description"] or ""
@@ -493,11 +504,11 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                     
                     # Parse plugin ID and name from title (format: "51192 - SSL Certificate Cannot Be Trusted")
                     plugin_id = None
-                    plugin_name = vuln_title
+                    plugin_name = vuln_title.rstrip(" -").strip()
                     match = re.match(r"^\s*(\d+)\s*[-:]\s*(.+)$", vuln_title)
                     if match:
                         plugin_id = match.group(1).strip()
-                        plugin_name = match.group(2).strip()
+                        plugin_name = match.group(2).strip().rstrip(" -").strip()
                     
                     # Find vulnerability details container (next sibling with class "section-wrapper")
                     vuln_container = current.find_next_sibling("div", class_="section-wrapper")
@@ -513,7 +524,8 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                             "risk_factor": "",
                             "cvss_v3_base_score": "",
                             "plugin_information": "",
-                            "plugin_output": ""
+                            "plugin_output": "",
+                            "plugin_output_url": None,
                         }
                         
                         # Parse all field sections within the vulnerability container
@@ -593,6 +605,15 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                                 elif "plugin information" in field_name_lower:
                                     vuln_data["plugin_information"] = content_text[:20000]
                         
+                        # Extract URL from plugin_output if present
+                        po_text = vuln_data.get("plugin_output") or ""
+                        if po_text:
+                            url_match = re.search(r'URL\s*:\s*(https?://\S+)', po_text)
+                            if not url_match:
+                                url_match = re.search(r'(https?://[^\s\n\r]+)', po_text)
+                            if url_match:
+                                vuln_data["plugin_output_url"] = url_match.group(1).rstrip('.,;)')
+
                         host_entry["vulnerabilities"].append(vuln_data)
             
             # Move to next sibling

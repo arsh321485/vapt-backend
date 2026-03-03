@@ -8,7 +8,11 @@ from scope.models import Scope
 import hashlib
 import os
 import datetime
+import threading
+import logging
 import pymongo
+
+logger = logging.getLogger(__name__)
 
 
 def check_admin_has_locked_scope(admin_user):
@@ -169,17 +173,37 @@ class UploadReportAdmin(admin.ModelAdmin):
         """Prepare hosts data for MongoDB storage."""
         prepared_hosts = []
         for host in hosts:
-            prepared_vulns = []
+            # Group by plugin_name — collect all plugin_outputs as an array
+            grouped = {}  # plugin_name -> vuln_dict
             for vuln in host.get("vulnerabilities", []):
-                vuln_copy = vuln.copy()
-                if "risk_factor" in vuln_copy and vuln_copy["risk_factor"]:
-                    risk = str(vuln_copy["risk_factor"]).strip()
-                    vuln_copy["risk_factor"] = risk.title() if risk else ""
-                prepared_vulns.append(vuln_copy)
+                plugin_name = (vuln.get("plugin_name") or "").strip()
+                if not plugin_name:
+                    continue
+
+                po_entry = {
+                    "port": vuln.get("port") or None,
+                    "plugin_output": vuln.get("plugin_output") or None,
+                    "plugin_output_url": vuln.get("plugin_output_url") or None,
+                }
+
+                if plugin_name not in grouped:
+                    vuln_copy = vuln.copy()
+                    if "risk_factor" in vuln_copy and vuln_copy["risk_factor"]:
+                        risk = str(vuln_copy["risk_factor"]).strip()
+                        vuln_copy["risk_factor"] = risk.title() if risk else ""
+                    # Replace single plugin_output with plugin_outputs array
+                    vuln_copy.pop("plugin_output", None)
+                    vuln_copy.pop("plugin_output_url", None)
+                    vuln_copy.pop("port", None)
+                    vuln_copy["plugin_outputs"] = [po_entry]
+                    grouped[plugin_name] = vuln_copy
+                else:
+                    grouped[plugin_name]["plugin_outputs"].append(po_entry)
+
             prepared_hosts.append({
                 "host_name": host.get("host_name"),
                 "host_information": host.get("host_information", {}),
-                "vulnerabilities": prepared_vulns
+                "vulnerabilities": list(grouped.values())
             })
         return prepared_hosts
 
@@ -302,6 +326,20 @@ class UploadReportAdmin(admin.ModelAdmin):
 
                     if mongodb_stored:
                         messages.success(request, f"File parsed and stored in database. Found {parsed_count} vulnerabilities.")
+
+                        # Auto-generate vulnerability cards in background (only for nessus reports, only on new upload)
+                        if parsed_data.get("type") in ("nessus", "nessus_html") and not change:
+                            from .views import _auto_generate_cards_bg
+                            report_id = str(obj._id)
+                            t = threading.Thread(
+                                target=_auto_generate_cards_bg,
+                                args=(report_id, admin_user.email, str(admin_user.id)),
+                                daemon=True
+                            )
+                            t.start()
+                            logger.info(f"[AutoGenCards] Background thread started from admin panel for report_id={report_id}")
+                            print(f"[AutoGenCards] Background thread started from admin panel for report_id={report_id}", flush=True)
+                            messages.info(request, "Vulnerability cards are being generated in background.")
                     else:
                         messages.warning(request, "File saved but MongoDB storage failed.")
                 else:
