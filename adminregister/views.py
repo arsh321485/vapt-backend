@@ -97,21 +97,29 @@ def _normalize_iso(dt):
 def get_team_members(db, team_name: str, admin_id: str):
     members = []
 
-    cursor = db["users_details_userdetail"].find({
-        "admin_id": admin_id, 
-        "Member_role": {
-            "$elemMatch": {
-                "$regex": f"^{team_name}$",
-                "$options": "i"
-            }
+    # admin ForeignKey is stored as 'admin_id' in MongoDB by djongo
+    # also try 'admin' in case of raw UUID storage differences
+    role_query = {
+        "$elemMatch": {
+            "$regex": f"^{re.escape(team_name)}$",
+            "$options": "i"
         }
-    })
+    }
+    query = {
+        "$or": [
+            {"admin_id": admin_id},
+            {"admin_id": str(admin_id)},
+        ],
+        "Member_role": role_query,
+    }
+
+    cursor = db["users_details_userdetail"].find(query)
 
     for u in cursor:
         members.append({
-            "user_id": str(u["_id"]),
+            "user_id": str(u.get("_id", "")),
             "name": f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(),
-            "email": u.get("email")
+            "email": u.get("email", "")
         })
 
     return members
@@ -830,11 +838,18 @@ class FixVulnerabilityCreateAPIView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # 4. ASSIGN TEAM — get assigned_team from vulnerability_cards for this vulnerability
+            # 4. ASSIGN TEAM — get assigned_team from vulnerability_cards for this vulnerability+host
             vuln_card_doc = db[VULN_CARD_COLLECTION].find_one({
                 "report_id": str(report_id),
-                "vulnerability_name": plugin_name_req
+                "vulnerability_name": plugin_name_req,
+                "host_name": host_name,
             })
+            # Fallback: match by report_id + vulnerability_name only (any host)
+            if not vuln_card_doc:
+                vuln_card_doc = db[VULN_CARD_COLLECTION].find_one({
+                    "report_id": str(report_id),
+                    "vulnerability_name": plugin_name_req,
+                })
             assigned_team = (vuln_card_doc or {}).get("assigned_team") or ""
 
             if assigned_team:
