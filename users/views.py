@@ -2385,10 +2385,10 @@ class DeleteTeamView(generics.GenericAPIView):
 # ─── Slack workspace / channel helpers ───────────────────────────────────────
 
 VAPTFIX_CHANNELS = [
-    "Patch-Management",
-    "Configuration-Management",
-    "Network-Security",
-    "Architectural-Flaws",
+    "patch-management",
+    "configuration-management",
+    "network-security",
+    "architectural-flaws",
 ]
 
 
@@ -2400,16 +2400,17 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
     """
     headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
 
-    # List existing channels
+    # List existing channels — Slack always stores names as lowercase
     resp = requests.get(
         "https://slack.com/api/conversations.list",
         headers=headers,
-        params={"types": "public_channel", "limit": 200},
+        params={"types": "public_channel", "limit": 1000},
     )
-    existing = {ch["name"]: ch["id"] for ch in resp.json().get("channels", [])}
+    existing = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
 
     channel_ids = {}
     for name in VAPTFIX_CHANNELS:
+        # VAPTFIX_CHANNELS are already lowercase; Slack lowercases names automatically
         if name in existing:
             channel_ids[name] = existing[name]
         else:
@@ -2418,10 +2419,23 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
                 headers=headers,
                 json={"name": name, "is_private": False},
             )
-            ch = create_resp.json().get("channel", {})
-            channel_ids[name] = ch.get("id")
+            ch_data = create_resp.json()
+            if ch_data.get("ok"):
+                channel_ids[name] = ch_data.get("channel", {}).get("id")
+            elif ch_data.get("error") == "name_taken":
+                # Already exists but not in listing (e.g. archived) — re-fetch
+                retry_resp = requests.get(
+                    "https://slack.com/api/conversations.list",
+                    headers=headers,
+                    params={"types": "public_channel,private_channel", "limit": 1000},
+                )
+                retry_existing = {ch["name"].lower(): ch["id"] for ch in retry_resp.json().get("channels", [])}
+                channel_ids[name] = retry_existing.get(name)
+            else:
+                logger.warning(f"[ensure_vaptfix_channels] Failed to create '{name}': {ch_data.get('error')}")
+                channel_ids[name] = None
 
-        channel_id = channel_ids[name]
+        channel_id = channel_ids.get(name)
         if not channel_id:
             continue
 
@@ -2434,11 +2448,14 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
 
         # Invite the logged-in Slack user
         if slack_user_id:
-            requests.post(
+            invite_resp = requests.post(
                 "https://slack.com/api/conversations.invite",
                 headers=headers,
                 json={"channel": channel_id, "users": slack_user_id},
             )
+            invite_data = invite_resp.json()
+            if not invite_data.get("ok") and invite_data.get("error") not in ("already_in_channel", "cant_invite_self"):
+                logger.warning(f"[ensure_vaptfix_channels] Invite '{slack_user_id}' to '{name}' failed: {invite_data.get('error')}")
 
     return channel_ids
 
