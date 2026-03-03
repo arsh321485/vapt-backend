@@ -40,3 +40,6 @@ openpyxl==3.1.5
 PyPDF2==3.0.1
 
 beautifulsoup4==4.14.2
+
+# AI / LLM integration
+openai>=1.0.0

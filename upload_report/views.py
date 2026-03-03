@@ -2,8 +2,12 @@ import os
 import uuid
 import json
 import datetime
+import threading
+import logging
 from typing import Optional, Dict, Any, List
 import hashlib
+
+logger = logging.getLogger(__name__)
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -14,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 import pymongo
+from pymongo import MongoClient
 
 from location.models import Location
 from scope.models import Scope
@@ -137,75 +142,69 @@ class UploadReportView(APIView):
         For Nessus reports, stores with vulnerabilities_by_host structure.
         For other reports, stores the parsed data as-is.
         """
-        mongo_uri = self._get_mongo_uri()
-        if not mongo_uri:
-            print("Warning: No MongoDB URI configured")
-            return False
-        
         try:
-            with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as client:
-                db = self._get_mongo_db(client)
-                
-                # Base document structure
-                # Fetch admin_id from admin_email for ownership validation
-                admin_id = None
-                if admin_email:
-                    try:
-                        admin_user = User.objects.filter(email=admin_email).first()
-                        if admin_user:
-                            admin_id = str(admin_user.id)
-                    except Exception:
-                        pass
+            client, db = _get_mongo_client_and_db()
 
-                document = {
-                    "report_id": report_id,
-                    "original_filename": original_filename,
-                    "location_id": location_id,
-                    "location_name": location_name,
-                    "admin_id": admin_id,  # Store admin_id for ownership validation
-                    "admin_email": admin_email,
-                    "member_type": member_type,
-                    "uploaded_at": datetime.datetime.utcnow(),
-                    "report_type": parsed_data.get("type", "unknown"),
-                }
-                
-                # For Nessus reports, use structured format
-                if parsed_data.get("type") in ("nessus_html", "nessus"):
-                    # FIXED: Now using _prepare_hosts_for_storage which KEEPS risk_factor
-                    hosts_payload = self._prepare_hosts_for_storage(
-                        parsed_data.get("vulnerabilities_by_host", [])
-                    )
-                    
-                    document.update({
-                        "scan_info": parsed_data.get("scan_info", {}),
-                        "total_hosts": parsed_data.get("total_hosts", 0),
-                        "total_vulnerabilities": parsed_data.get("total_vulnerabilities", 0),
-                        "vulnerabilities_by_host": hosts_payload
-                    })
-                    
-                    # Insert into nessus_reports collection
-                    db["nessus_reports"].insert_one(document)
-                    
-                    # Create indexes for efficient querying
-                    db["nessus_reports"].create_index("report_id", unique=True)
-                    db["nessus_reports"].create_index("location_id")
-                    db["nessus_reports"].create_index("uploaded_at")
-                    db["nessus_reports"].create_index([("vulnerabilities_by_host.host_name", 1)])
-                    # IMPORTANT: Index on risk_factor for filtering
-                    db["nessus_reports"].create_index([
-                        ("vulnerabilities_by_host.vulnerabilities.risk_factor", 1)
-                    ])
-                    db["nessus_reports"].create_index([
-                        ("vulnerabilities_by_host.vulnerabilities.plugin_id", 1)
-                    ])
-                else:
-                    # For other report types, store in generic collection
-                    document["parsed_data"] = parsed_data
-                    db["parsed_reports"].insert_one(document)
-                
-                print(f"Successfully stored report {report_id} in MongoDB with risk_factor data")
-                return True
-                
+            # Base document structure
+            # Fetch admin_id from admin_email for ownership validation
+            admin_id = None
+            if admin_email:
+                try:
+                    admin_user = User.objects.filter(email=admin_email).first()
+                    if admin_user:
+                        admin_id = str(admin_user.id)
+                except Exception:
+                    pass
+
+            document = {
+                "report_id": report_id,
+                "original_filename": original_filename,
+                "location_id": location_id,
+                "location_name": location_name,
+                "admin_id": admin_id,  # Store admin_id for ownership validation
+                "admin_email": admin_email,
+                "member_type": member_type,
+                "uploaded_at": datetime.datetime.utcnow(),
+                "report_type": parsed_data.get("type", "unknown"),
+            }
+
+            # For Nessus reports, use structured format
+            if parsed_data.get("type") in ("nessus_html", "nessus"):
+                # FIXED: Now using _prepare_hosts_for_storage which KEEPS risk_factor
+                hosts_payload = self._prepare_hosts_for_storage(
+                    parsed_data.get("vulnerabilities_by_host", [])
+                )
+
+                document.update({
+                    "scan_info": parsed_data.get("scan_info", {}),
+                    "total_hosts": parsed_data.get("total_hosts", 0),
+                    "total_vulnerabilities": parsed_data.get("total_vulnerabilities", 0),
+                    "vulnerabilities_by_host": hosts_payload
+                })
+
+                # Insert into nessus_reports collection
+                db["nessus_reports"].insert_one(document)
+
+                # Create indexes for efficient querying
+                db["nessus_reports"].create_index("report_id", unique=True)
+                db["nessus_reports"].create_index("location_id")
+                db["nessus_reports"].create_index("uploaded_at")
+                db["nessus_reports"].create_index([("vulnerabilities_by_host.host_name", 1)])
+                # IMPORTANT: Index on risk_factor for filtering
+                db["nessus_reports"].create_index([
+                    ("vulnerabilities_by_host.vulnerabilities.risk_factor", 1)
+                ])
+                db["nessus_reports"].create_index([
+                    ("vulnerabilities_by_host.vulnerabilities.plugin_id", 1)
+                ])
+            else:
+                # For other report types, store in generic collection
+                document["parsed_data"] = parsed_data
+                db["parsed_reports"].insert_one(document)
+
+            print(f"Successfully stored report {report_id} in MongoDB with risk_factor data")
+            return True
+
         except Exception as e:
             print(f"MongoDB storage error: {e}")
             import traceback
@@ -645,6 +644,20 @@ class UploadReportView(APIView):
                             member_type=mt
                         )
 
+                        # Auto-generate vulnerability cards in background (only for nessus reports)
+                        print(f"[AutoGenCards] mongodb_stored={mongodb_stored}, report_type={parsed_data.get('type')}", flush=True)
+                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html"):
+                            t = threading.Thread(
+                                target=_auto_generate_cards_bg,
+                                args=(report_id, target_admin.email, str(target_admin.id)),
+                                daemon=True
+                            )
+                            t.start()
+                            logger.info(f"[AutoGenCards] Background thread started for report_id={report_id}")
+                            print(f"[AutoGenCards] Background thread started for report_id={report_id}", flush=True)
+                        else:
+                            print(f"[AutoGenCards] Thread NOT started — condition failed", flush=True)
+
                         file_url = request.build_absolute_uri(
                             settings.MEDIA_URL + relative_filename
                         )
@@ -862,14 +875,10 @@ class UploadReportDeleteAPIView(APIView):
 
         # 🔹 OPTIONAL: delete MongoDB data
         try:
-            from pymongo import MongoClient
-            mongo_uri = settings.DATABASES["default"]["CLIENT"]["host"]
-
-            with MongoClient(mongo_uri) as client:
-                db = client.get_default_database()
-                db["nessus_reports"].delete_one(
-                    {"report_id": str(report._id)}
-                )
+            _, db = _get_mongo_client_and_db()
+            db["nessus_reports"].delete_one(
+                {"report_id": str(report._id)}
+            )
         except Exception:
             pass  # Mongo cleanup should not block API
 
@@ -884,3 +893,600 @@ class UploadReportDeleteAPIView(APIView):
             },
             status=200
         )
+
+
+# ---------------------------------------------------------------------------
+# Vulnerability Card generation and retrieval views
+# ---------------------------------------------------------------------------
+
+VULN_CARD_COLLECTION = "vulnerability_cards"
+NESSUS_COLLECTION = "nessus_reports"
+
+# Track running card generation jobs to prevent duplicate threads
+_running_card_jobs: set = set()
+_running_card_jobs_lock = threading.Lock()
+
+
+def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
+    """
+    Background thread: auto-generate vulnerability cards after file upload.
+    Runs the same logic as GenerateVulnerabilityCardView (Mode B).
+    """
+    import time
+    import uuid as _uuid
+    from .mitigation_tool import MitigationGenerationTool, _parse_troubleshooting_guide
+
+    # Prevent duplicate threads for the same report_id
+    with _running_card_jobs_lock:
+        if report_id in _running_card_jobs:
+            print(f"[AutoGenCards] Skipping duplicate thread for report_id={report_id}", flush=True)
+            return
+        _running_card_jobs.add(report_id)
+
+    print(f"[AutoGenCards] Starting background card generation for report_id={report_id}", flush=True)
+
+    # Small delay to ensure MongoDB document is fully committed
+    time.sleep(2)
+
+    client = None
+    try:
+        client, db = _get_mongo_client_and_db()
+        print(f"[AutoGenCards] MongoDB connected for report_id={report_id}", flush=True)
+
+        # MongoDB-level distributed lock (works across processes unlike in-memory lock)
+        existing_lock = db["card_gen_locks"].find_one_and_update(
+            {"report_id": report_id},
+            {"$setOnInsert": {"report_id": report_id, "locked_at": datetime.datetime.utcnow()}},
+            upsert=True,
+        )
+        if existing_lock is not None:
+            # Lock already existed — another process/thread is handling this
+            print(f"[AutoGenCards] Lock already held by another process for report_id={report_id}, skipping", flush=True)
+            return
+
+        # Fetch nessus report from MongoDB
+        nessus_doc = db[NESSUS_COLLECTION].find_one({"report_id": report_id})
+        if not nessus_doc:
+            logger.warning(f"[AutoGenCards] Nessus report not found: {report_id}")
+            print(f"[AutoGenCards] ERROR: Nessus report not found in MongoDB for report_id={report_id}", flush=True)
+            return
+
+        # Build vulnerabilities list — one card per (host, plugin_name) combination
+        # nessus_reports now stores plugin_outputs as array; use first entry for AI context
+        vulns_to_process = []
+        for host in nessus_doc.get("vulnerabilities_by_host", []):
+            host_name = (host.get("host_name") or "").strip()
+            for vuln in host.get("vulnerabilities", []):
+                vuln_plugin_name = vuln.get("plugin_name", "").strip()
+                if not vuln_plugin_name:
+                    continue
+                vuln_description = (
+                    vuln.get("description", "")
+                    or " ".join(vuln.get("description_points", []))
+                ).strip()
+                if not vuln_description:
+                    continue
+
+                # Get first plugin_output for AI context (new format: plugin_outputs array)
+                plugin_outputs = vuln.get("plugin_outputs")
+                if plugin_outputs and isinstance(plugin_outputs, list) and plugin_outputs:
+                    first_po = plugin_outputs[0]
+                    first_plugin_output = first_po.get("plugin_output", "") or ""
+                    first_plugin_output_url = first_po.get("plugin_output_url")
+                else:
+                    # Fallback: old single-field format
+                    first_plugin_output = vuln.get("plugin_output", "") or ""
+                    first_plugin_output_url = vuln.get("plugin_output_url")
+
+                vulns_to_process.append({
+                    "plugin_name": vuln_plugin_name,
+                    "description": vuln_description,
+                    "host_name": host_name,
+                    "plugin_output": first_plugin_output,
+                    "plugin_output_url": first_plugin_output_url,
+                })
+
+        if not vulns_to_process:
+            logger.info(f"[AutoGenCards] No vulnerabilities to process for report_id={report_id}")
+            return
+
+        print(f"[AutoGenCards] {len(vulns_to_process)} total vulnerabilities to process for report_id={report_id}", flush=True)
+
+        # Ensure indexes — unique per (report_id, vulnerability_name, host_name)
+        db[VULN_CARD_COLLECTION].create_index("card_id", unique=True)
+        db[VULN_CARD_COLLECTION].create_index("report_id")
+        db[VULN_CARD_COLLECTION].create_index("admin_email")
+        # Drop old (report_id, vulnerability_name) unique index if it exists
+        try:
+            db[VULN_CARD_COLLECTION].drop_index("report_id_1_vulnerability_name_1")
+        except Exception:
+            pass
+        # Drop old compound index variants to avoid conflicts
+        try:
+            db[VULN_CARD_COLLECTION].drop_index("report_id_1_vulnerability_name_1_host_name_1")
+        except Exception:
+            pass
+        db[VULN_CARD_COLLECTION].create_index(
+            [("report_id", 1), ("vulnerability_name", 1), ("host_name", 1)],
+            unique=True,
+        )
+        db[VULN_CARD_COLLECTION].create_index("created_at")
+
+        # Delete existing cards for fresh start
+        db[VULN_CARD_COLLECTION].delete_many({"report_id": report_id})
+
+        tool = MitigationGenerationTool()
+        generated = 0
+        errors = 0
+
+        for vuln in vulns_to_process:
+            vuln_plugin_name = vuln["plugin_name"]
+
+            result = tool._run(
+                plugin_name=vuln_plugin_name,
+                description=vuln["description"],
+                plugin_output=vuln.get("plugin_output", "") or "",
+                report_id=report_id,
+                host_name=vuln.get("host_name", "") or "",
+            )
+
+            if not result["success"]:
+                logger.warning(f"[AutoGenCards] Failed for '{vuln_plugin_name}': {result.get('error')}")
+                errors += 1
+                continue
+
+            vc = result.get("vulnerability_card", {})
+            mitigation_table_arr = result.get("mitigation_table", [])
+            troubleshooting_steps = _parse_troubleshooting_guide(
+                vc.get("post_mitigation_troubleshooting_guide", "") or ""
+            )
+
+            document = {
+                "card_id": str(_uuid.uuid4()),
+                "report_id": report_id,
+                "admin_email": admin_email,
+                "admin_id": admin_id,
+                "vulnerability_name": vuln_plugin_name,
+                "host_name": vuln.get("host_name", "") or "",
+                "description": vuln["description"],
+                "mitigation_table": mitigation_table_arr,
+                "resource_id": vc.get("resource_id"),
+                "region": vc.get("region"),
+                "affected_packages": vc.get("affected_packages"),
+                "vendor_advisory": vc.get("vendor_advisory"),
+                "reference_url": vc.get("reference_url"),
+                "vulnerability_type": vc.get("vulnerability_type"),
+                "affected_port_ranges": vc.get("affected_port_ranges"),
+                "assigned_team": vc.get("assigned_team"),
+                "vendor_fix_available": vc.get("vendor_fix_available"),
+                "steps_to_fix_count": vc.get("steps_to_fix_count"),
+                "steps_to_fix_description": vc.get("steps_to_fix_description"),
+                "deadline": vc.get("deadline"),
+                "artifacts_tools": vc.get("artifacts_tools"),
+                "post_mitigation_troubleshooting_guide": troubleshooting_steps,
+                "generated_at": result.get("generated_at"),
+                "created_at": datetime.datetime.utcnow(),
+            }
+
+            try:
+                db[VULN_CARD_COLLECTION].update_one(
+                    {
+                        "report_id": report_id,
+                        "vulnerability_name": vuln_plugin_name,
+                        "host_name": vuln.get("host_name", "") or "",
+                    },
+                    {"$set": document},
+                    upsert=True,
+                )
+                generated += 1
+            except Exception as insert_err:
+                print(f"[AutoGenCards] Insert error for '{vuln_plugin_name}' on host '{vuln.get('host_name', '')}': {insert_err}", flush=True)
+                errors += 1
+
+        # Verify actual count in MongoDB
+        actual_count = db[VULN_CARD_COLLECTION].count_documents({"report_id": report_id})
+        logger.info(
+            f"[AutoGenCards] Done for report_id={report_id} — "
+            f"generated={generated}, errors={errors}, actual_in_db={actual_count}"
+        )
+        print(f"[AutoGenCards] Done for report_id={report_id} — generated={generated}, errors={errors}, actual_in_db={actual_count}", flush=True)
+
+    except Exception as e:
+        logger.error(f"[AutoGenCards] Background generation failed for report_id={report_id}: {str(e)}", exc_info=True)
+        print(f"[AutoGenCards] EXCEPTION for report_id={report_id}: {str(e)}", flush=True)
+    finally:
+        try:
+            _, _db = _get_mongo_client_and_db()
+            _db["card_gen_locks"].delete_one({"report_id": report_id})
+        except Exception:
+            pass
+        with _running_card_jobs_lock:
+            _running_card_jobs.discard(report_id)
+
+
+_upload_mongo_client: pymongo.MongoClient = None
+_upload_mongo_lock = threading.Lock()
+
+
+def _get_shared_mongo_client() -> pymongo.MongoClient:
+    """Return a shared, pooled MongoClient (created once, reused across all requests)."""
+    global _upload_mongo_client
+    if _upload_mongo_client is None:
+        with _upload_mongo_lock:
+            if _upload_mongo_client is None:
+                try:
+                    mongo_uri = settings.DATABASES["default"]["CLIENT"]["host"]
+                except Exception:
+                    mongo_uri = getattr(settings, "MONGO_DB_URL", None)
+                if not mongo_uri:
+                    raise RuntimeError("MongoDB URI not configured")
+                _upload_mongo_client = pymongo.MongoClient(
+                    mongo_uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                    socketTimeoutMS=10000,
+                    maxPoolSize=50,
+                    minPoolSize=5,
+                    retryWrites=True,
+                )
+    return _upload_mongo_client
+
+
+def _get_mongo_client_and_db():
+    """Return (client, db) using the shared MongoDB connection pool."""
+    client = _get_shared_mongo_client()
+    try:
+        db = client.get_default_database()
+    except Exception:
+        db_name = settings.DATABASES["default"].get("NAME", "vaptfix")
+        db = client[db_name]
+    return client, db
+
+
+class GenerateVulnerabilityCardView(APIView):
+    """
+    POST /api/admin/upload_report/vulnerability-cards/generate/
+
+    Mode A — single vulnerability (provide plugin_name + description in body):
+    {
+        "report_id": "<string>",
+        "plugin_name": "<string>",
+        "description": "<string>",
+        "cve_id": "<string>",        # optional
+        "risk_factor": "<string>",   # optional
+        "host_name": "<string>",     # optional
+        "cvss_score": "<string>",    # optional
+        "force_regenerate": false    # optional
+    }
+
+    Mode B — bulk from nessus_reports (provide only report_id):
+    {
+        "report_id": "<string>",
+        "force_regenerate": false    # optional
+    }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .mitigation_tool import MitigationGenerationTool
+
+        report_id = request.data.get("report_id", "").strip()
+        if not report_id:
+            return Response({"error": "report_id is required"}, status=400)
+
+        force_regenerate = bool(request.data.get("force_regenerate", False))
+        plugin_name = request.data.get("plugin_name", "").strip()
+        description = request.data.get("description", "").strip()
+
+        # Determine mode
+        mode_a = bool(plugin_name and description)
+
+        try:
+            client, db = _get_mongo_client_and_db()
+        except RuntimeError as exc:
+            return Response({"error": str(exc)}, status=500)
+
+        try:
+            if mode_a:
+                # Mode A: single vulnerability from request body
+                vulns_to_process = [{
+                    "plugin_name": plugin_name,
+                    "description": description,
+                    "plugin_output": request.data.get("plugin_output", ""),
+                    "host_name": request.data.get("host_name", ""),
+                    "risk_factor": request.data.get("risk_factor", ""),
+                }]
+            else:
+                # Mode B: fetch all vulnerabilities from nessus_reports
+                nessus_doc = db[NESSUS_COLLECTION].find_one({"report_id": report_id})
+                if not nessus_doc:
+                    return Response(
+                        {"error": "Nessus report not found for the given report_id"},
+                        status=404,
+                    )
+
+                # Ownership check
+                doc_admin_email = nessus_doc.get("admin_email", "")
+                if (
+                    doc_admin_email != getattr(request.user, "email", "")
+                    and not request.user.is_superuser
+                ):
+                    return Response(
+                        {"error": "Access denied: report belongs to a different admin"},
+                        status=403,
+                    )
+
+                # Flatten all vulnerabilities across all hosts
+                vulns_to_process = []
+                for host in nessus_doc.get("vulnerabilities_by_host", []):
+                    host_name = host.get("host_name", "")
+                    for vuln in host.get("vulnerabilities", []):
+                        vuln_plugin_name = vuln.get("plugin_name", "").strip()
+                        vuln_description = (
+                            vuln.get("description", "")
+                            or " ".join(vuln.get("description_points", []))
+                        ).strip()
+                        if not vuln_plugin_name or not vuln_description:
+                            continue
+                        vulns_to_process.append({
+                            "plugin_name": vuln_plugin_name,
+                            "description": vuln_description,
+                            "plugin_output": vuln.get("plugin_output", ""),
+                            "host_name": host_name,
+                            "risk_factor": vuln.get("risk_factor", ""),
+                        })
+
+            if not vulns_to_process:
+                return Response(
+                    {"error": "No vulnerabilities with plugin_name and description found"},
+                    status=400,
+                )
+
+            # Ensure indexes exist
+            db[VULN_CARD_COLLECTION].create_index("card_id", unique=True)
+            db[VULN_CARD_COLLECTION].create_index("report_id")
+            db[VULN_CARD_COLLECTION].create_index("admin_email")
+            db[VULN_CARD_COLLECTION].create_index(
+                [("report_id", 1), ("vulnerability_name", 1)]
+            )
+            db[VULN_CARD_COLLECTION].create_index("created_at")
+
+            tool = MitigationGenerationTool()
+            cards_generated = []
+            skipped_count = 0
+            errors = []
+
+            for vuln in vulns_to_process:
+                vuln_plugin_name = vuln["plugin_name"]
+
+                # Deduplication check
+                if not force_regenerate:
+                    existing = db[VULN_CARD_COLLECTION].find_one({
+                        "report_id": report_id,
+                        "vulnerability_name": vuln_plugin_name,
+                    })
+                    if existing:
+                        skipped_count += 1
+                        continue
+
+                result = tool._run(
+                    plugin_name=vuln_plugin_name,
+                    description=vuln["description"],
+                    plugin_output=vuln.get("plugin_output", ""),
+                    report_id=report_id,
+                )
+
+                if not result["success"]:
+                    errors.append({
+                        "vulnerability_name": vuln_plugin_name,
+                        "error": result.get("error", "Unknown error"),
+                    })
+                    continue
+
+                import uuid as _uuid
+                card_id = str(_uuid.uuid4())
+                now = datetime.datetime.utcnow()
+                vc = result.get("vulnerability_card", {})
+
+                # mitigation_table is a list from the parser
+                mitigation_table_arr = result.get("mitigation_table", [])
+
+                # Fix: if AI returns null for resource_id, fall back to host_name from scan data
+                resource_id = vc.get("resource_id") or vuln.get("host_name", "") or None
+
+                # Parse post_mitigation_troubleshooting_guide into structured steps
+                from .mitigation_tool import _parse_troubleshooting_guide
+                troubleshooting_steps = _parse_troubleshooting_guide(
+                    vc.get("post_mitigation_troubleshooting_guide", "") or ""
+                )
+
+                document = {
+                    "card_id": card_id,
+                    "report_id": report_id,
+                    "admin_email": getattr(request.user, "email", ""),
+                    "admin_id": str(request.user.id),
+                    "vulnerability_name": vuln_plugin_name,
+                    "description": vuln["description"],
+                    "plugin_output": vuln.get("plugin_output", "") or None,
+                    "mitigation_table": mitigation_table_arr,
+                    # Vulnerability Card fields from AI
+                    "resource_id": resource_id,
+                    "region": vc.get("region"),
+                    "affected_packages": vc.get("affected_packages"),
+                    "vendor_advisory": vc.get("vendor_advisory"),
+                    "reference_url": vc.get("reference_url"),
+                    "vulnerability_type": vc.get("vulnerability_type"),
+                    "affected_port_ranges": vc.get("affected_port_ranges"),
+                    "file_path": vc.get("file_path"),
+                    "assigned_team": vc.get("assigned_team"),
+                    "vendor_fix_available": vc.get("vendor_fix_available"),
+                    "steps_to_fix_count": vc.get("steps_to_fix_count"),
+                    "steps_to_fix_description": vc.get("steps_to_fix_description"),
+                    "deadline": vc.get("deadline"),
+                    "artifacts_tools": vc.get("artifacts_tools"),
+                    "post_mitigation_troubleshooting_guide": troubleshooting_steps,
+                    "generated_at": result.get("generated_at"),
+                    "created_at": now,
+                }
+
+                db[VULN_CARD_COLLECTION].insert_one(document)
+
+                cards_generated.append({
+                    "card_id": card_id,
+                    "report_id": report_id,
+                    "vulnerability_name": vuln_plugin_name,
+                    "description": vuln["description"],
+                    "plugin_output": vuln.get("plugin_output", "") or None,
+                    # Vulnerability Card fields from AI
+                    "resource_id": resource_id,
+                    "region": vc.get("region"),
+                    "affected_packages": vc.get("affected_packages"),
+                    "vendor_advisory": vc.get("vendor_advisory"),
+                    "reference_url": vc.get("reference_url"),
+                    "vulnerability_type": vc.get("vulnerability_type"),
+                    "affected_port_ranges": vc.get("affected_port_ranges"),
+                    "file_path": vc.get("file_path"),
+                    "assigned_team": vc.get("assigned_team"),
+                    "vendor_fix_available": vc.get("vendor_fix_available"),
+                    "steps_to_fix_count": vc.get("steps_to_fix_count"),
+                    "steps_to_fix_description": vc.get("steps_to_fix_description"),
+                    "deadline": vc.get("deadline"),
+                    "artifacts_tools": vc.get("artifacts_tools"),
+                    "post_mitigation_troubleshooting_guide": troubleshooting_steps,
+                    "mitigation_table": mitigation_table_arr,
+                    "generated_at": result.get("generated_at"),
+                })
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "Vulnerability cards generated successfully",
+                    "count": len(cards_generated),
+                    "skipped_count": skipped_count,
+                    "cards": cards_generated,
+                    "errors": errors,
+                },
+                status=201,
+            )
+
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"error": "Generation failed", "detail": str(exc)},
+                status=500,
+            )
+        finally:
+            client.close()
+
+
+class VulnerabilityCardListView(APIView):
+    """
+    GET /api/admin/upload_report/vulnerability-cards/?report_id=<id>
+
+    Returns summary of all vulnerability cards for the given report.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        report_id = request.query_params.get("report_id", "").strip()
+        if not report_id:
+            return Response({"error": "report_id query parameter is required"}, status=400)
+
+        try:
+            client, db = _get_mongo_client_and_db()
+        except RuntimeError as exc:
+            return Response({"error": str(exc)}, status=500)
+
+        try:
+            query = {
+                "report_id": report_id,
+                "admin_email": getattr(request.user, "email", ""),
+            }
+            if request.user.is_superuser:
+                query = {"report_id": report_id}
+
+            cursor = db[VULN_CARD_COLLECTION].find(
+                query,
+                {
+                    # Exclude heavy fields from list view
+                    "mitigation_table": 0,
+                    "contextual_analysis": 0,
+                    "raw_ai_response": 0,
+                    "_id": 0,
+                },
+            ).sort("created_at", -1)
+
+            cards = list(cursor)
+            for card in cards:
+                # Ensure datetime objects are serializable
+                if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
+                    card["created_at"] = card["created_at"].isoformat()
+
+            return Response(
+                {
+                    "success": True,
+                    "count": len(cards),
+                    "report_id": report_id,
+                    "cards": cards,
+                },
+                status=200,
+            )
+
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to retrieve cards", "detail": str(exc)},
+                status=500,
+            )
+        finally:
+            client.close()
+
+
+class VulnerabilityCardDetailView(APIView):
+    """
+    GET /api/admin/upload_report/vulnerability-cards/<card_id>/
+
+    Returns the full vulnerability card including mitigation_table and
+    contextual_analysis.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, card_id):
+        try:
+            client, db = _get_mongo_client_and_db()
+        except RuntimeError as exc:
+            return Response({"error": str(exc)}, status=500)
+
+        try:
+            query = {"card_id": card_id}
+            if not request.user.is_superuser:
+                query["admin_email"] = getattr(request.user, "email", "")
+
+            card = db[VULN_CARD_COLLECTION].find_one(query, {"_id": 0})
+            if not card:
+                return Response(
+                    {"error": "Vulnerability card not found or access denied"},
+                    status=404,
+                )
+
+            if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
+                card["created_at"] = card["created_at"].isoformat()
+
+            return Response(
+                {
+                    "success": True,
+                    "card": card,
+                },
+                status=200,
+            )
+
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to retrieve card", "detail": str(exc)},
+                status=500,
+            )
+        finally:
+            client.close()

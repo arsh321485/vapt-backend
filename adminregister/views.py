@@ -5,6 +5,7 @@ from django.conf import settings
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 import pymongo
+import threading
 import uuid
 from urllib.parse import urlparse
 import re
@@ -16,6 +17,7 @@ from .serializers import AdminRegisterSimpleVulnSerializer,FixVulnerabilityCreat
 SUPPORT_REQUEST_COLLECTION = "support_requests"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
 NESSUS_COLLECTION = "nessus_reports"
+VULN_CARD_COLLECTION = "vulnerability_cards"
 TICKETS_COLLECTION = "tickets"
 FIX_VULN_STEPS_COLLECTION = "fix_vulnerability_steps"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
@@ -23,49 +25,60 @@ FIX_STEP_FEEDBACK_COLLECTION = "fix_step_feedback"
 FIX_FINAL_FEEDBACK_COLLECTION = "fix_vulnerability_final_feedback"
 
 
-# Robust MongoContext: same as before but compact
+_mongo_client_reg: pymongo.MongoClient = None
+_mongo_lock_reg = threading.Lock()
+
+
+def _get_reg_mongo_client() -> pymongo.MongoClient:
+    global _mongo_client_reg
+    if _mongo_client_reg is None:
+        with _mongo_lock_reg:
+            if _mongo_client_reg is None:
+                uri = getattr(settings, "MONGO_DB_URL", None)
+                if not uri:
+                    uri = settings.DATABASES.get('default', {}).get('CLIENT', {}).get('host')
+                if not uri:
+                    raise RuntimeError("MongoDB URI not configured. Set MONGO_DB_URL or DATABASES['default']['CLIENT']['host'].")
+                _mongo_client_reg = pymongo.MongoClient(
+                    uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                    socketTimeoutMS=10000,
+                    maxPoolSize=50,
+                    minPoolSize=5,
+                    retryWrites=True,
+                )
+    return _mongo_client_reg
+
+
+def _get_reg_db(client: pymongo.MongoClient):
+    dbname = getattr(settings, "MONGO_DB_NAME", None)
+    if not dbname:
+        uri = getattr(settings, "MONGO_DB_URL", None) or settings.DATABASES.get('default', {}).get('CLIENT', {}).get('host', '')
+        try:
+            parsed = urlparse(uri)
+            path = (parsed.path or "").lstrip("/")
+            if path:
+                dbname = re.split(r"[/?]", path)[0]
+        except Exception:
+            dbname = None
+    if not dbname:
+        try:
+            d = client.get_default_database()
+            if d:
+                dbname = d.name
+        except Exception:
+            dbname = None
+    return client[dbname or "vaptfix"]
+
+
 class MongoContext:
-    def __init__(self):
-        self.uri = getattr(settings, "MONGO_DB_URL", None)
-        if not self.uri:
-            self.uri = settings.DATABASES.get('default', {}).get('CLIENT', {}).get('host')
-        self.client = None
-        self.db = None
-
+    """Context manager using a shared MongoDB connection pool."""
     def __enter__(self):
-        if not self.uri:
-            raise RuntimeError("MongoDB URI not configured. Set MONGO_DB_URL or DATABASES['default']['CLIENT']['host'].")
-        self.client = pymongo.MongoClient(self.uri, serverSelectionTimeoutMS=5000)
-
-        dbname = getattr(settings, "MONGO_DB_NAME", None)
-        if not dbname:
-            try:
-                parsed = urlparse(self.uri)
-                path = (parsed.path or "").lstrip("/")
-                if path:
-                    dbname = re.split(r"[/?]", path)[0]
-            except Exception:
-                dbname = None
-
-        if not dbname:
-            try:
-                d = self.client.get_default_database()
-                if d: dbname = d.name
-            except Exception:
-                dbname = None
-
-        if not dbname:
-            dbname = "vaptfix"
-
-        self.db = self.client[dbname]
-        return self.db
+        return _get_reg_db(_get_reg_mongo_client())
 
     def __exit__(self, exc_type, exc, tb):
-        try:
-            if self.client:
-                self.client.close()
-        except Exception:
-            pass
+        pass  # Connection is pooled — do not close
 
 def _normalize_iso(dt):
     """Return ISO string for datetime-like or string; else None."""
@@ -81,16 +94,6 @@ def _normalize_iso(dt):
 # ===============================
 # TEAM ASSIGNMENT HELPERS
 # ===============================
-HOST_TEAM_MAP = {
-    "192.168.0.2": "Patch Management",
-    "192.168.0.5": "Network Security",
-    "192.168.0.6": "Configuration Management",
-    "192.168.0.9": "Architectural Flaws",
-}
-
-def get_assigned_team_by_host(host_name: str) -> str:
-    return HOST_TEAM_MAP.get(host_name, "Patch Management")
-
 def get_team_members(db, team_name: str, admin_id: str):
     members = []
 
@@ -635,9 +638,10 @@ class FixVulnerabilityCreateAPIView(APIView):
         Optional body:
             - port: Port number for additional uniqueness
             - status: Vulnerability status (default: fetched from latest report = "open")
-            - vulnerability_type: Type of vulnerability (default: "Network Vulnerability")
-            - affected_ports_ranges: Port/range info (default: auto-built from port/protocol)
-            - file_path: File path related to vulnerability (default: "N/A")
+        Auto-fetched from DB (not from request body):
+            - vulnerability_type: from vulnerability_cards
+            - affected_ports_ranges: from nessus_reports plugin_outputs -> plugin_output (array)
+            - file_path: from nessus_reports plugin_outputs -> plugin_output_url (array)
 
     GET /api/admin/adminregister/fix-vulnerability/report/{report_id}/asset/{host_name}/create/
         Returns all fix vulnerabilities for the given report and host.
@@ -698,9 +702,6 @@ class FixVulnerabilityCreateAPIView(APIView):
 
         # Optional fields from request body
         req_status = validated.get("status", "")
-        req_vulnerability_type = validated.get("vulnerability_type", "Network Vulnerability")
-        req_affected_ports_ranges = validated.get("affected_ports_ranges", "")
-        req_file_path = validated.get("file_path", "N/A")
 
         with MongoContext() as db:
             nessus_coll = db[NESSUS_COLLECTION]
@@ -764,13 +765,32 @@ class FixVulnerabilityCreateAPIView(APIView):
             existing_fix = fix_coll.find_one(duplicate_query)
 
             if existing_fix:
+                # Return existing fix record instead of error (idempotent)
                 return Response(
                     {
-                        "detail": "Fix vulnerability already exists for this id",
-                        "fix_vulnerability_id": str(existing_fix["_id"]),
-                        "id": id_req,
+                        "message": "Fix vulnerability already exists",
+                        "data": {
+                            "_id": str(existing_fix["_id"]),
+                            "report_id": existing_fix.get("report_id"),
+                            "admin_id": admin_id,
+                            "admin_email": admin_email,
+                            "id": existing_fix.get("id"),
+                            "vulnerability_name": existing_fix.get("plugin_name"),
+                            "asset": existing_fix.get("host_name"),
+                            "severity": existing_fix.get("risk_factor"),
+                            "port": existing_fix.get("port", ""),
+                            "description": existing_fix.get("description", "") or existing_fix.get("synopsis", ""),
+                            "assigned_team": existing_fix.get("assigned_team", ""),
+                            "assigned_team_members": existing_fix.get("assigned_team_members", []),
+                            "solution": existing_fix.get("solution", ""),
+                            "status": existing_fix.get("status", "open"),
+                            "vulnerability_type": existing_fix.get("vulnerability_type", ""),
+                            "affected_ports_ranges": existing_fix.get("affected_ports_ranges", []),
+                            "file_path": existing_fix.get("file_path", []),
+                            "created_at": _normalize_iso(existing_fix.get("created_at")),
+                        }
                     },
-                    status=status.HTTP_400_BAD_REQUEST
+                    status=status.HTTP_200_OK
                 )
 
             selected_vuln = None
@@ -810,13 +830,21 @@ class FixVulnerabilityCreateAPIView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # 4. ASSIGN TEAM
-            assigned_team = get_assigned_team_by_host(host_name)
-            assigned_team_members = get_team_members(
-                db=db,
-                team_name=assigned_team,
-                admin_id=admin_id
-            )
+            # 4. ASSIGN TEAM — get assigned_team from vulnerability_cards for this vulnerability
+            vuln_card_doc = db[VULN_CARD_COLLECTION].find_one({
+                "report_id": str(report_id),
+                "vulnerability_name": plugin_name_req
+            })
+            assigned_team = (vuln_card_doc or {}).get("assigned_team") or ""
+
+            if assigned_team:
+                assigned_team_members = get_team_members(
+                    db=db,
+                    team_name=assigned_team,
+                    admin_id=admin_id
+                )
+            else:
+                assigned_team_members = []
 
             # 5. Extract vulnerability details
             description = selected_vuln.get("description", "")
@@ -829,11 +857,21 @@ class FixVulnerabilityCreateAPIView(APIView):
             port = selected_vuln.get("port", "")
             protocol = selected_vuln.get("protocol", "")
 
-            # Build affected ports/ranges (use request value if provided, else auto-build)
-            if req_affected_ports_ranges:
-                affected_ports = req_affected_ports_ranges
-            else:
-                affected_ports = f"{port}/{protocol}" if port and protocol else "N/A"
+            # Extract affected_ports_ranges and file_path as arrays from nessus plugin_outputs
+            plugin_outputs = selected_vuln.get("plugin_outputs", [])
+            affected_ports = [
+                po.get("plugin_output")
+                for po in plugin_outputs
+                if po.get("plugin_output")
+            ]
+            file_path = [
+                po.get("plugin_output_url")
+                for po in plugin_outputs
+                if po.get("plugin_output_url")
+            ]
+
+            # Get vulnerability_type from vulnerability_cards
+            vulnerability_type = (vuln_card_doc or {}).get("vulnerability_type") or ""
 
             # Fetch status from LatestSuperAdmin report if not explicitly provided
             if req_status:
@@ -859,11 +897,11 @@ class FixVulnerabilityCreateAPIView(APIView):
                 "synopsis": synopsis,
                 "solution": solution,
 
-                # New fields
+                # Fields from nessus_reports and vulnerability_cards
                 "status": vuln_status,
-                "vulnerability_type": req_vulnerability_type,
+                "vulnerability_type": vulnerability_type,
                 "affected_ports_ranges": affected_ports,
-                "file_path": req_file_path,
+                "file_path": file_path,
 
                 "vendor_fix_available": bool(solution),
                 "assigned_team": assigned_team,
@@ -895,9 +933,9 @@ class FixVulnerabilityCreateAPIView(APIView):
                 "assigned_team_members": assigned_team_members,
                 "solution": solution,
                 "status": vuln_status,
-                "vulnerability_type": req_vulnerability_type,
+                "vulnerability_type": vulnerability_type,
                 "affected_ports_ranges": affected_ports,
-                "file_path": req_file_path,
+                "file_path": file_path,
                 "created_at": doc["created_at"].isoformat() if doc["created_at"] else None
             }
 
@@ -912,43 +950,117 @@ class FixVulnerabilityCreateAPIView(APIView):
     def get(self, request, report_id, host_name):
         """
         GET API: Retrieve all fix vulnerabilities for a given report and host.
-        Returns all fields including status, vulnerability_type, affected_ports_ranges, file_path.
+        Enriches each record with live data from nessus_reports and vulnerability_cards.
+
+        From nessus_reports:
+          - status, asset, vulnerability_name, description
+          - affected_ports_ranges (plugin_outputs -> plugin_output, array)
+          - file_path (plugin_outputs -> plugin_output_url, array)
+
+        From vulnerability_cards:
+          - assigned_team, vulnerability_type, vendor_fix_available
+          - steps_to_fix (mitigation_table, array), deadline
+          - artifacts_tools, post_mitigation_troubleshooting_guide, steps_to_fix_count
         """
         admin_id = str(request.user.id)
         admin_email = getattr(request.user, 'email', '')
 
         with MongoContext() as db:
             fix_coll = db[FIX_VULN_COLLECTION]
+            nessus_coll = db[NESSUS_COLLECTION]
+            vuln_card_coll = db[VULN_CARD_COLLECTION]
 
-            # Find all fix vulnerabilities for this report + host
-            cursor = fix_coll.find({
+            # 1. Fetch all fix docs for this report + host + admin
+            fix_docs = list(fix_coll.find({
                 "report_id": str(report_id),
                 "host_name": host_name,
                 "created_by": admin_id
-            }).sort("created_at", -1)
+            }).sort("created_at", -1))
 
+            # 2. Load nessus report for this admin + report_id
+            nessus_doc = nessus_coll.find_one({
+                "report_id": str(report_id),
+                "$or": [{"admin_id": admin_id}, {"admin_email": admin_email}]
+            })
+
+            # Build lookup: plugin_name -> vuln data (for the matching host only)
+            nessus_vuln_lookup = {}
+            if nessus_doc:
+                for host in nessus_doc.get("vulnerabilities_by_host", []):
+                    h_name = host.get("host_name") or host.get("host") or ""
+                    if h_name != host_name:
+                        continue
+                    for vuln in host.get("vulnerabilities", []):
+                        pname = (
+                            vuln.get("plugin_name")
+                            or vuln.get("pluginname")
+                            or vuln.get("name")
+                            or ""
+                        ).strip()
+                        if pname and pname not in nessus_vuln_lookup:
+                            nessus_vuln_lookup[pname] = vuln
+
+            # 3. Batch-load vulnerability cards for this report + admin
+            plugin_names = [doc.get("plugin_name", "") for doc in fix_docs if doc.get("plugin_name")]
+            vuln_card_lookup = {}
+            if plugin_names:
+                for card in vuln_card_coll.find({
+                    "report_id": str(report_id),
+                    "admin_email": admin_email,
+                    "vulnerability_name": {"$in": plugin_names}
+                }):
+                    vname = card.get("vulnerability_name", "")
+                    if vname:
+                        vuln_card_lookup[vname] = card
+
+            # 4. Build enriched results
             results = []
-            for doc in cursor:
+            for doc in fix_docs:
+                plugin_name = doc.get("plugin_name", "")
+                nessus_vuln = nessus_vuln_lookup.get(plugin_name, {})
+                vuln_card = vuln_card_lookup.get(plugin_name, {})
+
+                # Extract affected_ports_ranges and file_path as arrays from plugin_outputs
+                plugin_outputs = nessus_vuln.get("plugin_outputs", [])
+                affected_ports_list = [
+                    po.get("plugin_output")
+                    for po in plugin_outputs
+                    if po.get("plugin_output")
+                ]
+                file_path_list = [
+                    po.get("plugin_output_url")
+                    for po in plugin_outputs
+                    if po.get("plugin_output_url")
+                ]
+
                 results.append({
                     "_id": str(doc.get("_id")),
                     "report_id": doc.get("report_id"),
                     "admin_id": admin_id,
                     "admin_email": admin_email,
                     "id": doc.get("id"),
-                    "vulnerability_name": doc.get("plugin_name"),
-                    "asset": doc.get("host_name"),
+                    # From nessus_reports
+                    "status": nessus_vuln.get("status") or doc.get("status", "open"),
+                    "asset": host_name,
+                    "vulnerability_name": plugin_name,
+                    "description": nessus_vuln.get("description") or doc.get("description_points", "") or doc.get("synopsis", ""),
+                    "affected_ports_ranges": affected_ports_list,
+                    "file_path": file_path_list,
+                    # From vulnerability_cards
+                    "assigned_team": vuln_card.get("assigned_team") or doc.get("assigned_team", ""),
+                    "vulnerability_type": vuln_card.get("vulnerability_type"),
+                    "vendor_fix_available": vuln_card.get("vendor_fix_available") or doc.get("vendor_fix_available", False),
+                    "steps_to_fix": vuln_card.get("mitigation_table", []),
+                    "deadline": vuln_card.get("deadline"),
+                    "artifacts_tools": vuln_card.get("artifacts_tools"),
+                    "post_mitigation_troubleshooting_guide": vuln_card.get("post_mitigation_troubleshooting_guide"),
+                    "steps_to_fix_count": vuln_card.get("steps_to_fix_count"),
+                    # Other fields from fix doc
                     "severity": doc.get("risk_factor"),
                     "port": doc.get("port", ""),
                     "protocol": doc.get("protocol", ""),
-                    "description": doc.get("description", "") or doc.get("description_points", "") or doc.get("synopsis", ""),
                     "synopsis": doc.get("synopsis", ""),
                     "solution": doc.get("solution", ""),
-                    "status": doc.get("status", "open"),
-                    "vulnerability_type": doc.get("vulnerability_type", "Network Vulnerability"),
-                    "affected_ports_ranges": doc.get("affected_ports_ranges", "N/A"),
-                    "file_path": doc.get("file_path", "N/A"),
-                    "vendor_fix_available": doc.get("vendor_fix_available", False),
-                    "assigned_team": doc.get("assigned_team", ""),
                     "assigned_team_members": doc.get("assigned_team_members", []),
                     "created_at": _normalize_iso(doc.get("created_at")),
                     "created_by": doc.get("created_by")
@@ -1216,9 +1328,18 @@ class FixVulnerabilityStepsAPIView(APIView):
                     )
                 status_value = "closed"
 
-            # Get assigned team and members from fix vulnerability
-            assigned_team = fix_doc.get("assigned_team", "")
+            # Fetch vulnerability_cards data for this fix vulnerability
+            vuln_card = db[VULN_CARD_COLLECTION].find_one({
+                "report_id": fix_doc.get("report_id", ""),
+                "vulnerability_name": fix_doc.get("plugin_name", "")
+            }) or {}
+
+            # Get assigned_team, mitigation_table, deadline, artifacts_tools from vulnerability_cards
+            assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
             assigned_team_members = fix_doc.get("assigned_team_members", [])
+            mitigation_table = vuln_card.get("mitigation_table", [])
+            deadline = vuln_card.get("deadline")
+            artifacts_tools = vuln_card.get("artifacts_tools")
 
             # Fetch existing steps
             existing_steps = list(
@@ -1303,6 +1424,9 @@ class FixVulnerabilityStepsAPIView(APIView):
                     "asset": fix_doc.get("host_name", ""),
                     "severity": fix_doc.get("risk_factor", ""),
                     "assigned_team": assigned_team,
+                    "deadline": deadline,
+                    "artifacts_tools": artifacts_tools,
+                    "mitigation_table": mitigation_table,
                     "status": status_value,
                     "completed_steps": completed_count,
                     "total_steps": 6,

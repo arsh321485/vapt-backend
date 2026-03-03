@@ -7,6 +7,7 @@ from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 from django.utils import timezone
 import pymongo
+import threading
 import re
 
 from .serializers import AdminAssetSerializer,AssetHostVulnSerializer,HoldAssetSerializer,HoldAssetListSerializer
@@ -23,27 +24,43 @@ FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 DELETED_ASSETS_COLLECTION = "deleted_assets"
 
 # ---------------------- Mongo Context ----------------------
+_mongo_client_asset: pymongo.MongoClient = None
+_mongo_lock_asset = threading.Lock()
+
+
+def _get_asset_mongo_client() -> pymongo.MongoClient:
+    global _mongo_client_asset
+    if _mongo_client_asset is None:
+        with _mongo_lock_asset:
+            if _mongo_client_asset is None:
+                uri = getattr(settings, "MONGO_DB_URL", None)
+                if not uri:
+                    uri = settings.DATABASES.get("default", {}).get("CLIENT", {}).get("host")
+                if not uri:
+                    raise RuntimeError("MongoDB URI not configured.")
+                _mongo_client_asset = pymongo.MongoClient(
+                    uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                    socketTimeoutMS=10000,
+                    maxPoolSize=50,
+                    minPoolSize=5,
+                    retryWrites=True,
+                )
+    return _mongo_client_asset
+
+
 class MongoContext:
-    def __init__(self):
-        self.uri = getattr(settings, "MONGO_DB_URL", None)
-        if not self.uri:
-            self.uri = settings.DATABASES.get("default", {}).get("CLIENT", {}).get("host")
-        self.client = None
-
     def __enter__(self):
-        if not self.uri:
-            raise RuntimeError("MongoDB URI not configured.")
-
-        self.client = pymongo.MongoClient(self.uri, serverSelectionTimeoutMS=5000)
-
-        parsed = urlparse(self.uri)
-        dbname = parsed.path.replace("/", "") or "vaptfix"
-
-        return self.client[dbname]
+        client = _get_asset_mongo_client()
+        parsed = urlparse(client.HOST if hasattr(client, 'HOST') else "")
+        uri = getattr(settings, "MONGO_DB_URL", None) or settings.DATABASES.get("default", {}).get("CLIENT", {}).get("host", "")
+        parsed = urlparse(uri)
+        dbname = parsed.path.replace("/", "").split("?")[0] or "vaptfix"
+        return client[dbname]
 
     def __exit__(self, exc_type, exc, tb):
-        if self.client:
-            self.client.close()
+        pass  # Connection is pooled — do not close
 
 
 # ---------------------- Helper ----------------------

@@ -25,7 +25,7 @@ from urllib.parse import urljoin
 import logging
 import uuid
 from django.conf import settings
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from urllib.parse import urlencode
 import random
 from django.conf import settings
@@ -272,7 +272,7 @@ class AdminSignupVerifyOTPView(APIView):
         if not cached_data:
             return Response({"error": "No signup session found. Please start again."}, status=400)
         
-        if cached_data['otp'] != otp:
+        if cached_data['otp'] != str(otp):
             return Response({"error": "Invalid OTP"}, status=400)
 
         # ✅ OTP valid → create admin user with cached password
@@ -796,13 +796,31 @@ def auto_create_vaptfix_team(access_token):
         if resp.status_code == 200:
             teams = resp.json().get('value', [])
             for team in teams:
-                if team.get('displayName') == 'VAPTFIX':
-                    logger.info(f"VAPTFIX team already exists: {team.get('id')}")
+                if team.get('displayName') == 'Vaptfix':
+                    team_id = team.get('id')
+                    logger.info(f"VAPTFIX team already exists: {team_id}")
+                    # Fetch existing channels
+                    channels_result = []
+                    try:
+                        ch_resp = requests.get(
+                            f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
+                            headers=headers, timeout=10
+                        )
+                        if ch_resp.status_code == 200:
+                            for ch in ch_resp.json().get('value', []):
+                                channels_result.append({
+                                    "channelName": ch.get("displayName"),
+                                    "channelId": ch.get("id"),
+                                    "status": "exists"
+                                })
+                    except Exception as e:
+                        logger.warning(f"Error fetching channels: {str(e)}")
                     return {
-                        "team_id": team.get('id'),
-                        "team_name": "VAPTFIX",
+                        "team_id": team_id,
+                        "team_name": "Vaptfix",
                         "status": "already_exists",
-                        "channels": []
+                        "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None,
+                        "channels": channels_result
                     }
     except Exception as e:
         logger.warning(f"Error checking existing teams: {str(e)}")
@@ -812,8 +830,8 @@ def auto_create_vaptfix_team(access_token):
         create_url = "https://graph.microsoft.com/v1.0/teams"
         payload = {
             "template@odata.bind": "https://graph.microsoft.com/v1.0/teamsTemplates('standard')",
-            "displayName": "VAPTFIX",
-            "description": "VAPTFIX Security Management Team",
+            "displayName": "Vaptfix",
+            "description": "Vaptfix Security Management Team",
             "visibility": "private",
         }
         resp = requests.post(create_url, headers=headers, json=payload, timeout=30)
@@ -844,10 +862,10 @@ def auto_create_vaptfix_team(access_token):
                     logger.info(f"VAPTFIX team not ready, retry {attempt + 1}/5")
         else:
             logger.error(f"Failed to create VAPTFIX team: {resp.status_code} {resp.text}")
-            return {"team_id": None, "team_name": "VAPTFIX", "status": "creation_failed", "error": resp.text, "channels": []}
+            return {"team_id": None, "team_name": "Vaptfix", "status": "creation_failed", "error": resp.text, "channels": []}
 
         if not team_id:
-            return {"team_id": None, "team_name": "VAPTFIX", "status": "creation_failed", "error": "Could not extract team ID", "channels": []}
+            return {"team_id": None, "team_name": "Vaptfix", "status": "creation_failed", "error": "Could not extract team ID", "channels": []}
 
         # Step 3: Create 4 default channels
         default_channels = ["Patch Management", "Configuration Management", "Network Security", "Architectural Flaws"]
@@ -885,14 +903,15 @@ def auto_create_vaptfix_team(access_token):
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
         return {
             "team_id": team_id,
-            "team_name": "VAPTFIX",
+            "team_name": "Vaptfix",
             "status": "created",
+            "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None,
             "channels": channels_result
         }
 
     except Exception as e:
         logger.error(f"Auto-create VAPTFIX team error: {str(e)}")
-        return {"team_id": None, "team_name": "VAPTFIX", "status": "error", "error": str(e), "channels": []}
+        return {"team_id": None, "team_name": "Vaptfix", "status": "error", "error": str(e), "channels": []}
 
 
 class MicrosoftTeamsCallbackView(APIView):
@@ -963,9 +982,10 @@ class MicrosoftTeamsCallbackView(APIView):
                         "login_provider": "microsoft_teams",
                     },
                 )
-                if not created:
-                    user.login_provider = 'microsoft_teams'
-                    user.save(update_fields=['login_provider'])
+                user.login_provider = 'microsoft_teams'
+                user.ms_access_token = access_token
+                user.ms_refresh_token = token_data.get('refresh_token', '')
+                user.save(update_fields=['login_provider', 'ms_access_token', 'ms_refresh_token'])
                 user_data = {
                     "email": user.email,
                     "id": str(user.id),
@@ -1027,13 +1047,16 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                 microsoft_user_data = serializer.get_microsoft_user_data(access_token)
                 user = serializer.create_or_get_user(microsoft_user_data)
 
+                ms_refresh_token = serializer.validated_data.get('refresh_token', '')
                 user.login_provider = 'microsoft_teams'
-                user.save(update_fields=['login_provider'])
+                user.ms_access_token = access_token
+                user.ms_refresh_token = ms_refresh_token
+                user.save(update_fields=['login_provider', 'ms_access_token', 'ms_refresh_token'])
 
                 login(request, user)
                 refresh = RefreshToken.for_user(user)
 
-                # Auto-create VAPTFIX team with 4 channels
+                # Auto-create Vaptfix team with 4 channels
                 vaptfix_team = auto_create_vaptfix_team(access_token)
 
                 logger.info(f"Microsoft Teams OAuth login successful: {user.email}")
@@ -1563,16 +1586,6 @@ class CreateTeamView(generics.GenericAPIView):
                         "solution": "Please re-authenticate with Team.Create and Group.ReadWrite.All permissions"
                     }, status=status.HTTP_401_UNAUTHORIZED)
                 
-                # Check for duplicate team names
-                is_duplicate, duplicate_message = self.check_duplicate_team(access_token, team_name)
-                if is_duplicate:
-                    return Response({
-                        "error": "Team name already exists",
-                        "message": duplicate_message,
-                        "solution": "Please choose a different team name",
-                        "team_name": team_name
-                    }, status=status.HTTP_409_CONFLICT)
-                
                 # Create team using Groups API (Teams are built on top of Office 365 Groups)
                 url = "https://graph.microsoft.com/v1.0/teams"
                 
@@ -1642,11 +1655,12 @@ class CreateTeamView(generics.GenericAPIView):
                             "displayName": team_name,
                             "description": description,
                             "visibility": visibility,
-                            "location": team_location
+                            "location": team_location,
+                            "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None
                         },
                         "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
-                    
+
                 elif response.status_code == 202:
                     # Team creation is being processed asynchronously
                     team_location = response.headers.get('Location')
@@ -1668,6 +1682,7 @@ class CreateTeamView(generics.GenericAPIView):
                         "status": "completed",
                         "team_id": team_id,
                         "location": team_location,
+                        "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None,
                         "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
                     
@@ -1690,7 +1705,8 @@ class CreateTeamView(generics.GenericAPIView):
                                 "displayName": team_name,
                                 "description": description,
                                 "visibility": visibility,
-                                "data": response_data
+                                "data": response_data,
+                                "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None
                             },
                             "default_channels": channels_result
                         }, status=status.HTTP_201_CREATED)
@@ -2369,10 +2385,10 @@ class DeleteTeamView(generics.GenericAPIView):
 # ─── Slack workspace / channel helpers ───────────────────────────────────────
 
 VAPTFIX_CHANNELS = [
-    "patch-management",
-    "configuration-management",
-    "network-security",
-    "architectural-flaws",
+    "Patch-Management",
+    "Configuration-Management",
+    "Network-Security",
+    "Architectural-Flaws",
 ]
 
 
@@ -2561,15 +2577,11 @@ class SlackOAuthCallbackView(APIView):
                 email=email,
                 defaults={"login_provider": "slack", "password": ""},
             )
-            if not created:
-                user.login_provider = "slack"
-                user.slack_user_id = user_id
-                user.slack_team_id = team_info.get("id")
-                user.save()
-            else:
-                user.slack_user_id = user_id
-                user.slack_team_id = team_info.get("id")
-                user.save()
+            user.login_provider = "slack"
+            user.slack_user_id = user_id
+            user.slack_team_id = team_info.get("id")
+            user.slack_bot_token = bot_token
+            user.save()
 
             # ✅ Step 4b: Ensure vaptfix channels exist and invite user
             channels = {}
@@ -2583,82 +2595,15 @@ class SlackOAuthCallbackView(APIView):
             django_access_token = str(refresh.access_token)
             django_refresh_token = str(refresh)
 
-            # ✅ Step 5: Log all tokens to browser console, then redirect to Slack
+            # ✅ Step 5: Directly redirect to Slack platform
             team_id = team_info.get("id")
             slack_redirect_url = f"https://app.slack.com/client/{team_id}" if team_id else "https://slack.com"
-            html = f"""<!DOCTYPE html>
-<html><head><title>Slack Auth</title></head>
-<body style="font-family:Arial,sans-serif;text-align:center;margin-top:60px;background:#f0f4f8;">
-    <h2 style="color:#2eb67d;">&#10003; Slack Login Successful</h2>
-    <p style="color:#555;">Check your browser console (F12) for tokens.</p>
-    <p style="color:#888;">Redirecting to Slack in <strong id="countdown">50</strong> seconds...</p>
-<script>
-    console.log('=== DJANGO JWT (use this for all API calls) ===');
-    console.log('access_token (Django):', '{django_access_token}');
-    console.log('refresh_token (Django):', '{django_refresh_token}');
-    console.log('');
-    console.log('=== SLACK TOKENS (use for /slack/login/) ===');
-    console.log('bot_access_token:', '{bot_token}');
-    console.log('user_access_token:', '{user_access_token}');
-    console.log('slack_user_id:', '{user_id}');
-    console.log('email:', '{email}');
-    console.log('================================================');
-
-    var seconds = 50;
-    var timer = setInterval(function() {{
-        seconds--;
-        document.getElementById('countdown').innerText = seconds;
-        if (seconds <= 0) {{
-            clearInterval(timer);
-            window.location.href = '{slack_redirect_url}';
-        }}
-    }}, 1000);
-</script>
-</body></html>"""
-            return HttpResponse(html)
+            return HttpResponseRedirect(slack_redirect_url)
 
         except Exception as e:
             logger.exception("Slack OAuth callback exception")
             return self._html_response(success=False, error=str(e))
 
-    # def _html_response(self, success=True, data=None, error=None):
-    #     """
-    #     Returns a minimal HTML:
-    #       - Sends result via postMessage to parent window
-    #       - Closes popup after a short delay
-    #     """
-    #     payload = {"success": success}
-    #     if success:
-    #         payload.update(data or {})
-    #     else:
-    #         payload.update({"error": error})
-
-    #     html = f"""
-    #     <html>
-    #     <head>
-    #         <title>Slack OAuth</title>
-    #          <script>
-    #             (function() {{
-    #                 var payload = {json.dumps(payload)};
-    #                 console.log("Slack OAuth finished:", payload);
-    #                 if (window.opener) {{
-    #                     window.opener.postMessage({
-    #                         type: "slack-auth-success",
-    #                         payload: payload
-    #                     }, "*");
-    #                 }}
-    #                 window.close();
-    #             }})();
-    #         </script>
-    #     </head>
-    #     <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
-    #         <h2>Slack login successful 🎉</h2>
-    #         <p>You can close this window now.</p>
-    #     </body>
-    #     </html>
-    #     """
-    #     return HttpResponse(html)
-    
     def _html_response(self, success=True, data=None, error=None):
         """
         Returns a minimal HTML:
@@ -2699,84 +2644,6 @@ class SlackOAuthCallbackView(APIView):
         </html>
         """
         return HttpResponse(html)
-             
-# class SlackLoginView(APIView):
-#     """
-#     Slack Login API
-#     Takes bot_access_token and user_access_token from callback response,
-#     fetches Slack user info, and saves user to database.
-#     """
-#     permission_classes = [permissions.AllowAny]
-
-#     def post(self, request):
-#         # ✅ Validate incoming tokens
-#         serializer = SlackLoginSerializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
-
-#         bot_token = serializer.validated_data["bot_access_token"]
-#         user_token = serializer.validated_data["user_access_token"]
-
-#         # ✅ Step 1: Get Slack user info
-#         user_info_response = requests.get(
-#             "https://slack.com/api/users.identity",
-#             headers={"Authorization": f"Bearer {user_token}"}
-#         )
-#         user_info = user_info_response.json()
-
-#         if not user_info.get("ok"):
-#             return Response(
-#                 {"success": False, "error": user_info.get("error", "Unable to fetch Slack user info")},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
-#         # ✅ Step 2: Extract Slack user data
-#         user_data = user_info.get("user", {})
-#         team_data = user_info.get("team", {})
-
-#         email = user_data.get("email")
-#         name = user_data.get("name") or "Slack User"
-#         firstname = name.split()[0]
-#         lastname = " ".join(name.split()[1:]) if len(name.split()) > 1 else ""
-
-#         # ✅ Step 3: Create or update local user (no model change)
-#         user, created = User.objects.get_or_create(
-#             email=email,
-#             defaults={
-#                 "firstname": firstname,
-#                 "lastname": lastname,
-#                 "password": ""
-#             }
-#         )
-
-#         # ✅ Step 4: Optionally store Slack tokens (if SlackAuth model exists)
-#         try:
-#             SlackAuth = apps.get_model("users", "SlackAuth")
-#             SlackAuth.objects.create(
-#                 user=user,
-#                 bot_token=bot_token,
-#                 user_token=user_token,
-#                 team_id=team_data.get("id"),
-#                 team_name=team_data.get("name"),
-#             )
-#         except LookupError:
-#             pass  # skip if SlackAuth model not present
-
-#         # ✅ Step 5: Return clean response
-#         return Response({
-#             "success": True,
-#             "message": "Slack user login successful",
-#             "user": {
-#                 "id": user.id,
-#                 "email": user.email,
-#                 "name": f"{user.firstname} {user.lastname}"
-#             },
-#             "team": team_data,
-#             "tokens": {
-#                 "bot_access_token": bot_token,
-#                 "user_access_token": user_token
-#             }
-#         }, status=status.HTTP_200_OK)
-        
                         
      
 class SlackLoginView(APIView):
@@ -3054,61 +2921,6 @@ class SlackValidateTokenView(APIView):
                 'message': f'Error validating token: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
-
-# class SlackLoginView(APIView):
-#     """
-#     Slack Login API
-#     Logs in the user using bot and user access tokens.
-#     Fetches all Slack user info and stores user locally.
-#     """
-#     permission_classes = [permissions.AllowAny]
-
-#     def post(self, request):
-#         serializer = SlackLoginSerializer(data=request.data)
-#         if not serializer.is_valid():
-#             return Response(
-#                 {"success": False, "errors": serializer.errors},
-#                 status=status.HTTP_400_BAD_REQUEST,
-#             )
-
-#         validated_data = serializer.validated_data
-#         user, created = serializer.create_or_update_user(validated_data)
-
-#         profile = validated_data["user_info"].get("user", {}).get("profile", {})
-#         team = validated_data["team_info"].get("team", {})
-
-#         response_data = {
-#             "success": True,
-#             "message": "Slack user login successful",
-#             "bot_data": {
-#                 "ok": validated_data["bot_auth"].get("ok"),
-#                 "bot_user_id": validated_data["bot_auth"].get("user_id"),
-#                 "team_id": validated_data["bot_auth"].get("team_id"),
-#                 "team": validated_data["bot_auth"].get("team"),
-#             },
-#             "user_data": {
-#                 "ok": validated_data["user_auth"].get("ok"),
-#                 "user_id": validated_data["user_auth"].get("user_id"),
-#                 "team_id": validated_data["user_auth"].get("team_id"),
-#                 "user_name": validated_data.get("name"),
-#                 "email": validated_data.get("email"),
-#                 "image_512": profile.get("image_512"),
-#                 "title": profile.get("title"),
-#                 "phone": profile.get("phone"),
-#             },
-#             "team_info": {
-#                 "ok": validated_data["team_info"].get("ok"),
-#                 "team": team,
-#             },
-#             "local_user": {
-#                 "id": user.id,
-#                 "email": user.email,
-#                 "name": user.first_name,
-#                 "created": created,
-#             },
-#         }
-
-#         return Response(response_data, status=status.HTTP_200_OK)
     
     
 class SendSlackMessageView(APIView):

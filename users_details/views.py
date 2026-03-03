@@ -16,10 +16,10 @@ logger = logging.getLogger('users_details')
 
 
 ROLE_TO_SLACK_CHANNEL = {
-    "Patch Management": "patch-management",
-    "Configuration Management": "configuration-management",
-    "Network Security": "network-security",
-    "Architectural Flaws": "architectural-flaws",
+    "Patch Management": "Patch-Management",
+    "Configuration Management": "Configuration-Management",
+    "Network Security": "Network-Security",
+    "Architectural Flaws": "Architectural-Flaws",
 }
 
 
@@ -265,9 +265,10 @@ class UserDetailCreateView(generics.CreateAPIView):
                 roles=roles,
             )
 
-            # Sync with Microsoft Teams channels if access_token and team_id provided
+            # Sync with Microsoft Teams channels
+            # Use token from request, or fall back to admin's stored token
             teams_sync_result = []
-            ms_access_token = request.data.get("access_token")
+            ms_access_token = request.data.get("access_token") or getattr(request.user, 'ms_access_token', None)
             team_id = user_detail.team_id or request.data.get("team_id")
             if ms_access_token and team_id and roles:
                 teams_sync_result = sync_member_to_teams_channels(
@@ -277,10 +278,27 @@ class UserDetailCreateView(generics.CreateAPIView):
                     member_roles=roles
                 )
 
-            # Sync with Slack channels if slack_bot_token and slack_user_id provided
+            # Sync with Slack channels
+            # Use token from request, or fall back to admin's stored bot token
             slack_sync_result = []
-            slack_bot_token = request.data.get("slack_bot_token")
+            slack_bot_token = request.data.get("slack_bot_token") or getattr(request.user, 'slack_bot_token', None)
             slack_user_id = request.data.get("slack_user_id")
+
+            # Auto-lookup Slack user ID by email if not provided but bot token available
+            if slack_bot_token and not slack_user_id and email:
+                try:
+                    lookup_resp = requests.get(
+                        "https://slack.com/api/users.lookupByEmail",
+                        params={"email": email},
+                        headers={"Authorization": f"Bearer {slack_bot_token}"},
+                        timeout=5
+                    )
+                    lookup_data = lookup_resp.json()
+                    if lookup_data.get("ok"):
+                        slack_user_id = lookup_data.get("user", {}).get("id")
+                except Exception:
+                    pass
+
             if slack_bot_token and slack_user_id and roles:
                 slack_results, channel_ids = sync_member_to_slack_channels(
                     bot_token=slack_bot_token,
@@ -321,24 +339,6 @@ class UserDetailCreateView(generics.CreateAPIView):
             )
             
             
-            
-# class UserDetailListView(generics.ListAPIView):
-#     serializer_class = UserDetailSerializer
-#     permission_classes = [permissions.IsAuthenticated]
-
-#     def get_queryset(self):
-#         admin_id = self.request.query_params.get("admin_id")
-#         location_id = self.request.query_params.get("location_id")
-
-#         queryset = UserDetail.objects.all().order_by("-created_at")
-#         if admin_id:
-#             queryset = queryset.filter(admin__id=admin_id)
-#         if location_id:
-#             try:
-#                 queryset = queryset.filter(location__id=ObjectId(location_id))
-#             except Exception:
-#                 pass
-#         return queryset
 
 
 class UserDetailListView(generics.ListAPIView):

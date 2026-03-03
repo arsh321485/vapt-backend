@@ -52,6 +52,7 @@ urlpatterns = [
         name="closed-vulnerabilities-by-asset"
     ),
 
+#create Fix Vulnerability Steps 
     path(
         "fix-vulnerability/<str:fix_vuln_id>/step-complete/",
         FixVulnerabilityStepsAPIView.as_view(),
