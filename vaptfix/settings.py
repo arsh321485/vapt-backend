@@ -14,7 +14,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
-DEBUG = os.getenv("DEBUG", "True") == "True"
+DEBUG = os.getenv("DEBUG", "False") == "True"
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
@@ -105,8 +105,14 @@ DATABASES = {
         'NAME': 'vaptfix',
         'CLIENT': {
             'host': 'mongodb+srv://arshmittal740:ARSHMITTAL12@cluster0.9cj3n.mongodb.net/',
+            'maxPoolSize': 50,
+            'minPoolSize': 5,
+            'maxIdleTimeMS': 45000,
+            'serverSelectionTimeoutMS': 5000,
+            'connectTimeoutMS': 5000,
+            'socketTimeoutMS': 10000,
+            'retryWrites': True,
         }
-        # 'CLIENT': {'host': os.getenv("MONGO_DB_URL")}
     }
 }
 

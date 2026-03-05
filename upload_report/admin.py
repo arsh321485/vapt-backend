@@ -88,9 +88,10 @@ class UploadReportAdminForm(forms.ModelForm):
         # Build choices list for admin dropdown (show only email)
         choices = [('', '--- Select Admin ---')]
         try:
-            for user in User.objects.all():
-                if user.is_staff:
-                    choices.append((str(user.id), user.email))
+            choices += [
+                (str(uid), email)
+                for uid, email in User.objects.filter(is_staff=True).values_list('id', 'email')
+            ]
         except Exception:
             pass
 

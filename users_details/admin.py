@@ -123,21 +123,26 @@ def team_list_view(request):
     total_members = 0
 
     try:
-        # Get all admins that have team members
-        admin_ids = UserDetail.objects.values_list('admin_id', flat=True).distinct()
-        for admin_id in admin_ids:
-            try:
-                admin_user = User.objects.get(id=admin_id)
-                admin_email = admin_user.email
-            except User.DoesNotExist:
-                admin_email = str(admin_id)
-
-            count = UserDetail.objects.filter(admin_id=admin_id).count()
+        from django.db.models import Count
+        # Single query: get each admin_id with member count
+        admin_counts = (
+            UserDetail.objects
+            .values('admin_id')
+            .annotate(member_count=Count('_id'))
+        )
+        admin_id_list = [row['admin_id'] for row in admin_counts]
+        # Single query: fetch all admin emails at once
+        email_map = {
+            str(uid): email
+            for uid, email in User.objects.filter(id__in=admin_id_list).values_list('id', 'email')
+        }
+        for row in admin_counts:
+            aid = str(row['admin_id'])
+            count = row['member_count']
             total_members += count
-
             admins_data.append({
-                "admin_id": str(admin_id),
-                "admin_email": admin_email,
+                "admin_id": aid,
+                "admin_email": email_map.get(aid, aid),
                 "member_count": count,
             })
     except Exception:

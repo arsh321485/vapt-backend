@@ -4204,12 +4204,11 @@ class SlackEventsView(APIView):
         elif etype in ("channel_deleted", "channel_archive"):
             ch_id = event.get("channel")
             logger.info(f"Slack channel {etype}: {ch_id}")
-            for ud in UserDetail.objects.all():
-                ids = ud.slack_channel_ids or []
-                if ch_id in ids:
-                    ids.remove(ch_id)
-                    ud.slack_channel_ids = ids
-                    ud.save()
+            for ud in UserDetail.objects.filter(slack_channel_ids__contains=ch_id):
+                ids = list(ud.slack_channel_ids or [])
+                ids.remove(ch_id)
+                ud.slack_channel_ids = ids
+                ud.save()
 
         elif etype == "channel_unarchive":
             logger.info(f"Slack channel unarchived: {event.get('channel')}")

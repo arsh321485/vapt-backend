@@ -1293,30 +1293,120 @@ class FixVulnerabilityStepsAPIView(APIView):
     """
     Returns Steps to Fix for the selected vulnerability.
 
+    Steps are fetched from vulnerability_cards.mitigation_table (matched by plugin_name),
+    grouped by Step No. Each step includes both Windows and Linux variants.
+    Total step count is dynamic (from mitigation_table), not hardcoded.
+
     GET: Fetch all steps with:
-        - Step description
-        - Assigned team name
-        - Assigned team member name
+        - Step data (Windows + Linux variants from mitigation_table)
+        - Assigned team name / member
         - Deadline (if available)
         - Step status (pending/completed)
+        - is_locked / is_current flags for UI navigation
         - Feedback (if any)
+        - operating_system detected from nessus host_information
 
-    POST: Create/Update a step
+    POST: Complete/Update a step (sequential enforcement)
+        Required:
+            - step_number: int
+        Optional:
+            - status: "completed" | "pending"  (default: "completed")
+            - comment: string
+            - step_description: string override
+            - deadline: string
+            - assigned_member_id: string
 
-    Steps are linked to the Fix Vulnerability record.
+    Auto-closes vulnerability after ALL steps are completed (dynamic count).
+    Feedback is only submittable after vulnerability is closed.
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser]
 
-    # Default step descriptions
+    # Fallback descriptions used when mitigation_table is empty
     DEFAULT_STEP_DESCRIPTIONS = {
         1: "Initial Assessment - Identify and document the vulnerability scope",
         2: "Risk Analysis - Evaluate potential impact and prioritize remediation",
         3: "Solution Planning - Design and document the fix approach",
         4: "Implementation - Apply the fix or mitigation",
         5: "Testing & Validation - Verify the fix resolves the vulnerability",
-        6: "Documentation & Closure - Complete documentation and close the issue"
+        6: "Documentation & Closure - Complete documentation and close the issue",
     }
+
+    def _parse_mitigation_steps(self, mitigation_table):
+        """
+        Group mitigation_table rows by step_no (snake_case keys, as stored by _parse_markdown_table).
+        Returns (steps_dict, ordered_step_numbers).
+
+        All fields from each row are returned dynamically.
+        steps_dict[step_num] = {
+            "step_name": ...,
+            "criticality": ...,
+            "effort_estimate": ...,
+            "windows": { all OS-specific fields from Windows row },
+            "linux":   { all OS-specific fields from Linux row },
+        }
+        """
+        # Keys that are step-level meta (not OS-specific data)
+        META_KEYS = {"step_no", "step_name", "criticality", "effort_estimate", "operating_system"}
+
+        steps_dict = {}
+        step_order = []
+
+        for row in mitigation_table:
+            try:
+                step_num = int(row.get("step_no", 0))
+            except (ValueError, TypeError):
+                continue
+            if step_num <= 0:
+                continue
+
+            os_raw = (row.get("operating_system") or "").strip().lower()
+            os_key = "linux" if "linux" in os_raw else "windows"
+
+            # Return ALL fields dynamically — every column the AI generated
+            os_data = {k: v for k, v in row.items() if k not in META_KEYS}
+
+            if step_num not in steps_dict:
+                steps_dict[step_num] = {
+                    "step_name": row.get("step_name", f"Step {step_num}"),
+                    "criticality": row.get("criticality", ""),
+                    "effort_estimate": row.get("effort_estimate", ""),
+                    "windows": {},
+                    "linux": {},
+                }
+                step_order.append(step_num)
+
+            steps_dict[step_num][os_key] = os_data
+
+        step_order.sort()
+        return steps_dict, step_order
+
+    def _get_host_os(self, db, report_id, host_name):
+        """
+        Detect OS from nessus_reports host_information for the matching host.
+        Returns "Windows", "Linux", or None.
+        """
+        nessus_doc = db[NESSUS_COLLECTION].find_one({"report_id": str(report_id)})
+        if not nessus_doc:
+            return None
+        for h in nessus_doc.get("vulnerabilities_by_host", []):
+            if h.get("host_name") == host_name:
+                host_info = h.get("host_information", {})
+                os_raw = (
+                    host_info.get("operating-system")
+                    or host_info.get("OS")
+                    or host_info.get("os")
+                    or ""
+                )
+                if os_raw:
+                    os_lower = os_raw.lower()
+                    if "windows" in os_lower:
+                        return "Windows"
+                    if "linux" in os_lower or "unix" in os_lower:
+                        return "Linux"
+                    return os_raw
+                break
+        return None
 
     # =====================
     # GET → Fetch steps
@@ -1328,7 +1418,7 @@ class FixVulnerabilityStepsAPIView(APIView):
             closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
             feedback_coll = db[FIX_STEP_FEEDBACK_COLLECTION]
 
-            # 🔍 Check active OR closed
+            # Check active OR closed
             fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
             status_value = "open"
 
@@ -1343,132 +1433,157 @@ class FixVulnerabilityStepsAPIView(APIView):
                     )
                 status_value = "closed"
 
-            # Fetch vulnerability_cards data for this fix vulnerability
-            vuln_card = db[VULN_CARD_COLLECTION].find_one({
-                "report_id": fix_doc.get("report_id", ""),
-                "vulnerability_name": fix_doc.get("plugin_name", "")
-            }) or {}
+            report_id = fix_doc.get("report_id", "")
+            host_name = fix_doc.get("host_name", "")
+            plugin_name = fix_doc.get("plugin_name", "")
 
-            # Get assigned_team, mitigation_table, deadline, artifacts_tools from vulnerability_cards
+            # Fetch vulnerability_cards: match by report_id + vulnerability_name + host_name
+            # Fallback: match without host_name if not found
+            vuln_card = (
+                db[VULN_CARD_COLLECTION].find_one({
+                    "report_id": report_id,
+                    "vulnerability_name": plugin_name,
+                    "host_name": host_name,
+                })
+                or db[VULN_CARD_COLLECTION].find_one({
+                    "report_id": report_id,
+                    "vulnerability_name": plugin_name,
+                })
+                or {}
+            )
+
             assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
             assigned_team_members = fix_doc.get("assigned_team_members", [])
             mitigation_table = vuln_card.get("mitigation_table", [])
             deadline = vuln_card.get("deadline")
             artifacts_tools = vuln_card.get("artifacts_tools")
 
-            # Fetch existing steps
-            existing_steps = list(
-                steps_coll.find(
-                    {"fix_vulnerability_id": fix_vuln_id}
-                ).sort("step_number", 1)
-            )
+            # Parse mitigation_table into structured per-step data
+            steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
 
-            # Build steps list — only include steps that exist in the database
+            # Fallback to 6 default steps if mitigation_table is empty
+            if not step_order:
+                step_order = list(range(1, 7))
+                steps_dict = {
+                    n: {
+                        "step_name": self.DEFAULT_STEP_DESCRIPTIONS[n],
+                        "criticality": "",
+                        "effort_estimate": "",
+                        "windows": {},
+                        "linux": {},
+                    }
+                    for n in step_order
+                }
+
+            total_steps = len(step_order)
+
+            # Saved step records from DB, indexed by step_number
+            saved_steps = {
+                s["step_number"]: s
+                for s in steps_coll.find({"fix_vulnerability_id": fix_vuln_id})
+            }
+
+            # Detect host OS from nessus report
+            operating_system = self._get_host_os(db, report_id, host_name)
+
+            # Build step list
             steps = []
-            previous_completed = True  # Step 1 has no previous step
+            previous_completed = True  # step 1 has no predecessor
 
-            for existing_step in existing_steps:
-                step_num = existing_step.get("step_number")
-                current_status = existing_step.get("status", "pending")
+            for step_num in step_order:
+                step_meta = steps_dict[step_num]
+                saved = saved_steps.get(step_num)
+                current_status = saved.get("status", "pending") if saved else "pending"
 
-                # Get feedback for this step
+                is_locked = not previous_completed and current_status != "completed"
+                is_current = previous_completed and current_status == "pending"
+
                 step_feedback = feedback_coll.find_one({
                     "fix_vulnerability_id": fix_vuln_id,
-                    "step_number": step_num
+                    "step_number": step_num,
                 })
 
-                # Determine if step is locked (previous step not completed)
-                is_locked = not previous_completed and current_status != "completed"
-
                 step_data = {
-                    "_id": str(existing_step.get("_id", "")),
+                    "_id": str(saved["_id"]) if saved else "",
                     "step_number": step_num,
-                    "step_description": existing_step.get(
-                        "step_description",
-                        self.DEFAULT_STEP_DESCRIPTIONS.get(step_num, f"Step {step_num}")
-                    ),
+                    "step_name": step_meta["step_name"],
+                    "criticality": step_meta["criticality"],
+                    "effort_estimate": step_meta["effort_estimate"],
+                    "windows": step_meta["windows"],
+                    "linux": step_meta["linux"],
                     "assigned_team": assigned_team,
                     "assigned_team_members": [
                         {
                             "user_id": m.get("user_id"),
                             "name": m.get("name"),
-                            "email": m.get("email")
+                            "email": m.get("email"),
                         }
                         for m in assigned_team_members
                     ],
-                    "deadline": existing_step.get("deadline"),
+                    "deadline": (saved.get("deadline") if saved else None) or deadline,
                     "status": current_status,
                     "is_locked": is_locked,
-                    "comment": existing_step.get("comment", ""),
-                    "created_at": _normalize_iso(existing_step.get("created_at")),
-                    "updated_at": _normalize_iso(existing_step.get("updated_at")),
-                    "feedback": None
+                    "is_current": is_current,
+                    "comment": saved.get("comment", "") if saved else "",
+                    "created_at": _normalize_iso(saved.get("created_at")) if saved else None,
+                    "updated_at": _normalize_iso(saved.get("updated_at")) if saved else None,
+                    "feedback": None,
                 }
 
-                # Include feedback if exists
                 if step_feedback:
                     step_data["feedback"] = {
                         "feedback_id": str(step_feedback.get("_id")),
                         "feedback_comment": step_feedback.get("feedback_comment", ""),
                         "fix_status": step_feedback.get("fix_status", ""),
                         "submitted_at": _normalize_iso(step_feedback.get("submitted_at")),
-                        "submitted_by": step_feedback.get("submitted_by")
+                        "submitted_by": step_feedback.get("submitted_by"),
                     }
 
                 steps.append(step_data)
-
-                # Update previous_completed for next iteration
                 previous_completed = (current_status == "completed")
 
-            # Count completed steps and determine next step
             completed_count = sum(1 for s in steps if s["status"] == "completed")
-            next_step = completed_count + 1 if completed_count < 6 else None
+            next_step = (completed_count + 1) if completed_count < total_steps else None
 
-            # Get admin info from request
             admin_id = str(request.user.id)
-            admin_email = getattr(request.user, 'email', '')
+            admin_email = getattr(request.user, "email", "")
 
             return Response(
                 {
                     "message": "Steps fetched successfully",
-                    "report_id": fix_doc.get("report_id", ""),
+                    "report_id": report_id,
                     "fix_vulnerability_id": fix_vuln_id,
                     "admin_id": admin_id,
                     "admin_email": admin_email,
-                    "vulnerability_name": fix_doc.get("plugin_name", ""),
-                    "asset": fix_doc.get("host_name", ""),
+                    "vulnerability_name": plugin_name,
+                    "asset": host_name,
                     "severity": fix_doc.get("risk_factor", ""),
+                    "operating_system": operating_system,
                     "assigned_team": assigned_team,
                     "deadline": deadline,
                     "artifacts_tools": artifacts_tools,
-                    "mitigation_table": mitigation_table,
                     "status": status_value,
                     "completed_steps": completed_count,
-                    "total_steps": 6,
+                    "total_steps": total_steps,
                     "next_step": next_step,
-                    "steps": steps
+                    "steps": steps,
                 },
-                status=status.HTTP_200_OK
+                status=status.HTTP_200_OK,
             )
 
     # =====================
-    # POST → Create / Update step (SEQUENTIAL)
+    # POST → Complete next step (AUTO-SEQUENTIAL)
+    # step_number and step_name are auto-fetched from vulnerability_cards mitigation_table
+    # Frontend only passes: status (optional), comment (optional)
+    # Body: { "comment": "...", "status": "completed" }
     # =====================
     def post(self, request, fix_vuln_id):
         admin_id = str(request.user.id)
 
-        step_number = request.data.get("step_number")
         comment = request.data.get("comment", "")
         step_status = request.data.get("status", "completed")
-        step_description = request.data.get("step_description")
         deadline = request.data.get("deadline")
         assigned_member_id = request.data.get("assigned_member_id")
-
-        if step_number not in [1, 2, 3, 4, 5, 6]:
-            return Response(
-                {"detail": "step_number must be between 1 and 6"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
         with MongoContext() as db:
             fix_coll = db[FIX_VULN_COLLECTION]
@@ -1479,108 +1594,109 @@ class FixVulnerabilityStepsAPIView(APIView):
             if not fix_doc:
                 return Response(
                     {"detail": "Fix vulnerability not found or already closed"},
-                    status=status.HTTP_404_NOT_FOUND
+                    status=status.HTTP_404_NOT_FOUND,
                 )
 
-            # =====================
-            # SEQUENTIAL VALIDATION
-            # =====================
-            # Check if previous steps are completed (Steps must be done one by one)
-            if step_number > 1:
-                # Count how many steps before this one are completed
-                previous_completed = steps_coll.count_documents({
-                    "fix_vulnerability_id": fix_vuln_id,
-                    "step_number": {"$lt": step_number},
-                    "status": "completed"
+            # Fetch mitigation_table from vulnerability_cards
+            plugin_name = fix_doc.get("plugin_name", "")
+            report_id = fix_doc.get("report_id", "")
+            host_name = fix_doc.get("host_name", "")
+            vuln_card = (
+                db[VULN_CARD_COLLECTION].find_one({
+                    "report_id": report_id,
+                    "vulnerability_name": plugin_name,
+                    "host_name": host_name,
                 })
+                or db[VULN_CARD_COLLECTION].find_one({
+                    "report_id": report_id,
+                    "vulnerability_name": plugin_name,
+                })
+                or {}
+            )
+            mitigation_table = vuln_card.get("mitigation_table", [])
+            steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
+            total_steps = len(step_order) if step_order else 6
 
-                required_completed = step_number - 1
+            # Auto-determine current step: count completed steps → next in order
+            completed_count = steps_coll.count_documents({
+                "fix_vulnerability_id": fix_vuln_id,
+                "status": "completed",
+            })
 
-                if previous_completed < required_completed:
-                    # Find which step needs to be completed first
-                    next_required = previous_completed + 1
-                    return Response(
-                        {
-                            "detail": f"Steps must be completed sequentially. Please complete Step {next_required} first.",
-                            "current_step": step_number,
-                            "next_required_step": next_required,
-                            "completed_steps": previous_completed
-                        },
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+            if completed_count >= total_steps:
+                return Response(
+                    {
+                        "detail": "All steps are already completed.",
+                        "completed_steps": completed_count,
+                        "total_steps": total_steps,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # step_number and step_name fetched from mitigation_table
+            step_number = step_order[completed_count] if step_order else (completed_count + 1)
+            step_name = (
+                steps_dict[step_number]["step_name"]
+                if step_number in steps_dict
+                else self.DEFAULT_STEP_DESCRIPTIONS.get(step_number, f"Step {step_number}")
+            )
 
             # Build update document
             update_fields = {
                 "status": step_status,
+                "step_name": step_name,
                 "comment": comment,
                 "updated_by": admin_id,
-                "updated_at": datetime.utcnow()
+                "updated_at": datetime.utcnow(),
             }
-
-            # Add optional fields if provided
-            if step_description:
-                update_fields["step_description"] = step_description
-            else:
-                update_fields["step_description"] = self.DEFAULT_STEP_DESCRIPTIONS.get(
-                    step_number, f"Step {step_number}"
-                )
 
             if deadline:
                 update_fields["deadline"] = deadline
 
             if assigned_member_id:
-                # Find the member from assigned_team_members
-                assigned_member = None
                 for member in fix_doc.get("assigned_team_members", []):
                     if member.get("user_id") == assigned_member_id:
-                        assigned_member = member
+                        update_fields["assigned_member"] = member
                         break
-                if assigned_member:
-                    update_fields["assigned_member"] = assigned_member
 
-            # 🔁 UPSERT STEP (create OR update)
+            # UPSERT STEP (create OR update)
             steps_coll.update_one(
                 {
                     "fix_vulnerability_id": fix_vuln_id,
-                    "step_number": step_number
+                    "step_number": step_number,
                 },
                 {
                     "$set": update_fields,
                     "$setOnInsert": {
                         "created_at": datetime.utcnow(),
-                        "created_by": admin_id
-                    }
+                        "created_by": admin_id,
+                    },
                 },
-                upsert=True
+                upsert=True,
             )
 
-            # Fetch the step document to get its _id
             step_doc = steps_coll.find_one({
                 "fix_vulnerability_id": fix_vuln_id,
-                "step_number": step_number
+                "step_number": step_number,
             })
             step_id = str(step_doc["_id"]) if step_doc else ""
 
-            # ✅ Count completed steps
+            # Recount completed steps after upsert
             completed_steps = steps_coll.count_documents({
                 "fix_vulnerability_id": fix_vuln_id,
-                "status": "completed"
+                "status": "completed",
             })
 
-            # 🔒 AUTO CLOSE ON STEP 6
-            if completed_steps == 6:
+            # AUTO CLOSE when all steps completed
+            if completed_steps >= total_steps:
                 closed_doc = fix_doc.copy()
-
-                # 🔑 keep reference of original fix
                 closed_doc["fix_vulnerability_id"] = str(fix_doc["_id"])
                 closed_doc.pop("_id", None)
-
                 closed_doc.update({
                     "status": "closed",
                     "closed_at": datetime.utcnow(),
-                    "closed_by": admin_id
+                    "closed_by": admin_id,
                 })
-
                 closed_coll.insert_one(closed_doc)
                 fix_coll.delete_one({"_id": ObjectId(fix_vuln_id)})
 
@@ -1589,31 +1705,45 @@ class FixVulnerabilityStepsAPIView(APIView):
                         "message": "All steps completed. Fix vulnerability closed.",
                         "status": "closed",
                         "completed_steps": completed_steps,
+                        "total_steps": total_steps,
                         "step_saved": {
                             "fix_vulnerability_id": fix_vuln_id,
                             "fix_vulnerability_step_id": step_id,
                             "step_number": step_number,
+                            "step_name": step_name,
                             "status": step_status,
-                            "assigned_team": fix_doc.get("assigned_team", "")
-                        }
+                            "assigned_team": fix_doc.get("assigned_team", ""),
+                        },
                     },
-                    status=status.HTTP_200_OK
+                    status=status.HTTP_200_OK,
                 )
+
+            # Prepare next step info for UI
+            next_step_number = step_order[completed_steps] if step_order and completed_steps < len(step_order) else None
+            next_step_name = (
+                steps_dict[next_step_number]["step_name"]
+                if next_step_number and next_step_number in steps_dict
+                else None
+            )
 
             return Response(
                 {
                     "message": f"Step {step_number} saved successfully",
                     "status": "open",
                     "completed_steps": completed_steps,
+                    "total_steps": total_steps,
+                    "next_step": next_step_number,
+                    "next_step_name": next_step_name,
                     "step_saved": {
                         "fix_vulnerability_id": fix_vuln_id,
                         "fix_vulnerability_step_id": step_id,
                         "step_number": step_number,
+                        "step_name": step_name,
                         "status": step_status,
-                        "assigned_team": fix_doc.get("assigned_team", "")
-                    }
+                        "assigned_team": fix_doc.get("assigned_team", ""),
+                    },
                 },
-                status=status.HTTP_200_OK
+                status=status.HTTP_200_OK,
             )
   
 

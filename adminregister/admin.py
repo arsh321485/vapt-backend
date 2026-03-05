@@ -152,13 +152,10 @@ def _format_datetime(dt):
 
 
 def _get_admin_email_map():
-    email_map = {}
     try:
-        for user in User.objects.all():
-            email_map[str(user.id)] = user.email
+        return {str(uid): email for uid, email in User.objects.values_list('id', 'email')}
     except Exception:
-        pass
-    return email_map
+        return {}
 
 
 def _get_admin_email_by_id(admin_id):

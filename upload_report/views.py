@@ -1377,8 +1377,6 @@ class GenerateVulnerabilityCardView(APIView):
                 {"error": "Generation failed", "detail": str(exc)},
                 status=500,
             )
-        finally:
-            client.close()
 
 
 class VulnerabilityCardListView(APIView):
@@ -1440,8 +1438,6 @@ class VulnerabilityCardListView(APIView):
                 {"error": "Failed to retrieve cards", "detail": str(exc)},
                 status=500,
             )
-        finally:
-            client.close()
 
 
 class VulnerabilityCardDetailView(APIView):
@@ -1488,5 +1484,3 @@ class VulnerabilityCardDetailView(APIView):
                 {"error": "Failed to retrieve card", "detail": str(exc)},
                 status=500,
             )
-        finally:
-            client.close()
