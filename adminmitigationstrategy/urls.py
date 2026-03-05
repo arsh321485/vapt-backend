@@ -1,21 +1,13 @@
 from django.urls import path
 from .views import (
-    MitigationStrategyLatestAPIView,
-    MitigationStrategyByHostAPIView,
+    MitigationStrategyByTeamAPIView,
 )
 
 urlpatterns = [
-    # All vulnerabilities from latest report (host_name, os, plugin_name, risk_factor, status)
+    # Vulnerabilities grouped by assigned_team (from vulnerability_cards)
     path(
-        "latest/",
-        MitigationStrategyLatestAPIView.as_view(),
-        name="mitigation-strategy-latest",
-    ),
-
-    # Vulnerabilities for a specific host from latest report
-    path(
-        "host/<str:host_name>/vulnerabilities/",
-        MitigationStrategyByHostAPIView.as_view(),
-        name="mitigation-strategy-by-host",
+        "by-team/",
+        MitigationStrategyByTeamAPIView.as_view(),
+        name="mitigation-strategy-by-team",
     ),
 ]
