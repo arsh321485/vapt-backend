@@ -7,7 +7,7 @@ from .models import RiskCriteria
 from .serializers import (
     RiskCriteriaSerializer,
     RiskCriteriaCreateSerializer,
-    RiskCriteriaUpdateSerializer
+    RiskCriteriaUpdateSerializer,
 )
 import logging
 
@@ -21,9 +21,13 @@ class RiskCriteriaCreateView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        risk_criteria = serializer.save()
+        # admin is always the authenticated user — not taken from request body
+        risk_criteria = serializer.save(admin=request.user)
         data = RiskCriteriaSerializer(risk_criteria).data
-        return Response({"message": "Risk Criteria created successfully", "risk_criteria": data}, status=201)
+        return Response(
+            {"message": "Risk Criteria created successfully", "risk_criteria": data},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class RiskCriteriaListView(generics.ListAPIView):
@@ -31,31 +35,20 @@ class RiskCriteriaListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = RiskCriteria.objects.all().order_by('-created_at')
-        admin_id = self.request.query_params.get('admin_id')
-        if admin_id:
-            queryset = queryset.filter(admin__id=admin_id)
-        return queryset
+        # Always filter by the authenticated admin — no query param needed
+        return RiskCriteria.objects.filter(admin=self.request.user).order_by('-created_at')
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
-        return Response({"message": "Risk Criteria retrieved successfully", "count": len(serializer.data), "risk_criteria": serializer.data}, status=200)
-
-
-# class RiskCriteriaDetailView(generics.RetrieveAPIView):
-#     serializer_class = RiskCriteriaSerializer
-#     permission_classes = [IsAuthenticated]
-
-#     def get_object(self):
-#         risk_id = self.kwargs.get('risk_id')
-#         obj_id = ObjectId(risk_id)
-#         return get_object_or_404(RiskCriteria, _id=obj_id)
-
-#     def retrieve(self, request, *args, **kwargs):
-#         instance = self.get_object()
-#         serializer = self.get_serializer(instance)
-#         return Response({"message": "Risk Criteria retrieved successfully", "risk_criteria": serializer.data}, status=200)
+        return Response(
+            {
+                "message": "Risk Criteria retrieved successfully",
+                "count": len(serializer.data),
+                "risk_criteria": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class RiskCriteriaDetailView(generics.RetrieveAPIView):
@@ -64,31 +57,21 @@ class RiskCriteriaDetailView(generics.RetrieveAPIView):
 
     def get_object(self):
         risk_id = self.kwargs.get('risk_id')
-
         try:
             obj_id = ObjectId(risk_id)
         except Exception:
-            return Response(
-                {"detail": "Invalid Risk Criteria ID"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Invalid Risk Criteria ID")
 
-        # 🔐 IMPORTANT: filter by BOTH id and admin
-        return get_object_or_404(
-            RiskCriteria,
-            _id=obj_id,
-            admin=self.request.user
-        )
+        # Filter by both _id AND authenticated admin
+        return get_object_or_404(RiskCriteria, _id=obj_id, admin=self.request.user)
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
         serializer = self.get_serializer(instance)
         return Response(
-            {
-                "message": "Risk Criteria retrieved successfully",
-                "risk_criteria": serializer.data
-            },
-            status=status.HTTP_200_OK
+            {"message": "Risk Criteria retrieved successfully", "risk_criteria": serializer.data},
+            status=status.HTTP_200_OK,
         )
 
 
@@ -98,8 +81,14 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
 
     def get_object(self):
         risk_id = self.kwargs.get('risk_id')
-        obj_id = ObjectId(risk_id)
-        return get_object_or_404(RiskCriteria, _id=obj_id)
+        try:
+            obj_id = ObjectId(risk_id)
+        except Exception:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Invalid Risk Criteria ID")
+
+        # Filter by both _id AND authenticated admin
+        return get_object_or_404(RiskCriteria, _id=obj_id, admin=self.request.user)
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', True)
@@ -108,7 +97,10 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
         serializer.is_valid(raise_exception=True)
         risk_criteria = serializer.save()
         data = RiskCriteriaSerializer(risk_criteria).data
-        return Response({"message": "Risk Criteria updated successfully", "risk_criteria": data}, status=200)
+        return Response(
+            {"message": "Risk Criteria updated successfully", "risk_criteria": data},
+            status=status.HTTP_200_OK,
+        )
 
 
 class RiskCriteriaDeleteView(generics.DestroyAPIView):
@@ -116,10 +108,19 @@ class RiskCriteriaDeleteView(generics.DestroyAPIView):
 
     def get_object(self):
         risk_id = self.kwargs.get('risk_id')
-        obj_id = ObjectId(risk_id)
-        return get_object_or_404(RiskCriteria, _id=obj_id)
+        try:
+            obj_id = ObjectId(risk_id)
+        except Exception:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Invalid Risk Criteria ID")
+
+        # Filter by both _id AND authenticated admin
+        return get_object_or_404(RiskCriteria, _id=obj_id, admin=self.request.user)
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         instance.delete()
-        return Response({"message": "Risk Criteria deleted successfully"}, status=200)
+        return Response(
+            {"message": "Risk Criteria deleted successfully"},
+            status=status.HTTP_200_OK,
+        )
