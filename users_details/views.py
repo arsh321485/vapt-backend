@@ -120,9 +120,10 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
         )
         if channels_resp.status_code == 200:
             channels = channels_resp.json().get('value', [])
+            # Build O(1) lookup map instead of linear search per role
+            channel_map_display = {ch['displayName']: ch for ch in channels}
             for role in member_roles:
-                # Find the matching channel
-                matching_channel = next((ch for ch in channels if ch['displayName'] == role), None)
+                matching_channel = channel_map_display.get(role)
                 if not matching_channel:
                     results.append({"channel": role, "status": "channel_not_found"})
                     continue
