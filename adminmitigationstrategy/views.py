@@ -20,6 +20,14 @@ from upload_report.models import UploadReport
 # ── Collection names ────────────────────────────────────────────────────────
 NESSUS_COLLECTION          = "nessus_reports"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
+VULN_CARD_COLLECTION       = "vulnerability_cards"
+
+TEAM_NAMES = [
+    "Patch Management",
+    "Network Security",
+    "Architectural Flaws",
+    "Configuration Management",
+]
 
 # ── Shared MongoDB connection pool ──────────────────────────────────────────
 _mongo_client: pymongo.MongoClient = None
@@ -102,20 +110,12 @@ def _normalize_iso(dt):
 
 # ── API View ─────────────────────────────────────────────────────────────────
 
-class MitigationStrategyLatestAPIView(APIView):
+class MitigationStrategyByTeamAPIView(APIView):
     """
-    Returns vulnerabilities from the LATEST nessus report for the current Admin,
-    enriched with OS info and upload_reports status.
+    Returns vulnerabilities from latest nessus report, grouped by assigned_team.
+    Team is fetched from vulnerability_cards collection (matched by report_id + vulnerability_name + host_name).
 
-    Mirrors the logic of LatestSuperAdminVulnerabilityRegisterAPIView in adminregister,
-    adding:
-      - os         : from nessus_reports.vulnerabilities_by_host[].host_information
-      - report_status : from upload_reports.status (Django model)
-
-    GET /api/admin/adminmitigation-strategy/latest/
-
-    Response rows include:
-        host_name, os, plugin_name, risk_factor, port, protocol, vuln_status
+    GET /api/admin/adminmitigation-strategy/by-team/
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -127,184 +127,11 @@ class MitigationStrategyLatestAPIView(APIView):
             current_admin_email = getattr(request.user, "email", None)
 
             with MongoContext() as db:
-                nessus_coll = db[NESSUS_COLLECTION]
-                closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+                nessus_coll     = db[NESSUS_COLLECTION]
+                closed_coll     = db[FIX_VULN_CLOSED_COLLECTION]
+                vuln_card_coll  = db[VULN_CARD_COLLECTION]
 
-                # Find the LATEST report for this admin (by admin_id OR admin_email)
-                query_conditions = [{"admin_id": current_admin_id}]
-                if current_admin_email:
-                    query_conditions.append({"admin_email": current_admin_email})
-
-                latest_doc = nessus_coll.find_one(
-                    {"$or": query_conditions},
-                    sort=[("uploaded_at", pymongo.DESCENDING)],
-                )
-
-                if not latest_doc:
-                    return Response(
-                        {
-                            "detail": "No reports found for your account",
-                            "admin_id": current_admin_id,
-                            "admin_email": current_admin_email,
-                        },
-                        status=status.HTTP_404_NOT_FOUND,
-                    )
-
-                report_id   = latest_doc.get("report_id")
-                uploaded_at = latest_doc.get("uploaded_at")
-                admin_id    = latest_doc.get("admin_id")
-                admin_email = latest_doc.get("admin_email")
-
-                # ── Get upload_reports.status via Django ORM ──────────────
-                report_status = "unknown"
-                try:
-                    upload_obj = UploadReport.objects.filter(
-                        _id=ObjectId(report_id)
-                    ).first()
-                    if upload_obj:
-                        report_status = upload_obj.status or "unknown"
-                except Exception:
-                    report_status = "unknown"
-
-                # ── Build set of closed vulnerability keys ────────────────
-                closed_vulns = set()
-                for doc in closed_coll.find(
-                    {"report_id": str(report_id), "created_by": admin_id}
-                ):
-                    key = (
-                        doc.get("plugin_name", ""),
-                        doc.get("host_name", ""),
-                        str(doc.get("port", "")),
-                    )
-                    closed_vulns.add(key)
-
-                # ── Extract ALL vulnerabilities (first pass) ──────────────
-                all_rows = []
-
-                for host in latest_doc.get("vulnerabilities_by_host", []):
-                    host_name = host.get("host_name") or host.get("host") or ""
-                    host_info = host.get("host_information") or {}
-
-                    os_value = (
-                        host_info.get("os")
-                        or host_info.get("operating-system")
-                        or host_info.get("operating_system")
-                        or host_info.get("OS")
-                        or ""
-                    )
-
-                    for v in host.get("vulnerabilities", []):
-                        plugin_name = (
-                            v.get("plugin_name")
-                            or v.get("pluginname")
-                            or v.get("name")
-                            or ""
-                        )
-
-                        port     = v.get("port", "")
-                        protocol = v.get("protocol", "")
-
-                        risk_raw = (
-                            v.get("risk_factor")
-                            or v.get("severity")
-                            or v.get("risk")
-                            or ""
-                        )
-                        risk_factor = (
-                            risk_raw.strip().title()
-                            if isinstance(risk_raw, str)
-                            else ""
-                        )
-
-                        vuln_status = (
-                            "closed"
-                            if (plugin_name, host_name, str(port)) in closed_vulns
-                            else "open"
-                        )
-
-                        all_rows.append(
-                            {
-                                "id":          str(uuid.uuid4()),
-                                "host_name":   host_name,
-                                "os":          os_value,
-                                "plugin_name": plugin_name,
-                                "risk_factor": risk_factor,
-                                "port":        port,
-                                "protocol":    protocol,
-                                "status":      vuln_status,
-                            }
-                        )
-
-                # ── Filter rules ──────────────────────────────────────────
-                # Critical  → include ALL
-                # High / Medium / Low → include only REPEATED
-                #   (plugin_name appears on more than one host)
-
-                # Count how many distinct hosts each plugin_name appears on
-                from collections import Counter
-                plugin_host_count = Counter(
-                    r["plugin_name"]
-                    for r in all_rows
-                    if r["risk_factor"].lower() != "critical"
-                )
-
-                rows = [
-                    r for r in all_rows
-                    if r["risk_factor"].lower() == "critical"
-                    or plugin_host_count.get(r["plugin_name"], 0) > 1
-                ]
-
-                return Response(
-                    {
-                        "report_id":     str(report_id),
-                        "report_status": report_status,
-                        "admin_id":      current_admin_id,
-                        "admin_email":   current_admin_email,
-                        "uploaded_by": {
-                            "admin_id":    admin_id,
-                            "admin_email": admin_email,
-                        },
-                        "uploaded_at": _normalize_iso(uploaded_at),
-                        "count":       len(rows),
-                        "vulnerabilities": rows,
-                    },
-                    status=status.HTTP_200_OK,
-                )
-
-        except pymongo.errors.ServerSelectionTimeoutError as e:
-            return Response(
-                {"detail": "Cannot connect to MongoDB", "error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            return Response(
-                {"detail": "Unexpected error", "error": str(exc)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-
-class MitigationStrategyByHostAPIView(APIView):
-    """
-    Returns vulnerabilities for a specific host from the latest nessus report,
-    with OS and upload_reports status.
-
-    GET /api/admin/adminmitigation-strategy/host/<host_name>/vulnerabilities/
-    """
-
-    permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [JSONParser]
-
-    def get(self, request, host_name):
-        try:
-            current_admin_id    = str(request.user.id)
-            current_admin_email = getattr(request.user, "email", None)
-
-            with MongoContext() as db:
-                nessus_coll = db[NESSUS_COLLECTION]
-                closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
-
+                # Latest report for this admin
                 query_conditions = [{"admin_id": current_admin_id}]
                 if current_admin_email:
                     query_conditions.append({"admin_email": current_admin_email})
@@ -320,8 +147,8 @@ class MitigationStrategyByHostAPIView(APIView):
                         status=status.HTTP_404_NOT_FOUND,
                     )
 
-                report_id = latest_doc.get("report_id")
-                admin_id  = latest_doc.get("admin_id")
+                report_id = str(latest_doc.get("report_id", ""))
+                admin_id  = latest_doc.get("admin_id", current_admin_id)
 
                 # upload_reports status
                 report_status = "unknown"
@@ -332,29 +159,34 @@ class MitigationStrategyByHostAPIView(APIView):
                     if upload_obj:
                         report_status = upload_obj.status or "unknown"
                 except Exception:
-                    report_status = "unknown"
+                    pass
 
-                # Closed vulnerability keys
+                # Build closed vulnerability keys set
                 closed_vulns = set()
                 for doc in closed_coll.find(
-                    {"report_id": str(report_id), "created_by": admin_id}
+                    {"report_id": report_id, "created_by": admin_id}
                 ):
-                    closed_vulns.add(
-                        (
-                            doc.get("plugin_name", ""),
-                            doc.get("host_name", ""),
-                            str(doc.get("port", "")),
-                        )
-                    )
+                    closed_vulns.add((
+                        doc.get("plugin_name", ""),
+                        doc.get("host_name", ""),
+                        str(doc.get("port", "")),
+                    ))
 
-                rows = []
-                os_value = ""
+                # Bulk-fetch all vulnerability_cards for this report
+                vuln_cards = {}
+                for card in vuln_card_coll.find({"report_id": report_id}):
+                    key = (
+                        card.get("vulnerability_name", ""),
+                        card.get("host_name", ""),
+                    )
+                    vuln_cards[key] = card
+
+                # Initialize team buckets
+                teams = {name: [] for name in TEAM_NAMES}
+                teams["Unassigned"] = []
 
                 for host in latest_doc.get("vulnerabilities_by_host", []):
-                    h_name = host.get("host_name") or host.get("host") or ""
-                    if h_name != host_name:
-                        continue
-
+                    host_name = host.get("host_name") or host.get("host") or ""
                     host_info = host.get("host_information") or {}
                     os_value  = (
                         host_info.get("os")
@@ -390,35 +222,46 @@ class MitigationStrategyByHostAPIView(APIView):
                             else "open"
                         )
 
-                        rows.append(
-                            {
-                                "id":          str(uuid.uuid4()),
-                                "host_name":   host_name,
-                                "os":          os_value,
-                                "plugin_name": plugin_name,
-                                "risk_factor": risk_factor,
-                                "port":        port,
-                                "protocol":    protocol,
-                                "status":      vuln_status,
-                            }
+                        # Lookup assigned_team from vulnerability_cards
+                        card = (
+                            vuln_cards.get((plugin_name, host_name))
+                            or vuln_cards.get((plugin_name, ""))
                         )
-                    break  # found the host, no need to continue
+                        assigned_team = (card or {}).get("assigned_team", "") or ""
 
-                if not rows and not os_value:
-                    return Response(
-                        {"detail": f"Host '{host_name}' not found in the latest report"},
-                        status=status.HTTP_404_NOT_FOUND,
-                    )
+                        row = {
+                            "id":            str(uuid.uuid4()),
+                            "host_name":     host_name,
+                            "os":            os_value,
+                            "plugin_name":   plugin_name,
+                            "risk_factor":   risk_factor,
+                            "port":          port,
+                            "protocol":      protocol,
+                            "status":        vuln_status,
+                            "assigned_team": assigned_team,
+                        }
+
+                        if assigned_team in teams:
+                            teams[assigned_team].append(row)
+                        else:
+                            teams["Unassigned"].append(row)
+
+                teams_response = {
+                    team_name: {
+                        "count": len(vulns),
+                        "vulnerabilities": vulns,
+                    }
+                    for team_name, vulns in teams.items()
+                }
 
                 return Response(
                     {
-                        "report_id":     str(report_id),
+                        "report_id":     report_id,
                         "report_status": report_status,
                         "admin_id":      current_admin_id,
-                        "host_name":     host_name,
-                        "os":            os_value,
-                        "count":         len(rows),
-                        "vulnerabilities": rows,
+                        "admin_email":   current_admin_email,
+                        "uploaded_at":   _normalize_iso(latest_doc.get("uploaded_at")),
+                        "teams":         teams_response,
                     },
                     status=status.HTTP_200_OK,
                 )

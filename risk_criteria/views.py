@@ -1,6 +1,7 @@
 from rest_framework import generics, status, permissions
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
 from bson import ObjectId
 from django.shortcuts import get_object_or_404
 from .models import RiskCriteria
@@ -10,8 +11,47 @@ from .serializers import (
     RiskCriteriaUpdateSerializer,
 )
 import logging
+import calendar
+import re
+from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
+
+
+def parse_days(value):
+    """
+    Parse values like: "1", "2", "day 1", "day 3", "1 week", "2 weeks", "1 week 2 days"
+    Returns total number of days as int, or raises ValueError.
+    """
+    if value is None:
+        raise ValueError("Empty value")
+
+    value = str(value).strip().lower()
+
+    # Pure integer: "2", "7"
+    if value.isdigit():
+        return int(value)
+
+    total_days = 0
+    matched = False
+
+    # Match weeks: "1 week", "2 weeks"
+    week_match = re.search(r'(\d+)\s*week', value)
+    if week_match:
+        total_days += int(week_match.group(1)) * 7
+        matched = True
+
+    # Match days: "day 1", "1 day", "3 days"
+    day_match = re.search(r'(\d+)\s*day|day\s*(\d+)', value)
+    if day_match:
+        num = day_match.group(1) or day_match.group(2)
+        total_days += int(num)
+        matched = True
+
+    if not matched:
+        raise ValueError(f"Cannot parse day value: '{value}'")
+
+    return total_days
 
 
 class RiskCriteriaCreateView(generics.CreateAPIView):
@@ -36,7 +76,7 @@ class RiskCriteriaListView(generics.ListAPIView):
 
     def get_queryset(self):
         # Always filter by the authenticated admin — no query param needed
-        return RiskCriteria.objects.filter(admin=self.request.user).order_by('-created_at')
+        return RiskCriteria.objects.filter(admin_id=str(self.request.user.id)).order_by('-created_at')
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
@@ -64,7 +104,7 @@ class RiskCriteriaDetailView(generics.RetrieveAPIView):
             raise ValidationError("Invalid Risk Criteria ID")
 
         # Filter by both _id AND authenticated admin
-        return get_object_or_404(RiskCriteria, _id=obj_id, admin=self.request.user)
+        return get_object_or_404(RiskCriteria, _id=obj_id, admin_id=str(self.request.user.id))
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -88,7 +128,7 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
             raise ValidationError("Invalid Risk Criteria ID")
 
         # Filter by both _id AND authenticated admin
-        return get_object_or_404(RiskCriteria, _id=obj_id, admin=self.request.user)
+        return get_object_or_404(RiskCriteria, _id=obj_id, admin_id=str(self.request.user.id))
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', True)
@@ -115,12 +155,93 @@ class RiskCriteriaDeleteView(generics.DestroyAPIView):
             raise ValidationError("Invalid Risk Criteria ID")
 
         # Filter by both _id AND authenticated admin
-        return get_object_or_404(RiskCriteria, _id=obj_id, admin=self.request.user)
+        return get_object_or_404(RiskCriteria, _id=obj_id, admin_id=str(self.request.user.id))
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         instance.delete()
         return Response(
             {"message": "Risk Criteria deleted successfully"},
+            status=status.HTTP_200_OK,
+        )
+
+
+class RiskCriteriaCalendarView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, risk_id, *args, **kwargs):
+        # Validate and fetch risk criteria
+        try:
+            obj_id = ObjectId(risk_id)
+        except Exception:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Invalid Risk Criteria ID")
+
+        risk = get_object_or_404(RiskCriteria, _id=obj_id, admin_id=str(request.user.id))
+
+        # Parse day values — supports "2", "day 3", "1 week", "2 weeks", etc.
+        try:
+            critical_days = parse_days(risk.critical)
+            high_days = parse_days(risk.high)
+            medium_days = parse_days(risk.medium)
+            low_days = parse_days(risk.low)
+        except (ValueError, TypeError) as e:
+            return Response(
+                {"message": f"Risk criteria day values are invalid: {e}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # base_date = updated_at if criteria was updated, else created_at
+        base_date = (risk.updated_at or risk.created_at).date()
+
+        # Calculate deadline dates
+        deadlines = {
+            "critical": {"days": critical_days, "deadline_date": str(base_date + timedelta(days=critical_days))},
+            "high":     {"days": high_days,     "deadline_date": str(base_date + timedelta(days=high_days))},
+            "medium":   {"days": medium_days,   "deadline_date": str(base_date + timedelta(days=medium_days))},
+            "low":      {"days": low_days,       "deadline_date": str(base_date + timedelta(days=low_days))},
+        }
+
+        # Parse requested month (default: current month)
+        month_param = request.query_params.get("month")
+        try:
+            if month_param:
+                year, month = map(int, month_param.split("-"))
+            else:
+                today = date.today()
+                year, month = today.year, today.month
+        except (ValueError, AttributeError):
+            return Response(
+                {"message": "Invalid month format. Use YYYY-MM (e.g. 2026-03)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Build deadline date -> severity mapping
+        deadline_map = {}
+        for severity, info in deadlines.items():
+            d = info["deadline_date"]
+            deadline_map.setdefault(d, []).append(severity)
+
+        # Build full calendar for requested month
+        num_days = calendar.monthrange(year, month)[1]
+        days = []
+        for day in range(1, num_days + 1):
+            day_str = str(date(year, month, day))
+            days.append({
+                "date": day_str,
+                "severities": deadline_map.get(day_str, []),
+            })
+
+        return Response(
+            {
+                "message": "Calendar data retrieved successfully",
+                "risk_criteria_id": str(risk._id),
+                "base_date": str(base_date),
+                "deadlines": deadlines,
+                "calendar": {
+                    "month": f"{year:04d}-{month:02d}",
+                    "days": days,
+                },
+            },
             status=status.HTTP_200_OK,
         )
