@@ -2,7 +2,10 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from django.core.cache import cache
 import re
+
+DASHBOARD_CACHE_TTL = 300  # 5 minutes
 
 from .serializers import (
     TotalAssetsSerializer, AvgScoreSerializer,
@@ -129,14 +132,18 @@ class ReportTotalAssetsAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
+        cache_key = f"dash:total_assets:{report_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
 
-                # Load report
+                # Load report — only fetch the host list (projection)
                 doc = coll.find_one(
                     {"report_id": str(report_id)},
-                    {"vulnerabilities_by_host": 1}
+                    {"vulnerabilities_by_host.host_name": 1, "vulnerabilities_by_host.host": 1}
                 )
 
                 if not doc:
@@ -157,6 +164,7 @@ class ReportTotalAssetsAPIView(APIView):
 
                 # Return result
                 serializer = TotalAssetsSerializer({"total_assets": total_assets})
+                cache.set(cache_key, serializer.data, DASHBOARD_CACHE_TTL)
                 return Response(serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:
@@ -170,6 +178,10 @@ class ReportAvgScoreAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
+        cache_key = f"dash:avg_score:{report_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
         try:
             with MongoContext() as db:
                 doc = _load_report(db, report_id)
@@ -183,7 +195,9 @@ class ReportAvgScoreAPIView(APIView):
                         if num is not None:
                             cvss_vals.append(num)
                 avg = round(sum(cvss_vals)/len(cvss_vals), 2) if cvss_vals else None
-                return Response(AvgScoreSerializer({"avg_score": avg}).data)
+                data = AvgScoreSerializer({"avg_score": avg}).data
+                cache.set(cache_key, data, DASHBOARD_CACHE_TTL)
+                return Response(data)
         except RuntimeError as rte:
             return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
@@ -193,6 +207,10 @@ class ReportVulnerabilitiesAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
+        cache_key = f"dash:vulns:{report_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
         try:
             with MongoContext() as db:
                 doc = _load_report(db, report_id)
@@ -210,7 +228,9 @@ class ReportVulnerabilitiesAPIView(APIView):
                             counts["medium"] += 1
                         elif risk.startswith("low"):
                             counts["low"] += 1
-                return Response(VulnerabilitiesSerializer(counts).data)
+                data = VulnerabilitiesSerializer(counts).data
+                cache.set(cache_key, data, DASHBOARD_CACHE_TTL)
+                return Response(data)
         except RuntimeError as rte:
             return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
@@ -220,6 +240,10 @@ class ReportMitigationTimelineAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
+        cache_key = f"dash:timeline:{report_id}:{request.user.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=200)
         try:
             with MongoContext() as db:
                 doc = _load_report(db, report_id)
@@ -276,6 +300,7 @@ class ReportMitigationTimelineAPIView(APIView):
                     }
                 }
 
+                cache.set(cache_key, payload, DASHBOARD_CACHE_TTL)
                 return Response(payload, status=200)
 
         except Exception as exc:
@@ -289,6 +314,10 @@ class ReportMeanTimeRemediateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
+        cache_key = f"dash:mttr:{report_id}:{request.user.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=200)
         try:
             with MongoContext() as db:
                 doc = _load_report(db, report_id)
@@ -367,6 +396,7 @@ class ReportMeanTimeRemediateAPIView(APIView):
                     }
                 }
 
+                cache.set(cache_key, payload, DASHBOARD_CACHE_TTL)
                 return Response(payload, status=200)
 
         except Exception as exc:

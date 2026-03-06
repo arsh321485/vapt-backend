@@ -22,3 +22,6 @@ staticfiles/
 
 # Environment variables
 .env
+
+# Django file-based cache
+cache/

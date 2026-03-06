@@ -5,9 +5,7 @@ from django.conf import settings
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 import pymongo
-import threading
 import uuid
-from urllib.parse import urlparse
 import re
 from rest_framework.parsers import JSONParser
 from bson import ObjectId
@@ -25,60 +23,7 @@ FIX_STEP_FEEDBACK_COLLECTION = "fix_step_feedback"
 FIX_FINAL_FEEDBACK_COLLECTION = "fix_vulnerability_final_feedback"
 
 
-_mongo_client_reg: pymongo.MongoClient = None
-_mongo_lock_reg = threading.Lock()
-
-
-def _get_reg_mongo_client() -> pymongo.MongoClient:
-    global _mongo_client_reg
-    if _mongo_client_reg is None:
-        with _mongo_lock_reg:
-            if _mongo_client_reg is None:
-                uri = getattr(settings, "MONGO_DB_URL", None)
-                if not uri:
-                    uri = settings.DATABASES.get('default', {}).get('CLIENT', {}).get('host')
-                if not uri:
-                    raise RuntimeError("MongoDB URI not configured. Set MONGO_DB_URL or DATABASES['default']['CLIENT']['host'].")
-                _mongo_client_reg = pymongo.MongoClient(
-                    uri,
-                    serverSelectionTimeoutMS=5000,
-                    connectTimeoutMS=5000,
-                    socketTimeoutMS=10000,
-                    maxPoolSize=50,
-                    minPoolSize=5,
-                    retryWrites=True,
-                )
-    return _mongo_client_reg
-
-
-def _get_reg_db(client: pymongo.MongoClient):
-    dbname = getattr(settings, "MONGO_DB_NAME", None)
-    if not dbname:
-        uri = getattr(settings, "MONGO_DB_URL", None) or settings.DATABASES.get('default', {}).get('CLIENT', {}).get('host', '')
-        try:
-            parsed = urlparse(uri)
-            path = (parsed.path or "").lstrip("/")
-            if path:
-                dbname = re.split(r"[/?]", path)[0]
-        except Exception:
-            dbname = None
-    if not dbname:
-        try:
-            d = client.get_default_database()
-            if d:
-                dbname = d.name
-        except Exception:
-            dbname = None
-    return client[dbname or "vaptfix"]
-
-
-class MongoContext:
-    """Context manager using a shared MongoDB connection pool."""
-    def __enter__(self):
-        return _get_reg_db(_get_reg_mongo_client())
-
-    def __exit__(self, exc_type, exc, tb):
-        pass  # Connection is pooled — do not close
+from vaptfix.mongo_client import MongoContext
 
 def _normalize_iso(dt):
     """Return ISO string for datetime-like or string; else None."""
@@ -368,269 +313,269 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
 
 
 
-class VulnerabilitiesByHostListAPIView(APIView):
-    """
-    Returns a list of unique hosts with vulnerability counts grouped by risk factor.
+# class VulnerabilitiesByHostListAPIView(APIView):
+#     """
+#     Returns a list of unique hosts with vulnerability counts grouped by risk factor.
 
-    GET /api/admin/adminregister/register/hosts/
+#     GET /api/admin/adminregister/register/hosts/
 
-    Response:
-        - List of hosts with counts per risk level (Critical, High, Medium, Low)
-        - Total vulnerability count per host
-    """
-    permission_classes = [permissions.IsAuthenticated]
+#     Response:
+#         - List of hosts with counts per risk level (Critical, High, Medium, Low)
+#         - Total vulnerability count per host
+#     """
+#     permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request):
-        try:
-            current_admin_id = str(request.user.id)
-            current_admin_email = getattr(request.user, 'email', None)
+#     def get(self, request):
+#         try:
+#             current_admin_id = str(request.user.id)
+#             current_admin_email = getattr(request.user, 'email', None)
 
-            with MongoContext() as db:
-                coll = db[NESSUS_COLLECTION]
+#             with MongoContext() as db:
+#                 coll = db[NESSUS_COLLECTION]
 
-                # Build query to match by admin_id OR admin_email
-                query_conditions = [{"admin_id": current_admin_id}]
-                if current_admin_email:
-                    query_conditions.append({"admin_email": current_admin_email})
+#                 # Build query to match by admin_id OR admin_email
+#                 query_conditions = [{"admin_id": current_admin_id}]
+#                 if current_admin_email:
+#                     query_conditions.append({"admin_email": current_admin_email})
 
-                # Find the LATEST report for this admin
-                latest_doc = coll.find_one(
-                    {"$or": query_conditions},
-                    sort=[("uploaded_at", pymongo.DESCENDING)]
-                )
+#                 # Find the LATEST report for this admin
+#                 latest_doc = coll.find_one(
+#                     {"$or": query_conditions},
+#                     sort=[("uploaded_at", pymongo.DESCENDING)]
+#                 )
 
-                if not latest_doc:
-                    return Response(
-                        {"detail": "No reports found for your account"},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
+#                 if not latest_doc:
+#                     return Response(
+#                         {"detail": "No reports found for your account"},
+#                         status=status.HTTP_404_NOT_FOUND
+#                     )
 
-                report_id = latest_doc.get("report_id")
-                uploaded_at = latest_doc.get("uploaded_at")
+#                 report_id = latest_doc.get("report_id")
+#                 uploaded_at = latest_doc.get("uploaded_at")
 
-                # Group vulnerabilities by host
-                hosts_data = {}
+#                 # Group vulnerabilities by host
+#                 hosts_data = {}
 
-                for host in latest_doc.get("vulnerabilities_by_host", []):
-                    host_name = host.get("host_name") or host.get("host") or ""
+#                 for host in latest_doc.get("vulnerabilities_by_host", []):
+#                     host_name = host.get("host_name") or host.get("host") or ""
 
-                    if not host_name:
-                        continue
+#                     if not host_name:
+#                         continue
 
-                    # Initialize host entry if not exists
-                    if host_name not in hosts_data:
-                        hosts_data[host_name] = {
-                            "host_name": host_name,
-                            "critical": 0,
-                            "high": 0,
-                            "medium": 0,
-                            "low": 0,
-                            "info": 0,
-                            "total": 0
-                        }
+#                     # Initialize host entry if not exists
+#                     if host_name not in hosts_data:
+#                         hosts_data[host_name] = {
+#                             "host_name": host_name,
+#                             "critical": 0,
+#                             "high": 0,
+#                             "medium": 0,
+#                             "low": 0,
+#                             "info": 0,
+#                             "total": 0
+#                         }
 
-                    # Count vulnerabilities by risk factor
-                    for v in host.get("vulnerabilities", []):
-                        risk_raw = (
-                            v.get("risk_factor")
-                            or v.get("severity")
-                            or v.get("risk")
-                            or ""
-                        )
+#                     # Count vulnerabilities by risk factor
+#                     for v in host.get("vulnerabilities", []):
+#                         risk_raw = (
+#                             v.get("risk_factor")
+#                             or v.get("severity")
+#                             or v.get("risk")
+#                             or ""
+#                         )
 
-                        risk = risk_raw.strip().lower() if isinstance(risk_raw, str) else ""
+#                         risk = risk_raw.strip().lower() if isinstance(risk_raw, str) else ""
 
-                        if risk == "critical":
-                            hosts_data[host_name]["critical"] += 1
-                        elif risk == "high":
-                            hosts_data[host_name]["high"] += 1
-                        elif risk == "medium":
-                            hosts_data[host_name]["medium"] += 1
-                        elif risk == "low":
-                            hosts_data[host_name]["low"] += 1
-                        else:
-                            hosts_data[host_name]["info"] += 1
+#                         if risk == "critical":
+#                             hosts_data[host_name]["critical"] += 1
+#                         elif risk == "high":
+#                             hosts_data[host_name]["high"] += 1
+#                         elif risk == "medium":
+#                             hosts_data[host_name]["medium"] += 1
+#                         elif risk == "low":
+#                             hosts_data[host_name]["low"] += 1
+#                         else:
+#                             hosts_data[host_name]["info"] += 1
 
-                        hosts_data[host_name]["total"] += 1
+#                         hosts_data[host_name]["total"] += 1
 
-                # Convert to list and sort by total vulnerabilities (descending)
-                hosts_list = sorted(
-                    hosts_data.values(),
-                    key=lambda x: (x["critical"], x["high"], x["medium"], x["total"]),
-                    reverse=True
-                )
+#                 # Convert to list and sort by total vulnerabilities (descending)
+#                 hosts_list = sorted(
+#                     hosts_data.values(),
+#                     key=lambda x: (x["critical"], x["high"], x["medium"], x["total"]),
+#                     reverse=True
+#                 )
 
-                return Response(
-                    {
-                        "report_id": str(report_id),
-                        "uploaded_at": _normalize_iso(uploaded_at),
-                        "total_hosts": len(hosts_list),
-                        "hosts": hosts_list
-                    },
-                    status=status.HTTP_200_OK
-                )
+#                 return Response(
+#                     {
+#                         "report_id": str(report_id),
+#                         "uploaded_at": _normalize_iso(uploaded_at),
+#                         "total_hosts": len(hosts_list),
+#                         "hosts": hosts_list
+#                     },
+#                     status=status.HTTP_200_OK
+#                 )
 
-        except pymongo.errors.ServerSelectionTimeoutError as e:
-            return Response(
-                {"detail": "cannot connect to MongoDB", "error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+#         except pymongo.errors.ServerSelectionTimeoutError as e:
+#             return Response(
+#                 {"detail": "cannot connect to MongoDB", "error": str(e)},
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
 
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            return Response(
-                {"detail": "unexpected error", "error": str(exc)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+#         except Exception as exc:
+#             import traceback
+#             traceback.print_exc()
+#             return Response(
+#                 {"detail": "unexpected error", "error": str(exc)},
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
 
 
-class VulnerabilitiesByHostDetailAPIView(APIView):
-    """
-    Returns vulnerabilities for a specific host, grouped by risk factor.
+# class VulnerabilitiesByHostDetailAPIView(APIView):
+#     """
+#     Returns vulnerabilities for a specific host, grouped by risk factor.
 
-    GET /api/admin/adminregister/register/host/<host_name>/vulns/
+#     GET /api/admin/adminregister/register/host/<host_name>/vulns/
 
-    Response:
-        - Host information
-        - Vulnerabilities categorized by: Critical, High, Medium, Low
-        - Each vulnerability includes: name, description, port, status
-    """
-    permission_classes = [permissions.IsAuthenticated]
+#     Response:
+#         - Host information
+#         - Vulnerabilities categorized by: Critical, High, Medium, Low
+#         - Each vulnerability includes: name, description, port, status
+#     """
+#     permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request, host_name):
-        try:
-            current_admin_id = str(request.user.id)
-            current_admin_email = getattr(request.user, 'email', None)
+#     def get(self, request, host_name):
+#         try:
+#             current_admin_id = str(request.user.id)
+#             current_admin_email = getattr(request.user, 'email', None)
 
-            with MongoContext() as db:
-                coll = db[NESSUS_COLLECTION]
+#             with MongoContext() as db:
+#                 coll = db[NESSUS_COLLECTION]
 
-                # Build query to match by admin_id OR admin_email
-                query_conditions = [{"admin_id": current_admin_id}]
-                if current_admin_email:
-                    query_conditions.append({"admin_email": current_admin_email})
+#                 # Build query to match by admin_id OR admin_email
+#                 query_conditions = [{"admin_id": current_admin_id}]
+#                 if current_admin_email:
+#                     query_conditions.append({"admin_email": current_admin_email})
 
-                # Find the LATEST report for this admin
-                latest_doc = coll.find_one(
-                    {"$or": query_conditions},
-                    sort=[("uploaded_at", pymongo.DESCENDING)]
-                )
+#                 # Find the LATEST report for this admin
+#                 latest_doc = coll.find_one(
+#                     {"$or": query_conditions},
+#                     sort=[("uploaded_at", pymongo.DESCENDING)]
+#                 )
 
-                if not latest_doc:
-                    return Response(
-                        {"detail": "No reports found for your account"},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
+#                 if not latest_doc:
+#                     return Response(
+#                         {"detail": "No reports found for your account"},
+#                         status=status.HTTP_404_NOT_FOUND
+#                     )
 
-                report_id = latest_doc.get("report_id")
-                uploaded_at = latest_doc.get("uploaded_at")
+#                 report_id = latest_doc.get("report_id")
+#                 uploaded_at = latest_doc.get("uploaded_at")
 
-                # Initialize categories
-                vulnerabilities_by_risk = {
-                    "critical": [],
-                    "high": [],
-                    "medium": [],
-                    "low": [],
-                    "info": []
-                }
+#                 # Initialize categories
+#                 vulnerabilities_by_risk = {
+#                     "critical": [],
+#                     "high": [],
+#                     "medium": [],
+#                     "low": [],
+#                     "info": []
+#                 }
 
-                host_found = False
+#                 host_found = False
 
-                # Find vulnerabilities for the specified host
-                for host in latest_doc.get("vulnerabilities_by_host", []):
-                    current_host = host.get("host_name") or host.get("host") or ""
+#                 # Find vulnerabilities for the specified host
+#                 for host in latest_doc.get("vulnerabilities_by_host", []):
+#                     current_host = host.get("host_name") or host.get("host") or ""
 
-                    # Match the host name (case-insensitive)
-                    if current_host.lower() != host_name.lower():
-                        continue
+#                     # Match the host name (case-insensitive)
+#                     if current_host.lower() != host_name.lower():
+#                         continue
 
-                    host_found = True
+#                     host_found = True
 
-                    for v in host.get("vulnerabilities", []):
-                        plugin_name = (
-                            v.get("plugin_name")
-                            or v.get("pluginname")
-                            or v.get("name")
-                            or ""
-                        )
+#                     for v in host.get("vulnerabilities", []):
+#                         plugin_name = (
+#                             v.get("plugin_name")
+#                             or v.get("pluginname")
+#                             or v.get("name")
+#                             or ""
+#                         )
 
-                        risk_raw = (
-                            v.get("risk_factor")
-                            or v.get("severity")
-                            or v.get("risk")
-                            or ""
-                        )
+#                         risk_raw = (
+#                             v.get("risk_factor")
+#                             or v.get("severity")
+#                             or v.get("risk")
+#                             or ""
+#                         )
 
-                        risk = risk_raw.strip().lower() if isinstance(risk_raw, str) else ""
+#                         risk = risk_raw.strip().lower() if isinstance(risk_raw, str) else ""
 
-                        # Build vulnerability object
-                        vuln_data = {
-                            "plugin_id": v.get("plugin_id", ""),
-                            "plugin_name": plugin_name,
-                            "risk_factor": risk_raw.strip().title() if isinstance(risk_raw, str) else "",
-                            "port": v.get("port", ""),
-                            "protocol": v.get("protocol", ""),
-                            "synopsis": v.get("synopsis", ""),
-                            "description": v.get("description", ""),
-                            "solution": v.get("solution", ""),
-                            "cvss_score": v.get("cvss_v3_base_score", "") or v.get("cvss_base_score", ""),
-                            "first_observation": _normalize_iso(v.get("created_at") or uploaded_at),
-                            "status": "open"
-                        }
+#                         # Build vulnerability object
+#                         vuln_data = {
+#                             "plugin_id": v.get("plugin_id", ""),
+#                             "plugin_name": plugin_name,
+#                             "risk_factor": risk_raw.strip().title() if isinstance(risk_raw, str) else "",
+#                             "port": v.get("port", ""),
+#                             "protocol": v.get("protocol", ""),
+#                             "synopsis": v.get("synopsis", ""),
+#                             "description": v.get("description", ""),
+#                             "solution": v.get("solution", ""),
+#                             "cvss_score": v.get("cvss_v3_base_score", "") or v.get("cvss_base_score", ""),
+#                             "first_observation": _normalize_iso(v.get("created_at") or uploaded_at),
+#                             "status": "open"
+#                         }
 
-                        # Categorize by risk factor
-                        if risk == "critical":
-                            vulnerabilities_by_risk["critical"].append(vuln_data)
-                        elif risk == "high":
-                            vulnerabilities_by_risk["high"].append(vuln_data)
-                        elif risk == "medium":
-                            vulnerabilities_by_risk["medium"].append(vuln_data)
-                        elif risk == "low":
-                            vulnerabilities_by_risk["low"].append(vuln_data)
-                        else:
-                            vulnerabilities_by_risk["info"].append(vuln_data)
+#                         # Categorize by risk factor
+#                         if risk == "critical":
+#                             vulnerabilities_by_risk["critical"].append(vuln_data)
+#                         elif risk == "high":
+#                             vulnerabilities_by_risk["high"].append(vuln_data)
+#                         elif risk == "medium":
+#                             vulnerabilities_by_risk["medium"].append(vuln_data)
+#                         elif risk == "low":
+#                             vulnerabilities_by_risk["low"].append(vuln_data)
+#                         else:
+#                             vulnerabilities_by_risk["info"].append(vuln_data)
 
-                if not host_found:
-                    return Response(
-                        {"detail": f"Host '{host_name}' not found in the latest report"},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
+#                 if not host_found:
+#                     return Response(
+#                         {"detail": f"Host '{host_name}' not found in the latest report"},
+#                         status=status.HTTP_404_NOT_FOUND
+#                     )
 
-                # Count totals
-                total_count = sum(len(v) for v in vulnerabilities_by_risk.values())
+#                 # Count totals
+#                 total_count = sum(len(v) for v in vulnerabilities_by_risk.values())
 
-                return Response(
-                    {
-                        "report_id": str(report_id),
-                        "uploaded_at": _normalize_iso(uploaded_at),
-                        "host_name": host_name,
-                        "total_vulnerabilities": total_count,
-                        "counts": {
-                            "critical": len(vulnerabilities_by_risk["critical"]),
-                            "high": len(vulnerabilities_by_risk["high"]),
-                            "medium": len(vulnerabilities_by_risk["medium"]),
-                            "low": len(vulnerabilities_by_risk["low"]),
-                            "info": len(vulnerabilities_by_risk["info"])
-                        },
-                        "vulnerabilities": vulnerabilities_by_risk
-                    },
-                    status=status.HTTP_200_OK
-                )
+#                 return Response(
+#                     {
+#                         "report_id": str(report_id),
+#                         "uploaded_at": _normalize_iso(uploaded_at),
+#                         "host_name": host_name,
+#                         "total_vulnerabilities": total_count,
+#                         "counts": {
+#                             "critical": len(vulnerabilities_by_risk["critical"]),
+#                             "high": len(vulnerabilities_by_risk["high"]),
+#                             "medium": len(vulnerabilities_by_risk["medium"]),
+#                             "low": len(vulnerabilities_by_risk["low"]),
+#                             "info": len(vulnerabilities_by_risk["info"])
+#                         },
+#                         "vulnerabilities": vulnerabilities_by_risk
+#                     },
+#                     status=status.HTTP_200_OK
+#                 )
 
-        except pymongo.errors.ServerSelectionTimeoutError as e:
-            return Response(
-                {"detail": "cannot connect to MongoDB", "error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+#         except pymongo.errors.ServerSelectionTimeoutError as e:
+#             return Response(
+#                 {"detail": "cannot connect to MongoDB", "error": str(e)},
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
 
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            return Response(
-                {"detail": "unexpected error", "error": str(exc)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+#         except Exception as exc:
+#             import traceback
+#             traceback.print_exc()
+#             return Response(
+#                 {"detail": "unexpected error", "error": str(exc)},
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
 
     
 class FixVulnerabilityCreateAPIView(APIView):
@@ -852,6 +797,13 @@ class FixVulnerabilityCreateAPIView(APIView):
                 })
             assigned_team = (vuln_card_doc or {}).get("assigned_team") or ""
 
+            # Get vendor_fix_available from vulnerability_cards (stored as "Yes"/"No")
+            _vfa_raw = (vuln_card_doc or {}).get("vendor_fix_available", "No")
+            if isinstance(_vfa_raw, str):
+                vendor_fix_available = _vfa_raw.strip().lower() == "yes"
+            else:
+                vendor_fix_available = bool(_vfa_raw)
+
             if assigned_team:
                 assigned_team_members = get_team_members(
                     db=db,
@@ -918,7 +870,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                 "affected_ports_ranges": affected_ports,
                 "file_path": file_path,
 
-                "vendor_fix_available": bool(solution),
+                "vendor_fix_available": vendor_fix_available,
                 "assigned_team": assigned_team,
                 "assigned_team_members": assigned_team_members,
 
@@ -951,6 +903,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                 "vulnerability_type": vulnerability_type,
                 "affected_ports_ranges": affected_ports,
                 "file_path": file_path,
+                "vendor_fix_available": vendor_fix_available,
                 "created_at": doc["created_at"].isoformat() if doc["created_at"] else None
             }
 
@@ -1457,6 +1410,7 @@ class FixVulnerabilityStepsAPIView(APIView):
             mitigation_table = vuln_card.get("mitigation_table", [])
             deadline = vuln_card.get("deadline")
             artifacts_tools = vuln_card.get("artifacts_tools")
+            post_mitigation_troubleshooting_guide = vuln_card.get("post_mitigation_troubleshooting_guide", [])
 
             # Parse mitigation_table into structured per-step data
             steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
@@ -1562,6 +1516,7 @@ class FixVulnerabilityStepsAPIView(APIView):
                     "assigned_team": assigned_team,
                     "deadline": deadline,
                     "artifacts_tools": artifacts_tools,
+                    "post_mitigation_troubleshooting_guide": post_mitigation_troubleshooting_guide if isinstance(post_mitigation_troubleshooting_guide, list) else ([post_mitigation_troubleshooting_guide] if post_mitigation_troubleshooting_guide else []),
                     "status": status_value,
                     "completed_steps": completed_count,
                     "total_steps": total_steps,
@@ -2177,119 +2132,119 @@ class FixVulnerabilityFinalFeedbackAPIView(APIView):
             )
 
 
-class FixVulnerabilityDetailAPIView(APIView):
-    """
-    Get complete details of a fix vulnerability for the Fix Now card.
+# class FixVulnerabilityDetailAPIView(APIView):
+#     """
+#     Get complete details of a fix vulnerability for the Fix Now card.
 
-    Returns:
-        - Vulnerability name
-        - Asset
-        - Severity
-        - Description
-        - Assigned team
-        - Assigned team members
-        - All steps with status and feedback
-    """
-    permission_classes = [IsAuthenticated]
+#     Returns:
+#         - Vulnerability name
+#         - Asset
+#         - Severity
+#         - Description
+#         - Assigned team
+#         - Assigned team members
+#         - All steps with status and feedback
+#     """
+#     permission_classes = [IsAuthenticated]
 
-    def get(self, request, fix_vuln_id):
-        with MongoContext() as db:
-            fix_coll = db[FIX_VULN_COLLECTION]
-            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
-            steps_coll = db[FIX_VULN_STEPS_COLLECTION]
-            feedback_coll = db[FIX_STEP_FEEDBACK_COLLECTION]
-            final_feedback_coll = db[FIX_FINAL_FEEDBACK_COLLECTION]
+#     def get(self, request, fix_vuln_id):
+#         with MongoContext() as db:
+#             fix_coll = db[FIX_VULN_COLLECTION]
+#             closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+#             steps_coll = db[FIX_VULN_STEPS_COLLECTION]
+#             feedback_coll = db[FIX_STEP_FEEDBACK_COLLECTION]
+#             final_feedback_coll = db[FIX_FINAL_FEEDBACK_COLLECTION]
 
-            # Check active or closed
-            fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
-            vuln_status = "open"
+#             # Check active or closed
+#             fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+#             vuln_status = "open"
 
-            if not fix_doc:
-                fix_doc = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
-                if not fix_doc:
-                    return Response(
-                        {"detail": "Fix vulnerability not found"},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
-                vuln_status = "closed"
+#             if not fix_doc:
+#                 fix_doc = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
+#                 if not fix_doc:
+#                     return Response(
+#                         {"detail": "Fix vulnerability not found"},
+#                         status=status.HTTP_404_NOT_FOUND
+#                     )
+#                 vuln_status = "closed"
 
-            # Fetch steps
-            steps_cursor = steps_coll.find({
-                "fix_vulnerability_id": fix_vuln_id
-            }).sort("step_number", 1)
+#             # Fetch steps
+#             steps_cursor = steps_coll.find({
+#                 "fix_vulnerability_id": fix_vuln_id
+#             }).sort("step_number", 1)
 
-            step_map = {s.get("step_number"): s for s in steps_cursor}
+#             step_map = {s.get("step_number"): s for s in steps_cursor}
 
-            # Build steps with feedback
-            steps = []
-            for step_num in range(1, 7):
-                step_data = step_map.get(step_num, {})
+#             # Build steps with feedback
+#             steps = []
+#             for step_num in range(1, 7):
+#                 step_data = step_map.get(step_num, {})
 
-                # Get feedback for this step
-                feedback = feedback_coll.find_one({
-                    "fix_vulnerability_id": fix_vuln_id,
-                    "step_number": step_num
-                })
+#                 # Get feedback for this step
+#                 feedback = feedback_coll.find_one({
+#                     "fix_vulnerability_id": fix_vuln_id,
+#                     "step_number": step_num
+#                 })
 
-                steps.append({
-                    "step_number": step_num,
-                    "step_description": step_data.get(
-                        "step_description",
-                        FixVulnerabilityStepsAPIView.DEFAULT_STEP_DESCRIPTIONS.get(step_num, f"Step {step_num}")
-                    ),
-                    "status": step_data.get("status", "pending"),
-                    "deadline": step_data.get("deadline"),
-                    "comment": step_data.get("comment", ""),
-                    "feedback": {
-                        "feedback_id": str(feedback["_id"]) if feedback else None,
-                        "feedback_comment": feedback.get("feedback_comment", "") if feedback else "",
-                        "fix_status": feedback.get("fix_status", "") if feedback else ""
-                    } if feedback else None
-                })
+#                 steps.append({
+#                     "step_number": step_num,
+#                     "step_description": step_data.get(
+#                         "step_description",
+#                         FixVulnerabilityStepsAPIView.DEFAULT_STEP_DESCRIPTIONS.get(step_num, f"Step {step_num}")
+#                     ),
+#                     "status": step_data.get("status", "pending"),
+#                     "deadline": step_data.get("deadline"),
+#                     "comment": step_data.get("comment", ""),
+#                     "feedback": {
+#                         "feedback_id": str(feedback["_id"]) if feedback else None,
+#                         "feedback_comment": feedback.get("feedback_comment", "") if feedback else "",
+#                         "fix_status": feedback.get("fix_status", "") if feedback else ""
+#                     } if feedback else None
+#                 })
 
-            completed_count = sum(1 for s in steps if s["status"] == "completed")
+#             completed_count = sum(1 for s in steps if s["status"] == "completed")
 
-            # Get final feedback (only for closed vulnerabilities)
-            final_feedback = None
-            if vuln_status == "closed":
-                final_fb = final_feedback_coll.find_one({
-                    "fix_vulnerability_id": fix_vuln_id
-                })
-                if final_fb:
-                    final_feedback = {
-                        "feedback_id": str(final_fb["_id"]),
-                        "feedback_comment": final_fb.get("feedback_comment", ""),
-                        "fix_result": final_fb.get("fix_result", ""),
-                        "submitted_by": final_fb.get("submitted_by"),
-                        "submitted_at": _normalize_iso(final_fb.get("submitted_at"))
-                    }
+#             # Get final feedback (only for closed vulnerabilities)
+#             final_feedback = None
+#             if vuln_status == "closed":
+#                 final_fb = final_feedback_coll.find_one({
+#                     "fix_vulnerability_id": fix_vuln_id
+#                 })
+#                 if final_fb:
+#                     final_feedback = {
+#                         "feedback_id": str(final_fb["_id"]),
+#                         "feedback_comment": final_fb.get("feedback_comment", ""),
+#                         "fix_result": final_fb.get("fix_result", ""),
+#                         "submitted_by": final_fb.get("submitted_by"),
+#                         "submitted_at": _normalize_iso(final_fb.get("submitted_at"))
+#                     }
 
-            response_data = {
-                "fix_vulnerability_id": fix_vuln_id,
-                "vulnerability_name": fix_doc.get("plugin_name", ""),
-                "asset": fix_doc.get("host_name", ""),
-                "severity": fix_doc.get("risk_factor", ""),
-                "description": fix_doc.get("description", "") or fix_doc.get("description_points", "") or fix_doc.get("synopsis", ""),
-                "solution": fix_doc.get("solution", ""),
-                "assigned_team": fix_doc.get("assigned_team", ""),
-                "assigned_team_members": fix_doc.get("assigned_team_members", []),
-                "status": vuln_status,
-                "completed_steps": completed_count,
-                "total_steps": 6,
-                "steps": steps,
-                "created_at": _normalize_iso(fix_doc.get("created_at")),
-                "closed_at": _normalize_iso(fix_doc.get("closed_at")) if vuln_status == "closed" else None,
-                "final_feedback": final_feedback,
-                "can_submit_feedback": vuln_status == "closed" and final_feedback is None
-            }
+#             response_data = {
+#                 "fix_vulnerability_id": fix_vuln_id,
+#                 "vulnerability_name": fix_doc.get("plugin_name", ""),
+#                 "asset": fix_doc.get("host_name", ""),
+#                 "severity": fix_doc.get("risk_factor", ""),
+#                 "description": fix_doc.get("description", "") or fix_doc.get("description_points", "") or fix_doc.get("synopsis", ""),
+#                 "solution": fix_doc.get("solution", ""),
+#                 "assigned_team": fix_doc.get("assigned_team", ""),
+#                 "assigned_team_members": fix_doc.get("assigned_team_members", []),
+#                 "status": vuln_status,
+#                 "completed_steps": completed_count,
+#                 "total_steps": 6,
+#                 "steps": steps,
+#                 "created_at": _normalize_iso(fix_doc.get("created_at")),
+#                 "closed_at": _normalize_iso(fix_doc.get("closed_at")) if vuln_status == "closed" else None,
+#                 "final_feedback": final_feedback,
+#                 "can_submit_feedback": vuln_status == "closed" and final_feedback is None
+#             }
 
-            return Response(
-                {
-                    "message": "Fix vulnerability details fetched successfully",
-                    "data": response_data
-                },
-                status=status.HTTP_200_OK
-            )
+#             return Response(
+#                 {
+#                     "message": "Fix vulnerability details fetched successfully",
+#                     "data": response_data
+#                 },
+#                 status=status.HTTP_200_OK
+#             )
 
 
 class RaiseSupportRequestAPIView(APIView):
@@ -2818,6 +2773,151 @@ class TicketDetailAPIView(APIView):
                 {
                     "message": "Ticket fetched successfully",
                     "data": response_data
+                },
+                status=status.HTTP_200_OK
+            )
+
+
+class VulnerabilityTimelineAPIView(APIView):
+    """
+    GET /api/admin/adminregister/fix-vulnerability/<fix_vuln_id>/timeline/
+
+    Returns ordered timeline events for a vulnerability card:
+      1. Vulnerability identified  → vulnerability_cards.created_at
+      2. Assigned to Team          → vulnerability_cards.created_at + assigned_team
+      3. Deadline                  → vulnerability_cards.deadline
+      4. Step N Done (per step)    → fix_vulnerability_steps.updated_at (status=completed)
+      5. Exception Requested       → support_requests.requested_at (if exists)
+      6. Create Ticket             → tickets.created_at (if exists)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, fix_vuln_id):
+        admin_id = str(request.user.id)
+
+        with MongoContext() as db:
+            fix_coll = db[FIX_VULN_COLLECTION]
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+            # Find fix vulnerability — active or closed
+            fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+            if not fix_doc:
+                fix_doc = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
+                if not fix_doc:
+                    return Response(
+                        {"detail": "Fix vulnerability not found"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+
+            report_id = fix_doc.get("report_id", "")
+            plugin_name = fix_doc.get("plugin_name", "")
+            host_name = fix_doc.get("host_name", "")
+
+            # Fetch vulnerability_card for this vuln
+            vuln_card = (
+                db[VULN_CARD_COLLECTION].find_one({
+                    "report_id": report_id,
+                    "vulnerability_name": plugin_name,
+                    "host_name": host_name,
+                })
+                or db[VULN_CARD_COLLECTION].find_one({
+                    "report_id": report_id,
+                    "vulnerability_name": plugin_name,
+                })
+                or {}
+            )
+
+            assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
+            vuln_created_at = _normalize_iso(vuln_card.get("created_at"))
+            deadline = vuln_card.get("deadline")
+
+            timeline = []
+
+            # 1. Vulnerability Identified
+            timeline.append({
+                "event": "Vulnerability identified",
+                "type": "vulnerability_identified",
+                "date": vuln_created_at,
+                "status": "done" if vuln_created_at else "pending",
+                "icon": "arrow",
+            })
+
+            # 2. Assigned to Team
+            timeline.append({
+                "event": "Assigned to Team",
+                "type": "assigned_to_team",
+                "date": vuln_created_at,
+                "status": "done" if assigned_team else "pending",
+                "icon": "arrow",
+                "assigned_team": assigned_team,
+            })
+
+            # 3. Deadline
+            timeline.append({
+                "event": "Deadline",
+                "type": "deadline",
+                "date": _normalize_iso(deadline) if deadline else None,
+                "status": "scheduled",
+                "icon": "arrow",
+            })
+
+            # 4. Steps Done — only completed steps, ordered by step_number
+            completed_steps = list(
+                db[FIX_VULN_STEPS_COLLECTION].find({
+                    "fix_vulnerability_id": fix_vuln_id,
+                    "status": "completed",
+                }).sort("step_number", 1)
+            )
+
+            for step in completed_steps:
+                step_num = step.get("step_number")
+                step_date = _normalize_iso(
+                    step.get("updated_at") or step.get("created_at")
+                )
+                timeline.append({
+                    "event": f"Step {step_num} Done",
+                    "type": "step_done",
+                    "date": step_date,
+                    "status": "done",
+                    "icon": "check",
+                    "step_number": step_num,
+                })
+
+            # 5. Exception Requested (support_requests)
+            support_req = db[SUPPORT_REQUEST_COLLECTION].find_one({
+                "vulnerability_id": fix_vuln_id,
+                "admin_id": admin_id,
+            })
+            if support_req:
+                timeline.append({
+                    "event": "Exception Requested",
+                    "type": "exception_requested",
+                    "date": _normalize_iso(support_req.get("requested_at")),
+                    "status": "pending",
+                    "icon": "question",
+                })
+
+            # 6. Create Ticket (tickets)
+            ticket = db[TICKETS_COLLECTION].find_one({
+                "fix_vulnerability_id": fix_vuln_id,
+                "admin_id": admin_id,
+            })
+            if ticket:
+                timeline.append({
+                    "event": "Create Ticket",
+                    "type": "create_ticket",
+                    "date": _normalize_iso(ticket.get("created_at")),
+                    "status": "pending",
+                    "icon": "question",
+                })
+
+            return Response(
+                {
+                    "fix_vulnerability_id": fix_vuln_id,
+                    "vulnerability_name": plugin_name,
+                    "asset": host_name,
+                    "report_id": report_id,
+                    "timeline": timeline,
                 },
                 status=status.HTTP_200_OK
             )

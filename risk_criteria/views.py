@@ -4,6 +4,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from bson import ObjectId
 from django.shortcuts import get_object_or_404
+from django.http import Http404
 from .models import RiskCriteria
 from .serializers import (
     RiskCriteriaSerializer,
@@ -76,7 +77,7 @@ class RiskCriteriaListView(generics.ListAPIView):
 
     def get_queryset(self):
         # Always filter by the authenticated admin — no query param needed
-        return RiskCriteria.objects.filter(admin_id=str(self.request.user.id)).order_by('-created_at')
+        return RiskCriteria.objects.filter(admin=self.request.user).order_by('-created_at')
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
@@ -103,8 +104,10 @@ class RiskCriteriaDetailView(generics.RetrieveAPIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Invalid Risk Criteria ID")
 
-        # Filter by both _id AND authenticated admin
-        return get_object_or_404(RiskCriteria, _id=obj_id, admin_id=str(self.request.user.id))
+        obj = get_object_or_404(RiskCriteria, _id=obj_id)
+        if str(obj.admin_id) != str(self.request.user.id):
+            raise Http404
+        return obj
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -127,8 +130,10 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Invalid Risk Criteria ID")
 
-        # Filter by both _id AND authenticated admin
-        return get_object_or_404(RiskCriteria, _id=obj_id, admin_id=str(self.request.user.id))
+        obj = get_object_or_404(RiskCriteria, _id=obj_id)
+        if str(obj.admin_id) != str(self.request.user.id):
+            raise Http404
+        return obj
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', True)
@@ -154,8 +159,10 @@ class RiskCriteriaDeleteView(generics.DestroyAPIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Invalid Risk Criteria ID")
 
-        # Filter by both _id AND authenticated admin
-        return get_object_or_404(RiskCriteria, _id=obj_id, admin_id=str(self.request.user.id))
+        obj = get_object_or_404(RiskCriteria, _id=obj_id)
+        if str(obj.admin_id) != str(self.request.user.id):
+            raise Http404
+        return obj
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -177,7 +184,9 @@ class RiskCriteriaCalendarView(APIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Invalid Risk Criteria ID")
 
-        risk = get_object_or_404(RiskCriteria, _id=obj_id, admin_id=str(request.user.id))
+        risk = get_object_or_404(RiskCriteria, pk=obj_id)
+        if str(risk.admin_id) != str(request.user.id):
+            raise Http404
 
         # Parse day values — supports "2", "day 3", "1 week", "2 weeks", etc.
         try:

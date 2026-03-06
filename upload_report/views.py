@@ -1104,43 +1104,13 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             _running_card_jobs.discard(report_id)
 
 
-_upload_mongo_client: pymongo.MongoClient = None
-_upload_mongo_lock = threading.Lock()
-
-
-def _get_shared_mongo_client() -> pymongo.MongoClient:
-    """Return a shared, pooled MongoClient (created once, reused across all requests)."""
-    global _upload_mongo_client
-    if _upload_mongo_client is None:
-        with _upload_mongo_lock:
-            if _upload_mongo_client is None:
-                try:
-                    mongo_uri = settings.DATABASES["default"]["CLIENT"]["host"]
-                except Exception:
-                    mongo_uri = getattr(settings, "MONGO_DB_URL", None)
-                if not mongo_uri:
-                    raise RuntimeError("MongoDB URI not configured")
-                _upload_mongo_client = pymongo.MongoClient(
-                    mongo_uri,
-                    serverSelectionTimeoutMS=5000,
-                    connectTimeoutMS=5000,
-                    socketTimeoutMS=10000,
-                    maxPoolSize=50,
-                    minPoolSize=5,
-                    retryWrites=True,
-                )
-    return _upload_mongo_client
+from vaptfix.mongo_client import get_shared_client, get_shared_db
 
 
 def _get_mongo_client_and_db():
     """Return (client, db) using the shared MongoDB connection pool."""
-    client = _get_shared_mongo_client()
-    try:
-        db = client.get_default_database()
-    except Exception:
-        db_name = settings.DATABASES["default"].get("NAME", "vaptfix")
-        db = client[db_name]
-    return client, db
+    client = get_shared_client()
+    return client, get_shared_db(client)
 
 
 class GenerateVulnerabilityCardView(APIView):
