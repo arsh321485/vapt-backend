@@ -296,7 +296,7 @@ class UserDetailListView(generics.ListAPIView):
 
     def get_queryset(self):
         # Restrict to only the logged-in admin's own team members
-        return UserDetail.objects.filter(admin=self.request.user).order_by("-created_at")
+        return UserDetail.objects.filter(admin=self.request.user).select_related("admin").order_by("-created_at")
 
 
 class UserDetailView(generics.RetrieveAPIView):
@@ -527,9 +527,9 @@ class UserDetailSearchView(generics.ListAPIView):
 
     def get_queryset(self):
         # Restrict to only the logged-in admin's own team members
-        return UserDetail.objects.filter(admin=self.request.user).order_by("-created_at")
-    
-    
+        return UserDetail.objects.filter(admin=self.request.user).select_related("admin").order_by("-created_at")
+
+
 class UserDetailRoleUpdateView(generics.GenericAPIView):
     """
     PATCH endpoint to add or replace roles.
@@ -739,7 +739,7 @@ class UserDetailByAdminAPIView(generics.ListAPIView):
         if str(self.request.user.id) != str(admin_id):
             return UserDetail.objects.none()
 
-        return UserDetail.objects.filter(admin=self.request.user).order_by("-created_at")
+        return UserDetail.objects.filter(admin=self.request.user).select_related("admin").order_by("-created_at")
 
     def list(self, request, *args, **kwargs):
         admin_id = self.kwargs.get("admin_id")
@@ -751,9 +751,9 @@ class UserDetailByAdminAPIView(generics.ListAPIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        queryset = self.get_queryset()
+        queryset = list(self.get_queryset())
 
-        if not queryset.exists():
+        if not queryset:
             return Response(
                 {
                     "count": 0,
@@ -766,7 +766,7 @@ class UserDetailByAdminAPIView(generics.ListAPIView):
         serializer = self.get_serializer(queryset, many=True)
         return Response(
             {
-                "count": queryset.count(),
+                "count": len(queryset),
                 "admin_id": admin_id,
                 "results": serializer.data
             },

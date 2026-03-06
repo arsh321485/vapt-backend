@@ -52,7 +52,7 @@ class ScopeSerializer(serializers.ModelSerializer):
         ]
 
     def get_entry_count(self, obj):
-        return obj.entries.count()
+        return len(obj.entries.all())
 
 
 class ScopeListSerializer(serializers.ModelSerializer):
@@ -77,7 +77,7 @@ class ScopeListSerializer(serializers.ModelSerializer):
         ]
 
     def get_entry_count(self, obj):
-        return obj.entries.count()
+        return len(obj.entries.all())
 
 
 class ScopeUpdateSerializer(serializers.ModelSerializer):
