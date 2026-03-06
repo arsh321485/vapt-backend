@@ -19,6 +19,14 @@ NESSUS_COLLECTION = "nessus_reports"
 SUPPORT_REQUEST_COLLECTION = "support_requests"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
+VULN_CARD_COLLECTION = "vulnerability_cards"
+
+TEAM_NAMES = [
+    "Patch Management",
+    "Configuration Management",
+    "Network Security",
+    "Architectural Flaws",
+]
 
 try:
     from risk_criteria.models import RiskCriteria
@@ -961,6 +969,324 @@ class AdminDashboardSummaryAPIView(APIView):
             return Response(
                 {"detail": "error occurred", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class AdminDistributionByTeamAPIView(APIView):
+    """
+    Returns vulnerability distribution by assigned team for the logged-in admin.
+    Checks vulnerability_cards for assigned_team per vulnerability.
+
+    GET /api/admin/dashboard/distribution-by-team/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_email = request.user.email
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email)
+
+                if not doc:
+                    return Response(
+                        {"detail": "No reports found for your account"},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
+                vuln_card_coll = db[VULN_CARD_COLLECTION]
+
+                # Normalize team names for case-insensitive matching
+                team_names_lower = {name.lower(): name for name in TEAM_NAMES}
+
+                # Count distribution directly from vulnerability_cards
+                # Each card = one unique vulnerability — avoids inflating counts from multi-host repeats
+                counts = {name: 0 for name in TEAM_NAMES}
+                counts["Unassigned"] = 0
+                total = 0
+
+                for card in vuln_card_coll.find({"report_id": report_id}):
+                    raw_team = (card.get("assigned_team", "") or "").strip()
+                    matched_team = team_names_lower.get(raw_team.lower())
+                    if matched_team:
+                        counts[matched_team] += 1
+                    else:
+                        counts["Unassigned"] += 1
+                    total += 1
+
+                distribution = [
+                    {
+                        "team": team,
+                        "count": count,
+                        "percentage": round((count / total * 100), 2) if total else 0,
+                    }
+                    for team, count in counts.items()
+                ]
+
+                return Response(
+                    {
+                        "report_id": report_id,
+                        "total_vulnerabilities": total,
+                        "distribution": distribution,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "error occurred", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class AdminDistributionByTeamDetailAPIView(APIView):
+    """
+    Returns detailed vulnerability distribution by team with status (open/closed)
+    and risk_factor (Critical/High/Medium/Low) breakdown.
+
+    GET /api/admin/dashboard/distribution-by-team/detail/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_id    = str(request.user.id)
+            admin_email = request.user.email
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email)
+
+                if not doc:
+                    return Response(
+                        {"detail": "No reports found for your account"},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
+                team_names_lower = {name.lower(): name for name in TEAM_NAMES}
+                risk_levels = ["Critical", "High", "Medium", "Low"]
+
+                # ── plugin_name → risk_factor from nessus ───────────────────────
+                plugin_risk = {}
+                for host in doc.get("vulnerabilities_by_host", []):
+                    for v in host.get("vulnerabilities", []):
+                        pname = (
+                            v.get("plugin_name")
+                            or v.get("pluginname")
+                            or v.get("name")
+                            or ""
+                        )
+                        if pname and pname not in plugin_risk:
+                            risk_raw = (
+                                v.get("risk_factor")
+                                or v.get("severity")
+                                or v.get("risk")
+                                or ""
+                            ).strip()
+                            if risk_raw.lower().startswith("crit"):
+                                plugin_risk[pname] = "Critical"
+                            elif risk_raw.lower().startswith("high"):
+                                plugin_risk[pname] = "High"
+                            elif risk_raw.lower().startswith("med"):
+                                plugin_risk[pname] = "Medium"
+                            elif risk_raw.lower().startswith("low"):
+                                plugin_risk[pname] = "Low"
+                            else:
+                                plugin_risk[pname] = None
+
+                # ── closed plugin_names set for this report ─────────────────────
+                closed_plugins = set()
+                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
+                    {"report_id": report_id, "created_by": admin_id}
+                ):
+                    closed_plugins.add(doc_c.get("plugin_name", ""))
+
+                # ── initialize team buckets ─────────────────────────────────────
+                all_teams = TEAM_NAMES + ["Unassigned"]
+
+                def empty_bucket():
+                    return {
+                        "total": 0,
+                        "open": 0,
+                        "closed": 0,
+                        "by_risk": {r: 0 for r in risk_levels},
+                    }
+
+                teams = {t: empty_bucket() for t in all_teams}
+
+                # ── iterate vulnerability_cards (one unique vuln per card) ───────
+                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
+                    plugin_name = card.get("vulnerability_name", "")
+                    raw_team    = (card.get("assigned_team", "") or "").strip()
+                    team_key    = team_names_lower.get(raw_team.lower(), "") or "Unassigned"
+
+                    risk_label  = plugin_risk.get(plugin_name)
+                    is_closed   = plugin_name in closed_plugins
+                    vuln_status = "closed" if is_closed else "open"
+
+                    bucket = teams[team_key]
+                    bucket["total"] += 1
+                    bucket[vuln_status] += 1
+                    if risk_label:
+                        bucket["by_risk"][risk_label] += 1
+
+                return Response(
+                    {
+                        "report_id": report_id,
+                        "teams": teams,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "error occurred", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class AdminDetailedVulnerabilitiesAPIView(APIView):
+    """
+    Returns a detailed list of all vulnerabilities for the logged-in admin's latest report.
+
+    Fields per row:
+      - vulnerability_name  (from vulnerability_cards)
+      - assets / host_name  (from vulnerability_cards)
+      - assigned_team       (from vulnerability_cards)
+      - risk_factor         (from nessus_reports)
+      - found_date          (vulnerability_cards.created_at)
+      - status              (open / closed — from fix_vulnerabilities_closed)
+
+    GET /api/admin/dashboard/detailed-vulnerabilities/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_id    = str(request.user.id)
+            admin_email = request.user.email
+
+            with MongoContext() as db:
+                doc = _load_latest_report_for_admin(db, admin_email)
+
+                if not doc:
+                    return Response(
+                        {"detail": "No reports found for your account"},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
+                # ── plugin_name → risk_factor from nessus ───────────────────────
+                plugin_risk = {}
+                for host in doc.get("vulnerabilities_by_host", []):
+                    for v in host.get("vulnerabilities", []):
+                        pname = (
+                            v.get("plugin_name")
+                            or v.get("pluginname")
+                            or v.get("name")
+                            or ""
+                        )
+                        if pname and pname not in plugin_risk:
+                            risk_raw = (
+                                v.get("risk_factor")
+                                or v.get("severity")
+                                or v.get("risk")
+                                or ""
+                            ).strip()
+                            if risk_raw.lower().startswith("crit"):
+                                plugin_risk[pname] = "Critical"
+                            elif risk_raw.lower().startswith("high"):
+                                plugin_risk[pname] = "High"
+                            elif risk_raw.lower().startswith("med"):
+                                plugin_risk[pname] = "Medium"
+                            elif risk_raw.lower().startswith("low"):
+                                plugin_risk[pname] = "Low"
+                            else:
+                                plugin_risk[pname] = None
+
+                # ── closed plugin_names for this report ─────────────────────────
+                closed_plugins = set()
+                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
+                    {"report_id": report_id, "created_by": admin_id}
+                ):
+                    closed_plugins.add(doc_c.get("plugin_name", ""))
+
+                # ── card lookup: plugin_name → {assigned_team, found_date} ─────
+                # Cards have host_name="" so we match by plugin_name only.
+                # Each unique plugin_name gets assigned_team for its FIRST nessus occurrence only.
+                card_info = {}   # plugin_name -> {assigned_team, found_date}
+                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
+                    vname = card.get("vulnerability_name", "")
+                    if vname and vname not in card_info:
+                        card_info[vname] = {
+                            "assigned_team": (card.get("assigned_team", "") or "").strip(),
+                            "found_date":    card.get("created_at"),
+                        }
+
+                # ── build one row per (vulnerability, host) from nessus ──────────
+                vulnerabilities = []
+                seen = set()            # avoid duplicate (plugin_name, host_name) rows
+                used_cards = set()      # track plugin_names already matched to a card
+
+                for host in doc.get("vulnerabilities_by_host", []):
+                    h_name = (host.get("host_name") or host.get("host") or "").strip()
+                    for v in host.get("vulnerabilities", []):
+                        plugin_name = (
+                            v.get("plugin_name")
+                            or v.get("pluginname")
+                            or v.get("name")
+                            or ""
+                        )
+                        if not plugin_name:
+                            continue
+
+                        row_key = (plugin_name, h_name)
+                        if row_key in seen:
+                            continue
+                        seen.add(row_key)
+
+                        # Give assigned_team only to first occurrence of each plugin_name
+                        if plugin_name in card_info and plugin_name not in used_cards:
+                            info = card_info[plugin_name]
+                            used_cards.add(plugin_name)
+                        else:
+                            info = {}
+                        found_date    = info.get("found_date")
+                        risk_factor   = plugin_risk.get(plugin_name)
+                        vuln_status   = "closed" if plugin_name in closed_plugins else "open"
+                        assigned_team = (info.get("assigned_team") or "").strip()
+
+                        vulnerabilities.append({
+                            "vulnerability_name": plugin_name,
+                            "assets":             h_name,
+                            "assigned_team":      assigned_team,
+                            "risk_factor":        risk_factor or "",
+                            "found_date":         found_date.isoformat() if hasattr(found_date, "isoformat") else str(found_date) if found_date else None,
+                            "status":             vuln_status,
+                        })
+
+                return Response(
+                    {
+                        "report_id": report_id,
+                        "total":     len(vulnerabilities),
+                        "vulnerabilities": vulnerabilities,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "error occurred", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 

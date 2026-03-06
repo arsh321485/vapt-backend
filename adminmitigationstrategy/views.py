@@ -132,6 +132,11 @@ class MitigationStrategyByTeamAPIView(APIView):
                     )
 
                     for v in host.get("vulnerabilities", []):
+                        # Only include vulnerabilities where plugin_outputs array has more than 1 item
+                        plugin_outputs = v.get("plugin_outputs", [])
+                        if not isinstance(plugin_outputs, list) or len(plugin_outputs) <= 1:
+                            continue
+
                         plugin_name = (
                             v.get("plugin_name")
                             or v.get("pluginname")

@@ -135,12 +135,10 @@ class ScopeCreateAPIView(APIView):
             admin=request.user,
             name__iexact=name,
             testing_type=testing_type
-        )
+        ).prefetch_related("entries")
 
         for existing_scope in existing_scopes:
-            existing_entry_values = set(
-                entry.value.lower() for entry in existing_scope.entries.all()
-            )
+            existing_entry_values = {entry.value.lower() for entry in existing_scope.entries.all()}
             # Check if the new entries exactly match an existing scope's entries
             if new_entry_values == existing_entry_values:
                 return Response(
@@ -206,18 +204,19 @@ class ScopeListAPIView(APIView):
         user = request.user
 
         if user.is_superuser:
-            scopes = Scope.objects.all()
+            scopes = Scope.objects.all().prefetch_related("entries").select_related("admin")
         else:
-            scopes = Scope.objects.filter(admin=user)
+            scopes = Scope.objects.filter(admin=user).prefetch_related("entries").select_related("admin")
 
         # Filter by testing_type if provided
         testing_type = request.query_params.get("testing_type")
         if testing_type:
             scopes = scopes.filter(testing_type=testing_type)
 
+        scopes = list(scopes)
         serializer = ScopeListSerializer(scopes, many=True)
         return Response({
-            "count": scopes.count(),
+            "count": len(scopes),
             "scopes": serializer.data
         }, status=status.HTTP_200_OK)
 
@@ -259,21 +258,17 @@ class ScopeDetailAPIView(APIView):
 
         if name_changed or testing_type_changed:
             # Get current scope's entry values
-            current_entry_values = set(
-                entry.value.lower() for entry in scope.entries.all()
-            )
+            current_entry_values = {entry.value.lower() for entry in scope.entries.all()}
 
             # Check if moving to a name+testing_type that already has same entries
             existing_scopes = Scope.objects.filter(
                 admin=scope.admin,
                 name__iexact=new_name,
                 testing_type=new_testing_type
-            ).exclude(id=scope_id)
+            ).exclude(id=scope_id).prefetch_related("entries")
 
             for existing_scope in existing_scopes:
-                existing_entry_values = set(
-                    entry.value.lower() for entry in existing_scope.entries.all()
-                )
+                existing_entry_values = {entry.value.lower() for entry in existing_scope.entries.all()}
                 if current_entry_values == existing_entry_values:
                     return Response(
                         {"message": f"A scope with the same targets already exists for '{new_name}' with {new_testing_type.replace('_', ' ')} testing"},
@@ -684,11 +679,11 @@ class ScopesByAdminAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsSuperAdmin]
 
     def get(self, request, admin_id):
-        scopes = Scope.objects.filter(admin_id=admin_id)
+        scopes = list(Scope.objects.filter(admin_id=admin_id).prefetch_related("entries").select_related("admin"))
         serializer = ScopeListSerializer(scopes, many=True)
-        count = scopes.count()
+        count = len(scopes)
 
-        if count == 0:
+        if not scopes:
             return Response({
                 "message": "No scopes found for this admin",
                 "admin_id": admin_id,
@@ -833,7 +828,7 @@ class ScopeDataByNameAPIView(APIView):
             admin_id=admin_id,
             name__iexact=scope_name,
             testing_type=testing_type
-        ).order_by("-created_at")
+        ).order_by("-created_at").prefetch_related("entries")
 
         if not scopes.exists():
             return Response(
@@ -849,6 +844,7 @@ class ScopeDataByNameAPIView(APIView):
             "mobile_app_targets": []
         }
 
+        scopes = list(scopes)
         scope_ids = []
         for scope in scopes:
             scope_ids.append(str(scope.id))
@@ -876,9 +872,9 @@ class ScopeDataByNameAPIView(APIView):
         return Response({
             "message": "Scope data retrieved successfully",
             "admin_id": admin_id,
-            "scope_name": scopes.first().name,
+            "scope_name": scopes[0].name,
             "testing_type": testing_type,
-            "scope_count": scopes.count(),
+            "scope_count": len(scopes),
             "scope_ids": scope_ids,
             "entries": all_entries,
             "total_entries": sum(len(v) for v in all_entries.values())
@@ -910,13 +906,14 @@ class ScopeHierarchyAPIView(APIView):
         scope_name = request.query_params.get("scope_name")
         include_entries = request.query_params.get("include_entries", "").lower() == "true"
 
-        scopes = Scope.objects.filter(admin_id=admin_id)
+        scopes = Scope.objects.filter(admin_id=admin_id).prefetch_related("entries")
 
         # Filter by scope name if provided
         if scope_name:
             scopes = scopes.filter(name__iexact=scope_name)
 
-        if not scopes.exists():
+        scopes = list(scopes)
+        if not scopes:
             return Response({
                 "message": "No scopes found for this admin",
                 "admin_id": admin_id,
@@ -933,7 +930,7 @@ class ScopeHierarchyAPIView(APIView):
                 "testing_type": scope.testing_type,
                 "is_locked": scope.is_locked,
                 "locked_by": scope.locked_by,
-                "entry_count": scope.entries.count(),
+                "entry_count": len(scope.entries.all()),
                 "created_at": scope.created_at,
                 "updated_at": scope.updated_at
             }
@@ -945,15 +942,15 @@ class ScopeHierarchyAPIView(APIView):
 
         # Get unique scope names (case-insensitive)
         unique_names = {}
-        for name in scopes.values_list("name", flat=True):
-            name_lower = name.lower()
+        for scope in scopes:
+            name_lower = scope.name.lower()
             if name_lower not in unique_names:
-                unique_names[name_lower] = name
+                unique_names[name_lower] = scope.name
 
         return Response({
             "message": "Scope hierarchy retrieved successfully",
             "admin_id": admin_id,
-            "count": len(scope_data),
+            "count": len(scopes),
             "scope_names": list(unique_names.values()),
             "scopes": scope_data
         }, status=status.HTTP_200_OK)
