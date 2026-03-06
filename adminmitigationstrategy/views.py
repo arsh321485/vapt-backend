@@ -8,9 +8,7 @@ from django.conf import settings
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 import pymongo
-import threading
 import uuid
-from urllib.parse import urlparse
 import re
 from rest_framework.parsers import JSONParser
 from bson import ObjectId
@@ -30,70 +28,7 @@ TEAM_NAMES = [
 ]
 
 # ── Shared MongoDB connection pool ──────────────────────────────────────────
-_mongo_client: pymongo.MongoClient = None
-_mongo_lock = threading.Lock()
-
-
-def _get_mongo_client() -> pymongo.MongoClient:
-    global _mongo_client
-    if _mongo_client is None:
-        with _mongo_lock:
-            if _mongo_client is None:
-                uri = getattr(settings, "MONGO_DB_URL", None)
-                if not uri:
-                    uri = (
-                        settings.DATABASES.get("default", {})
-                        .get("CLIENT", {})
-                        .get("host")
-                    )
-                if not uri:
-                    raise RuntimeError(
-                        "MongoDB URI not configured. "
-                        "Set MONGO_DB_URL or DATABASES['default']['CLIENT']['host']."
-                    )
-                _mongo_client = pymongo.MongoClient(
-                    uri,
-                    serverSelectionTimeoutMS=5000,
-                    connectTimeoutMS=5000,
-                    socketTimeoutMS=10000,
-                    maxPoolSize=50,
-                    minPoolSize=5,
-                    retryWrites=True,
-                )
-    return _mongo_client
-
-
-def _get_db(client: pymongo.MongoClient):
-    dbname = getattr(settings, "MONGO_DB_NAME", None)
-    if not dbname:
-        uri = getattr(settings, "MONGO_DB_URL", None) or (
-            settings.DATABASES.get("default", {}).get("CLIENT", {}).get("host", "")
-        )
-        try:
-            parsed = urlparse(uri)
-            path = (parsed.path or "").lstrip("/")
-            if path:
-                dbname = re.split(r"[/?]", path)[0]
-        except Exception:
-            dbname = None
-        if not dbname:
-            try:
-                d = client.get_default_database()
-                if d:
-                    dbname = d.name
-            except Exception:
-                dbname = None
-    return client[dbname or "vaptfix"]
-
-
-class MongoContext:
-    """Context manager using a shared MongoDB connection pool."""
-
-    def __enter__(self):
-        return _get_db(_get_mongo_client())
-
-    def __exit__(self, exc_type, exc, tb):
-        pass  # Connection is pooled — do not close
+from vaptfix.mongo_client import MongoContext
 
 
 def _normalize_iso(dt):

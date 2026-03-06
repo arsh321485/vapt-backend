@@ -779,6 +779,24 @@ class MicrosoftTeamsOAuthUrlView(APIView):
             return JsonResponse({"error": str(e)}, status=500)
 
 
+def _create_vaptfix_channels(team_id, headers):
+    """Create 4 default channels on a provisioned team (safe to call from background thread)."""
+    default_channels = ["Patch Management", "Configuration Management", "Network Security", "Architectural Flaws"]
+    channels_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels"
+    results = []
+    for channel_name in default_channels:
+        try:
+            ch_resp = requests.post(channels_url, headers=headers, json={
+                "displayName": channel_name,
+                "description": f"{channel_name} channel",
+                "membershipType": "private"
+            }, timeout=15)
+            results.append({"channelName": channel_name, "status": "created" if ch_resp.status_code in (200, 201) else "failed"})
+        except Exception as e:
+            results.append({"channelName": channel_name, "status": "failed", "error": str(e)})
+    return results
+
+
 def auto_create_vaptfix_team(access_token):
     """
     Auto-create a team named 'VAPTFIX' with 4 default channels if it doesn't already exist.
@@ -849,17 +867,26 @@ def auto_create_vaptfix_team(access_token):
             match = re.search(r"teams\('([^']+)'\)", team_location)
             if match:
                 team_id = match.group(1)
-            # Wait for team to be provisioned
+            # Team provisioning is async — create channels in background to avoid blocking
             if team_id:
-                for attempt in range(5):
-                    time.sleep(10)
-                    check = requests.get(
-                        f"https://graph.microsoft.com/v1.0/teams/{team_id}",
-                        headers=headers, timeout=10
-                    )
-                    if check.status_code == 200:
-                        break
-                    logger.info(f"VAPTFIX team not ready, retry {attempt + 1}/5")
+                def _bg_create_channels(token, tid, hdrs):
+                    for attempt in range(5):
+                        time.sleep(10)
+                        try:
+                            check = requests.get(
+                                f"https://graph.microsoft.com/v1.0/teams/{tid}",
+                                headers=hdrs, timeout=10
+                            )
+                            if check.status_code == 200:
+                                break
+                        except Exception:
+                            pass
+                        logger.info(f"VAPTFIX team not ready, retry {attempt + 1}/5")
+                    _create_vaptfix_channels(tid, hdrs)
+
+                t = threading.Thread(target=_bg_create_channels, args=(access_token, team_id, headers), daemon=True)
+                t.start()
+            return {"team_id": team_id, "team_name": "Vaptfix", "status": "provisioning", "channels": []}
         else:
             logger.error(f"Failed to create VAPTFIX team: {resp.status_code} {resp.text}")
             return {"team_id": None, "team_name": "Vaptfix", "status": "creation_failed", "error": resp.text, "channels": []}
@@ -867,38 +894,8 @@ def auto_create_vaptfix_team(access_token):
         if not team_id:
             return {"team_id": None, "team_name": "Vaptfix", "status": "creation_failed", "error": "Could not extract team ID", "channels": []}
 
-        # Step 3: Create 4 default channels
-        default_channels = ["Patch Management", "Configuration Management", "Network Security", "Architectural Flaws"]
-        channels_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels"
-        channels_result = []
-
-        for channel_name in default_channels:
-            ch_payload = {
-                "displayName": channel_name,
-                "description": f"{channel_name} channel",
-                "membershipType": "private"
-            }
-            try:
-                ch_resp = requests.post(channels_url, headers=headers, json=ch_payload, timeout=15)
-                if ch_resp.status_code in (200, 201):
-                    ch_data = ch_resp.json()
-                    channels_result.append({
-                        "channelName": channel_name,
-                        "channelId": ch_data.get("id"),
-                        "status": "created"
-                    })
-                else:
-                    channels_result.append({
-                        "channelName": channel_name,
-                        "status": "failed",
-                        "error": ch_resp.text
-                    })
-            except Exception as e:
-                channels_result.append({
-                    "channelName": channel_name,
-                    "status": "failed",
-                    "error": str(e)
-                })
+        # Step 3: Create 4 default channels using the shared helper
+        channels_result = _create_vaptfix_channels(team_id, headers)
 
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
         return {
@@ -1548,25 +1545,31 @@ class CreateTeamView(generics.GenericAPIView):
         return results
 
     def wait_for_team_and_create_channels(self, access_token, team_id, max_retries=5, delay=10):
-        """Wait for async team provisioning to complete, then create default channels."""
+        """Start background thread that waits for team provisioning, then creates channels."""
         headers = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json'
         }
-        for attempt in range(max_retries):
-            time.sleep(delay)
-            try:
-                resp = requests.get(
-                    f"https://graph.microsoft.com/v1.0/teams/{team_id}",
-                    headers=headers,
-                    timeout=10
-                )
-                if resp.status_code == 200:
-                    return self.create_default_channels(access_token, team_id)
-            except Exception:
-                pass
-            logger.info(f"Team {team_id} not ready yet, retry {attempt + 1}/{max_retries}")
-        return [{"status": "failed", "error": "Team provisioning timed out. Channels were not created."}]
+
+        def _bg(token, tid, hdrs, retries, d):
+            for attempt in range(retries):
+                time.sleep(d)
+                try:
+                    resp = requests.get(
+                        f"https://graph.microsoft.com/v1.0/teams/{tid}",
+                        headers=hdrs, timeout=10
+                    )
+                    if resp.status_code == 200:
+                        _create_vaptfix_channels(tid, hdrs)
+                        return
+                except Exception:
+                    pass
+                logger.info(f"Team {tid} not ready yet, retry {attempt + 1}/{retries}")
+            logger.warning(f"Team {tid} provisioning timed out — channels not created.")
+
+        t = threading.Thread(target=_bg, args=(access_token, team_id, headers, max_retries, delay), daemon=True)
+        t.start()
+        return [{"status": "provisioning", "note": "Channels will be created in background once team is ready."}]
 
     def post(self, request, *args, **kwargs):
         try:

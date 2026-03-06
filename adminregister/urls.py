@@ -3,8 +3,8 @@ from django.urls import path
 from .views import (
     # VulnerabilityRegisterAPIView,
     LatestSuperAdminVulnerabilityRegisterAPIView,
-    VulnerabilitiesByHostListAPIView,
-    VulnerabilitiesByHostDetailAPIView,
+    # VulnerabilitiesByHostListAPIView,
+    # VulnerabilitiesByHostDetailAPIView,
     FixVulnerabilityCreateAPIView,
     FixVulnerabilityCardAPIView,
     ClosedVulnerabilitiesByAssetAPIView,
@@ -14,13 +14,14 @@ from .views import (
     FixVulnerabilityStepsAPIView,
     FixStepFeedbackAPIView,
     FixVulnerabilityFinalFeedbackAPIView,
-    FixVulnerabilityDetailAPIView,
+    # FixVulnerabilityDetailAPIView,
     RaiseSupportRequestByVulnerabilityAPIView,
     CreateTicketAPIView,
     TicketByReportAPIView,
     TicketOpenListAPIView,
     TicketClosedListAPIView,
-    TicketDetailAPIView
+    TicketDetailAPIView,
+    VulnerabilityTimelineAPIView,
  )
                     
 urlpatterns = [
@@ -28,10 +29,10 @@ urlpatterns = [
     path('register/latest/vulns/', LatestSuperAdminVulnerabilityRegisterAPIView.as_view(), name='latest-superadmin-vulns'),
 
     # Get list of hosts with vulnerability counts by risk factor
-    path('register/hosts/', VulnerabilitiesByHostListAPIView.as_view(), name='vulnerabilities-by-host-list'),
+    # path('register/hosts/', VulnerabilitiesByHostListAPIView.as_view(), name='vulnerabilities-by-host-list'),
 
     # Get vulnerabilities for a specific host, grouped by risk factor
-    path('register/host/<str:host_name>/vulns/', VulnerabilitiesByHostDetailAPIView.as_view(), name='vulnerabilities-by-host-detail'),
+    # path('register/host/<str:host_name>/vulns/', VulnerabilitiesByHostDetailAPIView.as_view(), name='vulnerabilities-by-host-detail'),
 
     path(
         "fix-vulnerability/report/<str:report_id>/asset/<str:host_name>/create/",
@@ -74,11 +75,11 @@ urlpatterns = [
     ),
 
     # Get complete fix vulnerability details for Fix Now card
-    path(
-        "fix-vulnerability/<str:fix_vuln_id>/detail/",
-        FixVulnerabilityDetailAPIView.as_view(),
-        name="fix-vulnerability-detail"
-    ),
+    # path(
+    #     "fix-vulnerability/<str:fix_vuln_id>/detail/",
+    #     FixVulnerabilityDetailAPIView.as_view(),
+    #     name="fix-vulnerability-detail"
+    # ),
 
     #create raise support request
     path(
@@ -138,5 +139,11 @@ urlpatterns = [
     name="get-ticket-detail"
 ),
 
+    # Timeline for a vulnerability card
+    path(
+        "fix-vulnerability/<str:fix_vuln_id>/timeline/",
+        VulnerabilityTimelineAPIView.as_view(),
+        name="vulnerability-timeline"
+    ),
 
 ]
