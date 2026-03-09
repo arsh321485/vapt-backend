@@ -4,6 +4,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     UserRegistrationView,
     UserLoginView,
+    UserMemberLoginView,
     AdminSignupSendOTPView,
     AdminSignupVerifyOTPView,
     AdminTestingTypeView,
@@ -77,6 +78,7 @@ urlpatterns = [
     path("signup/send-otp/", AdminSignupSendOTPView.as_view(),name="admin-signup-send-otp"),
     path("signup/verify-otp/", AdminSignupVerifyOTPView.as_view(),name="admin-signup-verify-otp"),
     path('login/', UserLoginView.as_view(), name='login'),
+    path('user-login/', UserMemberLoginView.as_view(), name='user-login'),
     path(
         "<str:admin_id>/testing-type/",
         AdminTestingTypeView.as_view(),

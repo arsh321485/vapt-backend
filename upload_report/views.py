@@ -956,6 +956,14 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         vulns_to_process = []
         for host in nessus_doc.get("vulnerabilities_by_host", []):
             host_name = (host.get("host_name") or "").strip()
+            # Extract OS from host_information (used for OS-specific mitigation steps)
+            host_info = host.get("host_information") or {}
+            operating_system = (
+                host_info.get("operating-system")
+                or host_info.get("os")
+                or ""
+            ).strip()
+
             for vuln in host.get("vulnerabilities", []):
                 vuln_plugin_name = vuln.get("plugin_name", "").strip()
                 if not vuln_plugin_name:
@@ -982,6 +990,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "plugin_name": vuln_plugin_name,
                     "description": vuln_description,
                     "host_name": host_name,
+                    "operating_system": operating_system,
                     "plugin_output": first_plugin_output,
                     "plugin_output_url": first_plugin_output_url,
                 })
@@ -1191,6 +1200,12 @@ class GenerateVulnerabilityCardView(APIView):
                 vulns_to_process = []
                 for host in nessus_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name", "")
+                    host_info = host.get("host_information") or {}
+                    host_os = (
+                        host_info.get("operating-system")
+                        or host_info.get("os")
+                        or ""
+                    ).strip()
                     for vuln in host.get("vulnerabilities", []):
                         vuln_plugin_name = vuln.get("plugin_name", "").strip()
                         vuln_description = (
@@ -1204,6 +1219,7 @@ class GenerateVulnerabilityCardView(APIView):
                             "description": vuln_description,
                             "plugin_output": vuln.get("plugin_output", ""),
                             "host_name": host_name,
+                            "operating_system": host_os,
                             "risk_factor": vuln.get("risk_factor", ""),
                         })
 
@@ -1245,6 +1261,8 @@ class GenerateVulnerabilityCardView(APIView):
                     description=vuln["description"],
                     plugin_output=vuln.get("plugin_output", ""),
                     report_id=report_id,
+                    host_name=vuln.get("host_name", "") or "",
+                    operating_system=vuln.get("operating_system", "") or "",
                 )
 
                 if not result["success"]:

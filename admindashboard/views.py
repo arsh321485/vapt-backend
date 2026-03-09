@@ -419,10 +419,18 @@ class ReportMeanTimeRemediateAPIView(APIView):
 # These views fetch data from the MOST RECENTLY uploaded report for the admin
 # ============================================================================
 
-def _load_latest_report_for_admin(db, admin_email):
-    """Load the most recently uploaded report for a specific admin by email."""
+def _load_latest_report_for_admin(db, admin_email, admin_id=None):
+    """Load the most recently uploaded report for a specific admin.
+    Tries admin_id first (more reliable for newer reports), falls back to admin_email.
+    """
     coll = db[NESSUS_COLLECTION]
-    # Sort by uploaded_at descending and get the first (most recent) document
+    if admin_id:
+        doc = coll.find_one(
+            {"admin_id": str(admin_id)},
+            sort=[("uploaded_at", -1)]
+        )
+        if doc:
+            return doc
     return coll.find_one(
         {"admin_email": admin_email},
         sort=[("uploaded_at", -1)]
@@ -441,7 +449,7 @@ class AdminTotalAssetsAPIView(APIView):
 
             with MongoContext() as db:
                 # Get the most recent report for this admin
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 if not doc:
                     return Response({
@@ -472,6 +480,102 @@ class AdminTotalAssetsAPIView(APIView):
             )
 
 
+class AdminAssetsByTeamAPIView(APIView):
+    """
+    GET /api/admin/admindashboard/dashboard/assets-by-team/
+    Returns unique asset (host) count per team for the admin's latest report.
+
+    Strategy:
+    1. Build vulnerability_name -> assigned_team map from vulnerability_cards
+    2. Loop nessus_reports.vulnerabilities_by_host — for each host, resolve its name
+       using fallbacks (host_name → host → host-ip → host-fqdn)
+    3. For each of that host's vulnerabilities, look up its team from the map
+    4. Add host to that team's set (deduplicated — one host counted once per team)
+    5. total_assets = all unique hosts in nessus doc (fallback: doc.total_hosts)
+
+    This grows correctly as more cards are generated:
+    - 15 cards now  → teams assigned to those 15 vulns → their affected hosts counted
+    - 83 cards later → all vulns mapped → full accurate counts per team
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_email = request.user.email
+            admin_id    = str(request.user.id)
+
+            with MongoContext() as db:
+                # Get the latest report for this admin
+                doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+                if not doc:
+                    return Response({"total_assets": 0, "by_team": []}, status=status.HTTP_200_OK)
+
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
+                team_names_lower = {name.lower(): name for name in TEAM_NAMES}
+
+                # Step 1: Build vuln_name -> assigned_team map from vulnerability_cards
+                plugin_team_map = {}
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": str(report_id)},
+                    {"vulnerability_name": 1, "assigned_team": 1}
+                ):
+                    pname = (card.get("vulnerability_name") or "").strip()
+                    raw_team = (card.get("assigned_team") or "").strip()
+                    matched_team = team_names_lower.get(raw_team.lower())
+                    if pname and matched_team:
+                        plugin_team_map[pname] = matched_team
+
+                # Step 2: Loop nessus hosts, resolve host_name, group by team
+                team_hosts = {name: set() for name in TEAM_NAMES}
+                all_hosts = set()
+
+                for host in (doc.get("vulnerabilities_by_host") or []):
+                    host_info = host.get("host_information") or {}
+                    host_name = (
+                        host.get("host_name")
+                        or host.get("host")
+                        or host_info.get("host-ip")
+                        or host_info.get("host-fqdn")
+                        or host_info.get("HOST_END")
+                        or ""
+                    )
+                    if isinstance(host_name, str):
+                        host_name = host_name.strip()
+                    if not host_name:
+                        continue
+
+                    all_hosts.add(host_name)
+
+                    for v in (host.get("vulnerabilities") or []):
+                        pname = (
+                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        ).strip()
+                        matched_team = plugin_team_map.get(pname)
+                        if matched_team:
+                            team_hosts[matched_team].add(host_name)
+
+                total_assets = len(all_hosts) or doc.get("total_hosts", 0)
+
+                by_team = [
+                    {"team": team, "asset_count": len(hosts)}
+                    for team, hosts in sorted(team_hosts.items())
+                ]
+
+                return Response({
+                    "report_id": report_id,
+                    "total_assets": total_assets,
+                    "by_team": by_team
+                }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "error occurred", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 class AdminAvgScoreAPIView(APIView):
     """
     Returns average CVSS score from the most recently uploaded report for the logged-in admin.
@@ -483,7 +587,7 @@ class AdminAvgScoreAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 if not doc:
                     return Response({"avg_score": None, "report_id": None}, status=status.HTTP_200_OK)
@@ -521,7 +625,7 @@ class AdminVulnerabilitiesAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                 report_id = None
@@ -564,7 +668,7 @@ class AdminMitigationTimelineAPIView(APIView):
             report_id = None
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
@@ -631,7 +735,7 @@ class AdminMeanTimeRemediateAPIView(APIView):
             report_id = None
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
@@ -710,7 +814,7 @@ class AdminVulnerabilitiesFixedAPIView(APIView):
 
             with MongoContext() as db:
                 # Get report_id from latest report
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
                 report_id = None
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
@@ -774,7 +878,7 @@ class AdminSupportRequestsAPIView(APIView):
 
             with MongoContext() as db:
                 # Get report_id from latest report
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
                 report_id = None
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
@@ -831,7 +935,7 @@ class AdminDashboardSummaryAPIView(APIView):
 
             with MongoContext() as db:
                 # Load the most recent report for this admin
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 # Initialize default values
                 total_assets = 0
@@ -986,7 +1090,7 @@ class AdminDistributionByTeamAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 if not doc:
                     return Response(
@@ -1057,7 +1161,7 @@ class AdminDistributionByTeamDetailAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 if not doc:
                     return Response(
@@ -1173,7 +1277,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 if not doc:
                     return Response(
@@ -1218,22 +1322,29 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                 ):
                     closed_plugins.add(doc_c.get("plugin_name", ""))
 
-                # ── card lookup: plugin_name → {assigned_team, found_date} ─────
-                # Cards have host_name="" so we match by plugin_name only.
-                # Each unique plugin_name gets assigned_team for its FIRST nessus occurrence only.
-                card_info = {}   # plugin_name -> {assigned_team, found_date}
+                # ── card lookup ──────────────────────────────────────────────────
+                # Primary key: (plugin_name, host_name) for exact per-host match.
+                # Fallback key: plugin_name only (for cards with empty host_name).
+                card_by_host = {}   # (plugin_name, host_name) -> {assigned_team, found_date}
+                card_by_name = {}   # plugin_name -> {assigned_team, found_date} (fallback)
                 for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
-                    vname = card.get("vulnerability_name", "")
-                    if vname and vname not in card_info:
-                        card_info[vname] = {
-                            "assigned_team": (card.get("assigned_team", "") or "").strip(),
-                            "found_date":    card.get("created_at"),
-                        }
+                    vname = (card.get("vulnerability_name") or "").strip()
+                    hname = (card.get("host_name") or "").strip()
+                    if not vname:
+                        continue
+                    info = {
+                        "assigned_team": (card.get("assigned_team") or "").strip(),
+                        "found_date":    card.get("created_at"),
+                    }
+                    if hname:
+                        card_by_host[(vname, hname)] = info
+                    # Always populate fallback (last card wins, all same vuln → same team)
+                    if vname not in card_by_name:
+                        card_by_name[vname] = info
 
                 # ── build one row per (vulnerability, host) from nessus ──────────
                 vulnerabilities = []
-                seen = set()            # avoid duplicate (plugin_name, host_name) rows
-                used_cards = set()      # track plugin_names already matched to a card
+                seen = set()    # avoid duplicate (plugin_name, host_name) rows
 
                 for host in doc.get("vulnerabilities_by_host", []):
                     h_name = (host.get("host_name") or host.get("host") or "").strip()
@@ -1252,12 +1363,11 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             continue
                         seen.add(row_key)
 
-                        # Give assigned_team only to first occurrence of each plugin_name
-                        if plugin_name in card_info and plugin_name not in used_cards:
-                            info = card_info[plugin_name]
-                            used_cards.add(plugin_name)
-                        else:
-                            info = {}
+                        # Exact (vuln, host) match first; fall back to vuln-only
+                        info = card_by_host.get((plugin_name, h_name)) \
+                               or card_by_name.get(plugin_name) \
+                               or {}
+
                         found_date    = info.get("found_date")
                         risk_factor   = plugin_risk.get(plugin_name)
                         vuln_status   = "closed" if plugin_name in closed_plugins else "open"
@@ -1303,7 +1413,7 @@ class AdminReportStatusAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email)
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
