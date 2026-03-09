@@ -86,14 +86,26 @@ class UploadReportAdminForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
 
         # Build choices list for admin dropdown (show only email)
+        # NOTE: djongo has a bug with boolean filters (is_staff=True generates broken SQL)
+        # So we use direct pymongo query instead of Django ORM
         choices = [('', '--- Select Admin ---')]
         try:
-            choices += [
-                (str(uid), email)
-                for uid, email in User.objects.filter(is_staff=True).values_list('id', 'email')
-            ]
-        except Exception:
-            pass
+            from django.conf import settings
+            import pymongo as _pymongo
+            mongo_uri = settings.DATABASES['default']['CLIENT']['host']
+            with _pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as _client:
+                try:
+                    _db = _client.get_default_database()
+                except Exception:
+                    _db = _client[settings.DATABASES['default'].get('NAME', 'vaptfix')]
+                admin_docs = list(_db["users_user"].find(
+                    {"is_staff": True, "is_active": True, "is_superuser": {"$ne": True}},
+                    {"id": 1, "email": 1, "_id": 0}
+                ))
+            choices += [(str(doc["id"]), doc["email"]) for doc in admin_docs if doc.get("email")]
+            logger.info(f"[UploadReportAdminForm] Loaded {len(admin_docs)} admins")
+        except Exception as e:
+            logger.error(f"[UploadReportAdminForm] Failed to load admin list: {e}")
 
         self.fields['admin_select'].choices = choices
 
