@@ -123,6 +123,45 @@ class UserLoginSerializer(serializers.Serializer):
         return attrs
 
 
+# Team Member Login Serializer (email + recaptcha only, no password)
+class UserMemberLoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    recaptcha = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        from users_details.models import UserDetail
+
+        email = attrs["email"].strip().lower()
+        recaptcha = attrs.get("recaptcha", "")
+
+        # reCAPTCHA verify
+        ok, msg = verify_recaptcha(recaptcha)
+        if not ok:
+            raise serializers.ValidationError({"recaptcha": msg})
+
+        # Check email in UserDetail table
+        user_detail = UserDetail.objects.filter(email__iexact=email).first()
+        if not user_detail:
+            raise serializers.ValidationError({"email": "No team member account found with this email."})
+
+        # Get or create a User account for this team member
+        User = get_user_model()
+        user, created = User.objects.get_or_create(
+            email=email,
+            defaults={"is_active": True}
+        )
+        if created:
+            user.set_unusable_password()
+            user.save()
+
+        if not user.is_active:
+            raise serializers.ValidationError({"email": "This account is inactive."})
+
+        attrs["user"] = user
+        attrs["user_detail"] = user_detail
+        return attrs
+
+
 # Admin Testing Type Serializer
 class AdminTestingTypeSerializer(serializers.ModelSerializer):
     class Meta:

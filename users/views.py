@@ -77,7 +77,8 @@ from .serializers import (
     JiraUserSerializer,
     JiraIssueSerializer,
     JiraProjectSerializer,
-    JiraCommentSerializer
+    JiraCommentSerializer,
+    UserMemberLoginSerializer
 )
 from .utils import JiraTokenManager
 import requests
@@ -204,7 +205,40 @@ class UserLoginView(generics.GenericAPIView):
         }, status=status.HTTP_200_OK)
 
 
-#  Admin Signup OTP View   
+# Team Member Login View (email + recaptcha only)
+class UserMemberLoginView(generics.GenericAPIView):
+    serializer_class = UserMemberLoginSerializer
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = serializer.validated_data["user"]
+        user_detail = serializer.validated_data["user_detail"]
+
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
+
+        refresh = RefreshToken.for_user(user)
+
+        return Response({
+            "message": "Login successful",
+            "user": {
+                "email": user_detail.email,
+                "first_name": user_detail.first_name,
+                "last_name": user_detail.last_name,
+                "user_type": user_detail.user_type,
+                "Member_role": user_detail.Member_role,
+            },
+            "tokens": {
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+            }
+        }, status=status.HTTP_200_OK)
+
+
+#  Admin Signup OTP View
 class AdminSignupSendOTPView(APIView):
     permission_classes = [AllowAny]
 

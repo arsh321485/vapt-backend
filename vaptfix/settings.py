@@ -65,8 +65,9 @@ INSTALLED_APPS = [
     "adminregister",
     "adminasset",
     "scope",
-    "adminmitigationstrategy"
-    
+    "adminmitigationstrategy",
+    "userdashboard",
+
 ]
 
 MIDDLEWARE = [
