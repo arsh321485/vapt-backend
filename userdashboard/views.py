@@ -175,7 +175,8 @@ class UserTotalAssetsAPIView(APIView):
 
                 report_id = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
 
-                # Build plugin_name -> matched_team map from vulnerability_cards
+                # Build plugin_name -> set of matched_teams from vulnerability_cards
+                # Using setdefault+set so one plugin can belong to multiple teams
                 plugin_team_map = {}
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
@@ -185,7 +186,7 @@ class UserTotalAssetsAPIView(APIView):
                     raw_team = (card.get("assigned_team") or "").strip()
                     matched  = teams_lower.get(raw_team.lower())
                     if pname and matched:
-                        plugin_team_map[pname] = matched
+                        plugin_team_map.setdefault(pname, set()).add(matched)
 
                 # Count unique hosts per team from nessus doc (with host-ip fallback)
                 by_team = {t: set() for t in active_teams}
@@ -203,16 +204,17 @@ class UserTotalAssetsAPIView(APIView):
                         pname = (
                             v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                         ).strip()
-                        matched = plugin_team_map.get(pname)
-                        if matched:
+                        for matched in plugin_team_map.get(pname, set()):
                             by_team[matched].add(h_name)
 
                 by_team_count = {t: len(hosts) for t, hosts in by_team.items()}
-                all_hosts = set().union(*by_team.values())
+                # total_assets = unique hosts across all teams (host in multiple teams counted once)
+                all_hosts = set().union(*by_team.values()) if by_team else set()
+                total_assets = len(all_hosts)
 
                 return Response({
                     "report_id": report_id,
-                    "total_assets": len(all_hosts),
+                    "total_assets": total_assets,
                     "teams": active_teams,
                     "by_team": by_team_count
                 })
@@ -223,7 +225,107 @@ class UserTotalAssetsAPIView(APIView):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. VULNERABILITIES
+# 3. AVERAGE CVSS SCORE (per total assets)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _safe_float(value):
+    """Convert a value to float, return None if not possible."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+class UserAvgScoreAPIView(APIView):
+    """
+    GET /api/user/dashboard/avg-score/
+    Returns average CVSS v3 score from vulnerabilities assigned to user's teams.
+    Optional: ?team=Patch+Management
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response({"avg_score": None, "total_assets": 0, "teams": [], "by_team": {}})
+
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams = [selected_team] if selected_team and selected_team in teams else teams
+            teams_lower = _normalize_teams(active_teams)
+
+            with MongoContext() as db:
+                nessus_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+                if not nessus_doc:
+                    return Response({"avg_score": None, "total_assets": 0, "teams": active_teams, "by_team": {}})
+
+                report_id = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
+
+                # Build plugin_name -> set of matched_teams from vulnerability_cards
+                plugin_team_map = {}
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": str(report_id)},
+                    {"vulnerability_name": 1, "assigned_team": 1}
+                ):
+                    pname    = (card.get("vulnerability_name") or "").strip()
+                    raw_team = (card.get("assigned_team") or "").strip()
+                    matched  = teams_lower.get(raw_team.lower())
+                    if pname and matched:
+                        plugin_team_map.setdefault(pname, set()).add(matched)
+
+                # Collect CVSS scores and unique hosts per team
+                by_team = {t: set() for t in active_teams}
+                cvss_vals = []
+
+                for host in (nessus_doc.get("vulnerabilities_by_host") or []):
+                    host_info = host.get("host_information") or {}
+                    h_name = (
+                        host.get("host_name") or host.get("host")
+                        or host_info.get("host-ip") or host_info.get("host-fqdn") or ""
+                    )
+                    if isinstance(h_name, str):
+                        h_name = h_name.strip()
+
+                    for v in (host.get("vulnerabilities") or []):
+                        pname = (
+                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        ).strip()
+                        matched_teams = plugin_team_map.get(pname, set())
+                        if not matched_teams:
+                            continue
+
+                        # Collect CVSS score for this vulnerability
+                        cv_raw = v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
+                        num = _safe_float(cv_raw)
+                        if num is not None:
+                            cvss_vals.append(num)
+
+                        # Count host per team
+                        if h_name:
+                            for matched in matched_teams:
+                                by_team[matched].add(h_name)
+
+                avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else None
+                by_team_count = {t: len(hosts) for t, hosts in by_team.items()}
+                all_hosts = set().union(*by_team.values()) if by_team else set()
+
+                return Response({
+                    "report_id": report_id,
+                    "avg_score": avg,
+                    "total_assets": len(all_hosts),
+                    "teams": active_teams,
+                    "by_team": by_team_count,
+                })
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(e)}, status=500)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. VULNERABILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 class UserVulnerabilitiesAPIView(APIView):

@@ -721,7 +721,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                 # Return existing fix record instead of error (idempotent)
                 return Response(
                     {
-                        "message": "Fix vulnerability already exists",
+                        "message": "Fix vulnerability  already exists",
                         "data": {
                             "_id": str(existing_fix["_id"]),
                             "report_id": existing_fix.get("report_id"),
@@ -1336,29 +1336,80 @@ class FixVulnerabilityStepsAPIView(APIView):
 
     def _get_host_os(self, db, report_id, host_name):
         """
-        Detect OS from nessus_reports host_information for the matching host.
+        Detect OS from nessus_reports for the matching host.
+        Reads host_information.OS (and fallbacks) from vulnerabilities_by_host.
         Returns "Windows", "Linux", or None.
         """
         nessus_doc = db[NESSUS_COLLECTION].find_one({"report_id": str(report_id)})
         if not nessus_doc:
             return None
+
+        host_name_lower = (host_name or "").strip().lower()
+
         for h in nessus_doc.get("vulnerabilities_by_host", []):
-            if h.get("host_name") == host_name:
-                host_info = h.get("host_information", {})
-                os_raw = (
-                    host_info.get("operating-system")
-                    or host_info.get("OS")
-                    or host_info.get("os")
-                    or ""
-                )
-                if os_raw:
-                    os_lower = os_raw.lower()
-                    if "windows" in os_lower:
+            h_name = (h.get("host_name") or h.get("host") or "").strip().lower()
+            if h_name != host_name_lower:
+                continue
+
+            host_info = h.get("host_information", {}) or {}
+
+            # 1. Check OS field (nessus stores it as "OS", "operating-system", or "os")
+            os_raw = (
+                host_info.get("OS")
+                or host_info.get("operating-system")
+                or host_info.get("os")
+                or ""
+            ).strip()
+
+            if os_raw:
+                os_lower = os_raw.lower()
+                if "windows" in os_lower:
+                    return "Windows"
+                if "linux" in os_lower or "unix" in os_lower:
+                    return "Linux"
+                # Return raw value so caller can still use it for filtering
+                return os_raw
+
+            # 2. CPE field
+            for cpe_key in ("cpe", "cpe-0", "cpe-1", "cpe-2"):
+                cpe = (host_info.get(cpe_key) or "").lower()
+                if cpe:
+                    if "microsoft" in cpe or "windows" in cpe:
                         return "Windows"
-                    if "linux" in os_lower or "unix" in os_lower:
+                    if "linux" in cpe or "ubuntu" in cpe or "debian" in cpe or "centos" in cpe or "redhat" in cpe:
                         return "Linux"
-                    return os_raw
-                break
+
+            # 3. NetBIOS name → Windows
+            if host_info.get("netbios-name") or host_info.get("smb-name"):
+                return "Windows"
+
+            # 4. plugin_output string of OS-detection plugins
+            # NOTE: parser stores plugin_output as a plain string per vulnerability
+            for v in h.get("vulnerabilities", []):
+                pname = (v.get("plugin_name") or v.get("pluginname") or "").lower()
+                if "os identification" in pname or "os detection" in pname or "operating system" in pname:
+                    output = (v.get("plugin_output") or "").lower()
+                    if "windows" in output:
+                        return "Windows"
+                    if "linux" in output or "unix" in output:
+                        return "Linux"
+
+            # 5. Heuristic: count Windows vs Linux plugin name hints
+            windows_hints = 0
+            linux_hints   = 0
+            for v in h.get("vulnerabilities", []):
+                pname = (v.get("plugin_name") or v.get("pluginname") or "").lower()
+                if any(k in pname for k in ("windows", "smb", "microsoft", "wmi", "winreg", "ntlm", "rdp", "mssql", "iis")):
+                    windows_hints += 1
+                if any(k in pname for k in ("linux", "ssh", "unix", "nfs", "iptables", "debian", "ubuntu", "centos", "bash")):
+                    linux_hints += 1
+            if windows_hints > linux_hints and windows_hints > 0:
+                return "Windows"
+            if linux_hints > windows_hints and linux_hints > 0:
+                return "Linux"
+
+            break
+
         return None
 
     # =====================
@@ -1415,6 +1466,13 @@ class FixVulnerabilityStepsAPIView(APIView):
             # Parse mitigation_table into structured per-step data
             steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
 
+            # Detect host OS: ?os= query param overrides nessus detection
+            os_param = request.query_params.get("os", "").strip().lower()
+            if os_param in ("windows", "linux"):
+                operating_system = "Windows" if os_param == "windows" else "Linux"
+            else:
+                operating_system = self._get_host_os(db, report_id, host_name) or "Windows"
+
             # Fallback to 6 default steps if mitigation_table is empty
             if not step_order:
                 step_order = list(range(1, 7))
@@ -1428,6 +1486,13 @@ class FixVulnerabilityStepsAPIView(APIView):
                     }
                     for n in step_order
                 }
+            else:
+                # OS-based step filtering: only show steps for the host's OS
+                if operating_system:
+                    os_key = "linux" if operating_system.lower() in ("linux", "unix") else "windows"
+                    os_filtered = [s for s in step_order if steps_dict[s].get(os_key)]
+                    if os_filtered:
+                        step_order = os_filtered
 
             total_steps = len(step_order)
 
@@ -1437,14 +1502,11 @@ class FixVulnerabilityStepsAPIView(APIView):
                 for s in steps_coll.find({"fix_vulnerability_id": fix_vuln_id})
             }
 
-            # Detect host OS from nessus report
-            operating_system = self._get_host_os(db, report_id, host_name)
-
             # Build step list
             steps = []
             previous_completed = True  # step 1 has no predecessor
 
-            for step_num in step_order:
+            for display_idx, step_num in enumerate(step_order, start=1):
                 step_meta = steps_dict[step_num]
                 saved = saved_steps.get(step_num)
                 current_status = saved.get("status", "pending") if saved else "pending"
@@ -1459,7 +1521,7 @@ class FixVulnerabilityStepsAPIView(APIView):
 
                 step_data = {
                     "_id": str(saved["_id"]) if saved else "",
-                    "step_number": step_num,
+                    "step_number": display_idx,
                     "step_name": step_meta["step_name"],
                     "criticality": step_meta["criticality"],
                     "effort_estimate": step_meta["effort_estimate"],
@@ -1570,6 +1632,23 @@ class FixVulnerabilityStepsAPIView(APIView):
             )
             mitigation_table = vuln_card.get("mitigation_table", [])
             steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
+
+            # OS-based step filtering: ?os= query param OR body "os" OR nessus detection
+            os_param = (
+                request.query_params.get("os", "")
+                or request.data.get("os", "")
+            ).strip().lower()
+            if os_param in ("windows", "linux"):
+                host_os = "Windows" if os_param == "windows" else "Linux"
+            else:
+                host_os = self._get_host_os(db, report_id, host_name) or "Windows"
+
+            if host_os and step_order:
+                os_key = "linux" if host_os.lower() in ("linux", "unix") else "windows"
+                os_filtered = [s for s in step_order if steps_dict[s].get(os_key)]
+                if os_filtered:
+                    step_order = os_filtered
+
             total_steps = len(step_order) if step_order else 6
 
             # Auto-determine current step: count completed steps → next in order
@@ -1588,12 +1667,15 @@ class FixVulnerabilityStepsAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # step_number and step_name fetched from mitigation_table
-            step_number = step_order[completed_count] if step_order else (completed_count + 1)
+            # internal_step_number = actual DB step number (e.g. 1,3,5,7 for Windows)
+            # display_step_number  = sequential for frontend (1,2,3,4...)
+            internal_step_number = step_order[completed_count] if step_order else (completed_count + 1)
+            display_step_number  = completed_count + 1
+            step_number = internal_step_number  # used for DB operations
             step_name = (
-                steps_dict[step_number]["step_name"]
-                if step_number in steps_dict
-                else self.DEFAULT_STEP_DESCRIPTIONS.get(step_number, f"Step {step_number}")
+                steps_dict[internal_step_number]["step_name"]
+                if internal_step_number in steps_dict
+                else self.DEFAULT_STEP_DESCRIPTIONS.get(internal_step_number, f"Step {display_step_number}")
             )
 
             # Build update document
@@ -1664,7 +1746,7 @@ class FixVulnerabilityStepsAPIView(APIView):
                         "step_saved": {
                             "fix_vulnerability_id": fix_vuln_id,
                             "fix_vulnerability_step_id": step_id,
-                            "step_number": step_number,
+                            "step_number": display_step_number,
                             "step_name": step_name,
                             "status": step_status,
                             "assigned_team": fix_doc.get("assigned_team", ""),
@@ -1674,25 +1756,26 @@ class FixVulnerabilityStepsAPIView(APIView):
                 )
 
             # Prepare next step info for UI
-            next_step_number = step_order[completed_steps] if step_order and completed_steps < len(step_order) else None
+            next_display_step = completed_steps + 1 if completed_steps < total_steps else None
+            next_internal     = step_order[completed_steps] if step_order and completed_steps < len(step_order) else None
             next_step_name = (
-                steps_dict[next_step_number]["step_name"]
-                if next_step_number and next_step_number in steps_dict
+                steps_dict[next_internal]["step_name"]
+                if next_internal and next_internal in steps_dict
                 else None
             )
 
             return Response(
                 {
-                    "message": f"Step {step_number} saved successfully",
+                    "message": f"Step {display_step_number} saved successfully",
                     "status": "open",
                     "completed_steps": completed_steps,
                     "total_steps": total_steps,
-                    "next_step": next_step_number,
+                    "next_step": next_display_step,
                     "next_step_name": next_step_name,
                     "step_saved": {
                         "fix_vulnerability_id": fix_vuln_id,
                         "fix_vulnerability_step_id": step_id,
-                        "step_number": step_number,
+                        "step_number": display_step_number,
                         "step_name": step_name,
                         "status": step_status,
                         "assigned_team": fix_doc.get("assigned_team", ""),
