@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     UserTeamsAPIView,
     UserTotalAssetsAPIView,
+    UserAvgScoreAPIView,
     UserVulnerabilitiesAPIView,
     UserVulnerabilitiesFixedAPIView,
     UserMitigationTimelineAPIView,
@@ -18,6 +19,7 @@ urlpatterns = [
     # Individual endpoints
     path("teams/",                   UserTeamsAPIView.as_view(),                 name="user-teams"),
     path("total-assets/",            UserTotalAssetsAPIView.as_view(),           name="user-total-assets"),
+    path("avg-score/",               UserAvgScoreAPIView.as_view(),              name="user-avg-score"),
     path("vulnerabilities/",         UserVulnerabilitiesAPIView.as_view(),       name="user-vulnerabilities"),
     path("vulnerabilities-fixed/",   UserVulnerabilitiesFixedAPIView.as_view(),  name="user-vulnerabilities-fixed"),
     path("mitigation-timeline/",     UserMitigationTimelineAPIView.as_view(),    name="user-mitigation-timeline"),

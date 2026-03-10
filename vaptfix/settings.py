@@ -67,6 +67,7 @@ INSTALLED_APPS = [
     "scope",
     "adminmitigationstrategy",
     "userdashboard",
+    "userregister",
 
 ]
 
