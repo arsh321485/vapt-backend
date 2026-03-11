@@ -925,17 +925,6 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                 completed_count = sum(1 for s in steps if s["status"] == "completed")
                 next_step       = (completed_count + 1) if completed_count < total_steps else None
 
-                # DEBUG: collect host_information to diagnose OS detection
-                _debug_host_info = {}
-                _nessus_doc = db[NESSUS_COLLECTION].find_one({"report_id": str(report_id)})
-                if _nessus_doc:
-                    _host_name_lower = (host_name or "").strip().lower()
-                    for _h in _nessus_doc.get("vulnerabilities_by_host", []):
-                        _h_name = (_h.get("host_name") or _h.get("host") or "").strip().lower()
-                        if _h_name == _host_name_lower:
-                            _debug_host_info = _h.get("host_information", {})
-                            break
-
                 return Response(
                     {
                         "message": "Steps fetched successfully",
@@ -945,7 +934,6 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         "asset": host_name,
                         "severity": fix_doc.get("risk_factor", ""),
                         "operating_system": operating_system,
-                        "debug_host_info": _debug_host_info,
                         "assigned_team": assigned_team,
                         "deadline": deadline,
                         "artifacts_tools": artifacts_tools,
@@ -1098,6 +1086,16 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     })
                     closed_coll.insert_one(closed_doc)
                     fix_coll.delete_one({"_id": ObjectId(fix_vuln_id)})
+
+                    # Auto-close any open ticket linked to this fix vulnerability
+                    db[TICKETS_COLLECTION].update_many(
+                        {"fix_vulnerability_id": fix_vuln_id, "status": "open"},
+                        {"$set": {
+                            "status": "closed",
+                            "closed_at": datetime.utcnow(),
+                            "close_comment": "Auto-closed: vulnerability patched",
+                        }},
+                    )
 
                     return Response(
                         {
@@ -1661,3 +1659,713 @@ class UserVulnerabilityTimelineAPIView(APIView):
                 {"detail": "unexpected error", "error": str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+# ─── UserSupportRequestsByReportAPIView ──────────────────────────────────────
+
+class UserSupportRequestsByReportAPIView(APIView):
+    """
+    GET  /api/user/register/support-requests/report/<report_id>/
+
+    Returns all support requests for a given report that belong to
+    the logged-in user's assigned teams (case-insensitive).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        teams, _admin = _get_user_context(request.user.email)
+        if not teams:
+            return Response(
+                {"detail": "No team assigned to this user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        teams_lower_set = {t.lower() for t in teams}
+
+        with MongoContext() as db:
+            support_coll = db[SUPPORT_REQUEST_COLLECTION]
+
+            cursor = support_coll.find(
+                {"report_id": str(report_id)}
+            ).sort("requested_at", -1)
+
+            # Collect docs that pass team filter
+            raw_docs = []
+            for doc in cursor:
+                doc_team = (doc.get("assigned_team") or "").strip().lower()
+                if doc_team not in teams_lower_set:
+                    continue
+                raw_docs.append(doc)
+
+        # ── Batch-resolve requester names from UserDetail ────────────────────
+        # Gather all unique user_ids (user_id preferred, fallback admin_id)
+        id_set = set()
+        for doc in raw_docs:
+            uid = doc.get("user_id") or doc.get("admin_id")
+            if uid:
+                id_set.add(str(uid))
+
+        # Build id → name map using assigned_team_members embedded in each doc
+        # (already contains user_id + name), supplemented by UserDetail lookup
+        id_to_name = {}
+
+        # Pass 1: extract from embedded assigned_team_members (no DB hit)
+        for doc in raw_docs:
+            for member in doc.get("assigned_team_members", []):
+                mid = str(member.get("user_id") or "")
+                mname = (member.get("name") or "").strip()
+                if mid and mname and mid not in id_to_name:
+                    id_to_name[mid] = mname
+
+        # Pass 2: for any IDs still missing, query UserDetail
+        missing_ids = id_set - set(id_to_name.keys())
+        if missing_ids and UserDetail:
+            for ud in UserDetail.objects.filter(
+                admin_id__in=missing_ids
+            ).only("admin_id", "first_name", "last_name"):
+                uid_str = str(ud.admin_id)
+                full = f"{ud.first_name} {ud.last_name}".strip()
+                if full:
+                    id_to_name[uid_str] = full
+
+        results = []
+        for doc in raw_docs:
+            uid = str(doc.get("user_id") or doc.get("admin_id") or "")
+            requester_name = id_to_name.get(uid) or doc.get("requested_by", "")
+            results.append({
+                "_id":                   str(doc.get("_id")),
+                "report_id":             doc.get("report_id"),
+                "vulnerability_id":      doc.get("vulnerability_id"),
+                "vul_name":              doc.get("vul_name"),
+                "host_name":             doc.get("host_name"),
+                "assigned_team":         doc.get("assigned_team"),
+                "assigned_team_members": doc.get("assigned_team_members", []),
+                "step_requested":        doc.get("step_requested"),
+                "description":           doc.get("description"),
+                "status":                doc.get("status"),
+                "requested_by":          requester_name,
+                "requested_at":          _normalize_iso(doc.get("requested_at")),
+            })
+
+        return Response(
+            {
+                "message": "Support requests fetched successfully",
+                "report_id": report_id,
+                "count": len(results),
+                "results": results,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+# ─── Inline serializer ───────────────────────────────────────────────────────
+from rest_framework import serializers as drf_serializers
+
+class _RaiseSupportRequestSerializer(drf_serializers.Serializer):
+    step = drf_serializers.CharField()
+    description = drf_serializers.CharField()
+
+
+# ─── UserRaiseSupportRequestAPIView ──────────────────────────────────────────
+
+class UserRaiseSupportRequestAPIView(APIView):
+    """
+    POST  /api/user/register/fix-vulnerability/<fix_vuln_id>/raise-support-request/
+
+    Raise a support request for a fix vulnerability.
+    Team validation: the logged-in user must belong to the team assigned
+    to that vulnerability (case-insensitive match).
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    def post(self, request, fix_vuln_id):
+        serializer = _RaiseSupportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        step_requested = serializer.validated_data["step"]
+        description    = serializer.validated_data["description"]
+        user_id        = str(request.user.id)
+
+        # Get user's teams
+        teams, admin_user = _get_user_context(request.user.email)
+        if not teams:
+            return Response(
+                {"detail": "No team assigned to this user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        teams_lower_set = {t.lower() for t in teams}
+
+        with MongoContext() as db:
+            fix_coll     = db[FIX_VULN_COLLECTION]
+            support_coll = db[SUPPORT_REQUEST_COLLECTION]
+
+            # ── Fetch fix vulnerability ──────────────────────────────────────
+            try:
+                vuln = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+            except Exception:
+                return Response(
+                    {"detail": "Invalid vulnerability ID"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not vuln:
+                return Response(
+                    {"detail": "Vulnerability not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            # ── Team validation ──────────────────────────────────────────────
+            assigned_team = (vuln.get("assigned_team") or "").strip()
+            if assigned_team.lower() not in teams_lower_set:
+                return Response(
+                    {"detail": "You do not have permission to raise a support request for this vulnerability"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # ── Duplicate check ──────────────────────────────────────────────
+            existing = support_coll.find_one({
+                "vulnerability_id": fix_vuln_id,
+                "user_id": user_id,
+            })
+            if existing:
+                return Response(
+                    {"detail": "Support request already raised for this vulnerability"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # ── Save support request ─────────────────────────────────────────
+            report_id = vuln.get("report_id", "")
+            support_doc = {
+                "report_id":             str(report_id),
+                "user_id":               user_id,
+                "admin_id":              str(admin_user.id) if admin_user else None,
+                "vulnerability_id":      fix_vuln_id,
+                "vul_name":              vuln.get("plugin_name"),
+                "host_name":             vuln.get("host_name"),
+                "assigned_team":         assigned_team,
+                "assigned_team_members": vuln.get("assigned_team_members", []),
+                "steps":                 vuln.get("mitigation_steps", []),
+                "step_requested":        step_requested,
+                "description":           description,
+                "status":                "open",
+                "requested_by":          request.user.email,
+                "requested_at":          datetime.utcnow(),
+            }
+            result = support_coll.insert_one(support_doc)
+            support_doc["_id"] = str(result.inserted_id)
+            support_doc["requested_at"] = _normalize_iso(support_doc["requested_at"])
+
+            return Response(
+                {
+                    "message": "Support request raised successfully",
+                    "data": support_doc,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+
+# ─── UserRaiseSupportRequestByVulnerabilityAPIView ────────────────────────────
+
+class UserRaiseSupportRequestByVulnerabilityAPIView(APIView):
+    """
+    GET  /api/user/register/fix-vulnerability/<fix_vuln_id>/raise-support-request/
+
+    Check whether a support request already exists for this vulnerability
+    raised by the logged-in user.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, fix_vuln_id):
+        user_id = str(request.user.id)
+
+        with MongoContext() as db:
+            support_coll = db[SUPPORT_REQUEST_COLLECTION]
+
+            support_req = support_coll.find_one({
+                "vulnerability_id": fix_vuln_id,
+                "user_id": user_id,
+            })
+
+            if not support_req:
+                return Response(
+                    {
+                        "exists": False,
+                        "detail": "No support request found for this vulnerability",
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            data = {
+                "_id":                   str(support_req.get("_id")),
+                "report_id":             support_req.get("report_id"),
+                "vulnerability_id":      support_req.get("vulnerability_id"),
+                "vul_name":              support_req.get("vul_name"),
+                "host_name":             support_req.get("host_name"),
+                "assigned_team":         support_req.get("assigned_team"),
+                "assigned_team_members": support_req.get("assigned_team_members", []),
+                "steps":                 support_req.get("steps", []),
+                "step_requested":        support_req.get("step_requested"),
+                "description":           support_req.get("description"),
+                "status":                support_req.get("status"),
+                "requested_by":          support_req.get("requested_by"),
+                "requested_at":          _normalize_iso(support_req.get("requested_at")),
+            }
+
+            return Response(
+                {
+                    "exists": True,
+                    "message": "Support request fetched successfully",
+                    "data": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TICKET VIEWS — team-filtered equivalents of adminregister ticket endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _CreateTicketSerializer(drf_serializers.Serializer):
+    category    = drf_serializers.CharField()
+    subject     = drf_serializers.CharField()
+    description = drf_serializers.CharField()
+
+
+def _ticket_row(doc, fix_doc):
+    """Serialize one ticket document for list responses."""
+    return {
+        "_id":                   str(doc.get("_id")),
+        "report_id":             doc.get("report_id"),
+        "fix_vulnerability_id":  doc.get("fix_vulnerability_id"),
+        "host_name":             doc.get("host_name"),
+        "plugin_name":           doc.get("plugin_name"),
+        "category":              doc.get("category"),
+        "subject":               doc.get("subject"),
+        "description":           doc.get("description"),
+        "status":                doc.get("status", "open"),
+        "created_at":            _normalize_iso(doc.get("created_at")),
+        "closed_at":             _normalize_iso(doc.get("closed_at")),
+        "close_comment":         doc.get("close_comment"),
+        "assigned_team":         fix_doc.get("assigned_team", ""),
+        "assigned_team_members": fix_doc.get("assigned_team_members", []),
+    }
+
+
+def _batch_fix_map(db, tickets):
+    """Return {fix_vuln_id_str: fix_doc} for all tickets in list."""
+    ids = []
+    for doc in tickets:
+        fid = doc.get("fix_vulnerability_id")
+        if fid:
+            try:
+                ids.append(ObjectId(fid))
+            except Exception:
+                pass
+    fix_map = {}
+    if ids:
+        for fix_doc in db[FIX_VULN_COLLECTION].find({"_id": {"$in": ids}}):
+            fix_map[str(fix_doc["_id"])] = fix_doc
+    return fix_map
+
+
+# ─── 1. Create Ticket ─────────────────────────────────────────────────────────
+
+class UserCreateTicketAPIView(APIView):
+    """
+    POST  /api/user/register/tickets/report/<report_id>/fix/<fix_vuln_id>/create/
+
+    Create a ticket for a fix vulnerability.
+    Team validation: vuln must be assigned to the logged-in user's team.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    def post(self, request, report_id, fix_vulnerability_id):
+        serializer = _CreateTicketSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        category    = serializer.validated_data["category"]
+        subject     = serializer.validated_data["subject"]
+        description = serializer.validated_data["description"]
+        user_id     = str(request.user.id)
+
+        teams, _admin = _get_user_context(request.user.email)
+        if not teams:
+            return Response(
+                {"detail": "No team assigned to this user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        teams_lower_set = {t.lower() for t in teams}
+
+        with MongoContext() as db:
+            fix_coll    = db[FIX_VULN_COLLECTION]
+            ticket_coll = db[TICKETS_COLLECTION]
+
+            # Fetch fix vulnerability
+            try:
+                fix_vuln = fix_coll.find_one({
+                    "_id": ObjectId(fix_vulnerability_id),
+                    "report_id": report_id,
+                })
+            except Exception:
+                return Response(
+                    {"detail": "Invalid fix_vulnerability_id"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if not fix_vuln:
+                return Response(
+                    {"detail": "Fix vulnerability not found for this report"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            # Team validation
+            assigned_team = (fix_vuln.get("assigned_team") or "").strip()
+            if assigned_team.lower() not in teams_lower_set:
+                return Response(
+                    {"detail": "You do not have permission to create a ticket for this vulnerability"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # Duplicate check
+            existing = ticket_coll.find_one({
+                "fix_vulnerability_id": fix_vulnerability_id,
+                "user_id": user_id,
+            })
+            if existing:
+                return Response(
+                    {"detail": "Ticket already created for this vulnerability"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Create ticket
+            ticket_doc = {
+                "fix_vulnerability_id": fix_vulnerability_id,
+                "report_id":            report_id,
+                "user_id":              user_id,
+                "host_name":            fix_vuln.get("host_name"),
+                "plugin_name":          fix_vuln.get("plugin_name"),
+                "category":             category,
+                "subject":              subject,
+                "description":          description,
+                "status":               "open",
+                "created_at":           datetime.utcnow(),
+            }
+            result = ticket_coll.insert_one(ticket_doc)
+            ticket_doc["_id"]        = str(result.inserted_id)
+            ticket_doc["created_at"] = _normalize_iso(ticket_doc["created_at"])
+
+            return Response(
+                {"message": "Ticket created successfully", "data": ticket_doc},
+                status=status.HTTP_201_CREATED,
+            )
+
+
+# ─── 2. All Tickets by Report ─────────────────────────────────────────────────
+
+class UserTicketByReportAPIView(APIView):
+    """
+    GET  /api/user/register/tickets/report/<report_id>/
+
+    All tickets for a report whose fix-vuln is assigned to the user's team.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        teams, _admin = _get_user_context(request.user.email)
+        if not teams:
+            return Response({"detail": "No team assigned"}, status=status.HTTP_403_FORBIDDEN)
+        teams_lower_set = {t.lower() for t in teams}
+
+        with MongoContext() as db:
+            ticket_coll = db[TICKETS_COLLECTION]
+            tickets = list(ticket_coll.find({"report_id": report_id}).sort("created_at", -1))
+            fix_map = _batch_fix_map(db, tickets)
+
+        results = []
+        for doc in tickets:
+            fix_doc = fix_map.get(doc.get("fix_vulnerability_id"), {})
+            if (fix_doc.get("assigned_team") or "").strip().lower() not in teams_lower_set:
+                continue
+            results.append(_ticket_row(doc, fix_doc))
+
+        return Response(
+            {"message": "Tickets fetched successfully", "report_id": report_id,
+             "count": len(results), "results": results},
+            status=status.HTTP_200_OK,
+        )
+
+
+# ─── 3. Open Tickets ──────────────────────────────────────────────────────────
+
+class UserTicketOpenListAPIView(APIView):
+    """
+    GET  /api/user/register/reports/<report_id>/tickets/open/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        teams, _admin = _get_user_context(request.user.email)
+        if not teams:
+            return Response({"detail": "No team assigned"}, status=status.HTTP_403_FORBIDDEN)
+        teams_lower_set = {t.lower() for t in teams}
+
+        with MongoContext() as db:
+            ticket_coll = db[TICKETS_COLLECTION]
+            fix_coll    = db[FIX_VULN_COLLECTION]
+
+            tickets = list(ticket_coll.find(
+                {"report_id": report_id, "status": "open"}
+            ).sort("created_at", -1))
+
+            fix_vuln_ids_in_tickets = list({
+                doc.get("fix_vulnerability_id")
+                for doc in tickets
+                if doc.get("fix_vulnerability_id")
+            })
+
+            active_obj_ids = []
+            for fid in fix_vuln_ids_in_tickets:
+                try:
+                    active_obj_ids.append(ObjectId(fid))
+                except Exception:
+                    pass
+
+            # Method 1: absent from fix_vulnerabilities = closed/deleted
+            active_ids = set()
+            if active_obj_ids:
+                for fix_doc in fix_coll.find({"_id": {"$in": active_obj_ids}}, {"_id": 1}):
+                    active_ids.add(str(fix_doc["_id"]))
+
+            # Method 2: present in fix_vulnerabilities_closed by host_name+plugin_name+report_id
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+            closed_keys = set()  # (host_name, plugin_name) tuples found in closed collection
+            if tickets:
+                or_conditions = [
+                    {
+                        "report_id": doc.get("report_id"),
+                        "host_name": doc.get("host_name"),
+                        "plugin_name": doc.get("plugin_name"),
+                    }
+                    for doc in tickets
+                    if doc.get("host_name") and doc.get("plugin_name")
+                ]
+                if or_conditions:
+                    for cdoc in closed_coll.find(
+                        {"$or": or_conditions},
+                        {"host_name": 1, "plugin_name": 1},
+                    ):
+                        closed_keys.add((cdoc.get("host_name"), cdoc.get("plugin_name")))
+
+            # stale = absent from active OR host+plugin found in closed collection
+            stale_ids = set()
+            for doc in tickets:
+                fid = doc.get("fix_vulnerability_id")
+                if not fid:
+                    continue
+                key = (doc.get("host_name"), doc.get("plugin_name"))
+                if fid not in active_ids or key in closed_keys:
+                    stale_ids.add(fid)
+
+            # Auto-close stale open tickets in DB
+            if stale_ids:
+                ticket_coll.update_many(
+                    {"fix_vulnerability_id": {"$in": list(stale_ids)}, "status": "open"},
+                    {"$set": {
+                        "status": "closed",
+                        "closed_at": datetime.utcnow(),
+                        "close_comment": "Auto-closed: vulnerability patched",
+                    }},
+                )
+
+            fix_map = _batch_fix_map(db, tickets)
+
+        results = []
+        for doc in tickets:
+            fid = doc.get("fix_vulnerability_id")
+            if fid in stale_ids:
+                continue
+            fix_doc = fix_map.get(fid, {})
+            # Team filter — only show tickets for user's teams
+            if (fix_doc.get("assigned_team") or "").strip().lower() not in teams_lower_set:
+                continue
+            results.append(_ticket_row(doc, fix_doc))
+
+        return Response(
+            {"message": "Open tickets fetched successfully", "report_id": report_id,
+             "status": "open", "count": len(results), "results": results},
+            status=status.HTTP_200_OK,
+        )
+
+
+# ─── 4. Closed Tickets ────────────────────────────────────────────────────────
+
+class UserTicketClosedListAPIView(APIView):
+    """
+    GET  /api/user/register/reports/<report_id>/tickets/closed/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        teams, _admin = _get_user_context(request.user.email)
+        if not teams:
+            return Response({"detail": "No team assigned"}, status=status.HTTP_403_FORBIDDEN)
+        teams_lower_set = {t.lower() for t in teams}
+
+        with MongoContext() as db:
+            ticket_coll = db[TICKETS_COLLECTION]
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+            # Get ALL tickets for this report (any status)
+            all_tickets = list(ticket_coll.find({"report_id": report_id}))
+
+            if not all_tickets:
+                return Response(
+                    {"message": "Closed tickets fetched successfully", "report_id": report_id,
+                     "status": "closed", "count": 0, "results": []},
+                    status=status.HTTP_200_OK,
+                )
+
+            all_fix_ids = [
+                doc.get("fix_vulnerability_id")
+                for doc in all_tickets
+                if doc.get("fix_vulnerability_id")
+            ]
+
+            # Check which fix_vuln_ids are in fix_vulnerabilities_closed
+            closed_fix_ids = set()
+            if all_fix_ids:
+                for cdoc in closed_coll.find(
+                    {"fix_vulnerability_id": {"$in": all_fix_ids}},
+                    {"fix_vulnerability_id": 1},
+                ):
+                    val = cdoc.get("fix_vulnerability_id")
+                    if val:
+                        closed_fix_ids.add(val)
+
+            # Auto-update ticket status to "closed" in DB if not already
+            if closed_fix_ids:
+                ticket_coll.update_many(
+                    {
+                        "fix_vulnerability_id": {"$in": list(closed_fix_ids)},
+                        "status": {"$ne": "closed"},
+                    },
+                    {"$set": {
+                        "status": "closed",
+                        "closed_at": datetime.utcnow(),
+                        "close_comment": "Auto-closed: vulnerability patched",
+                    }},
+                )
+
+            # Fetch assigned_team data from fix_vulnerabilities_closed
+            closed_fix_map = {}
+            if closed_fix_ids:
+                for cdoc in closed_coll.find(
+                    {"fix_vulnerability_id": {"$in": list(closed_fix_ids)}}
+                ):
+                    fid = cdoc.get("fix_vulnerability_id")
+                    if fid and fid not in closed_fix_map:
+                        closed_fix_map[fid] = cdoc
+
+        results = []
+        for doc in all_tickets:
+            fid = doc.get("fix_vulnerability_id")
+            if fid not in closed_fix_ids:
+                continue
+            fix_doc = closed_fix_map.get(fid, {})
+            # Team filter
+            if (fix_doc.get("assigned_team") or "").strip().lower() not in teams_lower_set:
+                continue
+            results.append({
+                "_id":                   str(doc["_id"]),
+                "report_id":             doc.get("report_id"),
+                "fix_vulnerability_id":  fid,
+                "host_name":             doc.get("host_name"),
+                "plugin_name":           doc.get("plugin_name"),
+                "category":              doc.get("category"),
+                "subject":               doc.get("subject"),
+                "description":           doc.get("description"),
+                "status":                "closed",
+                "created_at":            _normalize_iso(doc.get("created_at")),
+                "closed_at":             _normalize_iso(doc.get("closed_at")),
+                "close_comment":         doc.get("close_comment"),
+                "assigned_team":         fix_doc.get("assigned_team", ""),
+                "assigned_team_members": fix_doc.get("assigned_team_members", []),
+            })
+
+        results.sort(key=lambda x: x.get("closed_at") or "", reverse=True)
+
+        return Response(
+            {"message": "Closed tickets fetched successfully", "report_id": report_id,
+             "status": "closed", "count": len(results), "results": results},
+            status=status.HTTP_200_OK,
+        )
+
+
+# ─── 5. Ticket Detail ─────────────────────────────────────────────────────────
+
+class UserTicketDetailAPIView(APIView):
+    """
+    GET  /api/user/register/tickets/fix/<fix_vuln_id>/ticket/<ticket_id>/
+
+    Fetch a single ticket. Team ownership is validated via fix_vuln.assigned_team.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, fix_vulnerability_id, ticket_id):
+        teams, _admin = _get_user_context(request.user.email)
+        if not teams:
+            return Response({"detail": "No team assigned"}, status=status.HTTP_403_FORBIDDEN)
+        teams_lower_set = {t.lower() for t in teams}
+
+        try:
+            ticket_obj_id = ObjectId(ticket_id)
+        except Exception:
+            return Response({"detail": "Invalid ticket_id"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            fix_obj_id = ObjectId(fix_vulnerability_id)
+        except Exception:
+            return Response({"detail": "Invalid fix_vulnerability_id"}, status=status.HTTP_400_BAD_REQUEST)
+
+        with MongoContext() as db:
+            ticket = db[TICKETS_COLLECTION].find_one({
+                "_id": ticket_obj_id,
+                "fix_vulnerability_id": fix_vulnerability_id,
+            })
+
+            if not ticket:
+                return Response({"detail": "Ticket not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            fix_doc = db[FIX_VULN_COLLECTION].find_one({"_id": fix_obj_id}) or {}
+
+        # Team validation
+        assigned_team = (fix_doc.get("assigned_team") or "").strip()
+        if assigned_team.lower() not in teams_lower_set:
+            return Response(
+                {"detail": "You do not have permission to view this ticket"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        return Response(
+            {
+                "message": "Ticket fetched successfully",
+                "data": {
+                    "_id":                   str(ticket["_id"]),
+                    "report_id":             ticket.get("report_id"),
+                    "fix_vulnerability_id":  ticket.get("fix_vulnerability_id"),
+                    "host_name":             ticket.get("host_name"),
+                    "plugin_name":           ticket.get("plugin_name"),
+                    "severity":              fix_doc.get("risk_factor", ""),
+                    "category":              ticket.get("category"),
+                    "subject":               ticket.get("subject"),
+                    "description":           ticket.get("description"),
+                    "status":                ticket.get("status"),
+                    "created_at":            _normalize_iso(ticket.get("created_at")),
+                    "closed_at":             _normalize_iso(ticket.get("closed_at")),
+                    "close_comment":         ticket.get("close_comment"),
+                    "assigned_team":         assigned_team,
+                    "assigned_team_members": fix_doc.get("assigned_team_members", []),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )

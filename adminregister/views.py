@@ -209,11 +209,9 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 admin_email = latest_doc.get("admin_email")
 
                 # Build a set of closed vulnerability keys (plugin_name, host_name, port)
-                # Using port ensures only the specific record is marked closed
+                # Scope by report_id only — same as userregister — avoids created_by mismatch
                 closed_vulns = set()
-                for doc in closed_coll.find(
-                    {"report_id": str(report_id), "created_by": admin_id}
-                ):
+                for doc in closed_coll.find({"report_id": str(report_id)}):
                     key = (
                         doc.get("plugin_name", ""),
                         doc.get("host_name", ""),
@@ -1737,6 +1735,16 @@ class FixVulnerabilityStepsAPIView(APIView):
                 closed_coll.insert_one(closed_doc)
                 fix_coll.delete_one({"_id": ObjectId(fix_vuln_id)})
 
+                # Auto-close any open ticket linked to this fix vulnerability
+                db[TICKETS_COLLECTION].update_many(
+                    {"fix_vulnerability_id": fix_vuln_id, "status": "open"},
+                    {"$set": {
+                        "status": "closed",
+                        "closed_at": datetime.utcnow(),
+                        "close_comment": "Auto-closed: vulnerability patched",
+                    }},
+                )
+
                 return Response(
                     {
                         "message": "All steps completed. Fix vulnerability closed.",
@@ -2625,10 +2633,7 @@ class TicketByReportAPIView(APIView):
             fix_coll = db[FIX_VULN_COLLECTION]
 
             tickets = list(ticket_coll.find(
-                {
-                    "report_id": report_id,
-                    "admin_id": admin_id
-                }
+                {"report_id": report_id}
             ).sort("created_at", -1))
 
             # Batch-fetch fix vulnerabilities for assigned_team data
@@ -2675,38 +2680,99 @@ class TicketOpenListAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
-        admin_id = str(request.user.id)
-
         with MongoContext() as db:
             ticket_coll = db[TICKETS_COLLECTION]
-            fix_coll = db[FIX_VULN_COLLECTION]
+            fix_coll    = db[FIX_VULN_COLLECTION]
 
+            # Fetch ALL open tickets for this report (admin + user created)
             tickets = list(ticket_coll.find(
-                {
-                    "report_id": report_id,
-                    "admin_id": admin_id,
-                    "status": "open"
-                }
+                {"report_id": report_id, "status": "open"}
             ).sort("created_at", -1))
 
-            # Batch-fetch fix vulnerabilities for assigned_team data
-            fix_vuln_ids = [
-                ObjectId(doc["fix_vulnerability_id"])
+            if not tickets:
+                return Response(
+                    {"message": "Open tickets fetched successfully", "report_id": report_id,
+                     "status": "open", "count": 0, "results": []},
+                    status=status.HTTP_200_OK,
+                )
+
+            # Collect unique fix_vulnerability_ids from tickets
+            fix_vuln_ids_in_tickets = list({
+                doc.get("fix_vulnerability_id")
                 for doc in tickets
                 if doc.get("fix_vulnerability_id")
-            ]
+            })
+
+            active_obj_ids = []
+            for fid in fix_vuln_ids_in_tickets:
+                try:
+                    active_obj_ids.append(ObjectId(fid))
+                except Exception:
+                    pass
+
+            # Method 1: absent from fix_vulnerabilities = closed/deleted
+            active_ids = set()
+            if active_obj_ids:
+                for fix_doc in fix_coll.find({"_id": {"$in": active_obj_ids}}, {"_id": 1}):
+                    active_ids.add(str(fix_doc["_id"]))
+
+            # Method 2: present in fix_vulnerabilities_closed by host_name+plugin_name+report_id
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+            closed_keys = set()  # (host_name, plugin_name) tuples found in closed collection
+            if tickets:
+                or_conditions = [
+                    {
+                        "report_id": doc.get("report_id"),
+                        "host_name": doc.get("host_name"),
+                        "plugin_name": doc.get("plugin_name"),
+                    }
+                    for doc in tickets
+                    if doc.get("host_name") and doc.get("plugin_name")
+                ]
+                if or_conditions:
+                    for cdoc in closed_coll.find(
+                        {"$or": or_conditions},
+                        {"host_name": 1, "plugin_name": 1},
+                    ):
+                        closed_keys.add((cdoc.get("host_name"), cdoc.get("plugin_name")))
+
+            # stale = absent from active OR host+plugin found in closed collection
+            stale_ids = set()
+            for doc in tickets:
+                fid = doc.get("fix_vulnerability_id")
+                if not fid:
+                    continue
+                key = (doc.get("host_name"), doc.get("plugin_name"))
+                if fid not in active_ids or key in closed_keys:
+                    stale_ids.add(fid)
+
+            # Auto-close stale open tickets in DB
+            if stale_ids:
+                ticket_coll.update_many(
+                    {"fix_vulnerability_id": {"$in": list(stale_ids)}, "status": "open"},
+                    {"$set": {
+                        "status": "closed",
+                        "closed_at": datetime.utcnow(),
+                        "close_comment": "Auto-closed: vulnerability patched",
+                    }},
+                )
+
+            # Batch-fetch active fix_vulns for assigned_team data
             fix_map = {}
-            if fix_vuln_ids:
-                for fix_doc in fix_coll.find({"_id": {"$in": fix_vuln_ids}}):
+            if active_obj_ids:
+                for fix_doc in fix_coll.find({"_id": {"$in": active_obj_ids}}):
                     fix_map[str(fix_doc["_id"])] = fix_doc
 
             results = []
             for doc in tickets:
-                fix_doc = fix_map.get(doc.get("fix_vulnerability_id"), {})
+                fid = doc.get("fix_vulnerability_id")
+                if fid in stale_ids:
+                    continue
+                fix_doc = fix_map.get(fid, {})
                 results.append({
                     "_id": str(doc["_id"]),
                     "report_id": doc.get("report_id"),
-                    "fix_vulnerability_id": doc.get("fix_vulnerability_id"),
+                    "fix_vulnerability_id": fid,
                     "host_name": doc.get("host_name"),
                     "plugin_name": doc.get("plugin_name"),
                     "category": doc.get("category"),
@@ -2734,50 +2800,89 @@ class TicketClosedListAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
-        admin_id = str(request.user.id)
-
         with MongoContext() as db:
-            ticket_coll = db[TICKETS_COLLECTION]
-            fix_coll = db[FIX_VULN_COLLECTION]
+            ticket_coll  = db[TICKETS_COLLECTION]
+            closed_coll  = db[FIX_VULN_CLOSED_COLLECTION]
 
-            tickets = list(ticket_coll.find(
-                {
-                    "report_id": report_id,
-                    "admin_id": admin_id,
-                    "status": "closed"
-                }
-            ).sort("closed_at", -1))
+            # Get ALL tickets for this report (any status)
+            all_tickets = list(ticket_coll.find(
+                {"report_id": report_id}
+            ))
 
-            # Batch-fetch fix vulnerabilities for assigned_team data
-            fix_vuln_ids = [
-                ObjectId(doc["fix_vulnerability_id"])
-                for doc in tickets
+            if not all_tickets:
+                return Response(
+                    {"message": "Closed tickets fetched successfully", "report_id": report_id,
+                     "status": "closed", "count": 0, "results": []},
+                    status=status.HTTP_200_OK,
+                )
+
+            # Collect all fix_vulnerability_ids
+            all_fix_ids = [
+                doc.get("fix_vulnerability_id")
+                for doc in all_tickets
                 if doc.get("fix_vulnerability_id")
             ]
-            fix_map = {}
-            if fix_vuln_ids:
-                for fix_doc in fix_coll.find({"_id": {"$in": fix_vuln_ids}}):
-                    fix_map[str(fix_doc["_id"])] = fix_doc
+
+            # Check which are in fix_vulnerabilities_closed
+            closed_fix_ids = set()
+            if all_fix_ids:
+                for cdoc in closed_coll.find(
+                    {"fix_vulnerability_id": {"$in": all_fix_ids}},
+                    {"fix_vulnerability_id": 1},
+                ):
+                    val = cdoc.get("fix_vulnerability_id")
+                    if val:
+                        closed_fix_ids.add(val)
+
+            # Auto-update ticket status to "closed" in DB if not already
+            if closed_fix_ids:
+                ticket_coll.update_many(
+                    {
+                        "fix_vulnerability_id": {"$in": list(closed_fix_ids)},
+                        "status": {"$ne": "closed"},
+                    },
+                    {"$set": {
+                        "status": "closed",
+                        "closed_at": datetime.utcnow(),
+                        "close_comment": "Auto-closed: vulnerability patched",
+                    }},
+                )
+
+            # Fetch assigned_team data from fix_vulnerabilities_closed
+            closed_fix_map = {}
+            if closed_fix_ids:
+                for cdoc in closed_coll.find(
+                    {"fix_vulnerability_id": {"$in": list(closed_fix_ids)}}
+                ):
+                    fid = cdoc.get("fix_vulnerability_id")
+                    if fid and fid not in closed_fix_map:
+                        closed_fix_map[fid] = cdoc
 
             results = []
-            for doc in tickets:
-                fix_doc = fix_map.get(doc.get("fix_vulnerability_id"), {})
+            for doc in all_tickets:
+                fid = doc.get("fix_vulnerability_id")
+                if fid not in closed_fix_ids:
+                    continue
+                fix_doc = closed_fix_map.get(fid, {})
                 results.append({
-                    "_id": str(doc["_id"]),
-                    "report_id": doc.get("report_id"),
-                    "fix_vulnerability_id": doc.get("fix_vulnerability_id"),
-                    "host_name": doc.get("host_name"),
-                    "plugin_name": doc.get("plugin_name"),
-                    "category": doc.get("category"),
-                    "subject": doc.get("subject"),
-                    "description": doc.get("description"),
-                    "status": doc.get("status"),
-                    "created_at": doc.get("created_at"),
-                    "closed_at": doc.get("closed_at"),
-                    "close_comment": doc.get("close_comment"),
-                    "assigned_team": fix_doc.get("assigned_team", ""),
+                    "_id":                   str(doc["_id"]),
+                    "report_id":             doc.get("report_id"),
+                    "fix_vulnerability_id":  fid,
+                    "host_name":             doc.get("host_name"),
+                    "plugin_name":           doc.get("plugin_name"),
+                    "category":              doc.get("category"),
+                    "subject":               doc.get("subject"),
+                    "description":           doc.get("description"),
+                    "status":                "closed",
+                    "created_at":            doc.get("created_at"),
+                    "closed_at":             doc.get("closed_at"),
+                    "close_comment":         doc.get("close_comment"),
+                    "assigned_team":         fix_doc.get("assigned_team", ""),
                     "assigned_team_members": fix_doc.get("assigned_team_members", []),
                 })
+
+            # Sort by closed_at descending
+            results.sort(key=lambda x: x.get("closed_at") or "", reverse=True)
 
             return Response(
                 {

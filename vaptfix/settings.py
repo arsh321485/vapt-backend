@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     "adminmitigationstrategy",
     "userdashboard",
     "userregister",
+    "userasset",
 
 ]
 

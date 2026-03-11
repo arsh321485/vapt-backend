@@ -34,7 +34,8 @@ urlpatterns = [
     path("api/admin/adminmitigationstrategy/", include("adminmitigationstrategy.urls")),
     path("api/user/dashboard/", include("userdashboard.urls")),
     path("api/user/register/", include("userregister.urls")),
-    
+    path("api/user/asset/", include("userasset.urls")),
+
     path("media/<path:path>", serve_report_file),
 
 ]
