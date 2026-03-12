@@ -8,7 +8,8 @@ from .views import (
     UserDetailRoleDeleteView,
     UserDetailCompleteDeleteView,
     UserDetailRoleUpdateView,
-    UserDetailByAdminAPIView
+    UserDetailByAdminAPIView,
+    MemberProfileView,
 )
 
 app_name = "users_details"
@@ -26,5 +27,6 @@ urlpatterns = [
     "admin/<str:admin_id>/user-details/",
     UserDetailByAdminAPIView.as_view(),
     name="userdetail-by-admin"
-),
+    ),
+    path("member-profile/", MemberProfileView.as_view(), name="member-profile"),
 ]

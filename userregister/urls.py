@@ -15,6 +15,7 @@ from .views import (
     UserTicketOpenListAPIView,
     UserTicketClosedListAPIView,
     UserTicketDetailAPIView,
+    UserClosedVulnerabilitiesAPIView,
 )
 
 urlpatterns = [
@@ -121,5 +122,12 @@ urlpatterns = [
         "tickets/fix/<str:fix_vulnerability_id>/ticket/<str:ticket_id>/",
         UserTicketDetailAPIView.as_view(),
         name="user-ticket-detail",
+    ),
+
+    # 16. Closed vulnerabilities for member's teams
+    path(
+        "closed-vulns/",
+        UserClosedVulnerabilitiesAPIView.as_view(),
+        name="user-closed-vulns",
     ),
 ]

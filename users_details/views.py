@@ -7,9 +7,13 @@ from .models import UserDetail
 from .serializers import UserDetailSerializer, UserDetailCreateSerializer,UserDetailUpdateSerializer,UserDetailRoleUpdateSerializer
 from django.utils import timezone
 from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+from sendgrid.helpers.mail import (
+    Mail, Attachment, FileContent, FileName, FileType, Disposition, ContentId
+)
 from django.conf import settings
 import logging
+import base64
+import os
 import requests
 
 logger = logging.getLogger('users_details')
@@ -160,78 +164,151 @@ class UserDetailCreateView(generics.CreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def send_welcome_email(self, email, first_name, last_name, roles):
-        """Enhanced SendGrid Email Sending with Better Error Handling"""
-        
-        # Validate inputs
+        """Send styled welcome email to newly added team member."""
+
         if not email or not isinstance(email, str):
             return False, "Invalid email address"
-        
+
         if not settings.SENDGRID_API_KEY:
             logger.error("SENDGRID_API_KEY is not configured")
             return False, "SendGrid API key not configured"
-        
-        subject = "Your Account Has Been Created"
+
         full_name = f"{first_name} {last_name}".strip() or "User"
-        
-        # Format roles properly
-        roles_str = ', '.join(roles) if isinstance(roles, list) else str(roles)
-        
+        roles_list = roles if isinstance(roles, list) else [str(roles)]
+        roles_html = "".join(
+            f'<li style="margin-bottom:6px;">{r}</li>' for r in roles_list
+        )
+
+        # Load logo as inline CID attachment
+        logo_b64 = None
+        logo_path = os.path.join(str(settings.BASE_DIR), "users", "static", "users", "logo.png")
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        if logo_b64:
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+        elif getattr(settings, "VAPTFIX_LOGO_URL", ""):
+            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
+        else:
+            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+
+        login_url = getattr(settings, "VAPTFIX_LOGIN_URL", "#")
+
         html_content = f"""
         <!DOCTYPE html>
         <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        </head>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-                <h2 style="color: #2c3e50;">Welcome {full_name}!</h2>
-                <p>Your account has been created successfully in our VAPTFIX.</p>
-                
-                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-                    <p style="margin: 10px 0;"><strong>Assigned Roles:</strong> {roles_str}</p>
-                </div>
-                
-                <p>You can now access the system and perform tasks according to your assigned roles.</p>
-                
-                <p style="margin-top: 30px;">
-                    Best regards,<br>
-                    <strong>Security Management Team</strong>
-                </p>
-            </div>
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+            <tr>
+              <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:8px; overflow:hidden;
+                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+                  <!-- Header -->
+                  <tr>
+                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
+                                border-bottom:1px solid #e8eaed;">
+                      {logo_html}
+                    </td>
+                  </tr>
+
+                  <!-- Body -->
+                  <tr>
+                    <td style="padding:40px;">
+                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">Welcome to VAPTFIX</h2>
+                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
+
+                      <p style="color:#444; font-size:15px; line-height:1.6;">Dear {full_name.upper()},</p>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        We are pleased to inform you that your account has been successfully
+                        created in VAPTFIX.
+                      </p>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        You have been assigned the following roles:
+                      </p>
+                      <ul style="color:#444; font-size:15px; line-height:1.8; padding-left:20px;">
+                        {roles_html}
+                      </ul>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        You can now securely access the system using the link below:
+                      </p>
+
+                      <!-- Login Button -->
+                      <div style="text-align:center; margin:28px 0;">
+                        <a href="{login_url}"
+                           style="background-color:#1a73e8; color:#ffffff; padding:14px 32px;
+                                  text-decoration:none; border-radius:6px; font-size:15px;
+                                  font-weight:bold; display:inline-block;">
+                          🔐 Click Here to Login
+                        </a>
+                      </div>
+
+                      <p style="color:#444; font-size:14px; line-height:1.6;">
+                        Please use your registered credentials to sign in and begin managing
+                        your assigned responsibilities.
+                      </p>
+                      <p style="color:#444; font-size:14px; line-height:1.6;">
+                        If you believe any role assignment is incorrect or require additional
+                        access, please contact your system administrator.
+                      </p>
+
+                      <hr style="border:none; border-top:1px solid #e8eaed; margin:24px 0;" />
+                      <p style="color:#444; font-size:14px; margin:0;">
+                        Best regards,<br/>
+                        <strong>Security Management Team</strong><br/>
+                        VAPTFIX
+                      </p>
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
+                      <p style="color:#888; font-size:12px; margin:0;">
+                        &copy; 2026 VAPTFIX. All rights reserved.
+                      </p>
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+          </table>
         </body>
         </html>
         """
-        
+
         try:
-            # Create the email message
             message = Mail(
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 to_emails=email,
-                subject=subject,
-                html_content=html_content
+                subject="Welcome to VAPTFIX – Your Account Has Been Created",
+                html_content=html_content,
             )
-            
-            # Initialize SendGrid client
+            if logo_b64:
+                attachment = Attachment(
+                    FileContent(logo_b64),
+                    FileName("logo.png"),
+                    FileType("image/png"),
+                    Disposition("inline"),
+                    ContentId("vaptfix_logo"),
+                )
+                message.add_attachment(attachment)
+
             sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
-            
-            # Send the email
             response = sg.send(message)
-            
-            logger.info(f"Email sent successfully to {email}. Status code: {response.status_code}")
-            
-            # Check if email was accepted
+            logger.info(f"Welcome email sent to {email}. Status: {response.status_code}")
+
             if response.status_code in [200, 201, 202]:
                 return True, None
-            else:
-                error_msg = f"SendGrid returned status code: {response.status_code}"
-                logger.warning(error_msg)
-                return False, error_msg
-                
+            return False, f"SendGrid status: {response.status_code}"
+
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Failed to send email to {email}: {error_msg}", exc_info=True)
-            return False, error_msg
+            logger.error(f"Failed to send email to {email}: {str(e)}", exc_info=True)
+            return False, str(e)
 
     def create(self, request, *args, **kwargs):
         try:
@@ -724,6 +801,31 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
         return Response(response_data, status=status.HTTP_200_OK)
         
         
+class MemberProfileView(generics.RetrieveAPIView):
+    """
+    GET /api/admin/users_details/member-profile/
+    Returns the UserDetail profile of the currently logged-in member.
+    """
+    serializer_class = UserDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        return UserDetail.objects.filter(email__iexact=self.request.user.email).first()
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if not instance:
+            return Response(
+                {"error": "Member profile not found for this account."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        serializer = self.get_serializer(instance)
+        return Response({
+            "message": "Profile retrieved successfully",
+            "user": serializer.data
+        }, status=status.HTTP_200_OK)
+
+
 class UserDetailByAdminAPIView(generics.ListAPIView):
     """
     List all UserDetails created by a specific admin.

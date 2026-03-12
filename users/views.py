@@ -18,6 +18,7 @@ import secrets
 import traceback
 import json
 import time
+import threading
 import re
 import hashlib
 import hmac
@@ -225,6 +226,7 @@ class UserMemberLoginView(generics.GenericAPIView):
         return Response({
             "message": "Login successful",
             "user": {
+                "id": str(user.id),
                 "email": user_detail.email,
                 "first_name": user_detail.first_name,
                 "last_name": user_detail.last_name,
@@ -542,9 +544,9 @@ class UserPasswordResetView(APIView):
             status=status.HTTP_200_OK
         )
 
-# ADMIN LOGOUT VIEW
+# LOGOUT VIEW
 @api_view(["POST"])
-@permission_classes([AllowAny]) 
+@permission_classes([permissions.IsAuthenticated])
 def logout_view(request):
     return Response({"message": "Logout successful"}, status=200)
     
