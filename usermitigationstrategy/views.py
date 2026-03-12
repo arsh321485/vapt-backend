@@ -1,56 +1,39 @@
-from django.shortcuts import render
-
-# Create your views here.
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
-from django.conf import settings
+from rest_framework.parsers import JSONParser
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 import pymongo
-import uuid
-import re
-from rest_framework.parsers import JSONParser
-from bson import ObjectId
 
-from upload_report.models import UploadReport
+from vaptfix.mongo_client import MongoContext
 
-# ── Collection names ────────────────────────────────────────────────────────
 NESSUS_COLLECTION          = "nessus_reports"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 VULN_CARD_COLLECTION       = "vulnerability_cards"
 
-TEAM_NAMES = [
-    "Patch Management",
-    "Network Security",
-    "Architectural Flaws",
-    "Configuration Management",
-]
 
-# ── Shared MongoDB connection pool ──────────────────────────────────────────
-from vaptfix.mongo_client import MongoContext
+def _get_member_detail(user):
+    """Fetch UserDetail for the logged-in member by email."""
+    from users_details.models import UserDetail
+    return UserDetail.objects.filter(email__iexact=user.email).first()
 
 
 def _normalize_iso(dt):
-    """Return ISO string for datetime-like or string; else None."""
     if not dt:
         return None
     if isinstance(dt, datetime):
-        d = dt
-        if is_naive(d):
-            d = make_aware(d)
+        d = make_aware(dt) if is_naive(dt) else dt
         return d.isoformat()
     return str(dt)
 
 
-# ── API View ─────────────────────────────────────────────────────────────────
-
-class MitigationStrategyByTeamAPIView(APIView):
+class UserMitigationStrategyByTeamAPIView(APIView):
     """
-    Returns vulnerabilities from latest nessus report, grouped by assigned_team.
-    Team is fetched from vulnerability_cards collection (matched by report_id + vulnerability_name + host_name).
+    Returns vulnerabilities from the admin's latest nessus report,
+    filtered to only the teams the logged-in member belongs to.
 
-    GET /api/admin/adminmitigation-strategy/by-team/
+    GET /api/user/mitigation/by-team/
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -58,45 +41,43 @@ class MitigationStrategyByTeamAPIView(APIView):
 
     def get(self, request):
         try:
-            current_admin_id    = str(request.user.id)
-            current_admin_email = getattr(request.user, "email", None)
+            # Step 1: Get member detail → teams + admin_id
+            user_detail = _get_member_detail(request.user)
+            if not user_detail:
+                return Response(
+                    {"detail": "Member profile not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            member_teams = user_detail.Member_role or []
+            if not member_teams:
+                return Response(
+                    {"detail": "No teams assigned to this member."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            admin_id = str(user_detail.admin.id)
 
             with MongoContext() as db:
-                nessus_coll     = db[NESSUS_COLLECTION]
-                closed_coll     = db[FIX_VULN_CLOSED_COLLECTION]
-                vuln_card_coll  = db[VULN_CARD_COLLECTION]
+                nessus_coll    = db[NESSUS_COLLECTION]
+                closed_coll    = db[FIX_VULN_CLOSED_COLLECTION]
+                vuln_card_coll = db[VULN_CARD_COLLECTION]
 
-                # Latest report for this admin
-                query_conditions = [{"admin_id": current_admin_id}]
-                if current_admin_email:
-                    query_conditions.append({"admin_email": current_admin_email})
-
+                # Step 2: Latest report for this admin
                 latest_doc = nessus_coll.find_one(
-                    {"$or": query_conditions},
+                    {"admin_id": admin_id},
                     sort=[("uploaded_at", pymongo.DESCENDING)],
                 )
 
                 if not latest_doc:
                     return Response(
-                        {"detail": "No reports found for your account"},
+                        {"detail": "No reports found for your admin."},
                         status=status.HTTP_404_NOT_FOUND,
                     )
 
                 report_id = str(latest_doc.get("report_id", ""))
-                admin_id  = latest_doc.get("admin_id", current_admin_id)
 
-                # upload_reports status
-                report_status = "unknown"
-                try:
-                    upload_obj = UploadReport.objects.filter(
-                        _id=ObjectId(report_id)
-                    ).first()
-                    if upload_obj:
-                        report_status = upload_obj.status or "unknown"
-                except Exception:
-                    pass
-
-                # Build closed vulnerability keys set
+                # Step 3: Build closed vulnerability keys set
                 closed_vulns = set()
                 for doc in closed_coll.find(
                     {"report_id": report_id, "created_by": admin_id}
@@ -107,7 +88,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                         str(doc.get("port", "")),
                     ))
 
-                # Bulk-fetch all vulnerability_cards for this report
+                # Step 4: Bulk-fetch vulnerability_cards for this report
                 vuln_cards = {}
                 for card in vuln_card_coll.find({"report_id": report_id}):
                     key = (
@@ -116,9 +97,8 @@ class MitigationStrategyByTeamAPIView(APIView):
                     )
                     vuln_cards[key] = card
 
-                # Initialize team buckets
-                teams = {name: [] for name in TEAM_NAMES}
-                teams["Unassigned"] = []
+                # Step 5: Filter by member's teams only
+                teams = {name: [] for name in member_teams}
 
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
@@ -132,7 +112,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                     )
 
                     for v in host.get("vulnerabilities", []):
-                        # Only include vulnerabilities where plugin_outputs array has more than 1 item
+                        # Same filter as admin view
                         plugin_outputs = v.get("plugin_outputs", [])
                         if not isinstance(plugin_outputs, list) or len(plugin_outputs) <= 1:
                             continue
@@ -162,15 +142,17 @@ class MitigationStrategyByTeamAPIView(APIView):
                             else "open"
                         )
 
-                        # Lookup assigned_team from vulnerability_cards
                         card = (
                             vuln_cards.get((plugin_name, host_name))
                             or vuln_cards.get((plugin_name, ""))
                         )
                         assigned_team = (card or {}).get("assigned_team", "") or ""
 
+                        # Only include if assigned_team is in this member's teams
+                        if assigned_team not in member_teams:
+                            continue
+
                         row = {
-                            "id":            str(uuid.uuid4()),
                             "host_name":     host_name,
                             "os":            os_value,
                             "plugin_name":   plugin_name,
@@ -180,15 +162,11 @@ class MitigationStrategyByTeamAPIView(APIView):
                             "status":        vuln_status,
                             "assigned_team": assigned_team,
                         }
-
-                        if assigned_team in teams:
-                            teams[assigned_team].append(row)
-                        else:
-                            teams["Unassigned"].append(row)
+                        teams[assigned_team].append(row)
 
                 teams_response = {
                     team_name: {
-                        "count": len(vulns),
+                        "count":           len(vulns),
                         "vulnerabilities": vulns,
                     }
                     for team_name, vulns in teams.items()
@@ -196,12 +174,10 @@ class MitigationStrategyByTeamAPIView(APIView):
 
                 return Response(
                     {
-                        "report_id":     report_id,
-                        "report_status": report_status,
-                        "admin_id":      current_admin_id,
-                        "admin_email":   current_admin_email,
-                        "uploaded_at":   _normalize_iso(latest_doc.get("uploaded_at")),
-                        "teams":         teams_response,
+                        "report_id":    report_id,
+                        "member_teams": member_teams,
+                        "uploaded_at":  _normalize_iso(latest_doc.get("uploaded_at")),
+                        "teams":        teams_response,
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -220,48 +196,70 @@ class MitigationStrategyByTeamAPIView(APIView):
             )
 
 
-class VulnerabilityAssetCountAPIView(APIView):
+class UserVulnerabilityAssetCountAPIView(APIView):
     """
-    Returns each unique vulnerability name with the count and list of assets it appears in.
+    Returns each unique vulnerability name (in member's teams) with
+    the count and list of assets it appears in.
 
-    GET /api/admin/adminmitigation-strategy/vuln-asset-count/
+    GET /api/user/mitigation/vuln-asset-count/
     """
 
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         try:
-            current_admin_id    = str(request.user.id)
-            current_admin_email = getattr(request.user, "email", None)
+            # Step 1: Get member detail → teams + admin_id
+            user_detail = _get_member_detail(request.user)
+            if not user_detail:
+                return Response(
+                    {"detail": "Member profile not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            member_teams = user_detail.Member_role or []
+            if not member_teams:
+                return Response(
+                    {"detail": "No teams assigned to this member."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            admin_id = str(user_detail.admin.id)
 
             with MongoContext() as db:
-                nessus_coll = db[NESSUS_COLLECTION]
+                nessus_coll    = db[NESSUS_COLLECTION]
+                vuln_card_coll = db[VULN_CARD_COLLECTION]
 
-                query_conditions = [{"admin_id": current_admin_id}]
-                if current_admin_email:
-                    query_conditions.append({"admin_email": current_admin_email})
-
+                # Step 2: Latest report for this admin
                 latest_doc = nessus_coll.find_one(
-                    {"$or": query_conditions},
+                    {"admin_id": admin_id},
                     sort=[("uploaded_at", pymongo.DESCENDING)],
                 )
 
                 if not latest_doc:
                     return Response(
-                        {"detail": "No reports found for your account"},
+                        {"detail": "No reports found for your admin."},
                         status=status.HTTP_404_NOT_FOUND,
                     )
 
                 report_id = str(latest_doc.get("report_id", ""))
 
-                # Group: plugin_name -> set of host_names
+                # Step 3: Bulk-fetch vulnerability_cards
+                vuln_cards = {}
+                for card in vuln_card_coll.find({"report_id": report_id}):
+                    key = (
+                        card.get("vulnerability_name", ""),
+                        card.get("host_name", ""),
+                    )
+                    vuln_cards[key] = card
+
+                # Step 4: Group plugin_name -> set of host_names (filtered by member teams)
                 plugin_map = {}
 
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
 
                     for v in host.get("vulnerabilities", []):
-                        # Same filter as MitigationStrategyByTeamAPIView
+                        # Same filter as admin view
                         plugin_outputs = v.get("plugin_outputs", [])
                         if not isinstance(plugin_outputs, list) or len(plugin_outputs) <= 1:
                             continue
@@ -276,11 +274,21 @@ class VulnerabilityAssetCountAPIView(APIView):
                         if not plugin_name:
                             continue
 
+                        card = (
+                            vuln_cards.get((plugin_name, host_name))
+                            or vuln_cards.get((plugin_name, ""))
+                        )
+                        assigned_team = (card or {}).get("assigned_team", "") or ""
+
+                        # Only include if assigned_team is in member's teams
+                        if assigned_team not in member_teams:
+                            continue
+
                         if plugin_name not in plugin_map:
                             plugin_map[plugin_name] = set()
                         plugin_map[plugin_name].add(host_name)
 
-                # Build sorted result (highest asset_count first)
+                # Step 5: Build sorted result
                 result = sorted(
                     [
                         {
@@ -297,6 +305,7 @@ class VulnerabilityAssetCountAPIView(APIView):
                 return Response(
                     {
                         "report_id":                   report_id,
+                        "member_teams":                member_teams,
                         "total_unique_vulnerabilities": len(result),
                         "vulnerabilities":             result,
                     },

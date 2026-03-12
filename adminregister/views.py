@@ -36,6 +36,41 @@ def _normalize_iso(dt):
         return d.isoformat()
     return str(dt)
 
+def _resolve_requester(doc):
+    """
+    Returns requester display name for a support_requests document.
+    - user_id present → UserDetail first_name + last_name
+    - admin_id only   → User email
+    - fallback        → stored requested_by value
+    """
+    from django.contrib.auth import get_user_model
+
+    user_id  = doc.get("user_id")
+    admin_id = doc.get("admin_id")
+
+    if user_id:
+        try:
+            from users_details.models import UserDetail
+            ud = UserDetail.objects.filter(admin_id=str(user_id)).first()
+            if ud:
+                full_name = f"{ud.first_name} {ud.last_name}".strip()
+                if full_name:
+                    return full_name
+        except Exception:
+            pass
+
+    if admin_id:
+        try:
+            User = get_user_model()
+            u = User.objects.filter(pk=str(admin_id)).only("email").first()
+            if u:
+                return u.email
+        except Exception:
+            pass
+
+    return doc.get("requested_by", "")
+
+
 # ===============================
 # TEAM ASSIGNMENT HELPERS
 # ===============================
@@ -2443,7 +2478,7 @@ class RaiseSupportRequestByVulnerabilityAPIView(APIView):
                 "step_requested": support_req.get("step_requested"),
                 "description": support_req.get("description"),
                 "status": support_req.get("status"),
-                "requested_by": support_req.get("requested_by"),
+                "requested_by": _resolve_requester(support_req),
                 "requested_at": support_req.get("requested_at"),
             }
 
@@ -2490,7 +2525,7 @@ class SupportRequestByReportAPIView(APIView):
                     "step_requested": doc.get("step_requested"),
                     "description": doc.get("description"),
                     "status": doc.get("status"),
-                    "requested_by": doc.get("requested_by"),
+                    "requested_by": _resolve_requester(doc),
                     "requested_at": doc.get("requested_at"),
                 })
 
@@ -2536,7 +2571,7 @@ class SupportRequestByHostNameAPIView(APIView):
                     "step_requested": doc.get("step_requested"),
                     "description": doc.get("description"),
                     "status": doc.get("status"),
-                    "requested_by": doc.get("requested_by"),
+                    "requested_by": _resolve_requester(doc),
                     "requested_at": doc.get("requested_at"),
                 })
 

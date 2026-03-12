@@ -1,9 +1,13 @@
 from datetime import timedelta
 import logging
+import base64
+import os
 from time import timezone
 import requests
 import sendgrid
-from sendgrid.helpers.mail import Mail
+from sendgrid.helpers.mail import (
+    Mail, Attachment, FileContent, FileName, FileType, Disposition, ContentId
+)
 from django.conf import settings
 from users.models import User
 import random
@@ -16,16 +20,37 @@ class Util:
     def send_mail(data):
         """
         Send email using SendGrid API.
+        Supports html_content if provided, else falls back to plain body.
         Returns (True, None) on success or (False, error_message) on failure.
         """
         try:
             sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-            mail = Mail(
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                to_emails=data["to_email"],
-                subject=data["subject"],
-                plain_text_content=data["body"],
-            )
+            html = data.get("html_content")
+            if html:
+                mail = Mail(
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    to_emails=data["to_email"],
+                    subject=data["subject"],
+                    html_content=html,
+                )
+                # Attach inline logo if provided
+                inline_logo = data.get("inline_logo_b64")
+                if inline_logo:
+                    attachment = Attachment(
+                        FileContent(inline_logo),
+                        FileName("logo.png"),
+                        FileType("image/png"),
+                        Disposition("inline"),
+                        ContentId("vaptfix_logo"),
+                    )
+                    mail.add_attachment(attachment)
+            else:
+                mail = Mail(
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    to_emails=data["to_email"],
+                    subject=data["subject"],
+                    plain_text_content=data["body"],
+                )
             response = sg.send(mail)
             logger.info(f"SendGrid response: {response.status_code}")
             if response.status_code in [200, 201, 202]:
@@ -67,22 +92,96 @@ class Util:
     # ✅ ADMIN WELCOME EMAIL
     @staticmethod
     def send_admin_welcome_email(user_email):
+        # Try to load logo from static file for inline CID attachment
+        logo_b64 = None
+        logo_path = os.path.join(str(settings.BASE_DIR), "users", "static", "users", "logo.png")
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        body = f"""
-        Dear Administrator,
+        # Use CID if logo file found, else fallback to URL or text
+        if logo_b64:
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+        elif getattr(settings, "VAPTFIX_LOGO_URL", ""):
+            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
+        else:
+            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
 
-        Your administrator account for VAPTFIX has been successfully created.
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+            <tr>
+              <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:8px; overflow:hidden;
+                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
 
-        Once signed in, you will be able to complete your initial setup and begin managing the system.
+                  <!-- Header — no background, just logo -->
+                  <tr>
+                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
+                                border-bottom:1px solid #e8eaed;">
+                      {logo_html}
+                    </td>
+                  </tr>
 
-        Thank you for choosing VAPTFIX.
+                  <!-- Body -->
+                  <tr>
+                    <td style="padding:40px;">
+                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">
+                        Administrator Account Created Successfully
+                      </h2>
+                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
 
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        Dear Administrator,
+                      </p>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        We are pleased to inform you that your Administrator account for
+                        VAPTFIX has been successfully created.
+                        You may now sign in to the platform using your registered credentials.
+                      </p>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        Once logged in, you will be able to:
+                      </p>
+                      <ul style="color:#444; font-size:15px; line-height:2; padding-left:20px;">
+                        <li>Complete your initial system configuration</li>
+                        <li>Configure teams and user roles</li>
+                        <li>Add and manage assets</li>
+                        <li>Initiate vulnerability scans</li>
+                        <li>Monitor security posture and remediation progress</li>
+                      </ul>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        We recommend completing the initial setup to ensure your environment
+                        is properly configured for secure and efficient operations.
+                      </p>
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
+                      <p style="color:#888; font-size:12px; margin:0;">
+                        &copy; 2026 VAPTFIX. All rights reserved.
+                      </p>
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
         """
 
         data = {
             "to_email": user_email,
-            "subject": "Your Admin Account Has Been Created",
-            "body": body,
+            "subject": "Administrator Account Created Successfully – VAPTFIX",
+            "html_content": html_content,
+            "inline_logo_b64": logo_b64,
         }
 
         return Util.send_mail(data)

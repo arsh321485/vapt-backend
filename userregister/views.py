@@ -65,6 +65,40 @@ def _normalize_teams(teams):
     return {t.lower(): t for t in teams}
 
 
+def _resolve_requester(doc):
+    """
+    Returns requester display name for a support_requests document.
+    - user_id present → UserDetail first_name + last_name
+    - admin_id only   → User email
+    - fallback        → stored requested_by value
+    """
+    from django.contrib.auth import get_user_model
+
+    user_id  = doc.get("user_id")
+    admin_id = doc.get("admin_id")
+
+    if user_id and UserDetail:
+        try:
+            ud = UserDetail.objects.filter(admin_id=str(user_id)).first()
+            if ud:
+                full_name = f"{ud.first_name} {ud.last_name}".strip()
+                if full_name:
+                    return full_name
+        except Exception:
+            pass
+
+    if admin_id:
+        try:
+            User = get_user_model()
+            u = User.objects.filter(pk=str(admin_id)).only("email").first()
+            if u:
+                return u.email
+        except Exception:
+            pass
+
+    return doc.get("requested_by", "")
+
+
 def _load_latest_report(db, admin_id, admin_email):
     """Load admin's most recently uploaded nessus report."""
     coll = db[NESSUS_COLLECTION]
@@ -1083,6 +1117,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         "status": "closed",
                         "closed_at": datetime.utcnow(),
                         "closed_by": user_id,
+                        "operating_system": host_os,
                     })
                     closed_coll.insert_one(closed_doc)
                     fix_coll.delete_one({"_id": ObjectId(fix_vuln_id)})
@@ -1730,7 +1765,7 @@ class UserSupportRequestsByReportAPIView(APIView):
         results = []
         for doc in raw_docs:
             uid = str(doc.get("user_id") or doc.get("admin_id") or "")
-            requester_name = id_to_name.get(uid) or doc.get("requested_by", "")
+            requester_name = id_to_name.get(uid) or _resolve_requester(doc)
             results.append({
                 "_id":                   str(doc.get("_id")),
                 "report_id":             doc.get("report_id"),
@@ -1906,7 +1941,7 @@ class UserRaiseSupportRequestByVulnerabilityAPIView(APIView):
                 "step_requested":        support_req.get("step_requested"),
                 "description":           support_req.get("description"),
                 "status":                support_req.get("status"),
-                "requested_by":          support_req.get("requested_by"),
+                "requested_by":          _resolve_requester(support_req),
                 "requested_at":          _normalize_iso(support_req.get("requested_at")),
             }
 
@@ -2369,3 +2404,113 @@ class UserTicketDetailAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class UserClosedVulnerabilitiesAPIView(APIView):
+    """
+    Returns all closed vulnerabilities for the logged-in member's teams.
+
+    GET /api/user/register/closed-vulns/
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # Step 1: Get member teams + admin
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams:
+                return Response(
+                    {"detail": "No teams assigned to this member."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not admin_user:
+                return Response(
+                    {"detail": "Member profile not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            admin_id    = str(admin_user.id)
+            admin_email = getattr(admin_user, "email", None)
+
+            with MongoContext() as db:
+                # Step 2: Get latest nessus report for admin
+                latest_doc = _load_latest_report(db, admin_id, admin_email)
+                if not latest_doc:
+                    return Response(
+                        {"detail": "No reports found for your admin."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                report_id = str(latest_doc.get("report_id", ""))
+
+                # Build host -> OS map from nessus report (fallback for old records)
+                host_os_map = {}
+                for h in latest_doc.get("vulnerabilities_by_host", []):
+                    h_name = h.get("host_name") or h.get("host") or ""
+                    host_info = h.get("host_information") or {}
+                    os_raw = (
+                        host_info.get("OS")
+                        or host_info.get("operating-system")
+                        or host_info.get("operating_system")
+                        or host_info.get("os")
+                        or ""
+                    ).strip()
+                    if h_name and os_raw:
+                        os_lower = os_raw.lower()
+                        if "windows" in os_lower:
+                            host_os_map[h_name] = "Windows"
+                        elif "linux" in os_lower or "unix" in os_lower:
+                            host_os_map[h_name] = "Linux"
+                        else:
+                            host_os_map[h_name] = os_raw
+
+                # Step 3: Query fix_vulnerabilities_closed filtered by member's teams
+                closed_cursor = db[FIX_VULN_CLOSED_COLLECTION].find(
+                    {
+                        "report_id":     report_id,
+                        "assigned_team": {"$in": teams},
+                    },
+                    sort=[("closed_at", pymongo.DESCENDING)],
+                )
+
+                results = []
+                for doc in closed_cursor:
+                    host_name = doc.get("host_name", "")
+                    # Use stored OS first; fall back to nessus host_information; default Windows
+                    os_value = doc.get("operating_system", "") or host_os_map.get(host_name, "") or "Windows"
+                    results.append({
+                        "fix_vulnerability_id": doc.get("fix_vulnerability_id", str(doc.get("_id", ""))),
+                        "plugin_name":          doc.get("plugin_name", ""),
+                        "host_name":            host_name,
+                        "os":                   os_value,
+                        "port":                 doc.get("port", ""),
+                        "risk_factor":          doc.get("risk_factor", ""),
+                        "assigned_team":        doc.get("assigned_team", ""),
+                        "created_at":           _normalize_iso(doc.get("created_at")),
+                        "closed_at":            _normalize_iso(doc.get("closed_at")),
+                        "closed_by":            doc.get("closed_by", ""),
+                    })
+
+                return Response(
+                    {
+                        "report_id":    report_id,
+                        "member_teams": teams,
+                        "total_closed": len(results),
+                        "closed_vulnerabilities": results,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        except pymongo.errors.ServerSelectionTimeoutError as e:
+            return Response(
+                {"detail": "Cannot connect to MongoDB", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "Unexpected error", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

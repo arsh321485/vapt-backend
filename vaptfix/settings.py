@@ -69,7 +69,7 @@ INSTALLED_APPS = [
     "userdashboard",
     "userregister",
     "userasset",
-
+    "usermitigationstrategy"
 ]
 
 MIDDLEWARE = [

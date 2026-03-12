@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from django.core.cache import cache
+from datetime import date, timedelta
 import re
 
 DASHBOARD_CACHE_TTL = 300  # 5 minutes
@@ -685,27 +686,50 @@ class AdminMitigationTimelineAPIView(APIView):
             total_days = critical_days + high_days + medium_days + low_days
             total_hours = days_to_hours(total_days)
 
+            # Remaining days calculation
+            base_date = (rc.updated_at or rc.created_at).date()
+            today = date.today()
+
+            def _remaining(n_days):
+                deadline = base_date + timedelta(days=n_days)
+                delta = (deadline - today).days
+                if delta < 0:
+                    return {"remaining_days": abs(delta), "remaining_label": "Overdue", "status": "overdue"}
+                weeks, days_left = divmod(delta, 7)
+                if weeks > 0 and days_left > 0:
+                    label = f"{weeks} week{'s' if weeks > 1 else ''} {days_left} day{'s' if days_left > 1 else ''}"
+                elif weeks > 0:
+                    label = f"{weeks} week{'s' if weeks > 1 else ''}"
+                else:
+                    label = f"{days_left} day{'s' if days_left > 1 else ''}"
+                return {"remaining_days": delta, "remaining_label": label, "status": "active"}
+
             payload = {
                 "report_id": report_id,
+                "base_date": str(base_date),
                 "critical": {
                     "raw": rc.critical,
                     "days": critical_days,
-                    "label": days_to_week_label(critical_days)
+                    "label": days_to_week_label(critical_days),
+                    **_remaining(critical_days),
                 },
                 "high": {
                     "raw": rc.high,
                     "days": high_days,
-                    "label": days_to_week_label(high_days)
+                    "label": days_to_week_label(high_days),
+                    **_remaining(high_days),
                 },
                 "medium": {
                     "raw": rc.medium,
                     "days": medium_days,
-                    "label": days_to_week_label(medium_days)
+                    "label": days_to_week_label(medium_days),
+                    **_remaining(medium_days),
                 },
                 "low": {
                     "raw": rc.low,
                     "days": low_days,
-                    "label": days_to_week_label(low_days)
+                    "label": days_to_week_label(low_days),
+                    **_remaining(low_days),
                 },
                 "total": {
                     "days": total_days,

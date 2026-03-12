@@ -76,8 +76,8 @@ class RiskCriteriaListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # Always filter by the authenticated admin — no query param needed
-        return RiskCriteria.objects.filter(admin=self.request.user).order_by('-created_at')
+        # Use explicit admin_id string to avoid djongo FK resolution issues
+        return RiskCriteria.objects.filter(admin_id=str(self.request.user.id)).order_by('-created_at')
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
@@ -105,7 +105,7 @@ class RiskCriteriaDetailView(generics.RetrieveAPIView):
             raise ValidationError("Invalid Risk Criteria ID")
 
         obj = get_object_or_404(RiskCriteria, _id=obj_id)
-        if str(obj.admin_id) != str(self.request.user.id):
+        if str(obj.admin_id).strip() != str(self.request.user.id).strip():
             raise Http404
         return obj
 
@@ -131,7 +131,7 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
             raise ValidationError("Invalid Risk Criteria ID")
 
         obj = get_object_or_404(RiskCriteria, _id=obj_id)
-        if str(obj.admin_id) != str(self.request.user.id):
+        if str(obj.admin_id).strip() != str(self.request.user.id).strip():
             raise Http404
         return obj
 
@@ -160,7 +160,7 @@ class RiskCriteriaDeleteView(generics.DestroyAPIView):
             raise ValidationError("Invalid Risk Criteria ID")
 
         obj = get_object_or_404(RiskCriteria, _id=obj_id)
-        if str(obj.admin_id) != str(self.request.user.id):
+        if str(obj.admin_id).strip() != str(self.request.user.id).strip():
             raise Http404
         return obj
 
@@ -202,14 +202,34 @@ class RiskCriteriaCalendarView(APIView):
 
         # base_date = updated_at if criteria was updated, else created_at
         base_date = (risk.updated_at or risk.created_at).date()
+        today = date.today()
 
-        # Calculate deadline dates
-        deadlines = {
-            "critical": {"days": critical_days, "deadline_date": str(base_date + timedelta(days=critical_days))},
-            "high":     {"days": high_days,     "deadline_date": str(base_date + timedelta(days=high_days))},
-            "medium":   {"days": medium_days,   "deadline_date": str(base_date + timedelta(days=medium_days))},
-            "low":      {"days": low_days,       "deadline_date": str(base_date + timedelta(days=low_days))},
-        }
+        def _remaining(deadline_date):
+            delta = (deadline_date - today).days
+            if delta < 0:
+                return {"days": abs(delta), "status": "overdue"}
+            weeks, days = divmod(delta, 7)
+            if weeks > 0 and days > 0:
+                label = f"{weeks} week{'s' if weeks > 1 else ''} {days} day{'s' if days > 1 else ''}"
+            elif weeks > 0:
+                label = f"{weeks} week{'s' if weeks > 1 else ''}"
+            else:
+                label = f"{days} day{'s' if days > 1 else ''}"
+            return {"days": delta, "label": label, "status": "active"}
+
+        # Calculate deadline dates with remaining days
+        deadlines = {}
+        for severity, n_days in [("critical", critical_days), ("high", high_days),
+                                  ("medium", medium_days), ("low", low_days)]:
+            deadline_date = base_date + timedelta(days=n_days)
+            remaining = _remaining(deadline_date)
+            deadlines[severity] = {
+                "days":           n_days,
+                "deadline_date":  str(deadline_date),
+                "remaining_days": remaining["days"],
+                "remaining_label": remaining.get("label", "Overdue"),
+                "status":         remaining["status"],
+            }
 
         # Parse requested month (default: current month)
         month_param = request.query_params.get("month")
