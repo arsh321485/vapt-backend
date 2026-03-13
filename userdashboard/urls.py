@@ -9,12 +9,12 @@ from .views import (
     UserMeanTimeRemediateAPIView,
     UserSupportRequestsAPIView,
     UserPatchManagementAPIView,
-    UserDashboardSummaryAPIView,
+    # UserDashboardSummaryAPIView,
 )
 
 urlpatterns = [
     # Full summary (recommended — single call for all metrics)
-    path("summary/",                 UserDashboardSummaryAPIView.as_view(),      name="user-dashboard-summary"),
+    # path("summary/",                 UserDashboardSummaryAPIView.as_view(),      name="user-dashboard-summary"),
 
     # Individual endpoints
     path("teams/",                   UserTeamsAPIView.as_view(),                 name="user-teams"),
