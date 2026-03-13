@@ -69,19 +69,84 @@ class Util:
     def send_signup_otp(email, otp=None):
         if otp is None:
             otp = str(random.randint(100000, 999999))
-        
+
         # Cache OTP only (password stored separately)
         cache.set(f"signup_otp_{email}", otp, timeout=300)
 
-        body = f"""
-        Your OTP for VAPTFIX Admin Signup is: {otp}
-        This OTP is valid for 5 minutes.
+        # Load logo (same approach as welcome email)
+        logo_b64 = None
+        logo_path = os.path.join(str(settings.BASE_DIR), "users", "static", "users", "logo.png")
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        if logo_b64:
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+        elif getattr(settings, "VAPTFIX_LOGO_URL", ""):
+            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
+        else:
+            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+            <tr>
+              <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:8px; overflow:hidden;
+                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+                  <!-- Header with Logo -->
+                  <tr>
+                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
+                                border-bottom:1px solid #e8eaed;">
+                      {logo_html}
+                    </td>
+                  </tr>
+
+                  <!-- Body -->
+                  <tr>
+                    <td style="padding:40px;">
+                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">Admin Signup – OTP Verification</h2>
+                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
+
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        Your One-Time Password (OTP) for VAPTFIX Admin Signup is:
+                        <strong style="font-size:22px; color:#1a1a2e; letter-spacing:4px;">{otp}</strong>
+                      </p>
+
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        This OTP is valid for <strong>5 minutes</strong>.
+                        Please do not share this OTP with anyone for security reasons.
+                      </p>
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
+                      <p style="color:#888; font-size:12px; margin:0;">
+                        &copy; 2026 VAPTFIX. All rights reserved.
+                      </p>
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
         """
 
         data = {
             "to_email": email,
-            "subject": "VAPTFIX Signup OTP",
-            "body": body,
+            "subject": "VAPTFIX Admin Signup – OTP Verification",
+            "html_content": html_content,
+            "inline_logo_b64": logo_b64,
         }
         success, error = Util.send_mail(data)
         return success, error

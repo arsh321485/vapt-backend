@@ -1,83 +1,60 @@
-from rest_framework import generics, status, permissions
-from rest_framework.response import Response
+from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework.views import APIView
-from bson import ObjectId
-from django.shortcuts import get_object_or_404
 from django.http import Http404
-from .models import RiskCriteria
-from .serializers import (
-    RiskCriteriaSerializer,
-    RiskCriteriaCreateSerializer,
-    RiskCriteriaUpdateSerializer,
-)
+from bson import ObjectId
 import logging
 import calendar
 import re
 from datetime import date, timedelta
 
+from risk_criteria.models import RiskCriteria
+from risk_criteria.serializers import RiskCriteriaSerializer, RiskCriteriaUpdateSerializer
+from users_details.models import UserDetail
+
 logger = logging.getLogger(__name__)
 
 
+def _get_admin_for_user(request_user):
+    """Return the admin User for the logged-in team member, or None."""
+    detail = UserDetail.objects.filter(email=request_user.email).first()
+    if not detail or not detail.admin:
+        return None
+    return detail.admin
+
+
 def parse_days(value):
-    """
-    Parse values like: "1", "2", "day 1", "day 3", "1 week", "2 weeks", "1 week 2 days"
-    Returns total number of days as int, or raises ValueError.
-    """
     if value is None:
         raise ValueError("Empty value")
-
     value = str(value).strip().lower()
-
-    # Pure integer: "2", "7"
     if value.isdigit():
         return int(value)
-
     total_days = 0
     matched = False
-
-    # Match weeks: "1 week", "2 weeks"
     week_match = re.search(r'(\d+)\s*week', value)
     if week_match:
         total_days += int(week_match.group(1)) * 7
         matched = True
-
-    # Match days: "day 1", "1 day", "3 days"
     day_match = re.search(r'(\d+)\s*day|day\s*(\d+)', value)
     if day_match:
         num = day_match.group(1) or day_match.group(2)
         total_days += int(num)
         matched = True
-
     if not matched:
         raise ValueError(f"Cannot parse day value: '{value}'")
-
     return total_days
 
 
-class RiskCriteriaCreateView(generics.CreateAPIView):
-    serializer_class = RiskCriteriaCreateSerializer
-    permission_classes = [IsAuthenticated]
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        # admin is always the authenticated user — not taken from request body
-        risk_criteria = serializer.save(admin=request.user)
-        data = RiskCriteriaSerializer(risk_criteria).data
-        return Response(
-            {"message": "Risk Criteria created successfully", "risk_criteria": data},
-            status=status.HTTP_201_CREATED,
-        )
-
-
-class RiskCriteriaListView(generics.ListAPIView):
+class UserRiskCriteriaListView(generics.ListAPIView):
     serializer_class = RiskCriteriaSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # Use explicit admin_id string to avoid djongo FK resolution issues
-        return RiskCriteria.objects.filter(admin_id=str(self.request.user.id)).order_by('-created_at')
+        admin = _get_admin_for_user(self.request.user)
+        if not admin:
+            return RiskCriteria.objects.none()
+        return RiskCriteria.objects.filter(admin_id=str(admin.id)).order_by('-created_at')
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
@@ -92,7 +69,7 @@ class RiskCriteriaListView(generics.ListAPIView):
         )
 
 
-class RiskCriteriaDetailView(generics.RetrieveAPIView):
+class UserRiskCriteriaDetailView(generics.RetrieveAPIView):
     serializer_class = RiskCriteriaSerializer
     permission_classes = [IsAuthenticated]
 
@@ -104,12 +81,20 @@ class RiskCriteriaDetailView(generics.RetrieveAPIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Invalid Risk Criteria ID")
 
+        admin = _get_admin_for_user(self.request.user)
+        if not admin:
+            raise Http404
+
         try:
             obj = RiskCriteria.objects.get(_id=obj_id)
         except RiskCriteria.DoesNotExist:
             raise Http404
-        if str(obj.admin_id).strip() != str(self.request.user.id).strip():
-            logger.warning(f"admin_id mismatch: obj.admin_id={obj.admin_id!r} user.id={self.request.user.id!r}")
+
+        if str(obj.admin_id).strip() != str(admin.id).strip():
+            logger.warning(
+                f"User {self.request.user.email} tried to access risk {risk_id} "
+                f"belonging to admin {obj.admin_id}, their admin is {admin.id}"
+            )
             raise Http404
         return obj
 
@@ -122,7 +107,7 @@ class RiskCriteriaDetailView(generics.RetrieveAPIView):
         )
 
 
-class RiskCriteriaUpdateView(generics.UpdateAPIView):
+class UserRiskCriteriaUpdateView(generics.UpdateAPIView):
     serializer_class = RiskCriteriaUpdateSerializer
     permission_classes = [IsAuthenticated]
 
@@ -134,11 +119,16 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Invalid Risk Criteria ID")
 
+        admin = _get_admin_for_user(self.request.user)
+        if not admin:
+            raise Http404
+
         try:
             obj = RiskCriteria.objects.get(_id=obj_id)
         except RiskCriteria.DoesNotExist:
             raise Http404
-        if str(obj.admin_id).strip() != str(self.request.user.id).strip():
+
+        if str(obj.admin_id).strip() != str(admin.id).strip():
             raise Http404
         return obj
 
@@ -155,7 +145,7 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
         )
 
 
-class RiskCriteriaDeleteView(generics.DestroyAPIView):
+class UserRiskCriteriaDeleteView(generics.DestroyAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_object(self):
@@ -166,11 +156,16 @@ class RiskCriteriaDeleteView(generics.DestroyAPIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Invalid Risk Criteria ID")
 
+        admin = _get_admin_for_user(self.request.user)
+        if not admin:
+            raise Http404
+
         try:
             obj = RiskCriteria.objects.get(_id=obj_id)
         except RiskCriteria.DoesNotExist:
             raise Http404
-        if str(obj.admin_id).strip() != str(self.request.user.id).strip():
+
+        if str(obj.admin_id).strip() != str(admin.id).strip():
             raise Http404
         return obj
 
@@ -183,26 +178,28 @@ class RiskCriteriaDeleteView(generics.DestroyAPIView):
         )
 
 
-class RiskCriteriaCalendarView(APIView):
+class UserRiskCriteriaCalendarView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, risk_id, *args, **kwargs):
-        # Validate and fetch risk criteria
         try:
             obj_id = ObjectId(risk_id)
         except Exception:
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Invalid Risk Criteria ID")
 
+        admin = _get_admin_for_user(request.user)
+        if not admin:
+            raise Http404
+
         try:
             risk = RiskCriteria.objects.get(_id=obj_id)
         except RiskCriteria.DoesNotExist:
             raise Http404
-        if str(risk.admin_id).strip() != str(request.user.id).strip():
-            logger.warning(f"admin_id mismatch: risk.admin_id={risk.admin_id!r} user.id={request.user.id!r}")
+
+        if str(risk.admin_id).strip() != str(admin.id).strip():
             raise Http404
 
-        # Parse day values — supports "2", "day 3", "1 week", "2 weeks", etc.
         try:
             critical_days = parse_days(risk.critical)
             high_days = parse_days(risk.high)
@@ -214,7 +211,6 @@ class RiskCriteriaCalendarView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # base_date = updated_at if criteria was updated, else created_at
         base_date = (risk.updated_at or risk.created_at).date()
         today = date.today()
 
@@ -231,21 +227,19 @@ class RiskCriteriaCalendarView(APIView):
                 label = f"{days} day{'s' if days > 1 else ''}"
             return {"days": delta, "label": label, "status": "active"}
 
-        # Calculate deadline dates with remaining days
         deadlines = {}
         for severity, n_days in [("critical", critical_days), ("high", high_days),
                                   ("medium", medium_days), ("low", low_days)]:
             deadline_date = base_date + timedelta(days=n_days)
             remaining = _remaining(deadline_date)
             deadlines[severity] = {
-                "days":           n_days,
-                "deadline_date":  str(deadline_date),
-                "remaining_days": remaining["days"],
+                "days":            n_days,
+                "deadline_date":   str(deadline_date),
+                "remaining_days":  remaining["days"],
                 "remaining_label": remaining.get("label", "Overdue"),
-                "status":         remaining["status"],
+                "status":          remaining["status"],
             }
 
-        # Parse requested month (default: current month)
         month_param = request.query_params.get("month")
         try:
             if month_param:
@@ -259,13 +253,11 @@ class RiskCriteriaCalendarView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Build deadline date -> severity mapping
         deadline_map = {}
         for severity, info in deadlines.items():
             d = info["deadline_date"]
             deadline_map.setdefault(d, []).append(severity)
 
-        # Build full calendar for requested month
         num_days = calendar.monthrange(year, month)[1]
         days = []
         for day in range(1, num_days + 1):

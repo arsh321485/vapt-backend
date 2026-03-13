@@ -1449,7 +1449,8 @@ class FixVulnerabilityStepsAPIView(APIView):
     # GET → Fetch steps
     # =====================
     def get(self, request, fix_vuln_id):
-        with MongoContext() as db:
+        try:
+          with MongoContext() as db:
             fix_coll = db[FIX_VULN_COLLECTION]
             steps_coll = db[FIX_VULN_STEPS_COLLECTION]
             closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
@@ -1499,10 +1500,13 @@ class FixVulnerabilityStepsAPIView(APIView):
             # Parse mitigation_table into structured per-step data
             steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
 
-            # Detect host OS: ?os= query param overrides nessus detection
+            # Detect host OS: stored OS takes priority (ensures GET/POST consistency),
+            # then ?os= param, then nessus detection
             os_param = request.query_params.get("os", "").strip().lower()
             if os_param in ("windows", "linux"):
                 operating_system = "Windows" if os_param == "windows" else "Linux"
+            elif fix_doc.get("operating_system"):
+                operating_system = fix_doc["operating_system"]
             else:
                 operating_system = self._get_host_os(db, report_id, host_name) or "Windows"
 
@@ -1620,6 +1624,12 @@ class FixVulnerabilityStepsAPIView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response(
+                {"detail": "unexpected error", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
     # =====================
     # POST → Complete next step (AUTO-SEQUENTIAL)
@@ -1683,6 +1693,13 @@ class FixVulnerabilityStepsAPIView(APIView):
                     step_order = os_filtered
 
             total_steps = len(step_order) if step_order else 6
+
+            # Persist detected OS into fix_doc so GET always uses the same OS
+            if not fix_doc.get("operating_system"):
+                fix_coll.update_one(
+                    {"_id": ObjectId(fix_vuln_id)},
+                    {"$set": {"operating_system": host_os}},
+                )
 
             # Auto-determine current step: count completed steps → next in order
             completed_count = steps_coll.count_documents({

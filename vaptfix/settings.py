@@ -69,7 +69,8 @@ INSTALLED_APPS = [
     "userdashboard",
     "userregister",
     "userasset",
-    "usermitigationstrategy"
+    "usermitigationstrategy",
+    "userrisk_criteria",
 ]
 
 MIDDLEWARE = [
@@ -158,6 +159,7 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://vapt-frontend-liart.vercel.app")
+VAPTFIX_LOGIN_URL = os.getenv("VAPTFIX_LOGIN_URL", "https://vapt-frontend-liart.vercel.app/auth?tab=user")
 
 
 MICROSOFT_SCOPES = [
@@ -322,7 +324,8 @@ LOGGING = {
 
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
-        "LOCATION": BASE_DIR / "cache",
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "vaptfix-cache",
+        "TIMEOUT": 300,
     }
 }
