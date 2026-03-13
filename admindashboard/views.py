@@ -2,11 +2,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from django.core.cache import cache
 from datetime import date, timedelta
 import re
-
-DASHBOARD_CACHE_TTL = 300  # 5 minutes
 
 from .serializers import (
     TotalAssetsSerializer, AvgScoreSerializer,
@@ -141,10 +138,6 @@ class ReportTotalAssetsAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
-        cache_key = f"dash:total_assets:{report_id}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
         try:
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
@@ -173,7 +166,6 @@ class ReportTotalAssetsAPIView(APIView):
 
                 # Return result
                 serializer = TotalAssetsSerializer({"total_assets": total_assets})
-                cache.set(cache_key, serializer.data, DASHBOARD_CACHE_TTL)
                 return Response(serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:
@@ -187,10 +179,6 @@ class ReportAvgScoreAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
-        cache_key = f"dash:avg_score:{report_id}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached)
         try:
             with MongoContext() as db:
                 doc = _load_report(db, report_id)
@@ -205,7 +193,6 @@ class ReportAvgScoreAPIView(APIView):
                             cvss_vals.append(num)
                 avg = round(sum(cvss_vals)/len(cvss_vals), 2) if cvss_vals else None
                 data = AvgScoreSerializer({"avg_score": avg}).data
-                cache.set(cache_key, data, DASHBOARD_CACHE_TTL)
                 return Response(data)
         except RuntimeError as rte:
             return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -216,10 +203,6 @@ class ReportVulnerabilitiesAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
-        cache_key = f"dash:vulns:{report_id}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached)
         try:
             with MongoContext() as db:
                 doc = _load_report(db, report_id)
@@ -238,7 +221,6 @@ class ReportVulnerabilitiesAPIView(APIView):
                         elif risk.startswith("low"):
                             counts["low"] += 1
                 data = VulnerabilitiesSerializer(counts).data
-                cache.set(cache_key, data, DASHBOARD_CACHE_TTL)
                 return Response(data)
         except RuntimeError as rte:
             return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -249,10 +231,6 @@ class ReportMitigationTimelineAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
-        cache_key = f"dash:timeline:{report_id}:{request.user.id}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=200)
         try:
             with MongoContext() as db:
                 doc = _load_report(db, report_id)
@@ -309,7 +287,6 @@ class ReportMitigationTimelineAPIView(APIView):
                     }
                 }
 
-                cache.set(cache_key, payload, DASHBOARD_CACHE_TTL)
                 return Response(payload, status=200)
 
         except Exception as exc:
@@ -323,10 +300,6 @@ class ReportMeanTimeRemediateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
-        cache_key = f"dash:mttr:{report_id}:{request.user.id}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=200)
         try:
             with MongoContext() as db:
                 doc = _load_report(db, report_id)
@@ -405,7 +378,6 @@ class ReportMeanTimeRemediateAPIView(APIView):
                     }
                 }
 
-                cache.set(cache_key, payload, DASHBOARD_CACHE_TTL)
                 return Response(payload, status=200)
 
         except Exception as exc:
@@ -449,14 +421,10 @@ class AdminTotalAssetsAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                # Get the most recent report for this admin
                 doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 if not doc:
-                    return Response({
-                        "total_assets": 0,
-                        "report_id": None
-                    }, status=status.HTTP_200_OK)
+                    return Response({"total_assets": 0, "report_id": None}, status=status.HTTP_200_OK)
 
                 hosts = set()
                 for h in (doc.get("vulnerabilities_by_host") or []):
@@ -467,10 +435,7 @@ class AdminTotalAssetsAPIView(APIView):
                 total_assets = len(hosts)
                 report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
-                return Response({
-                    "total_assets": total_assets,
-                    "report_id": report_id
-                }, status=status.HTTP_200_OK)
+                return Response({"total_assets": total_assets, "report_id": report_id}, status=status.HTTP_200_OK)
 
         except Exception as e:
             import traceback
@@ -506,7 +471,6 @@ class AdminAssetsByTeamAPIView(APIView):
             admin_id    = str(request.user.id)
 
             with MongoContext() as db:
-                # Get the latest report for this admin
                 doc = _load_latest_report_for_admin(db, admin_email, admin_id)
                 if not doc:
                     return Response({"total_assets": 0, "by_team": []}, status=status.HTTP_200_OK)
@@ -562,11 +526,7 @@ class AdminAssetsByTeamAPIView(APIView):
                     for team, hosts in sorted(team_hosts.items())
                 ]
 
-                return Response({
-                    "report_id": report_id,
-                    "total_assets": total_assets,
-                    "by_team": by_team
-                }, status=status.HTTP_200_OK)
+                return Response({"report_id": report_id, "total_assets": total_assets, "by_team": by_team}, status=status.HTTP_200_OK)
 
         except Exception as e:
             import traceback
@@ -837,7 +797,6 @@ class AdminVulnerabilitiesFixedAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                # Get report_id from latest report
                 doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
                 report_id = None
                 if doc:
@@ -901,7 +860,6 @@ class AdminSupportRequestsAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                # Get report_id from latest report
                 doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
                 report_id = None
                 if doc:
@@ -958,7 +916,6 @@ class AdminDashboardSummaryAPIView(APIView):
             admin_id = str(request.user.id)
 
             with MongoContext() as db:
-                # Load the most recent report for this admin
                 doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
                 # Initialize default values
@@ -1070,7 +1027,7 @@ class AdminDashboardSummaryAPIView(APIView):
                     "label": format_wdh_label(mttr_wdh)
                 }
 
-            return Response({
+            summary = {
                 "report_id": report_id,
                 "total_assets": total_assets,
                 "avg_score": avg_score,
@@ -1089,7 +1046,8 @@ class AdminDashboardSummaryAPIView(APIView):
                 },
                 "mitigation_timeline": mitigation_timeline,
                 "mean_time_to_remediate": mean_time_to_remediate
-            }, status=status.HTTP_200_OK)
+            }
+            return Response(summary, status=status.HTTP_200_OK)
 
         except Exception as e:
             import traceback

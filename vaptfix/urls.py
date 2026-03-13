@@ -36,6 +36,7 @@ urlpatterns = [
     path("api/user/register/", include("userregister.urls")),
     path("api/user/asset/", include("userasset.urls")),
     path("api/user/mitigation/", include("usermitigationstrategy.urls")),
+    path("api/user/risk_criteria/", include("userrisk_criteria.urls")),
 
     path("media/<path:path>", serve_report_file),
 

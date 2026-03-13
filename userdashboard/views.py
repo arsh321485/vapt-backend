@@ -861,7 +861,7 @@ class UserDashboardSummaryAPIView(APIView):
                     "label": _format_wdh_label(wdh)
                 }
 
-            return Response({
+            summary = {
                 "user_email": request.user.email,
                 "report_id": report_id,
                 "teams": active_teams,
@@ -883,7 +883,8 @@ class UserDashboardSummaryAPIView(APIView):
                     "pending": pending_count,
                     "closed":  closed_count,
                 },
-            })
+            }
+            return Response(summary)
 
         except Exception as e:
             import traceback; traceback.print_exc()
