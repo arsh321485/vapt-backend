@@ -1030,13 +1030,15 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                 mitigation_table = vuln_card.get("mitigation_table", [])
                 steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
 
-                # OS-based step filtering: ?os= query param OR body "os" OR nessus detection
+                # OS-based step filtering: ?os= param → stored OS → nessus detection
                 os_param = (
                     request.query_params.get("os", "")
                     or request.data.get("os", "")
                 ).strip().lower()
                 if os_param in ("windows", "linux"):
                     host_os = "Windows" if os_param == "windows" else "Linux"
+                elif fix_doc.get("operating_system"):
+                    host_os = fix_doc["operating_system"]
                 else:
                     host_os = self._get_host_os(db, report_id, host_name) or "Windows"
 

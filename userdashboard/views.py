@@ -433,14 +433,15 @@ class UserVulnerabilitiesFixedAPIView(APIView):
                         counts["low"] += 1
 
                 total = sum(counts.values())
-                return Response({
+                result = {
                     "report_id": report_id,
                     "total_fixed": total,
                     "critical_fixed": counts["critical"],
                     "high_fixed": counts["high"],
                     "medium_fixed": counts["medium"],
                     "low_fixed": counts["low"]
-                })
+                }
+                return Response(result)
 
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -471,13 +472,14 @@ class UserMitigationTimelineAPIView(APIView):
             l = _parse_timeline_to_days(rc.low)
             t = c + h + m + l
 
-            return Response({
+            result = {
                 "critical": {"raw": rc.critical, "days": c, "label": _days_to_label(c)},
                 "high":     {"raw": rc.high,     "days": h, "label": _days_to_label(h)},
                 "medium":   {"raw": rc.medium,   "days": m, "label": _days_to_label(m)},
                 "low":      {"raw": rc.low,       "days": l, "label": _days_to_label(l)},
                 "total":    {"days": t, "hours": _days_to_hours(t), "label": _days_to_label(t)}
-            })
+            }
+            return Response(result)
 
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -515,7 +517,7 @@ class UserMeanTimeRemediateAPIView(APIView):
             mttr  = round((c_h + h_h + m_h + l_h) / 4)
             wdh   = _hours_to_wdh(mttr)
 
-            return Response({
+            result = {
                 "risk_criteria": {
                     "critical": {"raw": rc.critical, "days": c_d, "hours": c_h},
                     "high":     {"raw": rc.high,     "days": h_d, "hours": h_h},
@@ -529,7 +531,8 @@ class UserMeanTimeRemediateAPIView(APIView):
                     "hours_remaining": wdh["hours"],
                     "label": _format_wdh_label(wdh)
                 }
-            })
+            }
+            return Response(result)
 
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -585,12 +588,13 @@ class UserSupportRequestsAPIView(APIView):
                 pending = support_coll.count_documents({**base_q, "status": {"$ne": "closed"}})
                 closed  = support_coll.count_documents({**base_q, "status": "closed"})
 
-                return Response({
+                result = {
                     "report_id": report_id,
                     "total": pending + closed,
                     "pending": pending,
                     "closed": closed
-                })
+                }
+                return Response(result)
 
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -704,188 +708,188 @@ class UserPatchManagementAPIView(APIView):
 # 9. FULL DASHBOARD SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 
-class UserDashboardSummaryAPIView(APIView):
-    """
-    GET /api/user/dashboard/summary/
-    All metrics in one call. Optional: ?team=Patch+Management
-    """
-    permission_classes = [IsAuthenticated]
+# class UserDashboardSummaryAPIView(APIView):
+#     """
+#     GET /api/user/dashboard/summary/
+#     All metrics in one call. Optional: ?team=Patch+Management
+#     """
+#     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        try:
-            teams, admin_user = _get_user_context(request.user.email)
+#     def get(self, request):
+#         try:
+#             teams, admin_user = _get_user_context(request.user.email)
 
-            if not teams or not admin_user:
-                return Response({
-                    "user_email": request.user.email,
-                    "teams": [],
-                    "total_assets": 0,
-                    "by_team_assets": {},
-                    "vulnerabilities": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-                    "vulnerabilities_fixed": {"total_fixed": 0, "critical_fixed": 0, "high_fixed": 0, "medium_fixed": 0, "low_fixed": 0},
-                    "mitigation_timeline": None,
-                    "mean_time_to_remediate": None,
-                    "support_requests": {"total": 0, "pending": 0, "closed": 0},
-                    "message": "User is not linked to any team. Ask your admin to assign you a team."
-                })
+#             if not teams or not admin_user:
+#                 return Response({
+#                     "user_email": request.user.email,
+#                     "teams": [],
+#                     "total_assets": 0,
+#                     "by_team_assets": {},
+#                     "vulnerabilities": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+#                     "vulnerabilities_fixed": {"total_fixed": 0, "critical_fixed": 0, "high_fixed": 0, "medium_fixed": 0, "low_fixed": 0},
+#                     "mitigation_timeline": None,
+#                     "mean_time_to_remediate": None,
+#                     "support_requests": {"total": 0, "pending": 0, "closed": 0},
+#                     "message": "User is not linked to any team. Ask your admin to assign you a team."
+#                 })
 
-            selected_team = request.query_params.get("team", "").strip()
-            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
-            teams_lower   = _normalize_teams(active_teams)
+#             selected_team = request.query_params.get("team", "").strip()
+#             active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+#             teams_lower   = _normalize_teams(active_teams)
 
-            with MongoContext() as db:
-                nessus_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+#             with MongoContext() as db:
+#                 nessus_doc = _load_latest_report(db, admin_user.id, admin_user.email)
 
-                if not nessus_doc:
-                    return Response({
-                        "user_email": request.user.email,
-                        "teams": active_teams,
-                        "total_assets": 0,
-                        "by_team_assets": {},
-                        "vulnerabilities": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-                        "vulnerabilities_fixed": {"total_fixed": 0, "critical_fixed": 0, "high_fixed": 0, "medium_fixed": 0, "low_fixed": 0},
-                        "mitigation_timeline": None,
-                        "mean_time_to_remediate": None,
-                        "support_requests": {"total": 0, "pending": 0, "closed": 0},
-                        "message": "No report uploaded yet."
-                    })
+#                 if not nessus_doc:
+#                     return Response({
+#                         "user_email": request.user.email,
+#                         "teams": active_teams,
+#                         "total_assets": 0,
+#                         "by_team_assets": {},
+#                         "vulnerabilities": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+#                         "vulnerabilities_fixed": {"total_fixed": 0, "critical_fixed": 0, "high_fixed": 0, "medium_fixed": 0, "low_fixed": 0},
+#                         "mitigation_timeline": None,
+#                         "mean_time_to_remediate": None,
+#                         "support_requests": {"total": 0, "pending": 0, "closed": 0},
+#                         "message": "No report uploaded yet."
+#                     })
 
-                report_id   = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
-                plugin_risk = _build_plugin_risk_map(nessus_doc)
-                admin_id    = str(admin_user.id)
+#                 report_id   = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
+#                 plugin_risk = _build_plugin_risk_map(nessus_doc)
+#                 admin_id    = str(admin_user.id)
 
-                # Per-team buckets
-                by_team_hosts  = {t: set() for t in active_teams}
-                vuln_counts    = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-                team_plugins   = set()
+#                 # Per-team buckets
+#                 by_team_hosts  = {t: set() for t in active_teams}
+#                 vuln_counts    = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+#                 team_plugins   = set()
 
-                # Build plugin_name -> matched_team from cards; count vulns
-                plugin_team_map = {}
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": str(report_id)}):
-                    raw_team = (card.get("assigned_team") or "").strip()
-                    matched  = teams_lower.get(raw_team.lower())
-                    if not matched:
-                        continue
-                    pname = (card.get("vulnerability_name") or "").strip()
-                    if pname:
-                        team_plugins.add(pname)
-                        plugin_team_map[pname] = matched
-                    risk = plugin_risk.get(pname)
-                    if risk in vuln_counts:
-                        vuln_counts[risk] += 1
+#                 # Build plugin_name -> matched_team from cards; count vulns
+#                 plugin_team_map = {}
+#                 for card in db[VULN_CARD_COLLECTION].find({"report_id": str(report_id)}):
+#                     raw_team = (card.get("assigned_team") or "").strip()
+#                     matched  = teams_lower.get(raw_team.lower())
+#                     if not matched:
+#                         continue
+#                     pname = (card.get("vulnerability_name") or "").strip()
+#                     if pname:
+#                         team_plugins.add(pname)
+#                         plugin_team_map[pname] = matched
+#                     risk = plugin_risk.get(pname)
+#                     if risk in vuln_counts:
+#                         vuln_counts[risk] += 1
 
-                # Count assets from nessus doc using host-ip fallback
-                for host in (nessus_doc.get("vulnerabilities_by_host") or []):
-                    host_info = host.get("host_information") or {}
-                    h_name = (
-                        host.get("host_name") or host.get("host")
-                        or host_info.get("host-ip") or host_info.get("host-fqdn") or ""
-                    )
-                    if isinstance(h_name, str):
-                        h_name = h_name.strip()
-                    if not h_name:
-                        continue
-                    for v in (host.get("vulnerabilities") or []):
-                        pname = (
-                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
-                        ).strip()
-                        matched = plugin_team_map.get(pname)
-                        if matched:
-                            by_team_hosts[matched].add(h_name)
+#                 # Count assets from nessus doc using host-ip fallback
+#                 for host in (nessus_doc.get("vulnerabilities_by_host") or []):
+#                     host_info = host.get("host_information") or {}
+#                     h_name = (
+#                         host.get("host_name") or host.get("host")
+#                         or host_info.get("host-ip") or host_info.get("host-fqdn") or ""
+#                     )
+#                     if isinstance(h_name, str):
+#                         h_name = h_name.strip()
+#                     if not h_name:
+#                         continue
+#                     for v in (host.get("vulnerabilities") or []):
+#                         pname = (
+#                             v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+#                         ).strip()
+#                         matched = plugin_team_map.get(pname)
+#                         if matched:
+#                             by_team_hosts[matched].add(h_name)
 
-                all_hosts      = set().union(*by_team_hosts.values())
-                by_team_assets = {t: len(hosts) for t, hosts in by_team_hosts.items()}
+#                 all_hosts      = set().union(*by_team_hosts.values())
+#                 by_team_assets = {t: len(hosts) for t, hosts in by_team_hosts.items()}
 
-                # ---- Fixed vulnerabilities ----
-                fixed_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-                for vuln in db[FIX_VULN_CLOSED_COLLECTION].find({
-                    "created_by": admin_id,
-                    "status": "closed",
-                    "report_id": str(report_id)
-                }):
-                    pname = (vuln.get("plugin_name") or "").strip()
-                    if pname not in team_plugins:
-                        continue
-                    risk = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
-                    if risk.startswith("crit"):
-                        fixed_counts["critical"] += 1
-                    elif risk.startswith("high"):
-                        fixed_counts["high"] += 1
-                    elif risk.startswith("med"):
-                        fixed_counts["medium"] += 1
-                    elif risk.startswith("low"):
-                        fixed_counts["low"] += 1
+#                 # ---- Fixed vulnerabilities ----
+#                 fixed_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+#                 for vuln in db[FIX_VULN_CLOSED_COLLECTION].find({
+#                     "created_by": admin_id,
+#                     "status": "closed",
+#                     "report_id": str(report_id)
+#                 }):
+#                     pname = (vuln.get("plugin_name") or "").strip()
+#                     if pname not in team_plugins:
+#                         continue
+#                     risk = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
+#                     if risk.startswith("crit"):
+#                         fixed_counts["critical"] += 1
+#                     elif risk.startswith("high"):
+#                         fixed_counts["high"] += 1
+#                     elif risk.startswith("med"):
+#                         fixed_counts["medium"] += 1
+#                     elif risk.startswith("low"):
+#                         fixed_counts["low"] += 1
 
-                # ---- Support requests ----
-                base_q = {
-                    "admin_id": admin_id,
-                    "report_id": str(report_id),
-                    "vul_name": {"$in": list(team_plugins)}
-                }
-                support_coll  = db[SUPPORT_REQUEST_COLLECTION]
-                pending_count = support_coll.count_documents({**base_q, "status": {"$ne": "closed"}})
-                closed_count  = support_coll.count_documents({**base_q, "status": "closed"})
+#                 # ---- Support requests ----
+#                 base_q = {
+#                     "admin_id": admin_id,
+#                     "report_id": str(report_id),
+#                     "vul_name": {"$in": list(team_plugins)}
+#                 }
+#                 support_coll  = db[SUPPORT_REQUEST_COLLECTION]
+#                 pending_count = support_coll.count_documents({**base_q, "status": {"$ne": "closed"}})
+#                 closed_count  = support_coll.count_documents({**base_q, "status": "closed"})
 
-            # ---- Risk criteria / timeline / MTTR ----
-            rc = _get_admin_riskcriteria(admin_user)
-            mitigation_timeline    = None
-            mean_time_to_remediate = None
+#             # ---- Risk criteria / timeline / MTTR ----
+#             rc = _get_admin_riskcriteria(admin_user)
+#             mitigation_timeline    = None
+#             mean_time_to_remediate = None
 
-            if rc:
-                c_d = _parse_timeline_to_days(rc.critical)
-                h_d = _parse_timeline_to_days(rc.high)
-                m_d = _parse_timeline_to_days(rc.medium)
-                l_d = _parse_timeline_to_days(rc.low)
-                t_d = c_d + h_d + m_d + l_d
+#             if rc:
+#                 c_d = _parse_timeline_to_days(rc.critical)
+#                 h_d = _parse_timeline_to_days(rc.high)
+#                 m_d = _parse_timeline_to_days(rc.medium)
+#                 l_d = _parse_timeline_to_days(rc.low)
+#                 t_d = c_d + h_d + m_d + l_d
 
-                mitigation_timeline = {
-                    "critical": {"raw": rc.critical, "days": c_d, "label": _days_to_label(c_d)},
-                    "high":     {"raw": rc.high,     "days": h_d, "label": _days_to_label(h_d)},
-                    "medium":   {"raw": rc.medium,   "days": m_d, "label": _days_to_label(m_d)},
-                    "low":      {"raw": rc.low,       "days": l_d, "label": _days_to_label(l_d)},
-                    "total":    {"days": t_d, "hours": _days_to_hours(t_d), "label": _days_to_label(t_d)},
-                }
+#                 mitigation_timeline = {
+#                     "critical": {"raw": rc.critical, "days": c_d, "label": _days_to_label(c_d)},
+#                     "high":     {"raw": rc.high,     "days": h_d, "label": _days_to_label(h_d)},
+#                     "medium":   {"raw": rc.medium,   "days": m_d, "label": _days_to_label(m_d)},
+#                     "low":      {"raw": rc.low,       "days": l_d, "label": _days_to_label(l_d)},
+#                     "total":    {"days": t_d, "hours": _days_to_hours(t_d), "label": _days_to_label(t_d)},
+#                 }
 
-                c_h  = _days_to_hours(c_d)
-                h_h  = _days_to_hours(h_d)
-                m_h  = _days_to_hours(m_d)
-                l_h  = _days_to_hours(l_d)
-                mttr = round((c_h + h_h + m_h + l_h) / 4)
-                wdh  = _hours_to_wdh(mttr)
+#                 c_h  = _days_to_hours(c_d)
+#                 h_h  = _days_to_hours(h_d)
+#                 m_h  = _days_to_hours(m_d)
+#                 l_h  = _days_to_hours(l_d)
+#                 mttr = round((c_h + h_h + m_h + l_h) / 4)
+#                 wdh  = _hours_to_wdh(mttr)
 
-                mean_time_to_remediate = {
-                    "hours": mttr,
-                    "weeks": wdh["weeks"],
-                    "days":  wdh["days"],
-                    "hours_remaining": wdh["hours"],
-                    "label": _format_wdh_label(wdh)
-                }
+#                 mean_time_to_remediate = {
+#                     "hours": mttr,
+#                     "weeks": wdh["weeks"],
+#                     "days":  wdh["days"],
+#                     "hours_remaining": wdh["hours"],
+#                     "label": _format_wdh_label(wdh)
+#                 }
 
-            summary = {
-                "user_email": request.user.email,
-                "report_id": report_id,
-                "teams": active_teams,
-                "selected_team": selected_team or None,
-                "total_assets": len(all_hosts),
-                "by_team_assets": by_team_assets,
-                "vulnerabilities": vuln_counts,
-                "vulnerabilities_fixed": {
-                    "total_fixed": sum(fixed_counts.values()),
-                    "critical_fixed": fixed_counts["critical"],
-                    "high_fixed":     fixed_counts["high"],
-                    "medium_fixed":   fixed_counts["medium"],
-                    "low_fixed":      fixed_counts["low"],
-                },
-                "mitigation_timeline": mitigation_timeline,
-                "mean_time_to_remediate": mean_time_to_remediate,
-                "support_requests": {
-                    "total":   pending_count + closed_count,
-                    "pending": pending_count,
-                    "closed":  closed_count,
-                },
-            }
-            return Response(summary)
+#             summary = {
+#                 "user_email": request.user.email,
+#                 "report_id": report_id,
+#                 "teams": active_teams,
+#                 "selected_team": selected_team or None,
+#                 "total_assets": len(all_hosts),
+#                 "by_team_assets": by_team_assets,
+#                 "vulnerabilities": vuln_counts,
+#                 "vulnerabilities_fixed": {
+#                     "total_fixed": sum(fixed_counts.values()),
+#                     "critical_fixed": fixed_counts["critical"],
+#                     "high_fixed":     fixed_counts["high"],
+#                     "medium_fixed":   fixed_counts["medium"],
+#                     "low_fixed":      fixed_counts["low"],
+#                 },
+#                 "mitigation_timeline": mitigation_timeline,
+#                 "mean_time_to_remediate": mean_time_to_remediate,
+#                 "support_requests": {
+#                     "total":   pending_count + closed_count,
+#                     "pending": pending_count,
+#                     "closed":  closed_count,
+#                 },
+#             }
+#             return Response(summary)
 
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            return Response({"detail": str(e)}, status=500)
+#         except Exception as e:
+#             import traceback; traceback.print_exc()
+#             return Response({"detail": str(e)}, status=500)

@@ -19,6 +19,7 @@ FIX_VULN_COLLECTION = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 VULN_CARD_COLLECTION = "vulnerability_cards"
 
+
 TEAM_NAMES = [
     "Patch Management",
     "Configuration Management",
@@ -192,8 +193,7 @@ class ReportAvgScoreAPIView(APIView):
                         if num is not None:
                             cvss_vals.append(num)
                 avg = round(sum(cvss_vals)/len(cvss_vals), 2) if cvss_vals else None
-                data = AvgScoreSerializer({"avg_score": avg}).data
-                return Response(data)
+                return Response(AvgScoreSerializer({"avg_score": avg}).data)
         except RuntimeError as rte:
             return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
@@ -220,8 +220,7 @@ class ReportVulnerabilitiesAPIView(APIView):
                             counts["medium"] += 1
                         elif risk.startswith("low"):
                             counts["low"] += 1
-                data = VulnerabilitiesSerializer(counts).data
-                return Response(data)
+                return Response(VulnerabilitiesSerializer(counts).data)
         except RuntimeError as rte:
             return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
@@ -902,160 +901,160 @@ class AdminSupportRequestsAPIView(APIView):
             )
 
 
-class AdminDashboardSummaryAPIView(APIView):
-    """
-    Returns a complete dashboard summary for the logged-in admin.
-    Fetches data from the MOST RECENTLY uploaded report only.
-    Combines all dashboard metrics in a single API call for efficiency.
-    """
-    permission_classes = [IsAuthenticated]
+# class AdminDashboardSummaryAPIView(APIView):
+#     """
+#     Returns a complete dashboard summary for the logged-in admin.
+#     Fetches data from the MOST RECENTLY uploaded report only.
+#     Combines all dashboard metrics in a single API call for efficiency.
+#     """
+#     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        try:
-            admin_email = request.user.email
-            admin_id = str(request.user.id)
+#     def get(self, request):
+#         try:
+#             admin_email = request.user.email
+#             admin_id = str(request.user.id)
 
-            with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
+#             with MongoContext() as db:
+#                 doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
-                # Initialize default values
-                total_assets = 0
-                avg_score = None
-                vuln_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-                report_id = None
+#                 # Initialize default values
+#                 total_assets = 0
+#                 avg_score = None
+#                 vuln_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+#                 report_id = None
 
-                if doc:
-                    report_id = doc.get("report_id")
+#                 if doc:
+#                     report_id = doc.get("report_id")
 
-                    # ---- Total Assets ----
-                    hosts = set()
-                    for h in (doc.get("vulnerabilities_by_host") or []):
-                        host_name = (h.get("host_name") or h.get("host") or "").strip()
-                        if host_name:
-                            hosts.add(host_name)
-                    total_assets = len(hosts)
+#                     # ---- Total Assets ----
+#                     hosts = set()
+#                     for h in (doc.get("vulnerabilities_by_host") or []):
+#                         host_name = (h.get("host_name") or h.get("host") or "").strip()
+#                         if host_name:
+#                             hosts.add(host_name)
+#                     total_assets = len(hosts)
 
-                    # ---- Average CVSS Score ----
-                    cvss_vals = []
-                    for host in doc.get("vulnerabilities_by_host") or []:
-                        for v in (host.get("vulnerabilities") or []):
-                            cv_raw = v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
-                            num = safe_float_from(cv_raw)
-                            if num is not None:
-                                cvss_vals.append(num)
-                    avg_score = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else None
+#                     # ---- Average CVSS Score ----
+#                     cvss_vals = []
+#                     for host in doc.get("vulnerabilities_by_host") or []:
+#                         for v in (host.get("vulnerabilities") or []):
+#                             cv_raw = v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
+#                             num = safe_float_from(cv_raw)
+#                             if num is not None:
+#                                 cvss_vals.append(num)
+#                     avg_score = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else None
 
-                    # ---- Vulnerability Counts ----
-                    for host in doc.get("vulnerabilities_by_host") or []:
-                        for v in (host.get("vulnerabilities") or []):
-                            risk = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
-                            if risk.startswith("crit"):
-                                vuln_counts["critical"] += 1
-                            elif risk.startswith("high"):
-                                vuln_counts["high"] += 1
-                            elif risk.startswith("med"):
-                                vuln_counts["medium"] += 1
-                            elif risk.startswith("low"):
-                                vuln_counts["low"] += 1
+#                     # ---- Vulnerability Counts ----
+#                     for host in doc.get("vulnerabilities_by_host") or []:
+#                         for v in (host.get("vulnerabilities") or []):
+#                             risk = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
+#                             if risk.startswith("crit"):
+#                                 vuln_counts["critical"] += 1
+#                             elif risk.startswith("high"):
+#                                 vuln_counts["high"] += 1
+#                             elif risk.startswith("med"):
+#                                 vuln_counts["medium"] += 1
+#                             elif risk.startswith("low"):
+#                                 vuln_counts["low"] += 1
 
-                # ---- Fixed Vulnerabilities ----
-                fix_coll = db[FIX_VULN_COLLECTION]
-                fixed_vulns = list(fix_coll.find({
-                    "created_by": admin_id,
-                    "status": "close"
-                }))
+#                 # ---- Fixed Vulnerabilities ----
+#                 fix_coll = db[FIX_VULN_COLLECTION]
+#                 fixed_vulns = list(fix_coll.find({
+#                     "created_by": admin_id,
+#                     "status": "close"
+#                 }))
 
-                fixed_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-                for vuln in fixed_vulns:
-                    risk = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
-                    if risk.startswith("crit"):
-                        fixed_counts["critical"] += 1
-                    elif risk.startswith("high"):
-                        fixed_counts["high"] += 1
-                    elif risk.startswith("med"):
-                        fixed_counts["medium"] += 1
-                    elif risk.startswith("low"):
-                        fixed_counts["low"] += 1
+#                 fixed_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+#                 for vuln in fixed_vulns:
+#                     risk = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
+#                     if risk.startswith("crit"):
+#                         fixed_counts["critical"] += 1
+#                     elif risk.startswith("high"):
+#                         fixed_counts["high"] += 1
+#                     elif risk.startswith("med"):
+#                         fixed_counts["medium"] += 1
+#                     elif risk.startswith("low"):
+#                         fixed_counts["low"] += 1
 
-                total_fixed = sum(fixed_counts.values())
+#                 total_fixed = sum(fixed_counts.values())
 
-                # ---- Support Requests ----
-                support_coll = db[SUPPORT_REQUEST_COLLECTION]
-                pending_requests = support_coll.count_documents({
-                    "admin_id": admin_id,
-                    "status": {"$ne": "closed"}
-                })
-                closed_requests = support_coll.count_documents({
-                    "admin_id": admin_id,
-                    "status": "closed"
-                })
+#                 # ---- Support Requests ----
+#                 support_coll = db[SUPPORT_REQUEST_COLLECTION]
+#                 pending_requests = support_coll.count_documents({
+#                     "admin_id": admin_id,
+#                     "status": {"$ne": "closed"}
+#                 })
+#                 closed_requests = support_coll.count_documents({
+#                     "admin_id": admin_id,
+#                     "status": "closed"
+#                 })
 
-            # ---- Mitigation Timeline & MTTR ----
-            rc = _get_latest_riskcriteria_for_user(request.user)
-            mitigation_timeline = None
-            mean_time_to_remediate = None
+#             # ---- Mitigation Timeline & MTTR ----
+#             rc = _get_latest_riskcriteria_for_user(request.user)
+#             mitigation_timeline = None
+#             mean_time_to_remediate = None
 
-            if rc:
-                critical_days = parse_timeline_to_days(rc.critical)
-                high_days = parse_timeline_to_days(rc.high)
-                medium_days = parse_timeline_to_days(rc.medium)
-                low_days = parse_timeline_to_days(rc.low)
+#             if rc:
+#                 critical_days = parse_timeline_to_days(rc.critical)
+#                 high_days = parse_timeline_to_days(rc.high)
+#                 medium_days = parse_timeline_to_days(rc.medium)
+#                 low_days = parse_timeline_to_days(rc.low)
 
-                total_days = critical_days + high_days + medium_days + low_days
+#                 total_days = critical_days + high_days + medium_days + low_days
 
-                mitigation_timeline = {
-                    "critical": {"raw": rc.critical, "days": critical_days, "label": days_to_week_label(critical_days)},
-                    "high": {"raw": rc.high, "days": high_days, "label": days_to_week_label(high_days)},
-                    "medium": {"raw": rc.medium, "days": medium_days, "label": days_to_week_label(medium_days)},
-                    "low": {"raw": rc.low, "days": low_days, "label": days_to_week_label(low_days)},
-                }
+#                 mitigation_timeline = {
+#                     "critical": {"raw": rc.critical, "days": critical_days, "label": days_to_week_label(critical_days)},
+#                     "high": {"raw": rc.high, "days": high_days, "label": days_to_week_label(high_days)},
+#                     "medium": {"raw": rc.medium, "days": medium_days, "label": days_to_week_label(medium_days)},
+#                     "low": {"raw": rc.low, "days": low_days, "label": days_to_week_label(low_days)},
+#                 }
 
-                critical_hours = days_to_hours(critical_days)
-                high_hours = days_to_hours(high_days)
-                medium_hours = days_to_hours(medium_days)
-                low_hours = days_to_hours(low_days)
+#                 critical_hours = days_to_hours(critical_days)
+#                 high_hours = days_to_hours(high_days)
+#                 medium_hours = days_to_hours(medium_days)
+#                 low_hours = days_to_hours(low_days)
 
-                total_hours = critical_hours + high_hours + medium_hours + low_hours
-                mttr_hours = round(total_hours / 4)
-                mttr_wdh = hours_to_wdh(mttr_hours)
+#                 total_hours = critical_hours + high_hours + medium_hours + low_hours
+#                 mttr_hours = round(total_hours / 4)
+#                 mttr_wdh = hours_to_wdh(mttr_hours)
 
-                mean_time_to_remediate = {
-                    "hours": mttr_hours,
-                    "weeks": mttr_wdh["weeks"],
-                    "days": mttr_wdh["days"],
-                    "hours_remaining": mttr_wdh["hours"],
-                    "label": format_wdh_label(mttr_wdh)
-                }
+#                 mean_time_to_remediate = {
+#                     "hours": mttr_hours,
+#                     "weeks": mttr_wdh["weeks"],
+#                     "days": mttr_wdh["days"],
+#                     "hours_remaining": mttr_wdh["hours"],
+#                     "label": format_wdh_label(mttr_wdh)
+#                 }
 
-            summary = {
-                "report_id": report_id,
-                "total_assets": total_assets,
-                "avg_score": avg_score,
-                "vulnerabilities": vuln_counts,
-                "vulnerabilities_fixed": {
-                    "total": total_fixed,
-                    "critical": fixed_counts["critical"],
-                    "high": fixed_counts["high"],
-                    "medium": fixed_counts["medium"],
-                    "low": fixed_counts["low"]
-                },
-                "support_requests": {
-                    "total": pending_requests + closed_requests,
-                    "pending": pending_requests,
-                    "closed": closed_requests
-                },
-                "mitigation_timeline": mitigation_timeline,
-                "mean_time_to_remediate": mean_time_to_remediate
-            }
-            return Response(summary, status=status.HTTP_200_OK)
+#             summary = {
+#                 "report_id": report_id,
+#                 "total_assets": total_assets,
+#                 "avg_score": avg_score,
+#                 "vulnerabilities": vuln_counts,
+#                 "vulnerabilities_fixed": {
+#                     "total": total_fixed,
+#                     "critical": fixed_counts["critical"],
+#                     "high": fixed_counts["high"],
+#                     "medium": fixed_counts["medium"],
+#                     "low": fixed_counts["low"]
+#                 },
+#                 "support_requests": {
+#                     "total": pending_requests + closed_requests,
+#                     "pending": pending_requests,
+#                     "closed": closed_requests
+#                 },
+#                 "mitigation_timeline": mitigation_timeline,
+#                 "mean_time_to_remediate": mean_time_to_remediate
+#             }
+#             return Response(summary, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return Response(
-                {"detail": "error occurred", "error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+#         except Exception as e:
+#             import traceback
+#             traceback.print_exc()
+#             return Response(
+#                 {"detail": "error occurred", "error": str(e)},
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
 
 
 class AdminDistributionByTeamAPIView(APIView):
