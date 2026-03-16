@@ -741,12 +741,16 @@ class FixVulnerabilityCreateAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # 3. DUPLICATE CHECK using id + host_name (unique combination)
+            # 3. DUPLICATE CHECK using (report_id, host_name, plugin_name, port) — stable fields
+            # NOTE: do NOT use "id" field — it is a fresh UUID generated every time by
+            # LatestSuperAdminVulnerabilityRegisterAPIView, so it will never match on second visit.
             duplicate_query = {
-                "report_id": str(report_id),
-                "host_name": host_name,
-                "id": id_req
+                "report_id":   str(report_id),
+                "host_name":   host_name,
+                "plugin_name": plugin_name_req,
             }
+            if port_req:
+                duplicate_query["port"] = str(port_req)
 
             existing_fix = fix_coll.find_one(duplicate_query)
 
@@ -773,6 +777,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                             "vulnerability_type": existing_fix.get("vulnerability_type", ""),
                             "affected_ports_ranges": existing_fix.get("affected_ports_ranges", []),
                             "file_path": existing_fix.get("file_path", []),
+                            "vendor_fix_available": existing_fix.get("vendor_fix_available", False),
                             "created_at": _normalize_iso(existing_fix.get("created_at")),
                         }
                     },

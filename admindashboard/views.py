@@ -1323,9 +1323,9 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                     if vname not in card_by_name:
                         card_by_name[vname] = info
 
-                # ── build one row per (vulnerability, host) from nessus ──────────
+                # ── build one row per (vulnerability, host, port) from nessus ─────
                 vulnerabilities = []
-                seen = set()    # avoid duplicate (plugin_name, host_name) rows
+                seen = set()    # avoid duplicate (plugin_name, host_name, port) rows
 
                 for host in doc.get("vulnerabilities_by_host", []):
                     h_name = (host.get("host_name") or host.get("host") or "").strip()
@@ -1339,7 +1339,8 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                         if not plugin_name:
                             continue
 
-                        row_key = (plugin_name, h_name)
+                        port = v.get("port", "")
+                        row_key = (plugin_name, h_name, str(port))
                         if row_key in seen:
                             continue
                         seen.add(row_key)
@@ -1357,6 +1358,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                         vulnerabilities.append({
                             "vulnerability_name": plugin_name,
                             "assets":             h_name,
+                            "port":               port,
                             "assigned_team":      assigned_team,
                             "risk_factor":        risk_factor or "",
                             "found_date":         found_date.isoformat() if hasattr(found_date, "isoformat") else str(found_date) if found_date else None,
