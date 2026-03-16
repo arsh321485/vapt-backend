@@ -1021,84 +1021,136 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         )
         db[VULN_CARD_COLLECTION].create_index("created_at")
 
-        # Delete existing cards for fresh start
-        db[VULN_CARD_COLLECTION].delete_many({"report_id": report_id})
-
         tool = MitigationGenerationTool()
         generated = 0
+        cached = 0
         errors = 0
 
         for vuln in vulns_to_process:
             vuln_plugin_name = vuln["plugin_name"]
+            vuln_host_name   = vuln.get("host_name", "") or ""
 
-            result = tool._run(
-                plugin_name=vuln_plugin_name,
-                description=vuln["description"],
-                plugin_output=vuln.get("plugin_output", "") or "",
-                report_id=report_id,
-                host_name=vuln.get("host_name", "") or "",
-            )
-
-            if not result["success"]:
-                logger.warning(f"[AutoGenCards] Failed for '{vuln_plugin_name}': {result.get('error')}")
-                errors += 1
+            # ── Step 1: Skip if card already exists for this exact (report_id, plugin_name, host_name) ──
+            already_exists = db[VULN_CARD_COLLECTION].find_one({
+                "report_id":          report_id,
+                "vulnerability_name": vuln_plugin_name,
+                "host_name":          vuln_host_name,
+            })
+            if already_exists:
+                print(f"[AutoGenCards] Already exists, skipping: '{vuln_plugin_name}' on '{vuln_host_name}'", flush=True)
+                cached += 1
                 continue
 
-            vc = result.get("vulnerability_card", {})
-            mitigation_table_arr = result.get("mitigation_table", [])
-            troubleshooting_steps = _parse_troubleshooting_guide(
-                vc.get("post_mitigation_troubleshooting_guide", "") or ""
+            # ── Step 2: Check if any card for this plugin_name exists in DB (any report/admin) ──
+            cached_card = db[VULN_CARD_COLLECTION].find_one(
+                {"vulnerability_name": vuln_plugin_name},
+                sort=[("created_at", -1)],
             )
 
-            document = {
-                "card_id": str(_uuid.uuid4()),
-                "report_id": report_id,
-                "admin_email": admin_email,
-                "admin_id": admin_id,
-                "vulnerability_name": vuln_plugin_name,
-                "host_name": vuln.get("host_name", "") or "",
-                "description": vuln["description"],
-                "mitigation_table": mitigation_table_arr,
-                "resource_id": vc.get("resource_id"),
-                "region": vc.get("region"),
-                "affected_packages": vc.get("affected_packages"),
-                "vendor_advisory": vc.get("vendor_advisory"),
-                "reference_url": vc.get("reference_url"),
-                "vulnerability_type": vc.get("vulnerability_type"),
-                "affected_port_ranges": vc.get("affected_port_ranges"),
-                "assigned_team": vc.get("assigned_team"),
-                "vendor_fix_available": vc.get("vendor_fix_available"),
-                "steps_to_fix_count": vc.get("steps_to_fix_count"),
-                "steps_to_fix_description": vc.get("steps_to_fix_description"),
-                "deadline": vc.get("deadline"),
-                "artifacts_tools": vc.get("artifacts_tools"),
-                "post_mitigation_troubleshooting_guide": troubleshooting_steps,
-                "generated_at": result.get("generated_at"),
-                "created_at": datetime.datetime.utcnow(),
-            }
+            if cached_card:
+                # Reuse mitigation data from existing card — no GPT call needed
+                print(f"[AutoGenCards] Cache hit for '{vuln_plugin_name}', copying from existing card", flush=True)
+                document = {
+                    "card_id":            str(_uuid.uuid4()),
+                    "report_id":          report_id,
+                    "admin_email":        admin_email,
+                    "admin_id":           admin_id,
+                    "vulnerability_name": vuln_plugin_name,
+                    "host_name":          vuln_host_name,
+                    "description":        vuln["description"],
+                    "mitigation_table":   cached_card.get("mitigation_table", []),
+                    "resource_id":        vuln_host_name or cached_card.get("resource_id"),
+                    "region":             cached_card.get("region"),
+                    "affected_packages":  cached_card.get("affected_packages"),
+                    "vendor_advisory":    cached_card.get("vendor_advisory"),
+                    "reference_url":      cached_card.get("reference_url"),
+                    "vulnerability_type": cached_card.get("vulnerability_type"),
+                    "affected_port_ranges": cached_card.get("affected_port_ranges"),
+                    "assigned_team":      cached_card.get("assigned_team"),
+                    "vendor_fix_available": cached_card.get("vendor_fix_available"),
+                    "steps_to_fix_count": cached_card.get("steps_to_fix_count"),
+                    "steps_to_fix_description": cached_card.get("steps_to_fix_description"),
+                    "deadline":           cached_card.get("deadline"),
+                    "artifacts_tools":    cached_card.get("artifacts_tools"),
+                    "post_mitigation_troubleshooting_guide": cached_card.get("post_mitigation_troubleshooting_guide", []),
+                    "generated_at":       cached_card.get("generated_at"),
+                    "created_at":         datetime.datetime.utcnow(),
+                    "cached_from_card_id": str(cached_card.get("card_id", "")),
+                }
+            else:
+                # ── Step 3: No cache — call GPT-4o to generate new card ──
+                print(f"[AutoGenCards] No cache for '{vuln_plugin_name}', calling GPT-4o", flush=True)
+                result = tool._run(
+                    plugin_name=vuln_plugin_name,
+                    description=vuln["description"],
+                    plugin_output=vuln.get("plugin_output", "") or "",
+                    report_id=report_id,
+                    host_name=vuln_host_name,
+                )
+
+                if not result["success"]:
+                    logger.warning(f"[AutoGenCards] Failed for '{vuln_plugin_name}': {result.get('error')}")
+                    errors += 1
+                    continue
+
+                vc = result.get("vulnerability_card", {})
+                mitigation_table_arr = result.get("mitigation_table", [])
+                troubleshooting_steps = _parse_troubleshooting_guide(
+                    vc.get("post_mitigation_troubleshooting_guide", "") or ""
+                )
+
+                document = {
+                    "card_id":            str(_uuid.uuid4()),
+                    "report_id":          report_id,
+                    "admin_email":        admin_email,
+                    "admin_id":           admin_id,
+                    "vulnerability_name": vuln_plugin_name,
+                    "host_name":          vuln_host_name,
+                    "description":        vuln["description"],
+                    "mitigation_table":   mitigation_table_arr,
+                    "resource_id":        vc.get("resource_id"),
+                    "region":             vc.get("region"),
+                    "affected_packages":  vc.get("affected_packages"),
+                    "vendor_advisory":    vc.get("vendor_advisory"),
+                    "reference_url":      vc.get("reference_url"),
+                    "vulnerability_type": vc.get("vulnerability_type"),
+                    "affected_port_ranges": vc.get("affected_port_ranges"),
+                    "assigned_team":      vc.get("assigned_team"),
+                    "vendor_fix_available": vc.get("vendor_fix_available"),
+                    "steps_to_fix_count": vc.get("steps_to_fix_count"),
+                    "steps_to_fix_description": vc.get("steps_to_fix_description"),
+                    "deadline":           vc.get("deadline"),
+                    "artifacts_tools":    vc.get("artifacts_tools"),
+                    "post_mitigation_troubleshooting_guide": troubleshooting_steps,
+                    "generated_at":       result.get("generated_at"),
+                    "created_at":         datetime.datetime.utcnow(),
+                }
 
             try:
                 db[VULN_CARD_COLLECTION].update_one(
                     {
-                        "report_id": report_id,
+                        "report_id":          report_id,
                         "vulnerability_name": vuln_plugin_name,
-                        "host_name": vuln.get("host_name", "") or "",
+                        "host_name":          vuln_host_name,
                     },
                     {"$set": document},
                     upsert=True,
                 )
-                generated += 1
+                if cached_card:
+                    cached += 1
+                else:
+                    generated += 1
             except Exception as insert_err:
-                print(f"[AutoGenCards] Insert error for '{vuln_plugin_name}' on host '{vuln.get('host_name', '')}': {insert_err}", flush=True)
+                print(f"[AutoGenCards] Insert error for '{vuln_plugin_name}' on host '{vuln_host_name}': {insert_err}", flush=True)
                 errors += 1
 
         # Verify actual count in MongoDB
         actual_count = db[VULN_CARD_COLLECTION].count_documents({"report_id": report_id})
         logger.info(
             f"[AutoGenCards] Done for report_id={report_id} — "
-            f"generated={generated}, errors={errors}, actual_in_db={actual_count}"
+            f"generated={generated}, cached={cached}, errors={errors}, actual_in_db={actual_count}"
         )
-        print(f"[AutoGenCards] Done for report_id={report_id} — generated={generated}, errors={errors}, actual_in_db={actual_count}", flush=True)
+        print(f"[AutoGenCards] Done for report_id={report_id} — generated={generated}, cached={cached}, errors={errors}, actual_in_db={actual_count}", flush=True)
 
     except Exception as e:
         logger.error(f"[AutoGenCards] Background generation failed for report_id={report_id}: {str(e)}", exc_info=True)

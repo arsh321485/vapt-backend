@@ -31,12 +31,13 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
         write_only=True,
         min_length=8,
+        trim_whitespace=False,
         validators=[
             validate_password,
             strong_password_validator
         ]
     )
-    confirm_password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True, trim_whitespace=False)
     recaptcha = serializers.CharField(
         write_only=True,
         required=False,
@@ -58,6 +59,20 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         }
 
     def validate(self, attrs):
+        # Reject spaces in email
+        email_raw = self.initial_data.get("email", "")
+        if email_raw != email_raw.strip():
+            raise serializers.ValidationError({
+                "email": "Email must not contain leading or trailing spaces."
+            })
+
+        # Reject leading/trailing spaces in password
+        password = attrs.get("password", "")
+        if password != password.strip():
+            raise serializers.ValidationError({
+                "password": "Password must not contain leading or trailing spaces."
+            })
+
         # 🔐 Password match
         if attrs.get("password") != attrs.get("confirm_password"):
             raise serializers.ValidationError({
@@ -108,11 +123,24 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
 class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
-    password = serializers.CharField(write_only=True)
+    password = serializers.CharField(write_only=True, trim_whitespace=False)
 
     def validate(self, attrs):
-        email = attrs["email"].strip().lower()
+        # Reject spaces in email input
+        email_raw = self.initial_data.get("email", "")
+        if email_raw != email_raw.strip():
+            raise serializers.ValidationError({
+                "email": "Email must not contain leading or trailing spaces."
+            })
+
+        email = attrs["email"].lower()
+
+        # Reject leading/trailing spaces in password
         password = attrs["password"]
+        if password != password.strip():
+            raise serializers.ValidationError({
+                "password": "Password must not contain leading or trailing spaces."
+            })
 
         user = authenticate(username=email, password=password)
 
@@ -131,7 +159,14 @@ class UserMemberLoginSerializer(serializers.Serializer):
     def validate(self, attrs):
         from users_details.models import UserDetail
 
-        email = attrs["email"].strip().lower()
+        # Reject spaces in email input
+        email_raw = self.initial_data.get("email", "")
+        if email_raw != email_raw.strip():
+            raise serializers.ValidationError({
+                "email": "Email must not contain leading or trailing spaces."
+            })
+
+        email = attrs["email"].lower()
         recaptcha = attrs.get("recaptcha", "")
 
         # reCAPTCHA verify
