@@ -27,6 +27,7 @@ class ProjectDetail(models.Model):
     full_name = models.CharField(max_length=255)
     email_address = models.EmailField()
     phone_number = models.CharField(max_length=20, blank=True, null=True)
+    is_submitted = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -38,6 +39,12 @@ class ProjectDetail(models.Model):
 
 
 class TestingMethodology(models.Model):
+    TESTING_TYPE_CHOICES = [
+        ('black_box', 'Black Box'),
+        ('grey_box', 'Grey Box'),
+        ('white_box', 'White Box'),
+    ]
+
     NETWORK_PERSPECTIVE_CHOICES = [
         ('internal', 'Internal'),
         ('external', 'External'),
@@ -51,13 +58,12 @@ class TestingMethodology(models.Model):
     ]
 
     _id = models.ObjectIdField(primary_key=True, default=ObjectId, editable=False)
-    admin = models.OneToOneField(
+    admin = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='testing_methodology'
+        related_name='testing_methodologies'
     )
-    # Multi-select fields stored as JSON arrays
-    testing_types = models.JSONField(default=list)
+    testing_type = models.CharField(max_length=20, choices=TESTING_TYPE_CHOICES)
     assessment_categories = models.JSONField(default=list)
     assessment_notes = models.TextField(blank=True, null=True)
     network_perspective = models.CharField(max_length=20, choices=NETWORK_PERSPECTIVE_CHOICES)
@@ -69,6 +75,7 @@ class TestingMethodology(models.Model):
 
     class Meta:
         db_table = 'scoping_testing_methodology'
+        unique_together = ('admin', 'testing_type')
 
     def __str__(self):
-        return f"Methodology for {self.admin.email}"
+        return f"{self.testing_type} methodology for {self.admin.email}"
