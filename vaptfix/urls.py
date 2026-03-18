@@ -31,6 +31,7 @@ urlpatterns = [
     path("api/admin/adminregister/", include("adminregister.urls")),
     path("api/admin/adminasset/", include("adminasset.urls")),
     path("api/admin/scope/", include("scope.urls")),
+    path("api/admin/scoping/", include("scoping.urls")),
     path("api/admin/adminmitigationstrategy/", include("adminmitigationstrategy.urls")),
     path("api/user/dashboard/", include("userdashboard.urls")),
     path("api/user/register/", include("userregister.urls")),

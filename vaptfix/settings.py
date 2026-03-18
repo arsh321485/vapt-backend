@@ -65,6 +65,7 @@ INSTALLED_APPS = [
     "adminregister",
     "adminasset",
     "scope",
+    "scoping",
     "adminmitigationstrategy",
     "userdashboard",
     "userregister",

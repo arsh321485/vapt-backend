@@ -251,6 +251,190 @@ class Util:
 
         return Util.send_mail(data)
 
+    @staticmethod
+    def _get_logo(base_dir):
+        """Helper: load logo as base64 or return fallback HTML."""
+        logo_b64 = None
+        logo_path = os.path.join(str(base_dir), "users", "static", "users", "logo.png")
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+        if logo_b64:
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+        elif getattr(settings, "VAPTFIX_LOGO_URL", ""):
+            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
+        else:
+            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+        return logo_b64, logo_html
+
+    @staticmethod
+    def send_scoping_sales_email(project_detail, testing_methodology):
+        """Send scoping form details to sales team."""
+        logo_b64, logo_html = Util._get_logo(settings.BASE_DIR)
+
+        def fmt_list(items):
+            return ', '.join([i.replace('_', ' ').title() for i in items]) if items else '—'
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+            <tr>
+              <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:8px; overflow:hidden;
+                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+                  <!-- Header -->
+                  <tr>
+                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
+                                border-bottom:1px solid #e8eaed;">
+                      {logo_html}
+                    </td>
+                  </tr>
+
+                  <!-- Body -->
+                  <tr>
+                    <td style="padding:40px;">
+                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">New Scoping Form Submission</h2>
+                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
+
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        A new scoping form has been submitted. Details below:
+                      </p>
+
+                      <!-- Project Details -->
+                      <h3 style="color:#1a73e8; font-size:14px; margin:20px 0 10px 0; text-transform:uppercase; letter-spacing:1px;">
+                        Project Details
+                      </h3>
+                      <table width="100%" cellpadding="8" cellspacing="0"
+                             style="background:#f8f9fa; border-radius:6px; font-size:14px; color:#444;">
+                        <tr><td style="width:40%; color:#888;">Admin Account</td><td><strong>{project_detail.admin.email}</strong></td></tr>
+                        <tr><td style="color:#888;">Organization</td><td><strong>{project_detail.organization_name}</strong></td></tr>
+                        <tr><td style="color:#888;">Industry</td><td>{project_detail.get_industry_display()}</td></tr>
+                        <tr><td style="color:#888;">Country</td><td>{project_detail.country}</td></tr>
+                        <tr><td style="color:#888;">Contact Name</td><td>{project_detail.full_name}</td></tr>
+                        <tr><td style="color:#888;">Contact Email</td><td>{project_detail.email_address}</td></tr>
+                        <tr><td style="color:#888;">Phone</td><td>{project_detail.phone_number or '—'}</td></tr>
+                      </table>
+
+                      <!-- Testing Methodology -->
+                      <h3 style="color:#1a73e8; font-size:14px; margin:24px 0 10px 0; text-transform:uppercase; letter-spacing:1px;">
+                        Testing Methodology
+                      </h3>
+                      <table width="100%" cellpadding="8" cellspacing="0"
+                             style="background:#f8f9fa; border-radius:6px; font-size:14px; color:#444;">
+                        <tr><td style="width:40%; color:#888;">Testing Types</td><td>{fmt_list(testing_methodology.testing_types)}</td></tr>
+                        <tr><td style="color:#888;">Assessment Categories</td><td>{fmt_list(testing_methodology.assessment_categories)}</td></tr>
+                        <tr><td style="color:#888;">Assessment Notes</td><td>{testing_methodology.assessment_notes or '—'}</td></tr>
+                        <tr><td style="color:#888;">Network Perspective</td><td>{testing_methodology.get_network_perspective_display()}</td></tr>
+                        <tr><td style="color:#888;">Environment</td><td>{testing_methodology.get_environment_display()}</td></tr>
+                        <tr><td style="color:#888;">Compliance Standards</td><td>{fmt_list(testing_methodology.compliance_standards)}</td></tr>
+                        <tr><td style="color:#888;">Compliance Notes</td><td>{testing_methodology.compliance_notes or '—'}</td></tr>
+                      </table>
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
+                      <p style="color:#888; font-size:12px; margin:0;">
+                        &copy; 2026 VAPTFIX. All rights reserved.
+                      </p>
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+        """
+
+        data = {
+            "to_email": "sales.secureitlab@gmail.com",
+            "subject": f"New Scoping Form Submission — {project_detail.organization_name}",
+            "html_content": html_content,
+            "inline_logo_b64": logo_b64,
+        }
+        return Util.send_mail(data)
+
+    @staticmethod
+    def send_scoping_admin_confirmation_email(admin_email, org_name):
+        """Send confirmation email to admin after scoping form submission."""
+        logo_b64, logo_html = Util._get_logo(settings.BASE_DIR)
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+            <tr>
+              <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:8px; overflow:hidden;
+                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+                  <!-- Header -->
+                  <tr>
+                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
+                                border-bottom:1px solid #e8eaed;">
+                      {logo_html}
+                    </td>
+                  </tr>
+
+                  <!-- Body -->
+                  <tr>
+                    <td style="padding:40px; text-align:center;">
+                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">Form Submitted Successfully!</h2>
+                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 auto 24px auto; width:60px;" />
+
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        Thank you for completing the scoping form for <strong>{org_name}</strong>.
+                      </p>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        Our sales team will review your submission and contact you soon via email.
+                      </p>
+
+                      <div style="margin:30px 0; padding:20px; background:#f0f7ff; border-radius:8px;
+                                  border-left:4px solid #1a73e8;">
+                        <p style="color:#1a73e8; font-size:14px; margin:0;">
+                          A copy of your submission has been sent to our sales team.
+                        </p>
+                      </div>
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
+                      <p style="color:#888; font-size:12px; margin:0;">
+                        &copy; 2026 VAPTFIX. All rights reserved.
+                      </p>
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+        """
+
+        data = {
+            "to_email": admin_email,
+            "subject": "Scoping Form Submitted Successfully — VAPTFIX",
+            "html_content": html_content,
+            "inline_logo_b64": logo_b64,
+        }
+        return Util.send_mail(data)
+
+
 # Verify reCAPTCHA
 def verify_recaptcha(recaptcha_response):
     """

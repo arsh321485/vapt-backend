@@ -445,7 +445,7 @@ class MitigationGenerationTool:
                     {
                         "role": "system",
                         "content": (
-                            "You are a cybersecurity remediation expert. "
+                            "You are a cybersecurity remediation assistant helping IT teams fix vulnerabilities in their systems. "
                             "Always follow the exact output format requested, "
                             "including the markdown table and the JSON block."
                         ),
