@@ -21,7 +21,6 @@ import pymongo
 from pymongo import MongoClient
 
 from location.models import Location
-from scope.models import Scope
 from users.models import User
 from .models import UploadReport
 from .serializers import UploadReportSerializer
@@ -533,16 +532,19 @@ class UploadReportView(APIView):
                 # Regular flow: use the requesting user as target admin
                 target_admin = request.user
 
-            # Check if target admin's scope is locked
-            # If scope is locked, only Super Admin can upload reports
-            admin_has_locked_scope = Scope.objects.filter(
-                admin=target_admin,
-                is_locked=True
-            ).exists()
+            # Check if target admin has completed scoping forms
+            try:
+                from scoping.models import ProjectDetail, TestingMethodology
+                has_project = ProjectDetail.objects.filter(admin=target_admin).exists()
+                has_methodology = TestingMethodology.objects.filter(admin=target_admin).exists()
+                scoping_complete = has_project and has_methodology
+            except Exception:
+                scoping_complete = False
 
-            if admin_has_locked_scope and not request.user.is_superuser:
+            if not scoping_complete:
                 return Response(
-                    {"error": "Scope is locked. Only Super Admin can upload reports."},
+                    {"error": "Admin has not completed the scoping form (Project Details + Testing Methodology). "
+                              "File upload is not allowed until scoping is complete."},
                     status=403
                 )
 

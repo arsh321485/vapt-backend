@@ -268,12 +268,39 @@ class Util:
         return logo_b64, logo_html
 
     @staticmethod
-    def send_scoping_sales_email(project_detail, testing_methodology):
-        """Send scoping form details to sales team."""
+    def send_scoping_sales_email(project_detail, testing_methodologies):
+        """Send scoping form details to sales team. testing_methodologies can be a list or single object."""
         logo_b64, logo_html = Util._get_logo(settings.BASE_DIR)
 
         def fmt_list(items):
             return ', '.join([i.replace('_', ' ').title() for i in items]) if items else '—'
+
+        # Normalize to list
+        if not isinstance(testing_methodologies, (list, tuple)):
+            try:
+                methodologies_list = list(testing_methodologies)
+            except TypeError:
+                methodologies_list = [testing_methodologies]
+        else:
+            methodologies_list = list(testing_methodologies)
+
+        # Build one section per testing type
+        methodology_sections = ""
+        for m in methodologies_list:
+            methodology_sections += f"""
+                      <h3 style="color:#1a73e8; font-size:14px; margin:24px 0 10px 0; text-transform:uppercase; letter-spacing:1px;">
+                        Testing Methodology — {m.testing_type.replace('_', ' ').title()}
+                      </h3>
+                      <table width="100%" cellpadding="8" cellspacing="0"
+                             style="background:#f8f9fa; border-radius:6px; font-size:14px; color:#444; margin-bottom:12px;">
+                        <tr><td style="width:40%; color:#888;">Assessment Categories</td><td>{fmt_list(m.assessment_categories)}</td></tr>
+                        <tr><td style="color:#888;">Assessment Notes</td><td>{m.assessment_notes or '—'}</td></tr>
+                        <tr><td style="color:#888;">Network Perspective</td><td>{m.get_network_perspective_display()}</td></tr>
+                        <tr><td style="color:#888;">Environment</td><td>{m.get_environment_display()}</td></tr>
+                        <tr><td style="color:#888;">Compliance Standards</td><td>{fmt_list(m.compliance_standards)}</td></tr>
+                        <tr><td style="color:#888;">Compliance Notes</td><td>{m.compliance_notes or '—'}</td></tr>
+                      </table>
+            """
 
         html_content = f"""
         <!DOCTYPE html>
@@ -320,20 +347,7 @@ class Util:
                         <tr><td style="color:#888;">Phone</td><td>{project_detail.phone_number or '—'}</td></tr>
                       </table>
 
-                      <!-- Testing Methodology -->
-                      <h3 style="color:#1a73e8; font-size:14px; margin:24px 0 10px 0; text-transform:uppercase; letter-spacing:1px;">
-                        Testing Methodology
-                      </h3>
-                      <table width="100%" cellpadding="8" cellspacing="0"
-                             style="background:#f8f9fa; border-radius:6px; font-size:14px; color:#444;">
-                        <tr><td style="width:40%; color:#888;">Testing Types</td><td>{fmt_list(testing_methodology.testing_types)}</td></tr>
-                        <tr><td style="color:#888;">Assessment Categories</td><td>{fmt_list(testing_methodology.assessment_categories)}</td></tr>
-                        <tr><td style="color:#888;">Assessment Notes</td><td>{testing_methodology.assessment_notes or '—'}</td></tr>
-                        <tr><td style="color:#888;">Network Perspective</td><td>{testing_methodology.get_network_perspective_display()}</td></tr>
-                        <tr><td style="color:#888;">Environment</td><td>{testing_methodology.get_environment_display()}</td></tr>
-                        <tr><td style="color:#888;">Compliance Standards</td><td>{fmt_list(testing_methodology.compliance_standards)}</td></tr>
-                        <tr><td style="color:#888;">Compliance Notes</td><td>{testing_methodology.compliance_notes or '—'}</td></tr>
-                      </table>
+                      {methodology_sections}
                     </td>
                   </tr>
 
@@ -400,12 +414,6 @@ class Util:
                         Our sales team will review your submission and contact you soon via email.
                       </p>
 
-                      <div style="margin:30px 0; padding:20px; background:#f0f7ff; border-radius:8px;
-                                  border-left:4px solid #1a73e8;">
-                        <p style="color:#1a73e8; font-size:14px; margin:0;">
-                          A copy of your submission has been sent to our sales team.
-                        </p>
-                      </div>
                     </td>
                   </tr>
 

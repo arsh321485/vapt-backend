@@ -74,7 +74,7 @@ class TestingMethodologySerializer(serializers.ModelSerializer):
         model = TestingMethodology
         fields = [
             'methodology_id', 'admin_id',
-            'testing_types', 'assessment_categories', 'assessment_notes',
+            'testing_type', 'assessment_categories', 'assessment_notes',
             'network_perspective', 'environment',
             'compliance_standards', 'compliance_notes',
             'created_at', 'updated_at'
@@ -87,13 +87,10 @@ class TestingMethodologySerializer(serializers.ModelSerializer):
     def get_admin_id(self, obj):
         return str(obj.admin_id)
 
-    def validate_testing_types(self, value):
-        if not isinstance(value, list) or len(value) == 0:
-            raise serializers.ValidationError("Select at least one testing type.")
-        invalid = [v for v in value if v not in VALID_TESTING_TYPES]
-        if invalid:
+    def validate_testing_type(self, value):
+        if value not in VALID_TESTING_TYPES:
             raise serializers.ValidationError(
-                f"Invalid testing types: {invalid}. Valid: {VALID_TESTING_TYPES}"
+                f"Invalid testing type: '{value}'. Valid: {VALID_TESTING_TYPES}"
             )
         return value
 
