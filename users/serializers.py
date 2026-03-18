@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
-from django.utils.encoding import smart_str, force_bytes, DjangoUnicodeDecodeError   
+from django.utils.encoding import smart_str, force_bytes, DjangoUnicodeDecodeError
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.forms import ValidationError
@@ -1215,3 +1215,5 @@ class JiraProjectDeleteSerializer(serializers.Serializer):
 class JiraResponseSerializer(serializers.Serializer):
     message = serializers.CharField()
     detail = serializers.JSONField(required=False)
+
+

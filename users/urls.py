@@ -64,7 +64,7 @@ from .views import (
     JiraSearchIssuesView,
     JiraAssignIssueView,
     JiraListProjectsView,
-    JiraCreateProjectView
+    JiraCreateProjectView,
     # JiraGetProjectView,
     # JiraUpdateProjectView,
     # JiraDeleteProjectView,
@@ -162,5 +162,6 @@ urlpatterns = [
     # path('jira/projects/<str:project_key>/', JiraGetProjectView.as_view(), name='jira_get_project'),
     # path('jira/projects/<str:project_key>/update/', JiraUpdateProjectView.as_view(), name='jira_update_project'),
     # path('jira/projects/<str:project_key>/delete/', JiraDeleteProjectView.as_view(), name='jira_delete_project'),
+
 ]
 

@@ -55,8 +55,18 @@ VALID_COUNTRIES = {
     "Uruguay", "Uzbekistan",
     "Venezuela", "Vietnam",
     "Yemen",
-    "Zambia", "Zimbabwe"
-} 
+    "Zambia", "Zimbabwe",
+    # Additional countries to reach 195
+    "Antigua and Barbuda", "Cabo Verde", "Central African Republic",
+    "Cote d'Ivoire", "Democratic Republic of the Congo", "Equatorial Guinea",
+    "Eswatini", "Grenada", "Guinea-Bissau", "Kiribati", "Kosovo",
+    "Liechtenstein", "Marshall Islands", "Micronesia", "Monaco", "Montenegro",
+    "Nauru", "Palau", "Papua New Guinea", "Palestine", "San Marino",
+    "Sao Tome and Principe", "Solomon Islands", "South Sudan",
+    "Saint Kitts and Nevis", "Saint Lucia", "Saint Vincent and the Grenadines",
+    "Suriname", "Timor-Leste", "Tonga", "Trinidad and Tobago",
+    "Turkmenistan", "Tuvalu", "Vanuatu"
+}
 
 class LocationCreateSerializer(serializers.ModelSerializer):
     admin_id = serializers.CharField(write_only=True)
