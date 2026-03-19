@@ -79,7 +79,8 @@ from .serializers import (
     JiraIssueSerializer,
     JiraProjectSerializer,
     JiraCommentSerializer,
-    UserMemberLoginSerializer
+    UserMemberLoginSerializer,
+    UserForgotPasswordSerializer,
 )
 from .utils import JiraTokenManager
 import requests
@@ -543,6 +544,138 @@ class UserPasswordResetView(APIView):
             {"msg": "Password reset successfully"},
             status=status.HTTP_200_OK
         )
+
+# USER MEMBER FORGOT PASSWORD VIEW
+class UserForgotPasswordView(generics.GenericAPIView):
+    serializer_class = UserForgotPasswordSerializer
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+        from django.contrib.auth.tokens import PasswordResetTokenGenerator
+        from django.contrib.auth import get_user_model
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        email = serializer.validated_data["email"]
+        User = get_user_model()
+
+        # Get or create Django User for this team member
+        user, created = User.objects.get_or_create(
+            email=email,
+            defaults={"is_active": True}
+        )
+        if created:
+            user.set_unusable_password()
+            user.save()
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        token = PasswordResetTokenGenerator().make_token(user)
+
+        reset_link = f"https://vapt-frontend-liart.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
+
+        # Load logo
+        import os, base64
+        logo_b64 = None
+        logo_path = os.path.join(str(settings.BASE_DIR), "users", "static", "users", "logo.png")
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        if logo_b64:
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+        elif getattr(settings, "VAPTFIX_LOGO_URL", ""):
+            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
+        else:
+            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+            <tr>
+              <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:8px; overflow:hidden;
+                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+                  <tr>
+                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
+                                border-bottom:1px solid #e8eaed;">
+                      {logo_html}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:40px;">
+                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">Reset Your Password</h2>
+                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        We received a request to reset your VAPTFIX account password.
+                        Click the button below to set a new password:
+                      </p>
+                      <div style="text-align:center; margin:28px 0;">
+                        <a href="{reset_link}"
+                           style="background-color:#1a73e8; color:#ffffff; padding:14px 32px;
+                                  text-decoration:none; border-radius:6px; font-size:15px;
+                                  font-weight:bold; display:inline-block;">
+                          Reset Password
+                        </a>
+                      </div>
+                      <p style="color:#444; font-size:14px; line-height:1.6;">
+                        This link will expire after a limited time. If you did not request a
+                        password reset, please ignore this email.
+                      </p>
+                      <hr style="border:none; border-top:1px solid #e8eaed; margin:24px 0;" />
+                      <p style="color:#444; font-size:14px; margin:0;">
+                        Best regards,<br/>
+                        <strong>Security Management Team</strong><br/>
+                        VAPTFIX
+                      </p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
+                      <p style="color:#888; font-size:12px; margin:0;">
+                        &copy; 2026 VAPTFIX. All rights reserved.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+        """
+
+        data = {
+            "to_email": email,
+            "subject": "Reset Your VAPTFIX Password",
+            "html_content": html_content,
+            "inline_logo_b64": logo_b64,
+        }
+
+        success, _ = Util.send_mail(data)
+        if success:
+            return Response({"msg": "Password set link sent. Please check your email."}, status=status.HTTP_200_OK)
+        return Response({"error": "Failed to send email"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# USER MEMBER SET PASSWORD VIEW
+class UserSetPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, uid, token):
+        serializer = UserPasswordResetSerializer(
+            data=request.data,
+            context={"uid": uid, "token": token}
+        )
+        serializer.is_valid(raise_exception=True)
+        return Response({"msg": "Your password has been set successfully. You can now log in."}, status=status.HTTP_200_OK)
+
 
 # LOGOUT VIEW
 @api_view(["POST"])

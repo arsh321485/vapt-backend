@@ -154,6 +154,7 @@ class UserLoginSerializer(serializers.Serializer):
 # Team Member Login Serializer (email + recaptcha only, no password)
 class UserMemberLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
     recaptcha = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     def validate(self, attrs):
@@ -167,6 +168,7 @@ class UserMemberLoginSerializer(serializers.Serializer):
             })
 
         email = attrs["email"].lower()
+        password = attrs["password"]
         recaptcha = attrs.get("recaptcha", "")
 
         # reCAPTCHA verify
@@ -179,22 +181,35 @@ class UserMemberLoginSerializer(serializers.Serializer):
         if not user_detail:
             raise serializers.ValidationError({"email": "No team member account found with this email."})
 
-        # Get or create a User account for this team member
+        # Get Django User for this team member
         User = get_user_model()
-        user, created = User.objects.get_or_create(
-            email=email,
-            defaults={"is_active": True}
-        )
-        if created:
-            user.set_unusable_password()
-            user.save()
+        user = User.objects.filter(email=email).first()
+        if not user:
+            raise serializers.ValidationError({"email": "Account not set up yet. Please use the link sent to your email to set your password."})
 
         if not user.is_active:
             raise serializers.ValidationError({"email": "This account is inactive."})
 
+        if not user.has_usable_password():
+            raise serializers.ValidationError({"password": "Password not set. Please use the link sent to your email to set your password."})
+
+        if not user.check_password(password):
+            raise serializers.ValidationError({"password": "Invalid password."})
+
         attrs["user"] = user
         attrs["user_detail"] = user_detail
         return attrs
+
+
+class UserForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        from users_details.models import UserDetail
+        email = value.lower()
+        if not UserDetail.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError("No team member account found with this email.")
+        return email
 
 
 # Admin Testing Type Serializer
