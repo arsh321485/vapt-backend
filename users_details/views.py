@@ -163,7 +163,7 @@ class UserDetailCreateView(generics.CreateAPIView):
     serializer_class = UserDetailCreateSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def send_welcome_email(self, email, first_name, last_name, roles):
+    def send_welcome_email(self, email, first_name, last_name, roles, set_password_url=None):
         """Send styled welcome email to newly added team member."""
 
         if not email or not isinstance(email, str):
@@ -193,7 +193,7 @@ class UserDetailCreateView(generics.CreateAPIView):
         else:
             logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
 
-        login_url = getattr(settings, "VAPTFIX_LOGIN_URL", "#")
+        login_url = set_password_url or getattr(settings, "VAPTFIX_LOGIN_URL", "#")
 
         html_content = f"""
         <!DOCTYPE html>
@@ -233,22 +233,22 @@ class UserDetailCreateView(generics.CreateAPIView):
                         {roles_html}
                       </ul>
                       <p style="color:#444; font-size:15px; line-height:1.6;">
-                        You can now securely access the system using the link below:
+                        Please set your password using the link below to activate your account:
                       </p>
 
-                      <!-- Login Button -->
+                      <!-- Set Password Button -->
                       <div style="text-align:center; margin:28px 0;">
                         <a href="{login_url}"
                            style="background-color:#1a73e8; color:#ffffff; padding:14px 32px;
                                   text-decoration:none; border-radius:6px; font-size:15px;
                                   font-weight:bold; display:inline-block;">
-                          🔐 Click Here to Login
+                          Set Your Password
                         </a>
                       </div>
 
                       <p style="color:#444; font-size:14px; line-height:1.6;">
-                        Please use your registered credentials to sign in and begin managing
-                        your assigned responsibilities.
+                        This link will expire after a limited time. After setting your password,
+                        you can log in with your email and password.
                       </p>
                       <p style="color:#444; font-size:14px; line-height:1.6;">
                         If you believe any role assignment is incorrect or require additional
@@ -335,12 +335,31 @@ class UserDetailCreateView(generics.CreateAPIView):
 
             logger.info(f"Creating user detail for {email} with roles: {roles}")
 
-            # Send welcome email
+            # Create Django User for this member and generate set-password link
+            from django.utils.http import urlsafe_base64_encode
+            from django.utils.encoding import force_bytes
+            from django.contrib.auth.tokens import PasswordResetTokenGenerator
+
+            User = get_user_model()
+            user, created = User.objects.get_or_create(
+                email=email,
+                defaults={"is_active": True}
+            )
+            if created:
+                user.set_unusable_password()
+                user.save()
+
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = PasswordResetTokenGenerator().make_token(user)
+            set_password_url = f"https://vapt-frontend-liart.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
+
+            # Send welcome email with set-password link
             email_sent, error = self.send_welcome_email(
                 email=email,
                 first_name=first_name,
                 last_name=last_name,
                 roles=roles,
+                set_password_url=set_password_url,
             )
 
             response_data = {

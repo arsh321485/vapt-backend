@@ -15,6 +15,8 @@ from .views import (
     UserPasswordResetView,
     logout_view,
     # SetPasswordView,
+    UserForgotPasswordView,
+    UserSetPasswordView,
     GoogleOAuthView,
     MicrosoftTeamsOAuthUrlView,
     MicrosoftTeamsCallbackView,
@@ -92,6 +94,11 @@ urlpatterns = [
     path('forgot-password/', SendPasswordResetEmailView.as_view(), name='forgot-password'),
     path('reset-password/<uid>/<token>/', UserPasswordResetView.as_view(), name='reset-password'),
     
+    
+    # User Member Password APIs
+    path('user-forgot-password/', UserForgotPasswordView.as_view(), name='user-forgot-password'),
+    path('user-set-password/<uid>/<token>/', UserSetPasswordView.as_view(), name='user-set-password'),
+    
     # Token Management
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     
@@ -104,14 +111,12 @@ urlpatterns = [
     path('teams/create/', CreateTeamView.as_view(), name='create-team'),
     path('teams/update/', UpdateTeamView.as_view(), name='update-team'),              
     path('teams/delete/', DeleteTeamView.as_view(), name='delete-team'),              
-    path('teams/list/', ListTeamsView.as_view(), name='list-teams'),
-    
+    path('teams/list/', ListTeamsView.as_view(), name='list-teams'),  
     path('teams/channels/list/', ListChannelsView.as_view(), name='list-channels'),
     path('teams/channels/create/', CreateTeamsChannelView.as_view(), name='create-channel'),
     path('teams/channels/update/', UpdateChannelView.as_view(), name='update-channel'),  
     path('teams/channels/delete/', DeleteChannelView.as_view(), name='delete-channel'),  
-    path('teams/channels/add-user/', AddUserToChannelView.as_view(), name='add-user-to-channel'),
-    
+    path('teams/channels/add-user/', AddUserToChannelView.as_view(), name='add-user-to-channel'),   
     path('teams/messages/send/', SendTeamsMessageView.as_view(), name='send-message'),
     
     
@@ -120,17 +125,12 @@ urlpatterns = [
     path('slack/callback/', SlackOAuthCallbackView.as_view(), name='slack-callback'),
     path('slack/validate-token/', SlackValidateTokenView.as_view(), name='slack-validate-token'),
     path('slack/login/', SlackLoginView.as_view(), name='slack-login'),
-
-    path('slack-oauth/', SlackOAuthView.as_view(), name='slack-oauth'),
- 
-    
-    
+    path('slack-oauth/', SlackOAuthView.as_view(), name='slack-oauth'),   
     # Slack Channel Management
     path('slack/channels/list/', ListSlackChannelsView.as_view(), name='slack-list-channels'),
     path('slack/channels/create/', CreateSlackChannelView.as_view(), name='slack-create-channel'),
     path('slack/channels/update/', UpdateSlackChannelView.as_view(), name='slack-update-channel'),
-    path('slack/channels/delete/', DeleteSlackChannelView.as_view(), name='slack-delete-channel'),
-    
+    path('slack/channels/delete/', DeleteSlackChannelView.as_view(), name='slack-delete-channel'),    
     # Slack Messaging
     path('slack/messages/send/', SendSlackMessageView.as_view(), name='slack-send-message'),
     path('slack/channel/join/', JoinSlackChannelView.as_view(), name='slack-join-channel'),
