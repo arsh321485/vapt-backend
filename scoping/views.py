@@ -78,23 +78,21 @@ class UploadStatusView(APIView):
         try:
             from upload_report.models import UploadReport
 
-            # Use ProjectDetail.created_at as baseline (set once, never changes).
-            # Files can only be uploaded after scoping exists, so any upload
-            # after created_at is a valid new upload for this admin.
-            baseline = None
+            # Get scoping submission time to only count NEW uploads
+            submitted_at = None
             try:
-                project_detail = ProjectDetail.objects.get(admin=request.user)
-                baseline = project_detail.created_at
+                project_detail = ProjectDetail.objects.get(admin=request.user, is_submitted=True)
+                submitted_at = project_detail.updated_at
             except ProjectDetail.DoesNotExist:
                 pass
 
-            if baseline:
+            if submitted_at:
                 file_uploaded = UploadReport.objects.filter(
                     admin=request.user,
-                    uploaded_at__gte=baseline
+                    uploaded_at__gte=submitted_at
                 ).exists()
             else:
-                file_uploaded = UploadReport.objects.filter(admin=request.user).exists()
+                file_uploaded = False
 
         except Exception as e:
             logger.error(f"[UploadStatus] Error checking upload status for {request.user.email}: {e}")
