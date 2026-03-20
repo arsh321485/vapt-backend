@@ -69,6 +69,7 @@ class UploadStatusView(APIView):
     """
     GET /api/scoping/upload-status/
     Frontend polls this to check if superadmin has uploaded a report file for this admin.
+    Only checks uploads that happened AFTER scoping form was submitted.
     When file is uploaded → frontend redirects to admin login page.
     """
     permission_classes = [IsAuthenticated]
@@ -76,7 +77,23 @@ class UploadStatusView(APIView):
     def get(self, request):
         try:
             from upload_report.models import UploadReport
-            file_uploaded = UploadReport.objects.filter(admin=request.user).exists()
+
+            # Get scoping submission time to only count NEW uploads
+            submitted_at = None
+            try:
+                project_detail = ProjectDetail.objects.get(admin=request.user, is_submitted=True)
+                submitted_at = project_detail.updated_at
+            except ProjectDetail.DoesNotExist:
+                pass
+
+            if submitted_at:
+                file_uploaded = UploadReport.objects.filter(
+                    admin=request.user,
+                    uploaded_at__gte=submitted_at
+                ).exists()
+            else:
+                file_uploaded = False
+
         except Exception as e:
             logger.error(f"[UploadStatus] Error checking upload status for {request.user.email}: {e}")
             file_uploaded = False
