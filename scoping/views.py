@@ -1,4 +1,6 @@
 import logging
+from django.core.cache import cache
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -48,6 +50,14 @@ class ScopingSubmitView(APIView):
         project_detail.is_submitted = True
         project_detail.save()
 
+        # Store exact submission time in cache so UploadStatusView
+        # only counts uploads that happen AFTER this moment.
+        cache.set(
+            f'waiting_since_{request.user.id}',
+            timezone.now(),
+            timeout=60 * 60 * 24 * 7  # 7 days
+        )
+
         # Send emails
         try:
             Util.send_scoping_sales_email(project_detail, methodologies)
@@ -78,23 +88,17 @@ class UploadStatusView(APIView):
         try:
             from upload_report.models import UploadReport
 
-            # Use created_at (set once, never changes) as baseline.
-            # Files can only be uploaded after scoping exists, so any
-            # UploadReport after created_at is a valid new upload.
-            baseline = None
-            try:
-                project_detail = ProjectDetail.objects.get(admin=request.user)
-                baseline = project_detail.created_at
-            except ProjectDetail.DoesNotExist:
-                pass
+            # Get the exact time when admin submitted the scoping form.
+            # Only count uploads that happened AFTER that moment.
+            waiting_since = cache.get(f'waiting_since_{request.user.id}')
 
-            if baseline:
+            if waiting_since:
                 file_uploaded = UploadReport.objects.filter(
                     admin=request.user,
-                    uploaded_at__gte=baseline
+                    uploaded_at__gte=waiting_since
                 ).exists()
             else:
-                file_uploaded = UploadReport.objects.filter(admin=request.user).exists()
+                file_uploaded = False
 
         except Exception as e:
             logger.error(f"[UploadStatus] Error checking upload status for {request.user.email}: {e}")
