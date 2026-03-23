@@ -218,8 +218,8 @@ JIRA_SCOPES = [
     'write:jira-work',
     'manage:jira-project',
     'manage:jira-configuration',
-    'read:me'
-    
+    'read:me',
+    'offline_access'
 ]
 
 # CORS_ALLOWED_ORIGINS = [

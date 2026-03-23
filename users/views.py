@@ -3878,8 +3878,6 @@ class JiraOAuthView(APIView):
             user, created = User.objects.get_or_create(
                 email=user_data['email'],
                 defaults={
-                    'username': user_data['email'],
-                    'full_name': user_data.get('name', ''),
                     'is_active': True,
                     'login_provider': 'jira',
                     'jira_access_token': tokens['access_token'],
@@ -3901,10 +3899,16 @@ class JiraOAuthView(APIView):
                 'user': {
                     'id': str(user.id),
                     'email': user.email,
-                    'name': user.full_name,
+                    'name': user_data.get('name', ''),
                     'account_id': user_data.get('account_id', '')
                 },
-                'jira_tokens': tokens,
+                'jira_tokens': {
+                    'access_token': tokens.get('access_token', ''),
+                    'refresh_token': tokens.get('refresh_token', ''),
+                    'expires_in': tokens.get('expires_in', 3600),
+                    'token_type': tokens.get('token_type', 'Bearer'),
+                    'scope': tokens.get('scope', ''),
+                },
                 'jwt_tokens': {
                     'refresh': str(refresh),
                     'access': str(refresh.access_token),
@@ -4041,7 +4045,12 @@ class JiraCreateProjectView(APIView):
                 }
             )
 
-            return Response(response.json(), status=response.status_code)
+            jira_data = response.json()
+            if response.status_code in [200, 201]:
+                jira_data['name'] = project_data.get('name', '')
+                jira_data['description'] = project_data.get('description', '')
+                jira_data['projectTypeKey'] = project_data.get('projectTypeKey', 'software')
+            return Response(jira_data, status=response.status_code)
         except Exception as e:
             logger.error(f"Project create failed: {str(e)}")
             return Response({'error': str(e)}, status=500)
@@ -4169,7 +4178,7 @@ class JiraDeleteIssueView(APIView):
 
 class JiraSearchIssuesView(APIView):
     """Search issues via JQL"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request):
         try:
@@ -4181,12 +4190,15 @@ class JiraSearchIssuesView(APIView):
                 return Response({'error': 'Missing Jira headers'}, status=400)
 
             response = requests.get(
-                f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search',
+                f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search/jql',
                 headers={
                     'Authorization': f'Bearer {access_token}',
                     'Accept': 'application/json'
                 },
-                params={'jql': jql}
+                params={
+                    'jql': jql,
+                    'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,reporter,project'
+                }
             )
 
             if response.status_code != 200:
@@ -4309,6 +4321,299 @@ class JiraAddCommentView(APIView):
         except Exception as e:
             logger.exception("Failed to add JIRA comment")
             return Response({'error': 'Failed to add comment', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- TOKEN REFRESH --------------------
+class JiraTokenRefreshView(APIView):
+    """Refresh Jira OAuth access token using refresh token"""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            refresh_token = request.data.get('refresh_token')
+            if not refresh_token:
+                return Response({'error': 'refresh_token is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            token_data = {
+                'grant_type': 'refresh_token',
+                'client_id': settings.JIRA_CLIENT_ID,
+                'client_secret': settings.JIRA_CLIENT_SECRET,
+                'refresh_token': refresh_token,
+            }
+
+            response = requests.post(
+                settings.JIRA_TOKEN_URL,
+                json=token_data,
+                headers={'Content-Type': 'application/json'}
+            )
+
+            if response.status_code != 200:
+                return Response({'error': 'Token refresh failed', 'detail': response.text},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            return Response(response.json(), status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Jira token refresh failed")
+            return Response({'error': 'Token refresh failed', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- DISCONNECT JIRA --------------------
+class JiraDisconnectView(APIView):
+    """Remove saved Jira tokens from user account"""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            from .utils import JiraTokenManager
+            if not request.user or not request.user.is_authenticated:
+                return Response({'message': 'Jira disconnected successfully'}, status=status.HTTP_200_OK)
+            JiraTokenManager.delete_token(request.user)
+            return Response({'message': 'Jira disconnected successfully'}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception("Jira disconnect failed")
+            return Response({'error': 'Disconnect failed', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- GET / UPDATE / DELETE PROJECT --------------------
+class JiraGetProjectView(APIView):
+    """Get a single Jira project by project key"""
+    permission_classes = [AllowAny]
+
+    def get(self, request, project_key):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project/{project_key}"
+            response = requests.get(url, headers={
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json'
+            })
+
+            return Response(response.json(), status=response.status_code)
+
+        except Exception as e:
+            logger.exception("Failed to get Jira project")
+            return Response({'error': 'Failed to get project', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class JiraUpdateProjectView(APIView):
+    """Update a Jira project"""
+    permission_classes = [AllowAny]
+
+    def patch(self, request, project_key):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project/{project_key}"
+            response = requests.put(url, json=request.data, headers={
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            })
+
+            jira_data = response.json()
+            if response.status_code in [200, 201]:
+                jira_data['name'] = request.data.get('name', jira_data.get('name', ''))
+                jira_data['description'] = request.data.get('description', jira_data.get('description', ''))
+            return Response(jira_data, status=response.status_code)
+
+        except Exception as e:
+            logger.exception("Failed to update Jira project")
+            return Response({'error': 'Failed to update project', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class JiraDeleteProjectView(APIView):
+    """Delete a Jira project"""
+    permission_classes = [AllowAny]
+
+    def delete(self, request, project_key):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project/{project_key}"
+            response = requests.delete(url, headers={
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json'
+            })
+
+            if response.status_code == 204:
+                return Response({'message': 'Project deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
+            return Response(response.json(), status=response.status_code)
+
+        except Exception as e:
+            logger.exception("Failed to delete Jira project")
+            return Response({'error': 'Failed to delete project', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- COMMENTS --------------------
+class JiraListCommentsView(APIView):
+    """List all comments on a Jira issue"""
+    permission_classes = [AllowAny]
+
+    def get(self, request, issue_key):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/comment"
+            response = requests.get(url, headers={
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json'
+            })
+
+            return Response(response.json(), status=response.status_code)
+
+        except Exception as e:
+            logger.exception("Failed to list Jira comments")
+            return Response({'error': 'Failed to list comments', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class JiraUpdateCommentView(APIView):
+    """Update a comment on a Jira issue"""
+    permission_classes = [AllowAny]
+
+    def put(self, request, issue_key, comment_id):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+            comment_text = request.data.get('comment')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
+            if not comment_text:
+                return Response({'error': 'comment field is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            comment_data = {
+                'body': {
+                    'type': 'doc',
+                    'version': 1,
+                    'content': [{'type': 'paragraph', 'content': [{'type': 'text', 'text': comment_text}]}]
+                }
+            }
+
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/comment/{comment_id}"
+            response = requests.put(url, json=comment_data, headers={
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            })
+
+            return Response(response.json(), status=response.status_code)
+
+        except Exception as e:
+            logger.exception("Failed to update Jira comment")
+            return Response({'error': 'Failed to update comment', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class JiraDeleteCommentView(APIView):
+    """Delete a comment from a Jira issue"""
+    permission_classes = [AllowAny]
+
+    def delete(self, request, issue_key, comment_id):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/comment/{comment_id}"
+            response = requests.delete(url, headers={
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json'
+            })
+
+            if response.status_code == 204:
+                return Response({'message': 'Comment deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
+            return Response(response.json(), status=response.status_code)
+
+        except Exception as e:
+            logger.exception("Failed to delete Jira comment")
+            return Response({'error': 'Failed to delete comment', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# -------------------- TRANSITIONS --------------------
+class JiraListTransitionsView(APIView):
+    """List available transitions (statuses) for a Jira issue"""
+    permission_classes = [AllowAny]
+
+    def get(self, request, issue_key):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/transitions"
+            response = requests.get(url, headers={
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json'
+            })
+
+            return Response(response.json(), status=response.status_code)
+
+        except Exception as e:
+            logger.exception("Failed to list Jira transitions")
+            return Response({'error': 'Failed to list transitions', 'detail': str(e)},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class JiraTransitionIssueView(APIView):
+    """Transition (change status of) a Jira issue"""
+    permission_classes = [AllowAny]
+
+    def post(self, request, issue_key):
+        try:
+            access_token = request.headers.get('Jira-Access-Token')
+            cloud_id = request.headers.get('Jira-Cloud-Id')
+            transition_id = request.data.get('transition_id')
+
+            if not access_token or not cloud_id:
+                return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
+            if not transition_id:
+                return Response({'error': 'transition_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            payload = {'transition': {'id': str(transition_id)}}
+            url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/transitions"
+            response = requests.post(url, json=payload, headers={
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            })
+
+            if response.status_code == 204:
+                return Response({'message': 'Issue status changed successfully'}, status=status.HTTP_200_OK)
+            return Response(response.json(), status=response.status_code)
+
+        except Exception as e:
+            logger.exception("Failed to transition Jira issue")
+            return Response({'error': 'Failed to transition issue', 'detail': str(e)},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
