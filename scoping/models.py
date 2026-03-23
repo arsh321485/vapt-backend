@@ -23,6 +23,7 @@ class ProjectDetail(models.Model):
     )
     organization_name = models.CharField(max_length=255)
     industry = models.CharField(max_length=50, choices=INDUSTRY_CHOICES)
+    industry_other = models.CharField(max_length=255, blank=True, null=True)
     country = models.CharField(max_length=100)
     full_name = models.CharField(max_length=255)
     email_address = models.EmailField()

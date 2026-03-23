@@ -77,7 +77,7 @@ class ScopingSubmitView(APIView):
 
 class UploadStatusView(APIView):
     """
-    GET /api/scoping/upload-status/
+    GET /api/admin/scoping/upload-status/
     Frontend polls this to check if superadmin has uploaded a report file for this admin.
     Only checks uploads that happened AFTER scoping form was submitted.
     When file is uploaded → frontend redirects to admin login page.

@@ -67,9 +67,16 @@ from .views import (
     JiraAssignIssueView,
     JiraListProjectsView,
     JiraCreateProjectView,
-    # JiraGetProjectView,
-    # JiraUpdateProjectView,
-    # JiraDeleteProjectView,
+    JiraGetProjectView,
+    JiraUpdateProjectView,
+    JiraDeleteProjectView,
+    JiraTokenRefreshView,
+    JiraDisconnectView,
+    JiraListCommentsView,
+    JiraUpdateCommentView,
+    JiraDeleteCommentView,
+    JiraListTransitionsView,
+    JiraTransitionIssueView,
 )
 
 app_name = 'users'
@@ -141,27 +148,38 @@ urlpatterns = [
     path("slack/events/", SlackEventsView.as_view(), name="slack-events"),
     
     
+    # Jira OAuth
     path('jira/oauth-url/', JiraOAuthUrlView.as_view(), name='jira-oauth-url'),
     path('jira/callback/', JiraOAuthCallbackView.as_view(), name='jira-callback'),
     path('jira/oauth/', JiraOAuthView.as_view(), name='jira-oauth'),
     path('jira/validate-token/', JiraValidateTokenView.as_view(), name='jira-validate-token'),
+    path('jira/token/refresh/', JiraTokenRefreshView.as_view(), name='jira-token-refresh'),
+    path('jira/disconnect/', JiraDisconnectView.as_view(), name='jira-disconnect'),
+
+    # Jira User & Resources
     path('jira/user/', JiraGetUserView.as_view(), name='jira-get-user'),
     path('jira/resources/', JiraGetResourcesView.as_view(), name='jira-resources'),
+
+    # Jira Projects
     path('jira/projects/', JiraListProjectsView.as_view(), name='jira-list-projects'),
+    path('jira/projects/create/', JiraCreateProjectView.as_view(), name='jira-create-project'),
+    path('jira/projects/<str:project_key>/', JiraGetProjectView.as_view(), name='jira-get-project'),
+    path('jira/projects/<str:project_key>/update/', JiraUpdateProjectView.as_view(), name='jira-update-project'),
+    path('jira/projects/<str:project_key>/delete/', JiraDeleteProjectView.as_view(), name='jira-delete-project'),
+
+    # Jira Issues — fixed ordering (static paths before <issue_key>)
+    path('jira/issues/create/', JiraCreateIssueView.as_view(), name='jira-create-issue'),
+    path('jira/issues/search/', JiraSearchIssuesView.as_view(), name='jira-search-issues'),
     path('jira/issues/comment/', JiraAddCommentView.as_view(), name='jira-add-comment'),
-    
-    path('jira/issues/create/', JiraCreateIssueView.as_view()),
-    path('jira/issues/<str:issue_key>/', JiraGetIssueView.as_view()),
-    path('jira/issues/<str:issue_key>/update/', JiraUpdateIssueView.as_view()),
-    path('jira/issues/<str:issue_key>/delete/', JiraDeleteIssueView.as_view()),
-    path('jira/issues/search/', JiraSearchIssuesView.as_view()),
-    path('jira/issues/<str:issue_key>/assign/', JiraAssignIssueView.as_view()),
-    
-    path('jira/projects/', JiraListProjectsView.as_view(), name='jira_list_projects'),
-    path('jira/projects/create/', JiraCreateProjectView.as_view(), name='jira_create_project'),
-    # path('jira/projects/<str:project_key>/', JiraGetProjectView.as_view(), name='jira_get_project'),
-    # path('jira/projects/<str:project_key>/update/', JiraUpdateProjectView.as_view(), name='jira_update_project'),
-    # path('jira/projects/<str:project_key>/delete/', JiraDeleteProjectView.as_view(), name='jira_delete_project'),
+    path('jira/issues/<str:issue_key>/', JiraGetIssueView.as_view(), name='jira-get-issue'),
+    path('jira/issues/<str:issue_key>/update/', JiraUpdateIssueView.as_view(), name='jira-update-issue'),
+    path('jira/issues/<str:issue_key>/delete/', JiraDeleteIssueView.as_view(), name='jira-delete-issue'),
+    path('jira/issues/<str:issue_key>/assign/', JiraAssignIssueView.as_view(), name='jira-assign-issue'),
+    path('jira/issues/<str:issue_key>/comments/', JiraListCommentsView.as_view(), name='jira-list-comments'),
+    path('jira/issues/<str:issue_key>/comments/<str:comment_id>/update/', JiraUpdateCommentView.as_view(), name='jira-update-comment'),
+    path('jira/issues/<str:issue_key>/comments/<str:comment_id>/delete/', JiraDeleteCommentView.as_view(), name='jira-delete-comment'),
+    path('jira/issues/<str:issue_key>/transitions/', JiraListTransitionsView.as_view(), name='jira-list-transitions'),
+    path('jira/issues/<str:issue_key>/transition/', JiraTransitionIssueView.as_view(), name='jira-transition-issue'),
 
 ]
 

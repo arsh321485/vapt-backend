@@ -8,7 +8,7 @@ VALID_TESTING_TYPES = ['black_box', 'grey_box', 'white_box']
 
 VALID_ASSESSMENT_CATEGORIES = [
     'network', 'web_app', 'mobile_app', 'api',
-    'cloud', 'social_eng', 'wireless', 'iot_ot'
+    'cloud', 'social_eng', 'iot_ot'
 ]
 
 VALID_COMPLIANCE_STANDARDS = [
@@ -19,12 +19,13 @@ VALID_COMPLIANCE_STANDARDS = [
 class ProjectDetailSerializer(serializers.ModelSerializer):
     project_id = serializers.SerializerMethodField()
     admin_id = serializers.SerializerMethodField()
+    industry_other = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = ProjectDetail
         fields = [
             'project_id', 'admin_id',
-            'organization_name', 'industry', 'country',
+            'organization_name', 'industry', 'industry_other', 'country',
             'full_name', 'email_address', 'phone_number',
             'created_at', 'updated_at'
         ]
@@ -64,6 +65,15 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
                 f"Invalid industry. Choose from: {', '.join(valid)}"
             )
         return value
+
+    def validate(self, attrs):
+        if attrs.get('industry') == 'other':
+            industry_other = attrs.get('industry_other', '').strip() if attrs.get('industry_other') else ''
+            if not industry_other:
+                raise serializers.ValidationError(
+                    {'industry_other': 'This field is required when industry is "other".'}
+                )
+        return attrs
 
 
 class TestingMethodologySerializer(serializers.ModelSerializer):
