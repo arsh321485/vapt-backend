@@ -81,21 +81,37 @@ class UploadStatusView(APIView):
         try:
             from upload_report.models import UploadReport
 
-            # Read submission time from DB — works across all Gunicorn workers.
+            # Read submission record from DB — works across all Gunicorn workers.
+            # NOTE: Djongo cannot parse boolean fields in WHERE clause (known bug),
+            # so we filter only by admin and check is_submitted in Python.
             project_detail = ProjectDetail.objects.filter(
-                admin=request.user, is_submitted=True
-            ).values('submitted_at').first()
+                admin=request.user
+            ).values('is_submitted', 'submitted_at', 'created_at').first()
 
-            if project_detail and project_detail['submitted_at']:
-                file_uploaded = UploadReport.objects.filter(
-                    admin=request.user,
-                    uploaded_at__gte=project_detail['submitted_at']
-                ).exists()
+            logger.warning(f"[UploadStatus] user={request.user.email} project_detail={project_detail}")
+
+            if not project_detail or not project_detail['is_submitted']:
+                logger.warning(f"[UploadStatus] No submitted ProjectDetail found for {request.user.email}")
+                return Response({"file_uploaded": False}, status=status.HTTP_200_OK)
+
+            since = project_detail['submitted_at'] or project_detail['created_at']
+            logger.warning(f"[UploadStatus] since={since}")
+
+            if since:
+                qs = UploadReport.objects.filter(admin=request.user, uploaded_at__gte=since)
+                file_uploaded = qs.exists()
+                logger.warning(f"[UploadStatus] UploadReport count (gte since)={qs.count()} file_uploaded={file_uploaded}")
             else:
-                file_uploaded = False
+                qs = UploadReport.objects.filter(admin=request.user)
+                file_uploaded = qs.exists()
+                logger.warning(f"[UploadStatus] UploadReport count (any)={qs.count()} file_uploaded={file_uploaded}")
+
+            # Extra debug: show all reports for this admin
+            all_reports = list(UploadReport.objects.filter(admin=request.user).values('_id', 'uploaded_at', 'status'))
+            logger.warning(f"[UploadStatus] All UploadReports for this admin: {all_reports}")
 
         except Exception as e:
-            logger.error(f"[UploadStatus] Error checking upload status for {request.user.email}: {e}")
+            logger.error(f"[UploadStatus] EXCEPTION: {e}", exc_info=True)
             file_uploaded = False
 
         return Response({
