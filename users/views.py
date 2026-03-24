@@ -272,13 +272,14 @@ class AdminSignupSendOTPView(APIView):
         if not ok:
             return Response({"error": msg}, status=400)
 
-        # ✅ Store BOTH OTP + PASSWORD in cache for 5 minutes
+        # Store OTP + PASSWORD in DB so all Gunicorn workers can access it.
+        # Replaces cache.set (LocMemCache is per-process — breaks with multiple workers).
         otp = str(random.randint(100000, 999999))
-        cache_data = {
-            'otp': otp,
-            'password': password  # Store hashed? No, hash when creating user
-        }
-        cache.set(f"signup_data_{email}", cache_data, timeout=300)
+        from .models import SignupOTPSession
+        SignupOTPSession.objects.update_or_create(
+            email=email,
+            defaults={'otp': otp, 'password': password, 'created_at': timezone.now()}
+        )
 
         # Send OTP email
         email_sent, email_error = Util.send_signup_otp(email, otp)
@@ -302,32 +303,38 @@ class AdminSignupVerifyOTPView(APIView):
         if not email or not otp:
             return Response({"error": "Email and OTP are required"}, status=400)
 
-        # ✅ Get cached OTP + password
-        cache_key = f"signup_data_{email}"
-        cached_data = cache.get(cache_key)
-        
-        if not cached_data:
+        # Get OTP session from DB (works across all Gunicorn workers)
+        from .models import SignupOTPSession
+        try:
+            session = SignupOTPSession.objects.get(email=email)
+        except SignupOTPSession.DoesNotExist:
             return Response({"error": "No signup session found. Please start again."}, status=400)
-        
-        if cached_data['otp'] != str(otp):
+
+        # Check 5-minute expiry
+        from django.utils import timezone as tz
+        age_seconds = (tz.now() - session.created_at).total_seconds()
+        if age_seconds > 300:
+            session.delete()
+            return Response({"error": "OTP has expired. Please start again."}, status=400)
+
+        if session.otp != str(otp):
             return Response({"error": "Invalid OTP"}, status=400)
 
-        # ✅ OTP valid → create admin user with cached password
+        # OTP valid → create admin user
         try:
             user = User.objects.create_user(
                 email=email,
-                password=cached_data['password'],  # Use cached password
+                password=session.password,
                 is_active=True,
-                is_staff=True,  # Admin privileges
+                is_staff=True,
                 is_superuser=False
             )
         except Exception as e:
             logger.error(f"Failed to create user: {str(e)}")
             return Response({"error": "Failed to create account"}, status=500)
 
-        # ✅ Clean up cache
-        cache.delete(cache_key)
-        cache.delete(f"signup_otp_{email}")
+        # Delete session immediately after successful verification
+        session.delete()
 
         # Generate tokens
         refresh = RefreshToken.for_user(user)
@@ -3692,10 +3699,13 @@ class SlackUserListView(APIView):
 
 class SlackInviteUserView(APIView):
     """
-    Invite a user to a Slack channel
+    Invite a user to a Slack channel.
+    After a successful invite, saves each user to UserDetail and sends
+    the same set-password welcome email that the normal user-add flow sends.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
+
     def post(self, request):
         serializer = SlackInviteUserSerializer(data=request.data)
         if not serializer.is_valid():
@@ -3703,14 +3713,14 @@ class SlackInviteUserView(APIView):
 
         access_token = serializer.validated_data["access_token"]
         channel = serializer.validated_data["channel"]
-        users = ",".join(serializer.validated_data["users"])  # multiple users supported
+        slack_user_ids = serializer.validated_data["users"]  # list of Slack user IDs
 
         url = "https://slack.com/api/conversations.invite"
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
-        payload = {"channel": channel, "users": users}
+        payload = {"channel": channel, "users": ",".join(slack_user_ids)}
 
         response = requests.post(url, headers=headers, json=payload)
         data = response.json()
@@ -3718,7 +3728,102 @@ class SlackInviteUserView(APIView):
         if not data.get("ok"):
             return Response({"success": False, "error": data.get("error")}, status=400)
 
+        # After successful Slack invite, save each user to UserDetail + send welcome email.
+        # Find admin by bot token so we know whose workspace this belongs to.
+        admin = User.objects.filter(slack_bot_token=access_token).first()
+        if admin:
+            for slack_uid in slack_user_ids:
+                try:
+                    self._save_and_email_invited_user(slack_uid, access_token, admin)
+                except Exception:
+                    logger.exception(f"[SlackInvite] Failed to save/email user {slack_uid}")
+
         return Response({"success": True, "data": data}, status=200)
+
+    def _save_and_email_invited_user(self, slack_user_id, bot_token, admin):
+        """Fetch Slack profile, save to UserDetail, send set-password welcome email."""
+        user_info = requests.get(
+            "https://slack.com/api/users.info",
+            params={"user": slack_user_id},
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=10,
+        ).json()
+
+        if not user_info.get("ok"):
+            logger.warning(f"[SlackInvite] users.info failed for {slack_user_id}: {user_info.get('error')}")
+            return
+
+        user_data = user_info.get("user", {})
+        if user_data.get("is_bot") or user_data.get("deleted"):
+            return
+
+        profile = user_data.get("profile", {})
+        email = profile.get("email")
+        if not email:
+            logger.warning(f"[SlackInvite] No email for {slack_user_id}")
+            return
+
+        name = user_data.get("real_name") or profile.get("display_name") or "Slack User"
+        parts = name.strip().split()
+        first_name = parts[0] if parts else "Slack"
+        last_name = " ".join(parts[1:]) if len(parts) > 1 else "User"
+
+        # Save to UserDetail — skip if already exists
+        from users_details.models import UserDetail
+        user_detail, created = UserDetail.objects.get_or_create(
+            admin=admin,
+            email=email,
+            defaults={
+                "first_name": first_name,
+                "last_name": last_name,
+                "user_type": "external",
+                "Member_role": ["Viewer"],
+            }
+        )
+
+        if not created:
+            logger.info(f"[SlackInvite] UserDetail already exists for {email} — skipping email")
+            return
+
+        logger.info(f"[SlackInvite] Created UserDetail for {email} under admin {admin.email}")
+
+        # Create Django User + generate set-password token
+        from django.contrib.auth import get_user_model
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+        from django.contrib.auth.tokens import PasswordResetTokenGenerator
+
+        UserModel = get_user_model()
+        django_user, u_created = UserModel.objects.get_or_create(
+            email=email,
+            defaults={"is_active": True}
+        )
+        if u_created:
+            django_user.set_unusable_password()
+            django_user.save()
+
+        uid = urlsafe_base64_encode(force_bytes(django_user.pk))
+        token = PasswordResetTokenGenerator().make_token(django_user)
+        set_password_url = (
+            f"https://vapt-frontend-liart.vercel.app/auth"
+            f"?mode=set-password&uid={uid}&token={token}"
+        )
+
+        # Send same welcome email as normal user-add flow
+        from users_details.views import UserDetailCreateView
+        view = UserDetailCreateView()
+        email_sent, error = view.send_welcome_email(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            roles=["Viewer"],
+            set_password_url=set_password_url,
+        )
+
+        if email_sent:
+            logger.info(f"[SlackInvite] Welcome email sent to {email}")
+        else:
+            logger.warning(f"[SlackInvite] Welcome email failed for {email}: {error}")
     
 
 # -------------------- JIRA OAUTH CALLBACK --------------------
@@ -3772,14 +3877,19 @@ class JiraOAuthCallbackView(APIView):
             if 'jira_oauth_state' in request.session:
                 del request.session['jira_oauth_state']
 
-            return Response({
-                'message': 'JIRA OAuth successful',
-                'access_token': tokens.get('access_token'),
+            # Redirect to frontend with tokens in query params.
+            # Frontend reads them from URL, stores in localStorage, then navigates to /communication.
+            from django.http import HttpResponseRedirect
+            from urllib.parse import urlencode
+
+            frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+            params = urlencode({
+                'access_token': tokens.get('access_token', ''),
                 'refresh_token': tokens.get('refresh_token', ''),
-                'expires_in': tokens.get('expires_in'),
-                'token_type': tokens.get('token_type'),
-                'scope': tokens.get('scope', '')
-            }, status=status.HTTP_200_OK)
+                'expires_in': tokens.get('expires_in', ''),
+                'scope': tokens.get('scope', ''),
+            })
+            return HttpResponseRedirect(f"{frontend_url}/jira/callback?{params}")
 
         except Exception as e:
             logger.exception("JIRA OAuth callback failed")
@@ -4641,7 +4751,8 @@ class SlackEventsView(APIView):
         # Handle event callbacks
         if event_type == "event_callback":
             event = payload.get("event", {})
-            self._handle_event(event)
+            team_id = payload.get("team_id", event.get("team", ""))
+            self._handle_event(event, team_id)
 
         return Response({"ok": True})
 
@@ -4664,7 +4775,7 @@ class SlackEventsView(APIView):
         ).hexdigest()
         return hmac.compare_digest(computed, signature)
 
-    def _handle_event(self, event):
+    def _handle_event(self, event, team_id=""):
         from users_details.models import UserDetail
         etype = event.get("type")
 
@@ -4691,7 +4802,118 @@ class SlackEventsView(APIView):
             logger.info(f"Slack channel unarchived: {event.get('channel')}")
 
         elif etype == "member_joined_channel":
-            logger.info(f"Slack member {event.get('user')} joined {event.get('channel')}")
+            slack_user_id = event.get("user")
+            tid = team_id or event.get("team", "")
+            logger.info(f"Slack member {slack_user_id} joined {event.get('channel')} (team={tid})")
+            self._save_slack_member_to_user_detail(slack_user_id, tid)
 
         elif etype == "member_left_channel":
             logger.info(f"Slack member {event.get('user')} left {event.get('channel')}")
+
+    def _save_slack_member_to_user_detail(self, slack_user_id, team_id):
+        """
+        When a member joins a Slack channel:
+        1. Find the admin who owns this workspace (by slack_team_id)
+        2. Fetch user info from Slack
+        3. Save to UserDetail (if not already exists)
+        4. Create Django User + generate set-password link
+        5. Send same welcome email that normal user-add flow sends
+        """
+        try:
+            if not slack_user_id or not team_id:
+                return
+
+            # Find admin who owns this Slack workspace
+            admin = User.objects.filter(slack_team_id=team_id).first()
+            if not admin or not admin.slack_bot_token:
+                logger.warning(f"[SlackEvent] No admin found for team_id={team_id}")
+                return
+
+            # Fetch user profile from Slack
+            user_info = requests.get(
+                "https://slack.com/api/users.info",
+                params={"user": slack_user_id},
+                headers={"Authorization": f"Bearer {admin.slack_bot_token}"},
+                timeout=10,
+            ).json()
+
+            if not user_info.get("ok"):
+                logger.warning(f"[SlackEvent] users.info failed: {user_info.get('error')}")
+                return
+
+            user_data = user_info.get("user", {})
+
+            # Skip bots and deleted accounts
+            if user_data.get("is_bot") or user_data.get("deleted"):
+                return
+
+            profile = user_data.get("profile", {})
+            email = profile.get("email")
+            if not email:
+                logger.warning(f"[SlackEvent] No email for slack_user_id={slack_user_id}")
+                return
+
+            name = user_data.get("real_name") or profile.get("display_name") or "Slack User"
+            parts = name.strip().split()
+            first_name = parts[0] if parts else "Slack"
+            last_name = " ".join(parts[1:]) if len(parts) > 1 else "User"
+
+            # Save to UserDetail — skip if already exists for this admin+email
+            from users_details.models import UserDetail
+            user_detail, created = UserDetail.objects.get_or_create(
+                admin=admin,
+                email=email,
+                defaults={
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "user_type": "external",
+                    "Member_role": ["Viewer"],
+                }
+            )
+
+            if not created:
+                logger.info(f"[SlackEvent] UserDetail already exists for {email} — skipping email")
+                return
+
+            logger.info(f"[SlackEvent] Created UserDetail for {email} under admin {admin.email}")
+
+            # Create Django User (inactive password) + generate set-password token
+            from django.contrib.auth import get_user_model
+            from django.utils.http import urlsafe_base64_encode
+            from django.utils.encoding import force_bytes
+            from django.contrib.auth.tokens import PasswordResetTokenGenerator
+
+            UserModel = get_user_model()
+            django_user, u_created = UserModel.objects.get_or_create(
+                email=email,
+                defaults={"is_active": True}
+            )
+            if u_created:
+                django_user.set_unusable_password()
+                django_user.save()
+
+            uid = urlsafe_base64_encode(force_bytes(django_user.pk))
+            token = PasswordResetTokenGenerator().make_token(django_user)
+            set_password_url = (
+                f"https://vapt-frontend-liart.vercel.app/auth"
+                f"?mode=set-password&uid={uid}&token={token}"
+            )
+
+            # Send the same welcome email that UserDetailCreateView sends
+            from users_details.views import UserDetailCreateView
+            view = UserDetailCreateView()
+            email_sent, error = view.send_welcome_email(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                roles=["Viewer"],
+                set_password_url=set_password_url,
+            )
+
+            if email_sent:
+                logger.info(f"[SlackEvent] Welcome email sent to {email}")
+            else:
+                logger.warning(f"[SlackEvent] Welcome email failed for {email}: {error}")
+
+        except Exception:
+            logger.exception(f"[SlackEvent] _save_slack_member_to_user_detail failed for user={slack_user_id}")
