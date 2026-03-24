@@ -1,5 +1,4 @@
 import logging
-from django.core.cache import cache
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -46,17 +45,11 @@ class ScopingSubmitView(APIView):
                 status=status.HTTP_200_OK
             )
 
-        # Mark as submitted
+        # Mark as submitted and record exact submission time in DB.
+        # Using DB (not cache) so all Gunicorn workers see the same value.
         project_detail.is_submitted = True
+        project_detail.submitted_at = timezone.now()
         project_detail.save()
-
-        # Store exact submission time in cache so UploadStatusView
-        # only counts uploads that happen AFTER this moment.
-        cache.set(
-            f'waiting_since_{request.user.id}',
-            timezone.now(),
-            timeout=60 * 60 * 24 * 7  # 7 days
-        )
 
         # Send emails
         try:
@@ -88,14 +81,15 @@ class UploadStatusView(APIView):
         try:
             from upload_report.models import UploadReport
 
-            # Get the exact time when admin submitted the scoping form.
-            # Only count uploads that happened AFTER that moment.
-            waiting_since = cache.get(f'waiting_since_{request.user.id}')
+            # Read submission time from DB — works across all Gunicorn workers.
+            project_detail = ProjectDetail.objects.filter(
+                admin=request.user, is_submitted=True
+            ).values('submitted_at').first()
 
-            if waiting_since:
+            if project_detail and project_detail['submitted_at']:
                 file_uploaded = UploadReport.objects.filter(
                     admin=request.user,
-                    uploaded_at__gte=waiting_since
+                    uploaded_at__gte=project_detail['submitted_at']
                 ).exists()
             else:
                 file_uploaded = False
