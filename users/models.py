@@ -61,6 +61,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     ms_access_token = models.TextField(blank=True, null=True)
     ms_refresh_token = models.TextField(blank=True, null=True)
 
+    jira_access_token = models.TextField(blank=True, null=True)
+    jira_refresh_token = models.TextField(blank=True, null=True)
+
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
@@ -81,6 +84,24 @@ class User(AbstractBaseUser, PermissionsMixin):
         if self.id and not isinstance(self.id, str):
             self.id = str(self.id)
         super().save(*args, **kwargs)
+
+
+class SignupOTPSession(models.Model):
+    """
+    Temporary store for admin signup OTP + password.
+    Replaces cache.set/get so it works across all Gunicorn workers.
+    Deleted immediately after OTP is verified or if expired (5 minutes).
+    """
+    email = models.EmailField(unique=True)
+    otp = models.CharField(max_length=6)
+    password = models.TextField()  # plain-text; hashed when User is created
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'signup_otp_sessions'
+
+    def __str__(self):
+        return f"SignupOTPSession({self.email})"
 
 
 
