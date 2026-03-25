@@ -3856,13 +3856,21 @@ class JiraOAuthCallbackView(APIView):
                 'redirect_uri': settings.JIRA_REDIRECT_URI
             }
 
-            logger.info(f"Exchanging code for token at {settings.JIRA_TOKEN_URL}")
+            logger.info(f"Exchanging code for token at {settings.JIRA_TOKEN_URL} | redirect_uri={settings.JIRA_REDIRECT_URI}")
 
-            token_response = requests.post(
-                settings.JIRA_TOKEN_URL,
-                json=token_data,
-                headers={'Content-Type': 'application/json'}
-            )
+            try:
+                token_response = requests.post(
+                    settings.JIRA_TOKEN_URL,
+                    json=token_data,
+                    headers={'Content-Type': 'application/json'},
+                    timeout=15
+                )
+            except requests.exceptions.Timeout:
+                logger.error("Jira token exchange timed out after 15s")
+                return Response({'error': 'Jira token exchange timed out'}, status=status.HTTP_504_GATEWAY_TIMEOUT)
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Jira token exchange request failed: {e}")
+                return Response({'error': 'Jira token exchange request failed', 'detail': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
             if token_response.status_code != 200:
                 logger.error(f"Token exchange failed: {token_response.text}")
