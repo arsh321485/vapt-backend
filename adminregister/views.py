@@ -1500,29 +1500,53 @@ class FixVulnerabilityStepsAPIView(APIView):
             mitigation_table = vuln_card.get("mitigation_table", [])
             artifacts_tools = vuln_card.get("artifacts_tools")
 
-            # Deadline: use stored value or calculate from RiskCriteria + severity
-            deadline = vuln_card.get("deadline") or fix_doc.get("deadline")
+            # Deadline: RiskCriteria + severity takes priority (base = vuln_card.created_at)
+            deadline = None
+            _base_dt = vuln_card.get("created_at")
+            if not isinstance(_base_dt, datetime):
+                _base_dt = datetime.now()
+
+            # Step 1: RiskCriteria (primary source)
+            try:
+                from risk_criteria.models import RiskCriteria
+                from admindashboard.views import parse_timeline_to_days
+                rc = RiskCriteria.objects.filter(admin=request.user).order_by('-created_at').first()
+                if rc:
+                    severity = (fix_doc.get("risk_factor") or "").strip().lower()
+                    if severity.startswith("crit"):
+                        _days = parse_timeline_to_days(rc.critical)
+                    elif severity.startswith("high"):
+                        _days = parse_timeline_to_days(rc.high)
+                    elif severity.startswith("med"):
+                        _days = parse_timeline_to_days(rc.medium)
+                    elif severity.startswith("low"):
+                        _days = parse_timeline_to_days(rc.low)
+                    else:
+                        _days = 0
+                    if _days > 0:
+                        deadline = (_base_dt + timedelta(days=_days)).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+            # Step 2: Stored deadline fallback (proper ISO date or duration string)
             if not deadline:
-                try:
-                    from risk_criteria.models import RiskCriteria
-                    from admindashboard.views import parse_timeline_to_days
-                    rc = RiskCriteria.objects.filter(admin=request.user).order_by('-created_at').first()
-                    if rc:
-                        severity = (fix_doc.get("risk_factor") or "").strip().lower()
-                        if severity.startswith("crit"):
-                            days = parse_timeline_to_days(rc.critical)
-                        elif severity.startswith("high"):
-                            days = parse_timeline_to_days(rc.high)
-                        elif severity.startswith("med"):
-                            days = parse_timeline_to_days(rc.medium)
-                        elif severity.startswith("low"):
-                            days = parse_timeline_to_days(rc.low)
-                        else:
-                            days = 0
-                        if days > 0:
-                            deadline = (date.today() + timedelta(days=days)).strftime("%Y-%m-%d")
-                except Exception:
-                    pass
+                _raw_deadline = vuln_card.get("deadline") or fix_doc.get("deadline")
+                if _raw_deadline:
+                    try:
+                        datetime.fromisoformat(str(_raw_deadline).replace("Z", "+00:00"))
+                        deadline = str(_raw_deadline)
+                    except (ValueError, TypeError):
+                        dur = str(_raw_deadline).strip().lower()
+                        num_match = re.search(r"(\d+)", dur)
+                        if num_match:
+                            num = int(num_match.group(1))
+                            if "hour" in dur:
+                                deadline = (_base_dt + timedelta(hours=num)).strftime("%Y-%m-%d")
+                            elif "week" in dur:
+                                deadline = (_base_dt + timedelta(days=num * 7)).strftime("%Y-%m-%d")
+                            else:
+                                deadline = (_base_dt + timedelta(days=num)).strftime("%Y-%m-%d")
+
             post_mitigation_troubleshooting_guide = vuln_card.get("post_mitigation_troubleshooting_guide", [])
 
             # Parse mitigation_table into structured per-step data
@@ -3100,29 +3124,52 @@ class VulnerabilityTimelineAPIView(APIView):
             assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
             vuln_created_at = _normalize_iso(vuln_card.get("created_at"))
 
-            # Deadline: use stored or calculate from RiskCriteria + severity
-            deadline = vuln_card.get("deadline") or fix_doc.get("deadline")
+            # Deadline: RiskCriteria + severity takes priority (base = vuln_card.created_at)
+            deadline = None
+            base_dt = vuln_card.get("created_at")
+            if not isinstance(base_dt, datetime):
+                base_dt = datetime.now()
+
+            # Step 1: RiskCriteria (primary source)
+            try:
+                from risk_criteria.models import RiskCriteria
+                from admindashboard.views import parse_timeline_to_days
+                rc = RiskCriteria.objects.filter(admin=request.user).order_by('-created_at').first()
+                if rc:
+                    severity = (fix_doc.get("risk_factor") or "").strip().lower()
+                    if severity.startswith("crit"):
+                        days = parse_timeline_to_days(rc.critical)
+                    elif severity.startswith("high"):
+                        days = parse_timeline_to_days(rc.high)
+                    elif severity.startswith("med"):
+                        days = parse_timeline_to_days(rc.medium)
+                    elif severity.startswith("low"):
+                        days = parse_timeline_to_days(rc.low)
+                    else:
+                        days = 0
+                    if days > 0:
+                        deadline = base_dt + timedelta(days=days)
+            except Exception:
+                pass
+
+            # Step 2: Stored deadline fallback (only proper ISO date, not duration strings)
             if not deadline:
-                try:
-                    from risk_criteria.models import RiskCriteria
-                    from admindashboard.views import parse_timeline_to_days
-                    rc = RiskCriteria.objects.filter(admin=request.user).order_by('-created_at').first()
-                    if rc:
-                        severity = (fix_doc.get("risk_factor") or "").strip().lower()
-                        if severity.startswith("crit"):
-                            days = parse_timeline_to_days(rc.critical)
-                        elif severity.startswith("high"):
-                            days = parse_timeline_to_days(rc.high)
-                        elif severity.startswith("med"):
-                            days = parse_timeline_to_days(rc.medium)
-                        elif severity.startswith("low"):
-                            days = parse_timeline_to_days(rc.low)
-                        else:
-                            days = 0
-                        if days > 0:
-                            deadline = (date.today() + timedelta(days=days)).strftime("%Y-%m-%d")
-                except Exception:
-                    pass
+                _raw_deadline = vuln_card.get("deadline") or fix_doc.get("deadline")
+                if _raw_deadline:
+                    try:
+                        deadline = datetime.fromisoformat(str(_raw_deadline).replace("Z", "+00:00"))
+                    except (ValueError, TypeError):
+                        # It's a duration string like "24 hours", "1 Day" — parse as last resort
+                        dur = str(_raw_deadline).strip().lower()
+                        num_match = re.search(r"(\d+)", dur)
+                        if num_match:
+                            num = int(num_match.group(1))
+                            if "hour" in dur:
+                                deadline = base_dt + timedelta(hours=num)
+                            elif "week" in dur:
+                                deadline = base_dt + timedelta(days=num * 7)
+                            else:
+                                deadline = base_dt + timedelta(days=num)
 
             timeline = []
 
