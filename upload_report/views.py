@@ -1154,6 +1154,12 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         )
         print(f"[AutoGenCards] Done for report_id={report_id} — generated={generated}, cached={cached}, errors={errors}, actual_in_db={actual_count}", flush=True)
 
+        # Mark generation as complete in nessus_reports so UploadStatusView knows
+        db[NESSUS_COLLECTION].update_one(
+            {"report_id": report_id},
+            {"$set": {"cards_generation_complete": True, "cards_generated_count": actual_count}}
+        )
+
     except Exception as e:
         logger.error(f"[AutoGenCards] Background generation failed for report_id={report_id}: {str(e)}", exc_info=True)
         print(f"[AutoGenCards] EXCEPTION for report_id={report_id}: {str(e)}", flush=True)

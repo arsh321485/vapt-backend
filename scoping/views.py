@@ -99,16 +99,68 @@ class UploadStatusView(APIView):
 
             if since:
                 qs = UploadReport.objects.filter(admin=request.user, uploaded_at__gte=since)
-                file_uploaded = qs.exists()
-                logger.warning(f"[UploadStatus] UploadReport count (gte since)={qs.count()} file_uploaded={file_uploaded}")
             else:
                 qs = UploadReport.objects.filter(admin=request.user)
-                file_uploaded = qs.exists()
-                logger.warning(f"[UploadStatus] UploadReport count (any)={qs.count()} file_uploaded={file_uploaded}")
 
-            # Extra debug: show all reports for this admin
-            all_reports = list(UploadReport.objects.filter(admin=request.user).values('_id', 'uploaded_at', 'status'))
-            logger.warning(f"[UploadStatus] All UploadReports for this admin: {all_reports}")
+            file_uploaded = qs.exists()
+            logger.warning(f"[UploadStatus] UploadReport count={qs.count()} file_uploaded={file_uploaded}")
+
+            if not file_uploaded:
+                return Response({"file_uploaded": False}, status=status.HTTP_200_OK)
+
+            # File exists — now check if all vulnerability cards are generated
+            try:
+                from vaptfix.mongo_client import get_shared_client, get_shared_db
+                from bson import ObjectId
+
+                mongo_client = get_shared_client()
+                db = get_shared_db(mongo_client)
+
+                # Check each uploaded report's card generation status
+                all_cards_ready = True
+                for report in qs:
+                    report_id = str(report._id)
+
+                    # Get nessus report from MongoDB
+                    nessus_doc = db["nessus_reports"].find_one(
+                        {"report_id": report_id},
+                        {"total_vulnerabilities": 1, "report_type": 1, "cards_generation_complete": 1}
+                    )
+
+                    if not nessus_doc:
+                        # Not a nessus report — no cards needed, skip
+                        continue
+
+                    # Check completion flag set by _auto_generate_cards_bg
+                    if nessus_doc.get("cards_generation_complete", False):
+                        logger.warning(f"[UploadStatus] report_id={report_id} cards_generation_complete=True")
+                        continue
+
+                    # Flag not set — fallback: check if any cards exist (uploaded before this fix)
+                    cards_count = db["vulnerability_cards"].count_documents({"report_id": report_id})
+                    logger.warning(f"[UploadStatus] report_id={report_id} cards_generation_complete=False, cards_count={cards_count}")
+
+                    if cards_count > 0:
+                        # Cards exist — mark as complete so future checks are faster
+                        db["nessus_reports"].update_one(
+                            {"report_id": report_id},
+                            {"$set": {"cards_generation_complete": True}}
+                        )
+                        continue
+
+                    # No flag, no cards — still generating
+                    all_cards_ready = False
+                    break
+
+                if not all_cards_ready:
+                    return Response({
+                        "file_uploaded": False,
+                        "cards_generating": True,
+                    }, status=status.HTTP_200_OK)
+
+            except Exception as card_err:
+                logger.error(f"[UploadStatus] Card check error: {card_err}", exc_info=True)
+                # If card check fails, don't block — allow redirect
 
         except Exception as e:
             logger.error(f"[UploadStatus] EXCEPTION: {e}", exc_info=True)
