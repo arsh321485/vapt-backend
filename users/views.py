@@ -2048,16 +2048,65 @@ class AddUserToChannelView(generics.GenericAPIView):
                 user_email = serializer.validated_data['user_email']
                 user_role = serializer.validated_data['user_role']
                 
-                # Check if user exists in our UserDetail model
+                # Check if user exists in our UserDetail model; if not, create + send welcome email
+                from users_details.models import UserDetail
                 try:
-                    from users_details.models import UserDetail
                     user_detail = UserDetail.objects.get(email=user_email)
                     logger.info(f"Found user in database: {user_detail.first_name} {user_detail.last_name}")
                 except UserDetail.DoesNotExist:
-                    return Response({
-                        "error": f"User with email {user_email} not found in the system",
-                        "solution": "Please ensure the user is registered in your system first"
-                    }, status=status.HTTP_404_NOT_FOUND)
+                    # Auto-create the user and send welcome email (same as normal user-add flow)
+                    admin = request.user
+                    name_part = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').split()
+                    first_name = name_part[0].capitalize() if name_part else "Teams"
+                    last_name = " ".join(p.capitalize() for p in name_part[1:]) if len(name_part) > 1 else "User"
+
+                    user_detail, created = UserDetail.objects.get_or_create(
+                        admin=admin,
+                        email=user_email,
+                        defaults={
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "user_type": "external",
+                            "Member_role": ["Viewer"],
+                        }
+                    )
+
+                    if created:
+                        logger.info(f"[TeamsAddUser] Created UserDetail for {user_email}")
+                        try:
+                            from django.contrib.auth import get_user_model
+                            from django.utils.http import urlsafe_base64_encode
+                            from django.utils.encoding import force_bytes
+                            from django.contrib.auth.tokens import PasswordResetTokenGenerator
+                            from users_details.views import UserDetailCreateView
+
+                            UserModel = get_user_model()
+                            django_user, u_created = UserModel.objects.get_or_create(
+                                email=user_email,
+                                defaults={"is_active": True}
+                            )
+                            if u_created:
+                                django_user.set_unusable_password()
+                                django_user.save()
+
+                            uid = urlsafe_base64_encode(force_bytes(django_user.pk))
+                            token = PasswordResetTokenGenerator().make_token(django_user)
+                            frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+                            set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
+
+                            email_sent, error = UserDetailCreateView().send_welcome_email(
+                                email=user_email,
+                                first_name=first_name,
+                                last_name=last_name,
+                                roles=["Viewer"],
+                                set_password_url=set_password_url,
+                            )
+                            if email_sent:
+                                logger.info(f"[TeamsAddUser] Welcome email sent to {user_email}")
+                            else:
+                                logger.warning(f"[TeamsAddUser] Welcome email failed for {user_email}: {error}")
+                        except Exception:
+                            logger.exception(f"[TeamsAddUser] Error sending welcome email to {user_email}")
                 
                 # Get Microsoft user ID by email
                 user_id, error_msg = self.get_user_id_by_email(access_token, user_email)
@@ -3593,6 +3642,14 @@ class AddUserToSlackChannelView(APIView):
             response = self._add_user(access_token, channel, user_id)
 
             if response["success"]:
+                # Save to UserDetail + send welcome email (same as SlackInviteUserView)
+                admin = User.objects.filter(slack_bot_token=access_token).first()
+                if admin:
+                    try:
+                        SlackInviteUserView()._save_and_email_invited_user(user_id, access_token, admin)
+                    except Exception:
+                        logger.exception(f"[AddUserToSlack] Failed to save/email user {user_id}")
+
                 return Response({
                     "success": True,
                     "message": "User added to channel successfully",
