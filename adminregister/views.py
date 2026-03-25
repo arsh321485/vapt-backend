@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from django.conf import settings
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from django.utils.timezone import is_naive, make_aware
 import pymongo
 import uuid
@@ -1498,8 +1498,31 @@ class FixVulnerabilityStepsAPIView(APIView):
             assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
             assigned_team_members = fix_doc.get("assigned_team_members", [])
             mitigation_table = vuln_card.get("mitigation_table", [])
-            deadline = vuln_card.get("deadline")
             artifacts_tools = vuln_card.get("artifacts_tools")
+
+            # Deadline: use stored value or calculate from RiskCriteria + severity
+            deadline = vuln_card.get("deadline") or fix_doc.get("deadline")
+            if not deadline:
+                try:
+                    from risk_criteria.models import RiskCriteria
+                    from admindashboard.views import parse_timeline_to_days
+                    rc = RiskCriteria.objects.filter(admin=request.user).order_by('-created_at').first()
+                    if rc:
+                        severity = (fix_doc.get("risk_factor") or "").strip().lower()
+                        if severity.startswith("crit"):
+                            days = parse_timeline_to_days(rc.critical)
+                        elif severity.startswith("high"):
+                            days = parse_timeline_to_days(rc.high)
+                        elif severity.startswith("med"):
+                            days = parse_timeline_to_days(rc.medium)
+                        elif severity.startswith("low"):
+                            days = parse_timeline_to_days(rc.low)
+                        else:
+                            days = 0
+                        if days > 0:
+                            deadline = (date.today() + timedelta(days=days)).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
             post_mitigation_troubleshooting_guide = vuln_card.get("post_mitigation_troubleshooting_guide", [])
 
             # Parse mitigation_table into structured per-step data
@@ -3076,7 +3099,30 @@ class VulnerabilityTimelineAPIView(APIView):
 
             assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
             vuln_created_at = _normalize_iso(vuln_card.get("created_at"))
-            deadline = vuln_card.get("deadline")
+
+            # Deadline: use stored or calculate from RiskCriteria + severity
+            deadline = vuln_card.get("deadline") or fix_doc.get("deadline")
+            if not deadline:
+                try:
+                    from risk_criteria.models import RiskCriteria
+                    from admindashboard.views import parse_timeline_to_days
+                    rc = RiskCriteria.objects.filter(admin=request.user).order_by('-created_at').first()
+                    if rc:
+                        severity = (fix_doc.get("risk_factor") or "").strip().lower()
+                        if severity.startswith("crit"):
+                            days = parse_timeline_to_days(rc.critical)
+                        elif severity.startswith("high"):
+                            days = parse_timeline_to_days(rc.high)
+                        elif severity.startswith("med"):
+                            days = parse_timeline_to_days(rc.medium)
+                        elif severity.startswith("low"):
+                            days = parse_timeline_to_days(rc.low)
+                        else:
+                            days = 0
+                        if days > 0:
+                            deadline = (date.today() + timedelta(days=days)).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
 
             timeline = []
 
@@ -3116,18 +3162,17 @@ class VulnerabilityTimelineAPIView(APIView):
                 }).sort("step_number", 1)
             )
 
-            for step in completed_steps:
-                step_num = step.get("step_number")
+            for display_idx, step in enumerate(completed_steps, start=1):
                 step_date = _normalize_iso(
                     step.get("updated_at") or step.get("created_at")
                 )
                 timeline.append({
-                    "event": f"Step {step_num} Done",
+                    "event": f"Step {display_idx} Done",
                     "type": "step_done",
                     "date": step_date,
                     "status": "done",
                     "icon": "check",
-                    "step_number": step_num,
+                    "step_number": display_idx,
                 })
 
             # 5. Exception Requested (support_requests)
