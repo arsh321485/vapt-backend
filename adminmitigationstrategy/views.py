@@ -116,6 +116,27 @@ class MitigationStrategyByTeamAPIView(APIView):
                     )
                     vuln_cards[key] = card
 
+                # Pre-pass: find plugin_names that appear on 2+ different assets
+                plugin_asset_map = {}
+                for host in latest_doc.get("vulnerabilities_by_host", []):
+                    _host_name = host.get("host_name") or host.get("host") or ""
+                    for v in host.get("vulnerabilities", []):
+                        _outputs = v.get("plugin_outputs", [])
+                        if not isinstance(_outputs, list) or len(_outputs) <= 1:
+                            continue
+                        _pname = (
+                            v.get("plugin_name")
+                            or v.get("pluginname")
+                            or v.get("name")
+                            or ""
+                        )
+                        if _pname:
+                            plugin_asset_map.setdefault(_pname, set()).add(_host_name)
+
+                multi_asset_plugins = {
+                    p for p, assets in plugin_asset_map.items() if len(assets) > 1
+                }
+
                 # Initialize team buckets
                 teams = {name: [] for name in TEAM_NAMES}
                 teams["Unassigned"] = []
@@ -143,6 +164,11 @@ class MitigationStrategyByTeamAPIView(APIView):
                             or v.get("name")
                             or ""
                         )
+
+                        # Only include vulns that appear on 2+ different assets
+                        if plugin_name not in multi_asset_plugins:
+                            continue
+
                         port     = v.get("port", "")
                         protocol = v.get("protocol", "")
                         risk_raw = (
@@ -258,14 +284,9 @@ class VulnerabilityAssetCountAPIView(APIView):
                 plugin_map = {}
 
                 for host in latest_doc.get("vulnerabilities_by_host", []):
-                    host_name = host.get("host_name") or host.get("host") or ""
+                    host_name = (host.get("host_name") or host.get("host") or "").strip()
 
                     for v in host.get("vulnerabilities", []):
-                        # Same filter as MitigationStrategyByTeamAPIView
-                        plugin_outputs = v.get("plugin_outputs", [])
-                        if not isinstance(plugin_outputs, list) or len(plugin_outputs) <= 1:
-                            continue
-
                         plugin_name = (
                             v.get("plugin_name")
                             or v.get("pluginname")
@@ -280,7 +301,7 @@ class VulnerabilityAssetCountAPIView(APIView):
                             plugin_map[plugin_name] = set()
                         plugin_map[plugin_name].add(host_name)
 
-                # Build sorted result (highest asset_count first)
+                # Only include vulns that appear on 2+ DIFFERENT assets
                 result = sorted(
                     [
                         {
@@ -289,6 +310,7 @@ class VulnerabilityAssetCountAPIView(APIView):
                             "assets":      sorted(assets),
                         }
                         for plugin_name, assets in plugin_map.items()
+                        if len(assets) > 1
                     ],
                     key=lambda x: x["asset_count"],
                     reverse=True,

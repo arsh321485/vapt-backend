@@ -592,8 +592,27 @@ class AdminVulnerabilitiesAPIView(APIView):
 
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
+                    # Build set of closed (plugin_name, host_name) for this report
+                    closed_vulns = set()
+                    for closed_doc in db["fix_vulnerabilities_closed"].find(
+                        {"report_id": report_id},
+                        {"plugin_name": 1, "host_name": 1}
+                    ):
+                        p = (closed_doc.get("plugin_name") or "").strip().lower()
+                        h = (closed_doc.get("host_name") or "").strip().lower()
+                        if p:
+                            closed_vulns.add((p, h))
+
                     for host in doc.get("vulnerabilities_by_host") or []:
+                        host_name = (host.get("host_name") or "").strip().lower()
                         for v in (host.get("vulnerabilities") or []):
+                            plugin_name = (v.get("plugin_name") or "").strip().lower()
+
+                            # Skip closed vulnerabilities
+                            if (plugin_name, host_name) in closed_vulns:
+                                continue
+
                             risk = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
                             if risk.startswith("crit"):
                                 counts["critical"] += 1
