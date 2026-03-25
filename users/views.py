@@ -2048,10 +2048,10 @@ class AddUserToChannelView(generics.GenericAPIView):
                 user_email = serializer.validated_data['user_email']
                 user_role = serializer.validated_data['user_role']
                 
-                # Check if user exists in our UserDetail model; if not, create + send welcome email
+                # Check if user exists under THIS admin in UserDetail; if not, create + send welcome email
                 from users_details.models import UserDetail
                 try:
-                    user_detail = UserDetail.objects.get(email=user_email)
+                    user_detail = UserDetail.objects.get(admin=request.user, email=user_email)
                     logger.info(f"Found user in database: {user_detail.first_name} {user_detail.last_name}")
                 except UserDetail.DoesNotExist:
                     # Auto-create the user and send welcome email (same as normal user-add flow)
@@ -3622,8 +3622,7 @@ def slack_oauth_url(request):
         
 class AddUserToSlackChannelView(APIView):
     """Invite a user to a Slack channel"""
-    authentication_classes = []
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         serializer = AddUserToSlackChannelSerializer(data=request.data)
@@ -3637,18 +3636,28 @@ class AddUserToSlackChannelView(APIView):
         access_token = serializer.validated_data["access_token"]
         channel = serializer.validated_data["channel"]
         user_id = serializer.validated_data["user_id"]
+        user_email = serializer.validated_data.get("user_email")
+        user_name = serializer.validated_data.get("user_name")
 
         try:
             response = self._add_user(access_token, channel, user_id)
 
             if response["success"]:
-                # Save to UserDetail + send welcome email (same as SlackInviteUserView)
-                admin = User.objects.filter(slack_bot_token=access_token).first()
-                if admin:
-                    try:
-                        SlackInviteUserView()._save_and_email_invited_user(user_id, access_token, admin)
-                    except Exception:
-                        logger.exception(f"[AddUserToSlack] Failed to save/email user {user_id}")
+                # Save to UserDetail + send welcome email
+                try:
+                    if user_email:
+                        # Email provided directly — no Slack API call needed
+                        slack_view = SlackInviteUserView()
+                        slack_view._save_and_email_with_known_email(
+                            email=user_email,
+                            name=user_name or user_email.split("@")[0],
+                            admin=request.user,
+                        )
+                    else:
+                        # Fallback: fetch email from Slack API (requires users:read.email scope)
+                        SlackInviteUserView()._save_and_email_invited_user(user_id, access_token, request.user)
+                except Exception:
+                    logger.exception(f"[AddUserToSlack] Failed to save/email user {user_id}")
 
                 return Response({
                     "success": True,
@@ -3796,6 +3805,58 @@ class SlackInviteUserView(APIView):
                     logger.exception(f"[SlackInvite] Failed to save/email user {slack_uid}")
 
         return Response({"success": True, "data": data}, status=200)
+
+    def _save_and_email_with_known_email(self, email, name, admin):
+        """Save to UserDetail and send welcome email when email is already known."""
+        from users_details.models import UserDetail
+        parts = name.strip().split()
+        first_name = parts[0] if parts else "Slack"
+        last_name = " ".join(parts[1:]) if len(parts) > 1 else "User"
+
+        user_detail, created = UserDetail.objects.get_or_create(
+            admin=admin,
+            email=email,
+            defaults={
+                "first_name": first_name,
+                "last_name": last_name,
+                "user_type": "external",
+                "Member_role": ["Viewer"],
+            }
+        )
+
+        if not created:
+            logger.info(f"[SlackInvite] UserDetail already exists for {email} — skipping email")
+            return
+
+        logger.info(f"[SlackInvite] Created UserDetail for {email} under admin {admin.email}")
+
+        from django.contrib.auth import get_user_model
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+        from django.contrib.auth.tokens import PasswordResetTokenGenerator
+        from users_details.views import UserDetailCreateView
+
+        UserModel = get_user_model()
+        django_user, u_created = UserModel.objects.get_or_create(
+            email=email, defaults={"is_active": True}
+        )
+        if u_created:
+            django_user.set_unusable_password()
+            django_user.save()
+
+        uid = urlsafe_base64_encode(force_bytes(django_user.pk))
+        token = PasswordResetTokenGenerator().make_token(django_user)
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+        set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
+
+        email_sent, error = UserDetailCreateView().send_welcome_email(
+            email=email, first_name=first_name, last_name=last_name,
+            roles=["Viewer"], set_password_url=set_password_url,
+        )
+        if email_sent:
+            logger.info(f"[SlackInvite] Welcome email sent to {email}")
+        else:
+            logger.warning(f"[SlackInvite] Welcome email failed for {email}: {error}")
 
     def _save_and_email_invited_user(self, slack_user_id, bot_token, admin):
         """Fetch Slack profile, save to UserDetail, send set-password welcome email."""

@@ -1105,6 +1105,18 @@ class AddUserToSlackChannelSerializer(serializers.Serializer):
         required=True,
         help_text="Slack user ID to invite (e.g., U1234567890)"
     )
+    user_email = serializers.EmailField(
+        required=False,
+        allow_blank=True,
+        default=None,
+        help_text="User's email (optional, avoids Slack API scope requirement)"
+    )
+    user_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default=None,
+        help_text="User's display name (optional)"
+    )
     
 
 class SlackInviteUserSerializer(serializers.Serializer):
