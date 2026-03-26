@@ -141,8 +141,9 @@ class UploadStatusView(APIView):
                     cards_count = db["vulnerability_cards"].count_documents({"report_id": report_id})
                     logger.warning(f"[UploadStatus] report_id={report_id} cards_generation_complete=False, cards_count={cards_count}")
 
-                    if cards_count > 0:
-                        # Cards exist — mark as complete so future checks are faster
+                    total_vulns = nessus_doc.get("total_vulnerabilities", 0)
+                    if total_vulns > 0 and cards_count >= total_vulns:
+                        # All cards generated — mark as complete so future checks are faster
                         db["nessus_reports"].update_one(
                             {"report_id": report_id},
                             {"$set": {"cards_generation_complete": True}}
