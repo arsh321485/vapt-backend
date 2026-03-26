@@ -116,14 +116,11 @@ class MitigationStrategyByTeamAPIView(APIView):
                     )
                     vuln_cards[key] = card
 
-                # Pre-pass: find plugin_names that appear on 2+ different assets
+                # Pre-pass: find plugin_names that appear on 4+ different assets
                 plugin_asset_map = {}
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     _host_name = host.get("host_name") or host.get("host") or ""
                     for v in host.get("vulnerabilities", []):
-                        _outputs = v.get("plugin_outputs", [])
-                        if not isinstance(_outputs, list) or len(_outputs) <= 1:
-                            continue
                         _pname = (
                             v.get("plugin_name")
                             or v.get("pluginname")
@@ -153,11 +150,6 @@ class MitigationStrategyByTeamAPIView(APIView):
                     )
 
                     for v in host.get("vulnerabilities", []):
-                        # Only include vulnerabilities where plugin_outputs array has more than 1 item
-                        plugin_outputs = v.get("plugin_outputs", [])
-                        if not isinstance(plugin_outputs, list) or len(plugin_outputs) <= 1:
-                            continue
-
                         plugin_name = (
                             v.get("plugin_name")
                             or v.get("pluginname")
@@ -261,7 +253,8 @@ class VulnerabilityAssetCountAPIView(APIView):
             current_admin_email = getattr(request.user, "email", None)
 
             with MongoContext() as db:
-                nessus_coll = db[NESSUS_COLLECTION]
+                nessus_coll    = db[NESSUS_COLLECTION]
+                vuln_card_coll = db[VULN_CARD_COLLECTION]
 
                 query_conditions = [{"admin_id": current_admin_id}]
                 if current_admin_email:
@@ -279,6 +272,17 @@ class VulnerabilityAssetCountAPIView(APIView):
                     )
 
                 report_id = str(latest_doc.get("report_id", ""))
+
+                # Build plugin_name -> assigned_team from vulnerability_cards
+                plugin_team_map = {}
+                for card in vuln_card_coll.find(
+                    {"report_id": report_id},
+                    {"vulnerability_name": 1, "assigned_team": 1}
+                ):
+                    vname = card.get("vulnerability_name", "")
+                    team  = card.get("assigned_team", "") or ""
+                    if vname and vname not in plugin_team_map:
+                        plugin_team_map[vname] = team
 
                 # Group: plugin_name -> set of host_names
                 plugin_map = {}
@@ -301,26 +305,38 @@ class VulnerabilityAssetCountAPIView(APIView):
                             plugin_map[plugin_name] = set()
                         plugin_map[plugin_name].add(host_name)
 
-                # Only include vulns that appear on 4+ DIFFERENT assets
-                result = sorted(
-                    [
-                        {
-                            "plugin_name": plugin_name,
-                            "asset_count": len(assets),
-                            "assets":      sorted(assets),
-                        }
-                        for plugin_name, assets in plugin_map.items()
-                        if len(assets) > 3
-                    ],
-                    key=lambda x: x["asset_count"],
-                    reverse=True,
-                )
+                # Initialize team buckets
+                teams = {name: [] for name in TEAM_NAMES}
+                teams["Unassigned"] = []
+
+                # Only include vulns that appear on 4+ DIFFERENT assets, grouped by team
+                for plugin_name, assets in plugin_map.items():
+                    if len(assets) <= 3:
+                        continue
+                    entry = {
+                        "plugin_name": plugin_name,
+                        "asset_count": len(assets),
+                        "assets":      sorted(assets),
+                    }
+                    assigned_team = plugin_team_map.get(plugin_name, "")
+                    if assigned_team in teams:
+                        teams[assigned_team].append(entry)
+                    else:
+                        teams["Unassigned"].append(entry)
+
+                # Sort each team's vulnerabilities by asset_count descending
+                teams_response = {
+                    team_name: {
+                        "total_unique_vulnerabilities": len(vulns),
+                        "vulnerabilities": sorted(vulns, key=lambda x: x["asset_count"], reverse=True),
+                    }
+                    for team_name, vulns in teams.items()
+                }
 
                 return Response(
                     {
-                        "report_id":                   report_id,
-                        "total_unique_vulnerabilities": len(result),
-                        "vulnerabilities":             result,
+                        "report_id": report_id,
+                        "teams":     teams_response,
                     },
                     status=status.HTTP_200_OK,
                 )
