@@ -134,7 +134,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                             plugin_asset_map.setdefault(_pname, set()).add(_host_name)
 
                 multi_asset_plugins = {
-                    p for p, assets in plugin_asset_map.items() if len(assets) > 1
+                    p for p, assets in plugin_asset_map.items() if len(assets) > 3
                 }
 
                 # Initialize team buckets
@@ -301,7 +301,7 @@ class VulnerabilityAssetCountAPIView(APIView):
                             plugin_map[plugin_name] = set()
                         plugin_map[plugin_name].add(host_name)
 
-                # Only include vulns that appear on 2+ DIFFERENT assets
+                # Only include vulns that appear on 4+ DIFFERENT assets
                 result = sorted(
                     [
                         {
@@ -310,7 +310,7 @@ class VulnerabilityAssetCountAPIView(APIView):
                             "assets":      sorted(assets),
                         }
                         for plugin_name, assets in plugin_map.items()
-                        if len(assets) > 1
+                        if len(assets) > 3
                     ],
                     key=lambda x: x["asset_count"],
                     reverse=True,
