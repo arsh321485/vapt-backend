@@ -128,8 +128,9 @@ class UploadStatusView(APIView):
                     )
 
                     if not nessus_doc:
-                        # Not a nessus report — no cards needed, skip
-                        continue
+                        # Document not yet created — agent still initializing
+                        all_cards_ready = False
+                        break
 
                     # Check completion flag set by _auto_generate_cards_bg
                     if nessus_doc.get("cards_generation_complete", False):
