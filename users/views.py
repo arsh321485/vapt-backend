@@ -1159,6 +1159,12 @@ class MicrosoftTeamsCallbackView(APIView):
                 user.ms_access_token = access_token
                 user.ms_refresh_token = token_data.get('refresh_token', '')
                 user.save(update_fields=['login_provider', 'ms_access_token', 'ms_refresh_token'])
+
+                # Generate Django JWT so frontend can call IsAuthenticated APIs
+                refresh = RefreshToken.for_user(user)
+                django_access_token = str(refresh.access_token)
+                django_refresh_token = str(refresh)
+
                 user_data = {
                     "email": user.email,
                     "id": str(user.id),
@@ -1189,6 +1195,8 @@ class MicrosoftTeamsCallbackView(APIView):
                             success: true,
                             user: {json.dumps(user_data)},
                             tokens: {json.dumps(token_data)},
+                            django_access_token: "{django_access_token}",
+                            django_refresh_token: "{django_refresh_token}",
                             vaptfix_team: {json.dumps(vaptfix_team)}
                         }}, "{frontend_redirect}");
                     }}
@@ -2045,9 +2053,20 @@ class AddUserToChannelView(generics.GenericAPIView):
                 access_token = serializer.validated_data['access_token']
                 team_id = serializer.validated_data['team_id']
                 channel_id = serializer.validated_data['channel_id']
+                channel_name = serializer.validated_data.get('channel_name', '')
                 user_email = serializer.validated_data['user_email']
                 user_role = serializer.validated_data['user_role']
-                
+
+                # Map channel name to Member_role (same mapping as Slack)
+                TEAMS_CHANNEL_TO_ROLE = {
+                    "patch-management": "Patch Management",
+                    "configuration-management": "Configuration Management",
+                    "network-security": "Network Security",
+                    "architectural-flaws": "Architectural Flaws",
+                }
+                member_role = [TEAMS_CHANNEL_TO_ROLE.get(channel_name.lower(), "Viewer")]
+                logger.info(f"[TeamsAddUser] Channel '{channel_name}' mapped to role '{member_role}'")
+
                 # Check if user exists under THIS admin in UserDetail; if not, create + send welcome email
                 from users_details.models import UserDetail
                 try:
@@ -2067,12 +2086,12 @@ class AddUserToChannelView(generics.GenericAPIView):
                             "first_name": first_name,
                             "last_name": last_name,
                             "user_type": "external",
-                            "Member_role": ["Viewer"],
+                            "Member_role": member_role,
                         }
                     )
 
                     if created:
-                        logger.info(f"[TeamsAddUser] Created UserDetail for {user_email}")
+                        logger.info(f"[TeamsAddUser] Created UserDetail for {user_email} with role {member_role}")
                         try:
                             from django.contrib.auth import get_user_model
                             from django.utils.http import urlsafe_base64_encode
@@ -2098,7 +2117,7 @@ class AddUserToChannelView(generics.GenericAPIView):
                                 email=user_email,
                                 first_name=first_name,
                                 last_name=last_name,
-                                roles=["Viewer"],
+                                roles=member_role,
                                 set_password_url=set_password_url,
                             )
                             if email_sent:
@@ -3763,14 +3782,21 @@ class SlackUserListView(APIView):
         return Response({"success": True, "users": users}, status=200)
 
 
+SLACK_CHANNEL_TO_ROLE = {
+    "patch-management": "Patch Management",
+    "configuration-management": "Configuration Management",
+    "network-security": "Network Security",
+    "architectural-flaws": "Architectural Flaws",
+}
+
+
 class SlackInviteUserView(APIView):
     """
     Invite a user to a Slack channel.
     After a successful invite, saves each user to UserDetail and sends
     the same set-password welcome email that the normal user-add flow sends.
     """
-    authentication_classes = []
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         serializer = SlackInviteUserSerializer(data=request.data)
@@ -3794,15 +3820,28 @@ class SlackInviteUserView(APIView):
         if not data.get("ok"):
             return Response({"success": False, "error": data.get("error")}, status=400)
 
-        # After successful Slack invite, save each user to UserDetail + send welcome email.
-        # Find admin by bot token so we know whose workspace this belongs to.
-        admin = User.objects.filter(slack_bot_token=access_token).first()
-        if admin:
-            for slack_uid in slack_user_ids:
-                try:
-                    self._save_and_email_invited_user(slack_uid, access_token, admin)
-                except Exception:
-                    logger.exception(f"[SlackInvite] Failed to save/email user {slack_uid}")
+        # Determine role from channel name using Slack conversations.info
+        role = "Viewer"
+        try:
+            ch_info = requests.get(
+                "https://slack.com/api/conversations.info",
+                params={"channel": channel},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=5,
+            ).json()
+            channel_name = ch_info.get("channel", {}).get("name", "")
+            role = SLACK_CHANNEL_TO_ROLE.get(channel_name, "Viewer")
+            logger.info(f"[SlackInvite] Channel '{channel_name}' mapped to role '{role}'")
+        except Exception:
+            logger.warning("[SlackInvite] Could not fetch channel name — defaulting to Viewer")
+
+        # admin = the authenticated user making this request
+        admin = request.user
+        for slack_uid in slack_user_ids:
+            try:
+                self._save_and_email_invited_user(slack_uid, access_token, admin, role=role)
+            except Exception:
+                logger.exception(f"[SlackInvite] Failed to save/email user {slack_uid}")
 
         return Response({"success": True, "data": data}, status=200)
 
@@ -3858,7 +3897,7 @@ class SlackInviteUserView(APIView):
         else:
             logger.warning(f"[SlackInvite] Welcome email failed for {email}: {error}")
 
-    def _save_and_email_invited_user(self, slack_user_id, bot_token, admin):
+    def _save_and_email_invited_user(self, slack_user_id, bot_token, admin, role="Viewer"):
         """Fetch Slack profile, save to UserDetail, send set-password welcome email."""
         user_info = requests.get(
             "https://slack.com/api/users.info",
@@ -3888,6 +3927,8 @@ class SlackInviteUserView(APIView):
 
         # Save to UserDetail — skip if already exists
         from users_details.models import UserDetail
+        member_role = [role] if isinstance(role, str) else role
+
         user_detail, created = UserDetail.objects.get_or_create(
             admin=admin,
             email=email,
@@ -3895,7 +3936,7 @@ class SlackInviteUserView(APIView):
                 "first_name": first_name,
                 "last_name": last_name,
                 "user_type": "external",
-                "Member_role": ["Viewer"],
+                "Member_role": member_role,
             }
         )
 
@@ -3903,7 +3944,7 @@ class SlackInviteUserView(APIView):
             logger.info(f"[SlackInvite] UserDetail already exists for {email} — skipping email")
             return
 
-        logger.info(f"[SlackInvite] Created UserDetail for {email} under admin {admin.email}")
+        logger.info(f"[SlackInvite] Created UserDetail for {email} under admin {admin.email} with role {member_role}")
 
         # Create Django User + generate set-password token
         from django.contrib.auth import get_user_model
@@ -3922,10 +3963,8 @@ class SlackInviteUserView(APIView):
 
         uid = urlsafe_base64_encode(force_bytes(django_user.pk))
         token = PasswordResetTokenGenerator().make_token(django_user)
-        set_password_url = (
-            f"https://vapt-frontend-liart.vercel.app/auth"
-            f"?mode=set-password&uid={uid}&token={token}"
-        )
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+        set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
         # Send same welcome email as normal user-add flow
         from users_details.views import UserDetailCreateView
@@ -3934,7 +3973,7 @@ class SlackInviteUserView(APIView):
             email=email,
             first_name=first_name,
             last_name=last_name,
-            roles=["Viewer"],
+            roles=member_role,
             set_password_url=set_password_url,
         )
 

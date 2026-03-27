@@ -787,6 +787,7 @@ class AddUserToChannelSerializer(serializers.Serializer):
     access_token = serializers.CharField(required=True)
     team_id = serializers.CharField(required=True)
     channel_id = serializers.CharField(required=True)
+    channel_name = serializers.CharField(required=False, allow_blank=True, default="")
     user_email = serializers.EmailField(required=True)
     user_role = serializers.ChoiceField(choices=['owner', 'member'], default='member')
     
