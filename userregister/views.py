@@ -1303,16 +1303,6 @@ class UserFixStepFeedbackAPIView(APIView):
             feedback_comment = request.data.get("feedback_comment", "").strip()
             fix_status       = request.data.get("fix_status", "").lower()
 
-            if step_number not in [1, 2, 3, 4, 5, 6]:
-                return Response(
-                    {"detail": "step_number must be between 1 and 6"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            if not feedback_comment:
-                return Response(
-                    {"detail": "feedback_comment is required"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
             if fix_status not in self.VALID_FIX_STATUSES:
                 return Response(
                     {"detail": f"fix_status must be one of: {', '.join(self.VALID_FIX_STATUSES)}"},
@@ -1334,6 +1324,42 @@ class UserFixStepFeedbackAPIView(APIView):
                             status=status.HTTP_404_NOT_FOUND
                         )
 
+                # Determine actual total steps from mitigation_table
+                report_id   = fix_doc.get("report_id", "")
+                plugin_name = fix_doc.get("plugin_name", "")
+                host_name   = fix_doc.get("host_name", "")
+                vuln_card = (
+                    db[VULN_CARD_COLLECTION].find_one({
+                        "report_id": report_id,
+                        "vulnerability_name": plugin_name,
+                        "host_name": host_name,
+                    })
+                    or db[VULN_CARD_COLLECTION].find_one({
+                        "report_id": report_id,
+                        "vulnerability_name": plugin_name,
+                    })
+                    or {}
+                )
+                mitigation_table = vuln_card.get("mitigation_table") or []
+                if mitigation_table:
+                    step_nums = set()
+                    for row in mitigation_table:
+                        try:
+                            step_nums.add(int(row.get("step_no", 0)))
+                        except (ValueError, TypeError):
+                            pass
+                    step_nums.discard(0)
+                    total_steps = max(step_nums) if step_nums else 6
+                else:
+                    total_steps = 6
+
+                # Validate step_number against actual total steps
+                if not isinstance(step_number, int) or step_number < 1 or step_number > total_steps:
+                    return Response(
+                        {"detail": f"step_number must be between 1 and {total_steps} for this vulnerability"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
                 step_doc = steps_coll.find_one({
                     "fix_vulnerability_id": fix_vuln_id,
                     "step_number": step_number
@@ -1342,6 +1368,13 @@ class UserFixStepFeedbackAPIView(APIView):
                     return Response(
                         {"detail": f"Step {step_number} does not exist for this vulnerability"},
                         status=status.HTTP_404_NOT_FOUND
+                    )
+
+                # Step must be completed before feedback can be submitted
+                if step_doc.get("status") != "completed":
+                    return Response(
+                        {"detail": f"Step {step_number} must be completed before submitting feedback"},
+                        status=status.HTTP_400_BAD_REQUEST
                     )
 
                 existing = feedback_coll.find_one({
