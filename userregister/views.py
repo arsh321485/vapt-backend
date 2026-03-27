@@ -3,14 +3,34 @@ from rest_framework.response import Response
 from rest_framework import status, permissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import JSONParser
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.utils.timezone import is_naive, make_aware
 from bson import ObjectId
 import pymongo
 import uuid
 import re
 
+import logging
 from vaptfix.mongo_client import MongoContext
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_timeline_to_days(value: str) -> int:
+    """Convert timeline string to days. e.g. '5 Days'->5, '1 Week'->7"""
+    if not value:
+        return 0
+    value = value.strip().lower()
+    if value in ("select", ""):
+        return 0
+    import re as _re
+    match = _re.search(r"(\d+)", value)
+    if not match:
+        return 0
+    num = int(match.group(1))
+    if "week" in value:
+        return num * 7
+    return num
 
 # ─── Collection names (same as adminregister) ────────────────────────────────
 NESSUS_COLLECTION          = "nessus_reports"
@@ -867,9 +887,72 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                 assigned_team    = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
                 assigned_members = fix_doc.get("assigned_team_members", [])
                 mitigation_table = vuln_card.get("mitigation_table", [])
-                deadline         = vuln_card.get("deadline")
                 artifacts_tools  = vuln_card.get("artifacts_tools")
                 post_guide       = vuln_card.get("post_mitigation_troubleshooting_guide", [])
+
+                # Deadline: exact same logic as adminregister.FixVulnerabilityStepsAPIView
+                deadline = None
+                _base_dt = vuln_card.get("created_at")
+                if not isinstance(_base_dt, datetime):
+                    _base_dt = datetime.now()
+
+                # Find admin_id: UserDetail (team member's own admin) takes priority
+                _admin_id_str = None
+                try:
+                    # Priority 1: team member's admin via UserDetail
+                    if UserDetail:
+                        _ud = UserDetail.objects.filter(email=request.user.email).first()
+                        if _ud and _ud.admin:
+                            _admin_id_str = str(_ud.admin.id)
+                    # Priority 2: fix_doc.created_by fallback
+                    if not _admin_id_str:
+                        _created_by = fix_doc.get("created_by")
+                        if _created_by:
+                            _admin_id_str = str(_created_by)
+                except Exception as _e:
+                    logger.error(f"[UserFixSteps] admin_id lookup error: {_e}", exc_info=True)
+
+                # Step 1: RiskCriteria via direct MongoDB (bypasses djongo ORM ForeignKey bug)
+                try:
+                    _rc_doc = db["risk_criteria_riskcriteria"].find_one(
+                        {"admin_id": _admin_id_str},
+                        sort=[("created_at", pymongo.DESCENDING)],
+                    ) if _admin_id_str else None
+                    if _rc_doc:
+                        severity = (fix_doc.get("risk_factor") or "").strip().lower()
+                        if severity.startswith("crit"):
+                            _days = _parse_timeline_to_days(_rc_doc.get("critical", ""))
+                        elif severity.startswith("high"):
+                            _days = _parse_timeline_to_days(_rc_doc.get("high", ""))
+                        elif severity.startswith("med"):
+                            _days = _parse_timeline_to_days(_rc_doc.get("medium", ""))
+                        elif severity.startswith("low"):
+                            _days = _parse_timeline_to_days(_rc_doc.get("low", ""))
+                        else:
+                            _days = 0
+                        if _days > 0:
+                            deadline = (_base_dt + timedelta(days=_days)).strftime("%Y-%m-%d")
+                except Exception as e:
+                    logger.error(f"[UserFixSteps] Deadline error: {e}", exc_info=True)
+
+                # Step 2: Stored deadline fallback (proper ISO date or duration string)
+                if not deadline:
+                    _raw_deadline = vuln_card.get("deadline") or fix_doc.get("deadline")
+                    if _raw_deadline:
+                        try:
+                            datetime.fromisoformat(str(_raw_deadline).replace("Z", "+00:00"))
+                            deadline = str(_raw_deadline)
+                        except (ValueError, TypeError):
+                            dur = str(_raw_deadline).strip().lower()
+                            num_match = re.search(r"(\d+)", dur)
+                            if num_match:
+                                num = int(num_match.group(1))
+                                if "hour" in dur:
+                                    deadline = (_base_dt + timedelta(hours=num)).strftime("%Y-%m-%d")
+                                elif "week" in dur:
+                                    deadline = (_base_dt + timedelta(days=num * 7)).strftime("%Y-%m-%d")
+                                else:
+                                    deadline = (_base_dt + timedelta(days=num)).strftime("%Y-%m-%d")
 
                 steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
 
@@ -1623,7 +1706,69 @@ class UserVulnerabilityTimelineAPIView(APIView):
 
                 assigned_team   = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
                 vuln_created_at = _normalize_iso(vuln_card.get("created_at"))
-                deadline        = vuln_card.get("deadline")
+
+                # Deadline: exact same logic as adminregister.VulnerabilityTimelineAPIView
+                deadline = None
+                base_dt = vuln_card.get("created_at")
+                if not isinstance(base_dt, datetime):
+                    base_dt = datetime.now()
+
+                # Find admin_id: UserDetail (team member's own admin) takes priority
+                _admin_id_str = None
+                try:
+                    # Priority 1: team member's admin via UserDetail
+                    if UserDetail:
+                        _ud = UserDetail.objects.filter(email=request.user.email).first()
+                        if _ud and _ud.admin:
+                            _admin_id_str = str(_ud.admin.id)
+                    # Priority 2: fix_doc.created_by fallback
+                    if not _admin_id_str:
+                        _created_by = fix_doc.get("created_by")
+                        if _created_by:
+                            _admin_id_str = str(_created_by)
+                except Exception as _e:
+                    logger.error(f"[UserTimeline] admin_id lookup error: {_e}", exc_info=True)
+
+                # Step 1: RiskCriteria via direct MongoDB (bypasses djongo ORM ForeignKey bug)
+                try:
+                    _rc_doc = db["risk_criteria_riskcriteria"].find_one(
+                        {"admin_id": _admin_id_str},
+                        sort=[("created_at", pymongo.DESCENDING)],
+                    ) if _admin_id_str else None
+                    if _rc_doc:
+                        severity = (fix_doc.get("risk_factor") or "").strip().lower()
+                        if severity.startswith("crit"):
+                            days = _parse_timeline_to_days(_rc_doc.get("critical", ""))
+                        elif severity.startswith("high"):
+                            days = _parse_timeline_to_days(_rc_doc.get("high", ""))
+                        elif severity.startswith("med"):
+                            days = _parse_timeline_to_days(_rc_doc.get("medium", ""))
+                        elif severity.startswith("low"):
+                            days = _parse_timeline_to_days(_rc_doc.get("low", ""))
+                        else:
+                            days = 0
+                        if days > 0:
+                            deadline = base_dt + timedelta(days=days)
+                except Exception as e:
+                    logger.error(f"[UserTimeline] Deadline error: {e}", exc_info=True)
+
+                # Step 2: Stored deadline fallback (only proper ISO date, not duration strings)
+                if not deadline:
+                    _raw_deadline = vuln_card.get("deadline") or fix_doc.get("deadline")
+                    if _raw_deadline:
+                        try:
+                            deadline = datetime.fromisoformat(str(_raw_deadline).replace("Z", "+00:00"))
+                        except (ValueError, TypeError):
+                            dur = str(_raw_deadline).strip().lower()
+                            num_match = re.search(r"(\d+)", dur)
+                            if num_match:
+                                num = int(num_match.group(1))
+                                if "hour" in dur:
+                                    deadline = base_dt + timedelta(hours=num)
+                                elif "week" in dur:
+                                    deadline = base_dt + timedelta(days=num * 7)
+                                else:
+                                    deadline = base_dt + timedelta(days=num)
 
                 timeline = [
                     {
