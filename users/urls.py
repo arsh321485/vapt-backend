@@ -77,6 +77,8 @@ from .views import (
     JiraDeleteCommentView,
     JiraListTransitionsView,
     JiraTransitionIssueView,
+    TeamsWebhookView,
+    CreateTeamsSubscriptionView,
 )
 
 app_name = 'users'
@@ -146,6 +148,10 @@ urlpatterns = [
     path("slack/users/list/", SlackUserListView.as_view(), name="slack-users-list"),
     path("slack/channel/invite/", SlackInviteUserView.as_view(), name="slack-invite-user"),
     path("slack/events/", SlackEventsView.as_view(), name="slack-events"),
+
+    # MS Teams Webhook
+    path("teams/webhook/", TeamsWebhookView.as_view(), name="teams-webhook"),
+    path("teams/webhook/subscribe/", CreateTeamsSubscriptionView.as_view(), name="teams-webhook-subscribe"),
     
     
     # Jira OAuth
