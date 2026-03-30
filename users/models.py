@@ -60,6 +60,7 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     ms_access_token = models.TextField(blank=True, null=True)
     ms_refresh_token = models.TextField(blank=True, null=True)
+    ms_team_id = models.CharField(max_length=255, blank=True, null=True)
 
     jira_access_token = models.TextField(blank=True, null=True)
     jira_refresh_token = models.TextField(blank=True, null=True)

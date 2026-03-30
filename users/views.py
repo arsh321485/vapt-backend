@@ -5082,3 +5082,215 @@ class SlackEventsView(APIView):
 
         except Exception:
             logger.exception(f"[SlackEvent] _save_slack_member_to_user_detail failed for user={slack_user_id}")
+
+
+class CreateTeamsSubscriptionView(APIView):
+    """
+    POST /api/users/teams/webhook/subscribe/
+    Admin calls this once after connecting Teams to subscribe to team member changes.
+    Required body: { "team_id": "<Teams team ID>" }
+    Saves team_id on admin's User record and creates MS Graph change notification subscription.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        team_id = request.data.get("team_id")
+        if not team_id:
+            return Response({"error": "team_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = request.user.ms_access_token
+        if not access_token:
+            return Response({"error": "Microsoft Teams not connected. Please connect Teams first."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Save team_id on admin's user record
+        request.user.ms_team_id = team_id
+        request.user.save(update_fields=["ms_team_id"])
+
+        # Webhook notification URL (must be HTTPS and publicly accessible)
+        notification_url = f"{settings.BACKEND_BASE_URL}/api/users/teams/webhook/"
+
+        payload = {
+            "changeType": "created",
+            "notificationUrl": notification_url,
+            "resource": f"teams/{team_id}/members",
+            "expirationDateTime": self._expiry_datetime(),
+            "clientState": str(request.user.id),  # used to identify admin on webhook
+        }
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+
+        resp = requests.post(
+            "https://graph.microsoft.com/v1.0/subscriptions",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+
+        if resp.status_code in (200, 201):
+            return Response({
+                "message": "Teams webhook subscription created successfully.",
+                "subscription": resp.json(),
+            }, status=status.HTTP_201_CREATED)
+
+        return Response({
+            "error": "Failed to create Teams subscription.",
+            "detail": resp.text,
+        }, status=resp.status_code)
+
+    def _expiry_datetime(self):
+        from datetime import datetime, timedelta, timezone as dt_timezone
+        expiry = datetime.now(dt_timezone.utc) + timedelta(days=2)
+        return expiry.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+class TeamsWebhookView(APIView):
+    """
+    GET  /api/users/teams/webhook/?validationToken=xxx  — MS Graph endpoint validation
+    POST /api/users/teams/webhook/                      — Receive member-added notifications
+
+    When a user is added directly on MS Teams:
+    1. MS Graph sends notification here
+    2. We fetch user's email via Graph API
+    3. Save UserDetail in DB
+    4. Create Django User + send set-password email
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        """MS Graph sends validationToken — must return it as plain text."""
+        validation_token = request.GET.get("validationToken")
+        if validation_token:
+            return HttpResponse(validation_token, content_type="text/plain", status=200)
+        return Response({"error": "Missing validationToken"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request):
+        notifications = request.data.get("value", [])
+        for notification in notifications:
+            change_type = notification.get("changeType")
+            client_state = notification.get("clientState", "")
+            resource = notification.get("resource", "")
+
+            if change_type == "created" and "members" in resource:
+                self._handle_member_added(notification, client_state, resource)
+
+        return Response({"ok": True})
+
+    def _handle_member_added(self, notification, client_state, resource):
+        """
+        resource format: teams/{team_id}/members/{member_id}
+        clientState = admin's user ID (set when subscription was created)
+        """
+        try:
+            parts = resource.strip("/").split("/")
+            # Expected: ["teams", team_id, "members", member_id]
+            if len(parts) < 4:
+                logger.warning(f"[TeamsWebhook] Unexpected resource format: {resource}")
+                return
+
+            team_id = parts[1]
+            member_id = parts[3]
+
+            # Find admin by client_state (admin user ID)
+            try:
+                admin = User.objects.get(id=client_state)
+            except User.DoesNotExist:
+                logger.warning(f"[TeamsWebhook] No admin found for clientState={client_state}")
+                return
+
+            access_token = admin.ms_access_token
+            if not access_token:
+                logger.warning(f"[TeamsWebhook] Admin {admin.email} has no ms_access_token")
+                return
+
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            }
+
+            # Fetch member details from MS Graph
+            member_resp = requests.get(
+                f"https://graph.microsoft.com/v1.0/teams/{team_id}/members/{member_id}",
+                headers=headers,
+                timeout=10,
+            )
+
+            if member_resp.status_code != 200:
+                logger.warning(f"[TeamsWebhook] Failed to fetch member {member_id}: {member_resp.text}")
+                return
+
+            member_data = member_resp.json()
+            email = member_data.get("email") or member_data.get("displayName")
+            display_name = member_data.get("displayName") or "Teams User"
+
+            if not email or "@" not in email:
+                logger.warning(f"[TeamsWebhook] No valid email for member {member_id}")
+                return
+
+            name_parts = display_name.strip().split()
+            first_name = name_parts[0] if name_parts else "Teams"
+            last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "User"
+
+            # Save UserDetail — skip if already exists for this admin + email
+            from users_details.models import UserDetail
+            user_detail, created = UserDetail.objects.get_or_create(
+                admin=admin,
+                email=email,
+                defaults={
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "user_type": "external",
+                    "Member_role": ["Viewer"],
+                    "team_id": team_id,
+                }
+            )
+
+            if not created:
+                logger.info(f"[TeamsWebhook] UserDetail already exists for {email} — skipping")
+                return
+
+            logger.info(f"[TeamsWebhook] Created UserDetail for {email} under admin {admin.email}")
+
+            # Create Django User (unusable password) + generate set-password link
+            from django.contrib.auth import get_user_model
+            from django.utils.http import urlsafe_base64_encode
+            from django.utils.encoding import force_bytes
+            from django.contrib.auth.tokens import PasswordResetTokenGenerator
+
+            UserModel = get_user_model()
+            django_user, u_created = UserModel.objects.get_or_create(
+                email=email,
+                defaults={"is_active": True}
+            )
+            if u_created:
+                django_user.set_unusable_password()
+                django_user.save()
+
+            uid = urlsafe_base64_encode(force_bytes(django_user.pk))
+            token = PasswordResetTokenGenerator().make_token(django_user)
+            set_password_url = (
+                f"https://vapt-frontend-liart.vercel.app/auth"
+                f"?mode=set-password&uid={uid}&token={token}"
+            )
+
+            # Send same welcome email
+            from users_details.views import UserDetailCreateView
+            view = UserDetailCreateView()
+            email_sent, error = view.send_welcome_email(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                roles=["Viewer"],
+                set_password_url=set_password_url,
+            )
+
+            if email_sent:
+                logger.info(f"[TeamsWebhook] Welcome email sent to {email}")
+            else:
+                logger.warning(f"[TeamsWebhook] Welcome email failed for {email}: {error}")
+
+        except Exception:
+            logger.exception(f"[TeamsWebhook] _handle_member_added failed for resource={resource}")
