@@ -70,6 +70,25 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
     return results, added_channel_ids
 
 
+def lookup_slack_user_by_email(bot_token, email):
+    """
+    Look up a Slack user's ID by their email address.
+    Returns slack_user_id string or None if not found.
+    """
+    if not bot_token or not email:
+        return None
+    headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
+    resp = requests.get(
+        "https://slack.com/api/users.lookupByEmail",
+        headers=headers,
+        params={"email": email},
+    )
+    data = resp.json()
+    if data.get("ok"):
+        return data.get("user", {}).get("id")
+    return None
+
+
 def sync_member_to_teams_channels(access_token, team_id, user_email, member_roles):
     """
     Add a user to the VAPTFIX team. Once added to the team, the user automatically
@@ -362,6 +381,39 @@ class UserDetailCreateView(generics.CreateAPIView):
                 set_password_url=set_password_url,
             )
 
+            # Sync to MS Teams if access_token + team_id provided
+            teams_sync_result = []
+            ms_access_token = request.data.get("access_token")
+            team_id = request.data.get("team_id")
+            if ms_access_token and team_id and roles:
+                teams_sync_result = sync_member_to_teams_channels(
+                    access_token=ms_access_token,
+                    team_id=team_id,
+                    user_email=email,
+                    member_roles=roles,
+                )
+                # Save team_id on the record
+                user_detail.team_id = team_id
+                user_detail.save(update_fields=["team_id"])
+
+            # Sync to Slack if slack_bot_token provided (lookup user by email)
+            slack_sync_result = []
+            slack_bot_token = request.data.get("slack_bot_token")
+            if slack_bot_token and roles:
+                slack_user_id = lookup_slack_user_by_email(slack_bot_token, email)
+                if slack_user_id:
+                    slack_results, channel_ids = sync_member_to_slack_channels(
+                        bot_token=slack_bot_token,
+                        slack_user_id=slack_user_id,
+                        member_roles=roles,
+                    )
+                    slack_sync_result = slack_results
+                    if channel_ids:
+                        user_detail.slack_channel_ids = list(set(channel_ids))
+                        user_detail.save(update_fields=["slack_channel_ids"])
+                else:
+                    slack_sync_result = [{"status": "failed", "error": "User not found in Slack workspace for this email"}]
+
             response_data = {
                 "message": "User detail created successfully",
                 "email_sent": email_sent,
@@ -373,6 +425,11 @@ class UserDetailCreateView(generics.CreateAPIView):
                 logger.warning(f"User created but email failed for {email}: {error}")
             else:
                 logger.info(f"User created and email sent successfully for {email}")
+
+            if teams_sync_result:
+                response_data["teams_sync"] = teams_sync_result
+            if slack_sync_result:
+                response_data["slack_sync"] = slack_sync_result
 
             return Response(response_data, status=status.HTTP_201_CREATED)
 
