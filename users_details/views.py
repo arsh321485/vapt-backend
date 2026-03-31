@@ -26,6 +26,70 @@ ROLE_TO_SLACK_CHANNEL = {
     "Architectural Flaws": "architectural-flaws",
 }
 
+TEAM_EMAIL_CONTENT = {
+    "Configuration Management": {
+        "subject": "Welcome to the Configuration Management Team",
+        "heading": "Welcome to the Configuration Management Team",
+        "body": (
+            "<p>Welcome to the Configuration Management team under the Vulnerability Management Program. "
+            "Your expertise will be key in maintaining secure system baselines and ensuring compliance "
+            "with our configuration standards across all environments.</p>"
+            "<p>In this team, you'll review configuration-related vulnerabilities, track deviations from "
+            "security baselines, and coordinate remediation with system owners. You'll work closely with "
+            "patching and network teams to reduce exposure through hardened configurations and best practices.</p>"
+            "<p>Access to configuration baselines, compliance reports, and monitoring tools will be provided "
+            "this week. Take a moment to explore the documentation and connect with your team lead for guidance "
+            "on current priorities.</p>"
+            "<p>Thank you for joining us in driving proactive configuration security and stability.</p>"
+        ),
+    },
+    "Architectural Flaws": {
+        "subject": "Welcome to the Architectural Flaws Team",
+        "heading": "Welcome to the Architectural Flaws Team",
+        "body": (
+            "<p>We're pleased to welcome you to the Architectural Flaws team — a vital part of our "
+            "Vulnerability Management Program focused on addressing systemic design issues and long-term risk reduction.</p>"
+            "<p>Your work will involve analyzing application, system, and network architectures to identify "
+            "weaknesses that cannot be mitigated by simple patches or configuration changes. You'll collaborate "
+            "with development, infrastructure, and risk teams to propose design improvements, compensating "
+            "controls, and roadmap updates.</p>"
+            "<p>In the next few days, you'll receive access to architectural diagrams, threat models, and "
+            "the vulnerability backlog for your review. Don't hesitate to engage with your peers as we "
+            "tackle foundational security enhancements together.</p>"
+            "<p>Welcome aboard — your insight will help shape a more resilient architecture for the entire organization.</p>"
+        ),
+    },
+    "Network Security": {
+        "subject": "Welcome to the Network Security Team",
+        "heading": "Welcome to the Network Security Team",
+        "body": (
+            "<p>Welcome to the Network Security team of our Vulnerability Management Program! Your contribution "
+            "will be central to identifying, prioritizing, and resolving vulnerabilities within our network "
+            "infrastructure and perimeter defenses.</p>"
+            "<p>You'll focus on reviewing scan results, verifying exposure points, and coordinating remediation "
+            "efforts to harden our firewalls, routers, and network-access systems. Continuous coordination with "
+            "the patch and configuration teams ensures that vulnerabilities are addressed holistically.</p>"
+            "<p>You'll soon receive access to our network vulnerability dashboards, asset inventory, and ticket "
+            "tracking platform. Please familiarize yourself with the network remediation process and escalation contacts.</p>"
+            "<p>We're thrilled to have your skills onboard in securing our organization's connectivity and defense layers.</p>"
+        ),
+    },
+    "Patch Management": {
+        "subject": "Welcome to the Patch Management Team",
+        "heading": "Welcome to the Patch Management Team",
+        "body": (
+            "<p>Welcome to the Patch Management team under the Vulnerability Management Program. Your role will "
+            "be critical in ensuring timely remediation of vulnerabilities through effective patching and software "
+            "updates across all systems.</p>"
+            "<p>In this team, you will focus on identifying missing patches, managing outdated software versions, "
+            "and addressing vulnerabilities associated with known CVEs that have vendor-provided fixes. You will "
+            "work closely with configuration and network teams to ensure systems are consistently updated and "
+            "protected against known threats.</p>"
+            "<p>Thank you for contributing to strengthening our security posture through proactive patch management.</p>"
+        ),
+    },
+}
+
 
 def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
     """
@@ -182,8 +246,33 @@ class UserDetailCreateView(generics.CreateAPIView):
     serializer_class = UserDetailCreateSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def _load_logo_b64(self):
+        """Load logo.png as base64 string for inline email attachment."""
+        logo_path = os.path.join(str(settings.BASE_DIR), "users", "static", "users", "logo.png")
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        return None
+
+    def _logo_html(self, logo_b64):
+        if logo_b64:
+            return '<img src="cid:vaptfix_logo" alt="VaptFix Pro" style="height:48px;" />'
+        if getattr(settings, "VAPTFIX_LOGO_URL", ""):
+            return f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VaptFix Pro" style="height:48px;" />'
+        return '<span style="color:#ffffff; font-size:20px; font-weight:bold; letter-spacing:1px;">VaptFix Pro</span>'
+
+    def _attach_logo(self, message, logo_b64):
+        if logo_b64:
+            message.add_attachment(Attachment(
+                FileContent(logo_b64),
+                FileName("logo.png"),
+                FileType("image/png"),
+                Disposition("inline"),
+                ContentId("vaptfix_logo"),
+            ))
+
     def send_welcome_email(self, email, first_name, last_name, roles, set_password_url=None):
-        """Send styled welcome email to newly added team member."""
+        """Send styled 'Set Your Password' email to newly added team member (screen.png style)."""
 
         if not email or not isinstance(email, str):
             return False, "Invalid email address"
@@ -194,139 +283,365 @@ class UserDetailCreateView(generics.CreateAPIView):
 
         full_name = f"{first_name} {last_name}".strip() or "User"
         roles_list = roles if isinstance(roles, list) else [str(roles)]
-        roles_html = "".join(
-            f'<li style="margin-bottom:6px;">{r}</li>' for r in roles_list
+
+        roles_badges_html = "".join(
+            f'<span style="display:inline-block; background-color:#e0f7fa; color:#006064;'
+            f'border:1px solid #b2ebf2; border-radius:20px; padding:6px 16px;'
+            f'font-size:13px; margin:4px 6px 4px 0; font-weight:500;">{r}</span>'
+            for r in roles_list
         )
 
-        # Load logo as inline CID attachment
-        logo_b64 = None
-        logo_path = os.path.join(str(settings.BASE_DIR), "users", "static", "users", "logo.png")
-        if os.path.exists(logo_path):
-            with open(logo_path, "rb") as f:
-                logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+        logo_b64 = self._load_logo_b64()
+        logo_html = self._logo_html(logo_b64)
+        set_password_link = set_password_url or getattr(settings, "VAPTFIX_LOGIN_URL", "#")
 
-        if logo_b64:
-            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
-        elif getattr(settings, "VAPTFIX_LOGO_URL", ""):
-            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
-        else:
-            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
-
-        login_url = set_password_url or getattr(settings, "VAPTFIX_LOGIN_URL", "#")
-
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head><meta charset="UTF-8"></head>
-        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
-          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
-            <tr>
-              <td align="center">
-                <table width="600" cellpadding="0" cellspacing="0"
-                       style="background:#ffffff; border-radius:8px; overflow:hidden;
-                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
-
-                  <!-- Header -->
-                  <tr>
-                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
-                                border-bottom:1px solid #e8eaed;">
-                      {logo_html}
-                    </td>
-                  </tr>
-
-                  <!-- Body -->
-                  <tr>
-                    <td style="padding:40px;">
-                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">Welcome to VAPTFIX</h2>
-                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
-
-                      <p style="color:#444; font-size:15px; line-height:1.6;">Dear {full_name.upper()},</p>
-                      <p style="color:#444; font-size:15px; line-height:1.6;">
-                        We are pleased to inform you that your account has been successfully
-                        created in VAPTFIX.
-                      </p>
-                      <p style="color:#444; font-size:15px; line-height:1.6;">
-                        You have been assigned the following roles:
-                      </p>
-                      <ul style="color:#444; font-size:15px; line-height:1.8; padding-left:20px;">
-                        {roles_html}
-                      </ul>
-                      <p style="color:#444; font-size:15px; line-height:1.6;">
-                        Please set your password using the link below to activate your account:
-                      </p>
-
-                      <!-- Set Password Button -->
-                      <div style="text-align:center; margin:28px 0;">
-                        <a href="{login_url}"
-                           style="background-color:#1a73e8; color:#ffffff; padding:14px 32px;
-                                  text-decoration:none; border-radius:6px; font-size:15px;
-                                  font-weight:bold; display:inline-block;">
-                          Set Your Password
-                        </a>
-                      </div>
-
-                      <p style="color:#444; font-size:14px; line-height:1.6;">
-                        This link will expire after a limited time. After setting your password,
-                        you can log in with your email and password.
-                      </p>
-                      <p style="color:#444; font-size:14px; line-height:1.6;">
-                        If you believe any role assignment is incorrect or require additional
-                        access, please contact your system administrator.
-                      </p>
-
-                      <hr style="border:none; border-top:1px solid #e8eaed; margin:24px 0;" />
-                      <p style="color:#444; font-size:14px; margin:0;">
-                        Best regards,<br/>
-                        <strong>Security Management Team</strong><br/>
-                        VAPTFIX
-                      </p>
-                    </td>
-                  </tr>
-
-                  <!-- Footer -->
-                  <tr>
-                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
-                      <p style="color:#888; font-size:12px; margin:0;">
-                        &copy; 2026 VAPTFIX. All rights reserved.
-                      </p>
-                    </td>
-                  </tr>
-
-                </table>
-              </td>
-            </tr>
-          </table>
-        </body>
-        </html>
-        """
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background-color:#f0f2f5;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f5;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,0.12);">
+        <!-- Dark Header -->
+        <tr>
+          <td style="background-color:#1e1b4b;padding:32px 40px;text-align:center;">
+            {logo_html}
+            <div style="margin-top:10px;color:#ffffff;font-size:22px;font-weight:bold;letter-spacing:0.5px;">VaptFix Pro</div>
+          </td>
+        </tr>
+        <!-- Body -->
+        <tr>
+          <td style="padding:36px 40px 28px 40px;">
+            <p style="color:#999;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 4px 0;">SUBJECT</p>
+            <h2 style="color:#1a1a2e;margin:0 0 14px 0;font-size:22px;">Welcome to VAPTFIX</h2>
+            <hr style="border:none;border-top:1px solid #e8eaed;margin:0 0 22px 0;" />
+            <p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 14px 0;">
+              Dear <strong>{full_name.upper()}</strong>,
+            </p>
+            <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 18px 0;">
+              We are pleased to inform you that your account has been successfully created in
+              <strong>VAPTFIX</strong>. You have been granted access to the Intelligence portal
+              as part of the Rational Curator framework.
+            </p>
+            <!-- Assigned Roles -->
+            <div style="background:#f8fafc;border:1px solid #e8eaed;border-radius:8px;padding:18px 20px;margin:0 0 20px 0;">
+              <p style="color:#999;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px 0;">ASSIGNED ROLES</p>
+              <div>{roles_badges_html}</div>
+            </div>
+            <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 22px 0;">
+              Please set your password using the link below to activate your account and start securing your assets.
+            </p>
+            <!-- Set Password Button -->
+            <div style="text-align:center;margin:0 0 22px 0;">
+              <a href="{set_password_link}"
+                 style="background-color:#1e1b4b;color:#ffffff;padding:14px 36px;
+                        text-decoration:none;border-radius:30px;font-size:15px;
+                        font-weight:bold;display:inline-block;letter-spacing:0.3px;">
+                Set Your Password &rarr;
+              </a>
+            </div>
+            <!-- Expiry Notice -->
+            <div style="background:#eff6ff;border-left:4px solid #3b82f6;border-radius:6px;padding:12px 16px;margin:0 0 8px 0;">
+              <p style="color:#1e40af;font-size:13px;margin:0;line-height:1.6;">
+                &#8505;&nbsp; This link will expire in 24 hours.
+                If you did not request this account, please contact our support team immediately.
+              </p>
+            </div>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="padding:18px 40px;text-align:center;border-top:1px solid #e8eaed;">
+            <p style="color:#999;font-size:12px;margin:0 0 6px 0;">
+              <a href="#" style="color:#666;text-decoration:none;margin:0 8px;">PRIVACY POLICY</a> |
+              <a href="#" style="color:#666;text-decoration:none;margin:0 8px;">TERMS OF SERVICE</a> |
+              <a href="#" style="color:#666;text-decoration:none;margin:0 8px;">HELP CENTER</a>
+            </p>
+            <p style="color:#bbb;font-size:11px;margin:0;">&copy; 2026 VAPTFIX. ALL RIGHTS RESERVED.</p>
+            <p style="color:#ddd;font-size:18px;margin:6px 0 0 0;">&#x2022; &nbsp; &#x2022; &nbsp; &#x2022;</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
 
         try:
             message = Mail(
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 to_emails=email,
-                subject="Welcome to VAPTFIX – Your Account Has Been Created",
+                subject="Welcome to VAPTFIX – Set Your Password",
                 html_content=html_content,
             )
-            if logo_b64:
-                attachment = Attachment(
-                    FileContent(logo_b64),
-                    FileName("logo.png"),
-                    FileType("image/png"),
-                    Disposition("inline"),
-                    ContentId("vaptfix_logo"),
-                )
-                message.add_attachment(attachment)
+            self._attach_logo(message, logo_b64)
 
             sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
             response = sg.send(message)
-            logger.info(f"Welcome email sent to {email}. Status: {response.status_code}")
+            logger.info(f"Set-password email sent to {email}. Status: {response.status_code}")
 
             if response.status_code in [200, 201, 202]:
                 return True, None
             return False, f"SendGrid status: {response.status_code}"
 
         except Exception as e:
-            logger.error(f"Failed to send email to {email}: {str(e)}", exc_info=True)
+            logger.error(f"Failed to send set-password email to {email}: {str(e)}", exc_info=True)
+            return False, str(e)
+
+    def send_team_welcome_emails(self, email, first_name, last_name, roles, admin_email=""):
+        """Send team-specific welcome emails — one per assigned team role (mail.png style)."""
+        import datetime
+
+        if not email or not settings.SENDGRID_API_KEY:
+            return
+
+        roles_list = roles if isinstance(roles, list) else [str(roles)]
+        full_name = f"{first_name} {last_name}".strip() or "Team Member"
+        admin_display = admin_email or "your administrator"
+        today_str = datetime.date.today().strftime("%B %d, %Y")
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+
+        logo_b64 = self._load_logo_b64()
+        logo_html = self._logo_html(logo_b64)
+
+        for role in roles_list:
+            team_info = TEAM_EMAIL_CONTENT.get(role)
+            if not team_info:
+                continue
+
+            html_content = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background-color:#f0f2f5;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f5;padding:40px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,0.12);">
+        <!-- Header -->
+        <tr>
+          <td style="background-color:#1e1b4b;padding:18px 40px;">
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="vertical-align:middle;">{logo_html}</td>
+                <td style="vertical-align:middle;text-align:right;">
+                  <span style="color:#a5b4fc;font-size:14px;font-weight:600;">VaptFix Pro Branding</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <!-- Body -->
+        <tr>
+          <td style="padding:36px 40px 20px 40px;">
+            <h2 style="color:#1a1a2e;margin:0 0 4px 0;font-size:21px;">{team_info["heading"]}</h2>
+            <p style="color:#888;font-size:13px;margin:0 0 22px 0;">Vulnerability Management Program</p>
+            <p style="color:#333;font-size:15px;margin:0 0 16px 0;">Hi <strong style="color:#1a1a2e;">{first_name}</strong>,</p>
+            <div style="color:#555;font-size:14px;line-height:1.8;margin:0 0 24px 0;">
+              {team_info["body"]}
+            </div>
+            <!-- Added By -->
+            <div style="background:#f8fafc;border:1px solid #e8eaed;border-radius:8px;padding:14px 18px;margin:0 0 24px 0;">
+              <p style="color:#999;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 4px 0;">ADDED BY</p>
+              <p style="color:#333;font-size:14px;margin:0;font-weight:500;">{admin_display}</p>
+            </div>
+            <!-- Signature -->
+            <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0;">
+              <tr>
+                <td style="vertical-align:middle;">
+                  <div style="display:inline-block;width:44px;height:44px;border-radius:50%;
+                              background-color:#312e81;text-align:center;line-height:44px;
+                              color:#fff;font-size:15px;font-weight:bold;margin-right:12px;vertical-align:middle;">
+                    VN
+                  </div>
+                  <div style="display:inline-block;vertical-align:middle;">
+                    <p style="margin:0;font-size:14px;font-weight:bold;color:#1a1a2e;">Vulnerability Management Program Lead</p>
+                    <p style="margin:0;font-size:12px;color:#888;">Vulnerability Management Program Lead</p>
+                  </div>
+                </td>
+                <td style="text-align:right;vertical-align:middle;">
+                  <p style="margin:0;font-size:12px;color:#999;">&#128197; Today, {today_str}</p>
+                </td>
+              </tr>
+            </table>
+            <!-- Buttons -->
+            <div style="margin:0 0 28px 0;">
+              <a href="{frontend_url}"
+                 style="background-color:#1e1b4b;color:#ffffff;padding:12px 24px;
+                        text-decoration:none;border-radius:30px;font-size:14px;
+                        font-weight:bold;display:inline-block;margin-right:12px;">
+                Go to Dashboard &rarr;
+              </a>
+              <a href="{frontend_url}"
+                 style="background-color:#ffffff;color:#1e1b4b;padding:11px 22px;
+                        text-decoration:none;border-radius:30px;font-size:14px;
+                        font-weight:bold;display:inline-block;border:2px solid #1e1b4b;">
+                View Asset Inventory
+              </a>
+            </div>
+          </td>
+        </tr>
+        <!-- Info Cards -->
+        <tr>
+          <td style="padding:0 40px 32px 40px;">
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td width="48%" style="background:#f8fafc;border-radius:8px;padding:16px 18px;vertical-align:top;">
+                  <p style="color:#888;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px 0;">&#128187; QUICK SETUP</p>
+                  <p style="color:#333;font-size:13px;margin:0;">Your terminal environment is ready for deployment.</p>
+                </td>
+                <td width="4%"></td>
+                <td width="48%" style="background:#f8fafc;border-radius:8px;padding:16px 18px;vertical-align:top;">
+                  <p style="color:#888;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px 0;">&#128101; TEAM SYNC</p>
+                  <p style="color:#333;font-size:13px;margin:0;">Daily stand-up at 09:30 AM via Teams channel.</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="background:#f4f4f8;padding:16px 40px;text-align:center;border-top:1px solid #e8eaed;">
+            <p style="color:#bbb;font-size:11px;margin:0;">&copy; 2026 VAPTFIX. ALL RIGHTS RESERVED.</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+            try:
+                message = Mail(
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    to_emails=email,
+                    subject=team_info["subject"],
+                    html_content=html_content,
+                )
+                self._attach_logo(message, logo_b64)
+
+                sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
+                response = sg.send(message)
+                logger.info(f"Team welcome email [{role}] sent to {email}. Status: {response.status_code}")
+            except Exception as e:
+                logger.error(f"Failed to send team email [{role}] to {email}: {str(e)}", exc_info=True)
+
+    def send_post_password_welcome_email(self, email, first_name, last_name, roles):
+        """Send general welcome email after user successfully sets their password."""
+
+        if not email or not settings.SENDGRID_API_KEY:
+            return False, "Missing email or SendGrid key"
+
+        full_name = f"{first_name} {last_name}".strip() or "Team Member"
+        roles_list = roles if isinstance(roles, list) else [str(roles)]
+
+        if len(roles_list) == 1:
+            team_label = roles_list[0]
+        elif len(roles_list) == 2:
+            team_label = " & ".join(roles_list)
+        else:
+            team_label = ", ".join(roles_list[:-1]) + ", & " + roles_list[-1]
+
+        roles_badges_html = "".join(
+            f'<span style="display:inline-block;background-color:#e0f7fa;color:#006064;'
+            f'border:1px solid #b2ebf2;border-radius:20px;padding:5px 14px;'
+            f'font-size:13px;margin:4px 6px 4px 0;font-weight:500;">{r}</span>'
+            for r in roles_list
+        )
+
+        logo_b64 = self._load_logo_b64()
+        logo_html = self._logo_html(logo_b64)
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background-color:#f0f2f5;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f2f5;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,0.12);">
+        <!-- Dark Header -->
+        <tr>
+          <td style="background-color:#1e1b4b;padding:32px 40px;text-align:center;">
+            {logo_html}
+            <div style="margin-top:10px;color:#ffffff;font-size:22px;font-weight:bold;letter-spacing:0.5px;">VaptFix Pro</div>
+          </td>
+        </tr>
+        <!-- Body -->
+        <tr>
+          <td style="padding:36px 40px 28px 40px;">
+            <h2 style="color:#1a1a2e;margin:0 0 14px 0;font-size:22px;">Welcome to the {team_label} Team</h2>
+            <hr style="border:none;border-top:1px solid #e8eaed;margin:0 0 22px 0;" />
+            <p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 14px 0;">
+              Hi <strong>{first_name}</strong>,
+            </p>
+            <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 14px 0;">
+              Welcome to the <strong>{team_label}</strong> team as part of our Vulnerability Management Program!
+              We're glad to have you on board. Your role will be key in strengthening our organization's security
+              posture by helping identify, assess, and remediate vulnerabilities within your area of focus.
+            </p>
+            <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 14px 0;">
+              As part of this team, you'll collaborate closely with other domain groups — including Patch Management,
+              Configuration Management, Architectural Flaws, and Network Security — to ensure a streamlined and
+              coordinated approach to risk reduction.
+            </p>
+            <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 20px 0;">
+              Over the next few days, you'll receive access to our tools, dashboards, and reporting channels.
+              Please take a moment to review our internal procedures and reach out to your team lead if you have any questions.
+            </p>
+            <!-- Teams -->
+            <div style="background:#f8fafc;border:1px solid #e8eaed;border-radius:8px;padding:16px 20px;margin:0 0 24px 0;">
+              <p style="color:#999;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px 0;">YOUR TEAMS</p>
+              <div>{roles_badges_html}</div>
+            </div>
+            <!-- Go to Dashboard -->
+            <div style="text-align:center;margin:0 0 8px 0;">
+              <a href="{frontend_url}"
+                 style="background-color:#1e1b4b;color:#ffffff;padding:13px 34px;
+                        text-decoration:none;border-radius:30px;font-size:15px;
+                        font-weight:bold;display:inline-block;">
+                Go to Dashboard &rarr;
+              </a>
+            </div>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="padding:18px 40px;text-align:center;border-top:1px solid #e8eaed;">
+            <p style="color:#999;font-size:12px;margin:0 0 6px 0;">
+              <a href="#" style="color:#666;text-decoration:none;margin:0 8px;">PRIVACY POLICY</a> |
+              <a href="#" style="color:#666;text-decoration:none;margin:0 8px;">TERMS OF SERVICE</a> |
+              <a href="#" style="color:#666;text-decoration:none;margin:0 8px;">HELP CENTER</a>
+            </p>
+            <p style="color:#bbb;font-size:11px;margin:0;">&copy; 2026 VAPTFIX. ALL RIGHTS RESERVED.</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+        try:
+            message = Mail(
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to_emails=email,
+                subject=f"Welcome to the {team_label} Team – VAPTFIX",
+                html_content=html_content,
+            )
+            self._attach_logo(message, logo_b64)
+
+            sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
+            response = sg.send(message)
+            logger.info(f"Post-password welcome email sent to {email}. Status: {response.status_code}")
+
+            if response.status_code in [200, 201, 202]:
+                return True, None
+            return False, f"SendGrid status: {response.status_code}"
+
+        except Exception as e:
+            logger.error(f"Failed to send post-password welcome email to {email}: {str(e)}", exc_info=True)
             return False, str(e)
 
     def create(self, request, *args, **kwargs):
@@ -372,13 +687,23 @@ class UserDetailCreateView(generics.CreateAPIView):
             token = PasswordResetTokenGenerator().make_token(user)
             set_password_url = f"https://vapt-frontend-liart.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
 
-            # Send welcome email with set-password link
+            # Send set-password email
             email_sent, error = self.send_welcome_email(
                 email=email,
                 first_name=first_name,
                 last_name=last_name,
                 roles=roles,
                 set_password_url=set_password_url,
+            )
+
+            # Send team-specific welcome emails (one per team), include admin info
+            admin_email = getattr(request.user, "email", "")
+            self.send_team_welcome_emails(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                roles=roles,
+                admin_email=admin_email,
             )
 
             # Sync to MS Teams if access_token + team_id provided
