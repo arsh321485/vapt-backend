@@ -307,7 +307,6 @@ class UserDetailCreateView(generics.CreateAPIView):
         <tr>
           <td style="background-color:#1e1b4b;padding:32px 40px;text-align:center;">
             {logo_html}
-            <div style="margin-top:10px;color:#ffffff;font-size:22px;font-weight:bold;letter-spacing:0.5px;">VaptFix Pro</div>
           </td>
         </tr>
         <!-- Body -->
@@ -317,7 +316,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             <h2 style="color:#1a1a2e;margin:0 0 14px 0;font-size:22px;">Welcome to VAPTFIX</h2>
             <hr style="border:none;border-top:1px solid #e8eaed;margin:0 0 22px 0;" />
             <p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 14px 0;">
-              Dear <strong>{full_name.upper()}</strong>,
+              Dear {full_name.upper()},
             </p>
             <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 18px 0;">
               We are pleased to inform you that your account has been successfully created in
@@ -396,6 +395,15 @@ class UserDetailCreateView(generics.CreateAPIView):
         if not email or not settings.SENDGRID_API_KEY:
             return
 
+        # Always look up the actual user's name from DB to ensure correct name is used
+        try:
+            detail = UserDetail.objects.filter(email=email).first()
+            if detail:
+                first_name = detail.first_name or first_name
+                last_name = detail.last_name or last_name
+        except Exception:
+            pass  # fallback to passed values
+
         roles_list = roles if isinstance(roles, list) else [str(roles)]
         full_name = f"{first_name} {last_name}".strip() or "Team Member"
         admin_display = admin_email or "your administrator"
@@ -420,15 +428,8 @@ class UserDetailCreateView(generics.CreateAPIView):
              style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,0.12);">
         <!-- Header -->
         <tr>
-          <td style="background-color:#1e1b4b;padding:18px 40px;">
-            <table width="100%" cellpadding="0" cellspacing="0">
-              <tr>
-                <td style="vertical-align:middle;">{logo_html}</td>
-                <td style="vertical-align:middle;text-align:right;">
-                  <span style="color:#a5b4fc;font-size:14px;font-weight:600;">VaptFix Pro Branding</span>
-                </td>
-              </tr>
-            </table>
+          <td style="background-color:#1e1b4b;padding:28px 40px;text-align:center;">
+            {logo_html}
           </td>
         </tr>
         <!-- Body -->
@@ -436,7 +437,7 @@ class UserDetailCreateView(generics.CreateAPIView):
           <td style="padding:36px 40px 20px 40px;">
             <h2 style="color:#1a1a2e;margin:0 0 4px 0;font-size:21px;">{team_info["heading"]}</h2>
             <p style="color:#888;font-size:13px;margin:0 0 22px 0;">Vulnerability Management Program</p>
-            <p style="color:#333;font-size:15px;margin:0 0 16px 0;">Hi <strong style="color:#1a1a2e;">{first_name}</strong>,</p>
+            <p style="color:#333;font-size:15px;margin:0 0 16px 0;">Hi {first_name.upper()},</p>
             <div style="color:#555;font-size:14px;line-height:1.8;margin:0 0 24px 0;">
               {team_info["body"]}
             </div>
@@ -466,37 +467,13 @@ class UserDetailCreateView(generics.CreateAPIView):
             </table>
             <!-- Buttons -->
             <div style="margin:0 0 28px 0;">
-              <a href="{frontend_url}"
+              <a href="https://vapt-frontend-liart.vercel.app/auth?mode=signin"
                  style="background-color:#1e1b4b;color:#ffffff;padding:12px 24px;
                         text-decoration:none;border-radius:30px;font-size:14px;
-                        font-weight:bold;display:inline-block;margin-right:12px;">
+                        font-weight:bold;display:inline-block;">
                 Go to Dashboard &rarr;
               </a>
-              <a href="{frontend_url}"
-                 style="background-color:#ffffff;color:#1e1b4b;padding:11px 22px;
-                        text-decoration:none;border-radius:30px;font-size:14px;
-                        font-weight:bold;display:inline-block;border:2px solid #1e1b4b;">
-                View Asset Inventory
-              </a>
             </div>
-          </td>
-        </tr>
-        <!-- Info Cards -->
-        <tr>
-          <td style="padding:0 40px 32px 40px;">
-            <table width="100%" cellpadding="0" cellspacing="0">
-              <tr>
-                <td width="48%" style="background:#f8fafc;border-radius:8px;padding:16px 18px;vertical-align:top;">
-                  <p style="color:#888;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px 0;">&#128187; QUICK SETUP</p>
-                  <p style="color:#333;font-size:13px;margin:0;">Your terminal environment is ready for deployment.</p>
-                </td>
-                <td width="4%"></td>
-                <td width="48%" style="background:#f8fafc;border-radius:8px;padding:16px 18px;vertical-align:top;">
-                  <p style="color:#888;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px 0;">&#128101; TEAM SYNC</p>
-                  <p style="color:#333;font-size:13px;margin:0;">Daily stand-up at 09:30 AM via Teams channel.</p>
-                </td>
-              </tr>
-            </table>
           </td>
         </tr>
         <!-- Footer -->
@@ -565,7 +542,6 @@ class UserDetailCreateView(generics.CreateAPIView):
         <tr>
           <td style="background-color:#1e1b4b;padding:32px 40px;text-align:center;">
             {logo_html}
-            <div style="margin-top:10px;color:#ffffff;font-size:22px;font-weight:bold;letter-spacing:0.5px;">VaptFix Pro</div>
           </td>
         </tr>
         <!-- Body -->
@@ -574,7 +550,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             <h2 style="color:#1a1a2e;margin:0 0 14px 0;font-size:22px;">Welcome to the {team_label} Team</h2>
             <hr style="border:none;border-top:1px solid #e8eaed;margin:0 0 22px 0;" />
             <p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 14px 0;">
-              Hi <strong>{first_name}</strong>,
+              Hi {first_name.upper()},
             </p>
             <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 14px 0;">
               Welcome to the <strong>{team_label}</strong> team as part of our Vulnerability Management Program!
@@ -597,7 +573,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             </div>
             <!-- Go to Dashboard -->
             <div style="text-align:center;margin:0 0 8px 0;">
-              <a href="{frontend_url}"
+              <a href="https://vapt-frontend-liart.vercel.app/auth?mode=signin"
                  style="background-color:#1e1b4b;color:#ffffff;padding:13px 34px;
                         text-decoration:none;border-radius:30px;font-size:15px;
                         font-weight:bold;display:inline-block;">
@@ -706,10 +682,10 @@ class UserDetailCreateView(generics.CreateAPIView):
                 admin_email=admin_email,
             )
 
-            # Sync to MS Teams if access_token + team_id provided
+            # Sync to MS Teams — use token from request body first, else fall back to admin's stored token
             teams_sync_result = []
-            ms_access_token = request.data.get("access_token")
-            team_id = request.data.get("team_id")
+            ms_access_token = request.data.get("access_token") or getattr(request.user, "ms_access_token", None)
+            team_id = request.data.get("team_id") or getattr(request.user, "ms_team_id", None)
             if ms_access_token and team_id and roles:
                 teams_sync_result = sync_member_to_teams_channels(
                     access_token=ms_access_token,
@@ -717,13 +693,13 @@ class UserDetailCreateView(generics.CreateAPIView):
                     user_email=email,
                     member_roles=roles,
                 )
-                # Save team_id on the record
                 user_detail.team_id = team_id
                 user_detail.save(update_fields=["team_id"])
+                logger.info(f"[UserDetailCreate] MS Teams sync done for {email}: {teams_sync_result}")
 
-            # Sync to Slack if slack_bot_token provided (lookup user by email)
+            # Sync to Slack — use token from request body first, else fall back to admin's stored token
             slack_sync_result = []
-            slack_bot_token = request.data.get("slack_bot_token")
+            slack_bot_token = request.data.get("slack_bot_token") or getattr(request.user, "slack_bot_token", None)
             if slack_bot_token and roles:
                 slack_user_id = lookup_slack_user_by_email(slack_bot_token, email)
                 if slack_user_id:
@@ -736,6 +712,7 @@ class UserDetailCreateView(generics.CreateAPIView):
                     if channel_ids:
                         user_detail.slack_channel_ids = list(set(channel_ids))
                         user_detail.save(update_fields=["slack_channel_ids"])
+                    logger.info(f"[UserDetailCreate] Slack sync done for {email}: {slack_sync_result}")
                 else:
                     slack_sync_result = [{"status": "failed", "error": "User not found in Slack workspace for this email"}]
 
