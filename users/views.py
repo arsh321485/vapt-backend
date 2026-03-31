@@ -681,6 +681,30 @@ class UserSetPasswordView(APIView):
             context={"uid": uid, "token": token}
         )
         serializer.is_valid(raise_exception=True)
+
+        # Send post-password welcome email
+        try:
+            from django.utils.http import urlsafe_base64_decode
+            from django.utils.encoding import smart_str
+            from users_details.models import UserDetail
+            from users_details.views import UserDetailCreateView
+
+            user_id = smart_str(urlsafe_base64_decode(uid))
+            User = get_user_model()
+            user = User.objects.filter(id=user_id).first()
+            if user:
+                user_detail = UserDetail.objects.filter(email=user.email).first()
+                if user_detail:
+                    view = UserDetailCreateView()
+                    view.send_post_password_welcome_email(
+                        email=user.email,
+                        first_name=user_detail.first_name or "",
+                        last_name=user_detail.last_name or "",
+                        roles=user_detail.Member_role or [],
+                    )
+        except Exception:
+            logger.exception("[UserSetPassword] Error sending post-password welcome email")
+
         return Response({"msg": "Your password has been set successfully. You can now log in."}, status=status.HTTP_200_OK)
 
 
@@ -2113,7 +2137,8 @@ class AddUserToChannelView(generics.GenericAPIView):
                             frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
                             set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
-                            email_sent, error = UserDetailCreateView().send_welcome_email(
+                            udcv = UserDetailCreateView()
+                            email_sent, error = udcv.send_welcome_email(
                                 email=user_email,
                                 first_name=first_name,
                                 last_name=last_name,
@@ -2121,9 +2146,17 @@ class AddUserToChannelView(generics.GenericAPIView):
                                 set_password_url=set_password_url,
                             )
                             if email_sent:
-                                logger.info(f"[TeamsAddUser] Welcome email sent to {user_email}")
+                                logger.info(f"[TeamsAddUser] Set-password email sent to {user_email}")
                             else:
-                                logger.warning(f"[TeamsAddUser] Welcome email failed for {user_email}: {error}")
+                                logger.warning(f"[TeamsAddUser] Set-password email failed for {user_email}: {error}")
+
+                            udcv.send_team_welcome_emails(
+                                email=user_email,
+                                first_name=first_name,
+                                last_name=last_name,
+                                roles=member_role,
+                                admin_email=getattr(request.user, "email", ""),
+                            )
                         except Exception:
                             logger.exception(f"[TeamsAddUser] Error sending welcome email to {user_email}")
                 
@@ -3888,14 +3921,23 @@ class SlackInviteUserView(APIView):
         frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
         set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
-        email_sent, error = UserDetailCreateView().send_welcome_email(
+        udcv = UserDetailCreateView()
+        email_sent, error = udcv.send_welcome_email(
             email=email, first_name=first_name, last_name=last_name,
             roles=["Viewer"], set_password_url=set_password_url,
         )
         if email_sent:
-            logger.info(f"[SlackInvite] Welcome email sent to {email}")
+            logger.info(f"[SlackInvite] Set-password email sent to {email}")
         else:
-            logger.warning(f"[SlackInvite] Welcome email failed for {email}: {error}")
+            logger.warning(f"[SlackInvite] Set-password email failed for {email}: {error}")
+
+        udcv.send_team_welcome_emails(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            roles=["Viewer"],
+            admin_email=getattr(admin, "email", "") if admin else "",
+        )
 
     def _save_and_email_invited_user(self, slack_user_id, bot_token, admin, role="Viewer"):
         """Fetch Slack profile, save to UserDetail, send set-password welcome email."""
@@ -3966,7 +4008,7 @@ class SlackInviteUserView(APIView):
         frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
         set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
-        # Send same welcome email as normal user-add flow
+        # Send set-password email + team-specific welcome emails
         from users_details.views import UserDetailCreateView
         view = UserDetailCreateView()
         email_sent, error = view.send_welcome_email(
@@ -3978,9 +4020,17 @@ class SlackInviteUserView(APIView):
         )
 
         if email_sent:
-            logger.info(f"[SlackInvite] Welcome email sent to {email}")
+            logger.info(f"[SlackInvite] Set-password email sent to {email}")
         else:
-            logger.warning(f"[SlackInvite] Welcome email failed for {email}: {error}")
+            logger.warning(f"[SlackInvite] Set-password email failed for {email}: {error}")
+
+        view.send_team_welcome_emails(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            roles=member_role,
+            admin_email=getattr(admin, "email", "") if admin else "",
+        )
     
 
 # -------------------- JIRA OAUTH CALLBACK --------------------
@@ -5064,7 +5114,7 @@ class SlackEventsView(APIView):
                 f"?mode=set-password&uid={uid}&token={token}"
             )
 
-            # Send the same welcome email that UserDetailCreateView sends
+            # Send set-password email + team-specific welcome emails
             from users_details.views import UserDetailCreateView
             view = UserDetailCreateView()
             email_sent, error = view.send_welcome_email(
@@ -5076,9 +5126,17 @@ class SlackEventsView(APIView):
             )
 
             if email_sent:
-                logger.info(f"[SlackEvent] Welcome email sent to {email}")
+                logger.info(f"[SlackEvent] Set-password email sent to {email}")
             else:
-                logger.warning(f"[SlackEvent] Welcome email failed for {email}: {error}")
+                logger.warning(f"[SlackEvent] Set-password email failed for {email}: {error}")
+
+            view.send_team_welcome_emails(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                roles=["Viewer"],
+                admin_email=getattr(admin, "email", ""),
+            )
 
         except Exception:
             logger.exception(f"[SlackEvent] _save_slack_member_to_user_detail failed for user={slack_user_id}")
