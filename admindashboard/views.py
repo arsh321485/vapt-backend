@@ -182,7 +182,13 @@ class ReportAvgScoreAPIView(APIView):
     def get(self, request, report_id):
         try:
             with MongoContext() as db:
-                doc = _load_report(db, report_id)
+                coll = db[NESSUS_COLLECTION]
+                doc = coll.find_one(
+                    {"report_id": str(report_id)},
+                    {"vulnerabilities_by_host.vulnerabilities.cvss_v3_base_score": 1,
+                     "vulnerabilities_by_host.vulnerabilities.cvss": 1,
+                     "vulnerabilities_by_host.vulnerabilities.cvss_score": 1}
+                )
                 if not doc:
                     return Response({"detail":"report not found"}, status=status.HTTP_404_NOT_FOUND)
                 cvss_vals = []
@@ -205,7 +211,12 @@ class ReportVulnerabilitiesAPIView(APIView):
     def get(self, request, report_id):
         try:
             with MongoContext() as db:
-                doc = _load_report(db, report_id)
+                coll = db[NESSUS_COLLECTION]
+                doc = coll.find_one(
+                    {"report_id": str(report_id)},
+                    {"vulnerabilities_by_host.vulnerabilities.risk_factor": 1,
+                     "vulnerabilities_by_host.vulnerabilities.severity": 1}
+                )
                 if not doc:
                     return Response({"detail":"report not found"}, status=status.HTTP_404_NOT_FOUND)
                 counts = {"critical":0,"high":0,"medium":0,"low":0}

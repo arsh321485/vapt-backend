@@ -14,6 +14,7 @@ from django.conf import settings
 import logging
 import base64
 import os
+import threading
 import requests
 
 logger = logging.getLogger('users_details')
@@ -397,7 +398,7 @@ class UserDetailCreateView(generics.CreateAPIView):
 
         # Always look up the actual user's name from DB to ensure correct name is used
         try:
-            detail = UserDetail.objects.filter(email=email).first()
+            detail = UserDetail.objects.only('first_name', 'last_name').filter(email=email).first()
             if detail:
                 first_name = detail.first_name or first_name
                 last_name = detail.last_name or last_name
@@ -663,24 +664,28 @@ class UserDetailCreateView(generics.CreateAPIView):
             token = PasswordResetTokenGenerator().make_token(user)
             set_password_url = f"https://vapt-frontend-liart.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
 
-            # Send set-password email
-            email_sent, error = self.send_welcome_email(
-                email=email,
-                first_name=first_name,
-                last_name=last_name,
-                roles=roles,
-                set_password_url=set_password_url,
-            )
-
-            # Send team-specific welcome emails (one per team), include admin info
+            # Send emails in background so the API response is not blocked
             admin_email = getattr(request.user, "email", "")
-            self.send_team_welcome_emails(
-                email=email,
-                first_name=first_name,
-                last_name=last_name,
-                roles=roles,
-                admin_email=admin_email,
-            )
+            _view = self
+
+            def _send_emails():
+                _view.send_welcome_email(
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    roles=roles,
+                    set_password_url=set_password_url,
+                )
+                _view.send_team_welcome_emails(
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    roles=roles,
+                    admin_email=admin_email,
+                )
+
+            threading.Thread(target=_send_emails, daemon=True).start()
+            email_sent, error = True, None  # optimistic — logged inside send methods
 
             # Sync to MS Teams — use token from request body first, else fall back to admin's stored token
             teams_sync_result = []

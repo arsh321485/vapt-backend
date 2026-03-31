@@ -112,12 +112,12 @@ DATABASES = {
         'NAME': 'vaptfix',
         'CLIENT': {
             'host': 'mongodb+srv://arshmittal740:ARSHMITTAL12@cluster0.9cj3n.mongodb.net/',
-            'maxPoolSize': 50,
-            'minPoolSize': 5,
-            'maxIdleTimeMS': 45000,
-            'serverSelectionTimeoutMS': 5000,
-            'connectTimeoutMS': 5000,
-            'socketTimeoutMS': 10000,
+            'maxPoolSize': 200,
+            'minPoolSize': 10,
+            'maxIdleTimeMS': 60000,
+            'serverSelectionTimeoutMS': 10000,
+            'connectTimeoutMS': 10000,
+            'socketTimeoutMS': 15000,
             'retryWrites': True,
         }
     }

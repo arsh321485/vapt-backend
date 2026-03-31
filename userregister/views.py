@@ -71,7 +71,7 @@ def _get_user_context(user_email):
     """
     if not UserDetail:
         return [], None
-    detail = UserDetail.objects.filter(email=user_email).first()
+    detail = UserDetail.objects.select_related('admin').filter(email=user_email).first()
     if not detail:
         return [], None
     teams = detail.Member_role if isinstance(detail.Member_role, list) else []
