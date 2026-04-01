@@ -2155,6 +2155,13 @@ class AddUserToChannelView(generics.GenericAPIView):
                             email=_ue, first_name=_fn, last_name=_ln,
                             roles=_mr, admin_email=_admin_email,
                         )
+                        udcv.send_platform_access_email(
+                            email=_ue,
+                            first_name=_fn,
+                            last_name=_ln,
+                            platform_name="Microsoft Teams",
+                            channel_names=_mr,
+                        )
                     except Exception:
                         logger.exception(f"[TeamsAddUser] Error sending welcome email to {_ue}")
 
@@ -3947,39 +3954,38 @@ class SlackInviteUserView(APIView):
                 from users_details.views import UserDetailCreateView
                 udcv = UserDetailCreateView()
 
-                if _is_new:
-                    # New user — send set-password + team emails + Slack platform email
-                    from django.contrib.auth import get_user_model
-                    from django.utils.http import urlsafe_base64_encode
-                    from django.utils.encoding import force_bytes
-                    from django.contrib.auth.tokens import PasswordResetTokenGenerator
+                # Send set-password + team emails for both new and existing users
+                from django.contrib.auth import get_user_model
+                from django.utils.http import urlsafe_base64_encode
+                from django.utils.encoding import force_bytes
+                from django.contrib.auth.tokens import PasswordResetTokenGenerator
 
-                    UserModel = get_user_model()
-                    django_user, u_created = UserModel.objects.get_or_create(
-                        email=_email, defaults={"is_active": True}
-                    )
-                    if u_created:
-                        django_user.set_unusable_password()
-                        django_user.save()
+                UserModel = get_user_model()
+                django_user, u_created = UserModel.objects.get_or_create(
+                    email=_email, defaults={"is_active": True}
+                )
+                if u_created:
+                    django_user.set_unusable_password()
+                    django_user.save()
 
-                    uid = urlsafe_base64_encode(force_bytes(django_user.pk))
-                    token = PasswordResetTokenGenerator().make_token(django_user)
-                    frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
-                    set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
+                uid = urlsafe_base64_encode(force_bytes(django_user.pk))
+                token = PasswordResetTokenGenerator().make_token(django_user)
+                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+                set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
-                    email_sent, error = udcv.send_welcome_email(
-                        email=_email, first_name=_first, last_name=_last,
-                        roles=_roles, set_password_url=set_password_url,
-                    )
-                    if email_sent:
-                        logger.info(f"[SlackInvite] Set-password email sent to {_email}")
-                    else:
-                        logger.warning(f"[SlackInvite] Set-password email failed for {_email}: {error}")
+                email_sent, error = udcv.send_welcome_email(
+                    email=_email, first_name=_first, last_name=_last,
+                    roles=_roles, set_password_url=set_password_url,
+                )
+                if email_sent:
+                    logger.info(f"[SlackInvite] Set-password email sent to {_email}")
+                else:
+                    logger.warning(f"[SlackInvite] Set-password email failed for {_email}: {error}")
 
-                    udcv.send_team_welcome_emails(
-                        email=_email, first_name=_first, last_name=_last,
-                        roles=_roles, admin_email=_admin_email,
-                    )
+                udcv.send_team_welcome_emails(
+                    email=_email, first_name=_first, last_name=_last,
+                    roles=_roles, admin_email=_admin_email,
+                )
 
                 # Always send Slack platform email
                 if _channel_name:
@@ -4055,38 +4061,37 @@ class SlackInviteUserView(APIView):
                 from users_details.views import UserDetailCreateView
                 view = UserDetailCreateView()
 
-                if _is_new:
-                    from django.contrib.auth import get_user_model
-                    from django.utils.http import urlsafe_base64_encode
-                    from django.utils.encoding import force_bytes
-                    from django.contrib.auth.tokens import PasswordResetTokenGenerator
+                from django.contrib.auth import get_user_model
+                from django.utils.http import urlsafe_base64_encode
+                from django.utils.encoding import force_bytes
+                from django.contrib.auth.tokens import PasswordResetTokenGenerator
 
-                    UserModel = get_user_model()
-                    django_user, u_created = UserModel.objects.get_or_create(
-                        email=_email, defaults={"is_active": True}
-                    )
-                    if u_created:
-                        django_user.set_unusable_password()
-                        django_user.save()
+                UserModel = get_user_model()
+                django_user, u_created = UserModel.objects.get_or_create(
+                    email=_email, defaults={"is_active": True}
+                )
+                if u_created:
+                    django_user.set_unusable_password()
+                    django_user.save()
 
-                    uid = urlsafe_base64_encode(force_bytes(django_user.pk))
-                    token = PasswordResetTokenGenerator().make_token(django_user)
-                    frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
-                    set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
+                uid = urlsafe_base64_encode(force_bytes(django_user.pk))
+                token = PasswordResetTokenGenerator().make_token(django_user)
+                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+                set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
-                    email_sent, error = view.send_welcome_email(
-                        email=_email, first_name=_first, last_name=_last,
-                        roles=_roles, set_password_url=set_password_url,
-                    )
-                    if email_sent:
-                        logger.info(f"[SlackInvite] Set-password email sent to {_email}")
-                    else:
-                        logger.warning(f"[SlackInvite] Set-password email failed for {_email}: {error}")
+                email_sent, error = view.send_welcome_email(
+                    email=_email, first_name=_first, last_name=_last,
+                    roles=_roles, set_password_url=set_password_url,
+                )
+                if email_sent:
+                    logger.info(f"[SlackInvite] Set-password email sent to {_email}")
+                else:
+                    logger.warning(f"[SlackInvite] Set-password email failed for {_email}: {error}")
 
-                    view.send_team_welcome_emails(
-                        email=_email, first_name=_first, last_name=_last,
-                        roles=_roles, admin_email=_admin_email,
-                    )
+                view.send_team_welcome_emails(
+                    email=_email, first_name=_first, last_name=_last,
+                    roles=_roles, admin_email=_admin_email,
+                )
 
                 # Always send Slack platform email
                 if _channel_names:
