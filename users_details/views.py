@@ -621,13 +621,10 @@ class UserDetailCreateView(generics.CreateAPIView):
             logger.error(f"Failed to send post-password welcome email to {email}: {str(e)}", exc_info=True)
             return False, str(e)
 
-    def send_slack_platform_email(self, email, first_name, last_name, channel_names):
-        """Send email notifying user they've been added to Slack channels."""
+    def send_platform_access_email(self, email, first_name, last_name, platform_name="VAPTFIX Platform", channel_names=None):
+        """Send platform access email for users added from UserDetails/Slack/Teams flows."""
         if not email or not settings.SENDGRID_API_KEY:
             return False, "Missing email or SendGrid key"
-
-        if not channel_names:
-            return False, "No channel names provided"
 
         try:
             detail = UserDetail.objects.only('first_name', 'last_name').filter(email=email).first()
@@ -637,17 +634,16 @@ class UserDetailCreateView(generics.CreateAPIView):
         except Exception:
             pass
 
-        full_name = f"{first_name} {last_name}".strip() or "Team Member"
-        channels_list = channel_names if isinstance(channel_names, list) else [str(channel_names)]
-        channels_html = "".join(
-            f'<li style="padding:6px 0;color:#333;font-size:14px;">'
-            f'<span style="color:#4A154B;font-weight:bold;">#</span> {ch}</li>'
-            for ch in channels_list
-        )
+        channels_list = channel_names if isinstance(channel_names, list) else ([channel_names] if channel_names else [])
+        channels_html = ""
+        if channels_list:
+            channels_html = "".join(
+                f'<li style="padding:6px 0;color:#333;font-size:14px;">{ch}</li>'
+                for ch in channels_list
+            )
 
         logo_b64 = self._load_logo_b64()
         logo_html = self._logo_html(logo_b64)
-        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
 
         html_content = f"""<!DOCTYPE html>
 <html>
@@ -657,54 +653,25 @@ class UserDetailCreateView(generics.CreateAPIView):
     <tr><td align="center">
       <table width="560" cellpadding="0" cellspacing="0"
              style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,0.12);">
-        <!-- Dark Header -->
         <tr>
           <td style="background-color:#1e1b4b;padding:32px 40px;text-align:center;">
             {logo_html}
           </td>
         </tr>
-        <!-- Slack Brand Bar -->
-        <tr>
-          <td style="background:#4A154B;padding:10px 40px;text-align:center;">
-            <span style="color:#fff;font-size:13px;letter-spacing:1px;text-transform:uppercase;font-weight:bold;">
-              Slack Workspace Access
-            </span>
-          </td>
-        </tr>
-        <!-- Body -->
         <tr>
           <td style="padding:36px 40px 28px 40px;">
             <p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 14px 0;">
-              Hi {first_name.upper()},
+              Hi {(first_name or "User").upper()},
             </p>
             <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 18px 0;">
-              You have been added to the following Slack channel(s) as part of the
-              <strong>VaptFix Vulnerability Management Program</strong>:
+              You have been granted access to <strong>{platform_name}</strong> in VAPTFIX.
             </p>
-            <!-- Channels List -->
-            <div style="background:#f9f0ff;border:1px solid #d9b3e8;border-radius:8px;padding:16px 20px;margin:0 0 24px 0;">
-              <p style="color:#999;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px 0;">YOUR SLACK CHANNELS</p>
-              <ul style="margin:0;padding:0 0 0 8px;list-style:none;">
-                {channels_html}
-              </ul>
-            </div>
-            <p style="color:#555;font-size:14px;line-height:1.7;margin:0 0 24px 0;">
-              Please open your Slack app and navigate to the channels listed above to connect with
-              your team. If you don't have Slack installed, download it from
-              <a href="https://slack.com/downloads" style="color:#4A154B;">slack.com/downloads</a>.
+            {f'<div style="background:#f8fafc;border:1px solid #e8eaed;border-radius:8px;padding:16px 20px;margin:0 0 24px 0;"><p style="color:#999;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px 0;">ASSIGNED CHANNELS / AREAS</p><ul style="margin:0;padding:0 0 0 16px;">{channels_html}</ul></div>' if channels_html else ''}
+            <p style="color:#555;font-size:14px;line-height:1.7;margin:0;">
+              You can now continue your onboarding in the VAPTFIX portal.
             </p>
-            <!-- CTA -->
-            <div style="text-align:center;margin:0 0 8px 0;">
-              <a href="https://slack.com"
-                 style="background-color:#4A154B;color:#ffffff;padding:13px 34px;
-                        text-decoration:none;border-radius:30px;font-size:15px;
-                        font-weight:bold;display:inline-block;">
-                Open Slack &rarr;
-              </a>
-            </div>
           </td>
         </tr>
-        <!-- Footer -->
         <tr>
           <td style="padding:18px 40px;text-align:center;border-top:1px solid #e8eaed;">
             <p style="color:#bbb;font-size:11px;margin:0;">&copy; 2026 VAPTFIX. ALL RIGHTS RESERVED.</p>
@@ -720,22 +687,31 @@ class UserDetailCreateView(generics.CreateAPIView):
             message = Mail(
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 to_emails=email,
-                subject="You've Been Added to Slack – VaptFix Vulnerability Management",
+                subject=f"Access Granted: {platform_name} – VAPTFIX",
                 html_content=html_content,
             )
             self._attach_logo(message, logo_b64)
-
             sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
             response = sg.send(message)
-            logger.info(f"Slack platform email sent to {email}. Status: {response.status_code}")
-
+            logger.info(f"Platform access email sent to {email} for {platform_name}. Status: {response.status_code}")
             if response.status_code in [200, 201, 202]:
                 return True, None
             return False, f"SendGrid status: {response.status_code}"
-
         except Exception as e:
-            logger.error(f"Failed to send Slack platform email to {email}: {str(e)}", exc_info=True)
+            logger.error(f"Failed to send platform access email to {email}: {str(e)}", exc_info=True)
             return False, str(e)
+
+    def send_slack_platform_email(self, email, first_name, last_name, channel_names):
+        """Send email notifying user they've been added to Slack channels."""
+        if not channel_names:
+            return False, "No channel names provided"
+        return self.send_platform_access_email(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            platform_name="Slack Workspace",
+            channel_names=channel_names,
+        )
 
     def create(self, request, *args, **kwargs):
         try:
@@ -785,6 +761,13 @@ class UserDetailCreateView(generics.CreateAPIView):
             _view = self
 
             def _send_emails():
+                _view.send_platform_access_email(
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    platform_name="VAPTFIX Platform",
+                    channel_names=roles,
+                )
                 _view.send_welcome_email(
                     email=email,
                     first_name=first_name,
