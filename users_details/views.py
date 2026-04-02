@@ -113,7 +113,8 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
     resp = requests.get(
         "https://slack.com/api/conversations.list",
         headers=headers,
-        params={"types": "public_channel", "limit": 1000},
+        # Slack channels can be private; include both types so role->channel mapping works.
+        params={"types": "public_channel,private_channel", "limit": 1000},
     )
     payload = resp.json() if resp is not None else {}
     channel_map = {ch["name"].lower(): ch["id"] for ch in payload.get("channels", [])}
