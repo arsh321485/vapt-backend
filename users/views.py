@@ -939,9 +939,11 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 return JsonResponse({"error": "Missing redirect_uri"}, status=400)
 
             # Create state (encodes frontend redirect)
+            admin_id = request.GET.get("admin_id")
             state_data = {
                 "redirect_uri": frontend_redirect,
-                "nonce": secrets.token_urlsafe(8)
+                "nonce": secrets.token_urlsafe(8),
+                "admin_id": admin_id,
             }
             state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
 
@@ -1129,14 +1131,17 @@ class MicrosoftTeamsCallbackView(APIView):
             # Decode state (to get frontend redirect)
             # State can be either base64-encoded JSON or a plain random string
             frontend_redirect = settings.FRONTEND_URL if hasattr(settings, 'FRONTEND_URL') else "http://localhost:3000"
+            admin_id_from_state = None
             try:
                 decoded_state = base64.urlsafe_b64decode(state + "==").decode()
                 state_data = json.loads(decoded_state)
                 frontend_redirect = state_data.get("redirect_uri", frontend_redirect)
+                admin_id_from_state = state_data.get("admin_id")
             except (UnicodeDecodeError, json.JSONDecodeError, Exception):
                 # State is a plain string (not base64-encoded JSON), use default redirect
                 logger.info(f"State is plain string: {state}, using default redirect: {frontend_redirect}")
             print("Frontend redirect:", frontend_redirect)
+            print(f"Admin id from state: {admin_id_from_state}")
 
             # Exchange code for tokens
             token_payload = {
@@ -1169,16 +1174,23 @@ class MicrosoftTeamsCallbackView(APIView):
             full_name = user_info.get("displayName", "")
             firstname, lastname = (full_name.split(" ", 1) + [""])[:2]
 
-            # Save user in DB
+            # Save user tokens in DB for the correct admin.
+            # If admin_id is provided in state, bind tokens to that user record.
             user_data = None
-            if email:
-                user, created = User.objects.get_or_create(
+            user = None
+            if admin_id_from_state:
+                user = User.objects.filter(id=admin_id_from_state).first()
+
+            if not user and email:
+                user, _ = User.objects.get_or_create(
                     email=email,
                     defaults={
                         "password": make_password(None),
                         "login_provider": "microsoft_teams",
                     },
                 )
+
+            if user:
                 user.login_provider = 'microsoft_teams'
                 user.ms_access_token = access_token
                 user.ms_refresh_token = token_data.get('refresh_token', '')
@@ -1199,6 +1211,17 @@ class MicrosoftTeamsCallbackView(APIView):
             # Auto-create VAPTFIX team with 4 channels
             vaptfix_team = auto_create_vaptfix_team(access_token)
             logger.info(f"VAPTFIX team result: {vaptfix_team}")
+
+            # Ensure ms_team_id is persisted for the correct admin user.
+            try:
+                team_id = vaptfix_team.get("team_id") if vaptfix_team else None
+                if user and team_id:
+                    user.ms_team_id = team_id
+                    user.save(update_fields=["ms_team_id"])
+                elif not user and vaptfix_team and vaptfix_team.get("team_id") and email:
+                    User.objects.filter(email=email).update(ms_team_id=vaptfix_team.get("team_id"))
+            except Exception:
+                logger.warning("Failed to persist ms_team_id after Microsoft Teams OAuth", exc_info=True)
 
             # HTML response: log access token to console and redirect immediately to MS Teams
             html = f"""
@@ -2755,7 +2778,14 @@ class SlackOAuthUrlView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        state = str(uuid.uuid4())
+        # state is returned back by Slack during callback.
+        # We must bind it to the admin selected in UI (admin_id), otherwise tokens can be saved to the wrong User record.
+        admin_id = request.data.get("admin_id")
+        state_data = {
+            "admin_id": admin_id,
+            "nonce": str(uuid.uuid4()),
+        }
+        state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
 
         # Use SLACK_REDIRECT_URI from settings if configured, otherwise detect dynamically
         redirect_uri = getattr(settings, "SLACK_REDIRECT_URI", "")
@@ -2855,6 +2885,17 @@ class SlackOAuthCallbackView(APIView):
             print(f"  bot_access_token  : {bot_token}")
             print(f"  user_access_token : {user_access_token}")
             print(f"  team              : {team_info.get('name')} ({team_info.get('id')})")
+            # Decode state to get UI admin_id (if provided)
+            decoded_state = None
+            admin_id_from_state = None
+            try:
+                decoded_state = base64.urlsafe_b64decode(state + "==").decode()
+                decoded_state = json.loads(decoded_state)
+                admin_id_from_state = decoded_state.get("admin_id")
+            except Exception:
+                # Backward compatible: older callbacks may have state as plain uuid string
+                admin_id_from_state = None
+            print(f"  admin_id_from_state: {admin_id_from_state}")
             print("=" * 60)
 
 
@@ -2876,11 +2917,20 @@ class SlackOAuthCallbackView(APIView):
             firstname = name.split()[0]
             lastname = " ".join(name.split()[1:]) if len(name.split()) > 1 else ""
 
-            # ✅ Step 4: Create or update user
-            user, created = User.objects.get_or_create(
-                email=email,
-                defaults={"login_provider": "slack", "password": ""},
-            )
+            # ✅ Step 4: Update the correct User record.
+            # Preferred: use admin_id from UI state (avoids email mismatch between platform login and Slack email).
+            # Fallback: use Slack email (older behavior).
+            if admin_id_from_state:
+                user = User.objects.filter(id=admin_id_from_state).first()
+            else:
+                user = None
+
+            if not user:
+                user, _ = User.objects.get_or_create(
+                    email=email,
+                    defaults={"login_provider": "slack", "password": ""},
+                )
+
             user.login_provider = "slack"
             user.slack_user_id = user_id
             user.slack_team_id = team_info.get("id")
