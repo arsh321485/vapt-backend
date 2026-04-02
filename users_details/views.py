@@ -104,13 +104,20 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
     results = []
     added_channel_ids = []
 
+    # Debug: trace Slack IDs and roles used for invites
+    logger.info(
+        f"[SlackSync] Start: slack_user_id={slack_user_id} roles={member_roles} bot_token_set={bool(bot_token)}"
+    )
+
     # Fetch existing channel list — Slack stores names as lowercase
     resp = requests.get(
         "https://slack.com/api/conversations.list",
         headers=headers,
         params={"types": "public_channel", "limit": 1000},
     )
-    channel_map = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
+    payload = resp.json() if resp is not None else {}
+    channel_map = {ch["name"].lower(): ch["id"] for ch in payload.get("channels", [])}
+    logger.info(f"[SlackSync] conversations.list status={resp.status_code} channels_found={len(channel_map)}")
 
     for role in member_roles:
         slack_name = ROLE_TO_SLACK_CHANNEL.get(role)
@@ -118,8 +125,10 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
             continue
         channel_id = channel_map.get(slack_name)
         if not channel_id:
+            logger.warning(f"[SlackSync] Channel not found for role={role} slack_name={slack_name} (public only)")
             results.append({"role": role, "status": "channel_not_found"})
             continue
+        logger.info(f"[SlackSync] Inviting slack_user_id={slack_user_id} to channel_id={channel_id} role={role}")
         invite_resp = requests.post(
             "https://slack.com/api/conversations.invite",
             headers=headers,
@@ -130,8 +139,13 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
             results.append({"role": role, "status": "invited", "channel_id": channel_id})
             added_channel_ids.append(channel_id)
         else:
+            logger.warning(
+                f"[SlackSync] Invite failed role={role} channel_id={channel_id} error={invite_data.get('error')} "
+                f"full={invite_data}"
+            )
             results.append({"role": role, "status": "failed", "error": invite_data.get("error")})
 
+    logger.info(f"[SlackSync] Done: added_channel_ids={added_channel_ids} results={results}")
     return results, added_channel_ids
 
 
@@ -143,6 +157,7 @@ def lookup_slack_user_by_email(bot_token, email):
     if not bot_token or not email:
         return None
     headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
+    logger.info(f"[SlackLookup] lookupByEmail email={email} bot_token_set={bool(bot_token)}")
     resp = requests.get(
         "https://slack.com/api/users.lookupByEmail",
         headers=headers,
@@ -150,7 +165,10 @@ def lookup_slack_user_by_email(bot_token, email):
     )
     data = resp.json()
     if data.get("ok"):
-        return data.get("user", {}).get("id")
+        slack_user_id = data.get("user", {}).get("id")
+        logger.info(f"[SlackLookup] Found slack_user_id={slack_user_id} for email={email}")
+        return slack_user_id
+    logger.warning(f"[SlackLookup] Not found email={email} slack_error={data.get('error')} full={data}")
     return None
 
 
@@ -173,15 +191,22 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
     results = []
 
     try:
+        logger.info(
+            f"[TeamsSync] Start: team_id={team_id} user_email={user_email} roles={member_roles} access_token_set={bool(access_token)}"
+        )
         # Get user's Azure AD ID by email
         user_resp = requests.get(
             f"https://graph.microsoft.com/v1.0/users/{user_email}",
             headers=headers, timeout=10
         )
         if user_resp.status_code != 200:
+            logger.warning(
+                f"[TeamsSync] Graph users lookup failed status={user_resp.status_code} user_email={user_email} body={user_resp.text}"
+            )
             return [{"error": f"Could not find user {user_email} in Azure AD", "detail": user_resp.text}]
 
         user_id = user_resp.json().get('id')
+        logger.info(f"[TeamsSync] Found Azure user_id={user_id} for email={user_email}")
 
         # Add user as team member — this gives access to ALL standard channels automatically
         team_member_payload = {
@@ -198,6 +223,9 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
         elif team_member_resp.status_code == 409:
             results.append({"action": "added_to_team", "status": "already_member"})
         else:
+            logger.warning(
+                f"[TeamsSync] Add to team failed status={team_member_resp.status_code} body={team_member_resp.text}"
+            )
             results.append({"action": "added_to_team", "status": "failed", "error": team_member_resp.text})
 
         # For standard channels, team membership = channel access (no individual add needed)
@@ -208,6 +236,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
         )
         if channels_resp.status_code == 200:
             channels = channels_resp.json().get('value', [])
+            logger.info(f"[TeamsSync] channels fetched count={len(channels)}")
             # Build O(1) lookup map instead of linear search per role
             channel_map_display = {ch['displayName']: ch for ch in channels}
             for role in member_roles:
@@ -217,6 +246,9 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
                     continue
 
                 membership_type = matching_channel.get('membershipType', 'standard')
+                logger.info(
+                    f"[TeamsSync] role={role} channel_id={matching_channel.get('id')} membershipType={membership_type}"
+                )
                 if membership_type == 'standard':
                     # Standard channels: user gets access via team membership
                     results.append({"channel": role, "status": "auto_access_via_team_membership"})
@@ -236,9 +268,13 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
                     elif add_resp.status_code == 409:
                         results.append({"channel": role, "status": "already_member"})
                     else:
+                        logger.warning(
+                            f"[TeamsSync] Add to channel failed role={role} status={add_resp.status_code} body={add_resp.text}"
+                        )
                         results.append({"channel": role, "status": "failed", "error": add_resp.text})
 
     except Exception as e:
+        logger.exception(f"[TeamsSync] Exception during sync: {str(e)}")
         results.append({"error": str(e)})
 
     return results
@@ -730,6 +766,11 @@ class UserDetailCreateView(generics.CreateAPIView):
             serializer.is_valid(raise_exception=True)
             user_detail = serializer.save()
 
+            # IMPORTANT: The UserDetail is created for the admin_id coming from request body.
+            # Platform sync tokens must be read from that same admin (user_detail.admin),
+            # not from request.user (the authenticated user).
+            admin_user = user_detail.admin
+
             # Extract data to send email
             email = user_detail.email
             first_name = user_detail.first_name or ""
@@ -757,7 +798,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             set_password_url = f"https://vapt-frontend-liart.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
 
             # Send emails in background so the API response is not blocked
-            admin_email = getattr(request.user, "email", "")
+            admin_email = getattr(admin_user, "email", "")
             _view = self
 
             def _send_emails():
@@ -788,8 +829,13 @@ class UserDetailCreateView(generics.CreateAPIView):
 
             # Sync to MS Teams — use token from request body first, else fall back to admin's stored token
             teams_sync_result = []
-            ms_access_token = request.data.get("access_token") or getattr(request.user, "ms_access_token", None)
-            team_id = request.data.get("team_id") or getattr(request.user, "ms_team_id", None)
+            ms_access_token = request.data.get("access_token") or getattr(admin_user, "ms_access_token", None)
+            team_id = request.data.get("team_id") or getattr(admin_user, "ms_team_id", None)
+            logger.info(
+                f"[UserDetailCreate] Teams sync check: admin_id={getattr(admin_user, 'id', None)} "
+                f"ms_access_token_set={bool(ms_access_token)} ms_team_id={getattr(admin_user, 'ms_team_id', None)} "
+                f"team_id_used={team_id} roles={roles}"
+            )
             if ms_access_token and team_id and roles:
                 teams_sync_result = sync_member_to_teams_channels(
                     access_token=ms_access_token,
@@ -800,10 +846,21 @@ class UserDetailCreateView(generics.CreateAPIView):
                 user_detail.team_id = team_id
                 user_detail.save(update_fields=["team_id"])
                 logger.info(f"[UserDetailCreate] MS Teams sync done for {email}: {teams_sync_result}")
+            else:
+                if not ms_access_token:
+                    logger.warning(f"[UserDetailCreate] Teams sync skipped: missing ms_access_token for admin_id={admin_user.id}")
+                elif not team_id:
+                    logger.warning(f"[UserDetailCreate] Teams sync skipped: missing team_id/ms_team_id for admin_id={admin_user.id}")
+                elif not roles:
+                    logger.warning(f"[UserDetailCreate] Teams sync skipped: missing roles for {email}")
 
             # Sync to Slack — use token from request body first, else fall back to admin's stored token
             slack_sync_result = []
-            slack_bot_token = request.data.get("slack_bot_token") or getattr(request.user, "slack_bot_token", None)
+            slack_bot_token = request.data.get("slack_bot_token") or getattr(admin_user, "slack_bot_token", None)
+            logger.info(
+                f"[UserDetailCreate] Slack sync check: admin_id={getattr(admin_user, 'id', None)} "
+                f"slack_bot_token_set={bool(slack_bot_token)} roles={roles} target_email={email}"
+            )
             if slack_bot_token and roles:
                 slack_user_id = lookup_slack_user_by_email(slack_bot_token, email)
                 if slack_user_id:
@@ -845,6 +902,15 @@ class UserDetailCreateView(generics.CreateAPIView):
                         threading.Thread(target=_send_slack_platform_email, daemon=True).start()
                 else:
                     slack_sync_result = [{"status": "failed", "error": "User not found in Slack workspace for this email"}]
+                    logger.warning(
+                        f"[UserDetailCreate] Slack sync failed: lookupByEmail returned None for target_email={email} "
+                        f"admin_id={admin_user.id}"
+                    )
+            else:
+                if not slack_bot_token:
+                    logger.warning(f"[UserDetailCreate] Slack sync skipped: missing slack_bot_token for admin_id={admin_user.id}")
+                elif not roles:
+                    logger.warning(f"[UserDetailCreate] Slack sync skipped: missing roles for {email}")
 
             response_data = {
                 "message": "User detail created successfully",
