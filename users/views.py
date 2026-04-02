@@ -2949,17 +2949,10 @@ class SlackOAuthCallbackView(APIView):
             django_access_token = str(refresh.access_token)
             django_refresh_token = str(refresh)
 
-            # ✅ Step 5: Return popup HTML and notify opener window.
-            # Frontend listens for `SLACK_CONNECTED`; direct redirect skips postMessage and causes "Slack not connected".
+            # ✅ Step 5: Directly redirect to Slack platform
             team_id = team_info.get("id")
             slack_redirect_url = f"https://app.slack.com/client/{team_id}" if team_id else "https://slack.com"
-            return self._html_response(success=True, data={
-                "bot_access_token": bot_token,
-                "team_id": team_id,
-                "slack_user_id": user_id,
-                "email": email,
-                "slack_redirect_url": slack_redirect_url,
-            })
+            return HttpResponseRedirect(slack_redirect_url)
 
         except Exception as e:
             logger.exception("Slack OAuth callback exception")
@@ -2988,18 +2981,9 @@ class SlackOAuthCallbackView(APIView):
                 (function() {{
                     var payload = {payload_json};
                     console.log("Slack OAuth finished:", payload);
-                    try {{
-                        if (payload && payload.success && payload.bot_access_token) {{
-                            localStorage.setItem("slack_bot_token", payload.bot_access_token);
-                            if (payload.team_id) localStorage.setItem("slack_team_id", payload.team_id);
-                            if (payload.slack_user_id) localStorage.setItem("slack_user_id", payload.slack_user_id);
-                        }}
-                    }} catch (e) {{
-                        console.warn("Could not persist Slack payload in popup localStorage", e);
-                    }}
                     if (window.opener) {{
                         window.opener.postMessage({{
-                            type: payload.success ? "SLACK_CONNECTED" : "SLACK_CONNECT_ERROR",
+                            type: "slack-auth-success",
                             payload: payload
                         }}, "*");
                     }}
