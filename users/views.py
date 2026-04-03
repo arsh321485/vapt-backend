@@ -1182,13 +1182,15 @@ class MicrosoftTeamsCallbackView(APIView):
                 user = User.objects.filter(id=admin_id_from_state).first()
 
             if not user and email:
-                user, _ = User.objects.get_or_create(
+                user, created = User.objects.get_or_create(
                     email=email,
                     defaults={
                         "password": make_password(None),
                         "login_provider": "microsoft_teams",
                     },
                 )
+            else:
+                created = False
 
             if user:
                 user.login_provider = 'microsoft_teams'

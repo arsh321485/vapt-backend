@@ -1,5 +1,0 @@
-The problem
-auto_create_vaptfix_team() already returns a team_id from Microsoft Graph, but the code never saved it on the admin User. Only ms_access_token was stored.
-When a member is created, sync runs only if request.user.ms_team_id is set (or team_id is sent in the body). So ms_team_id stayed empty → Teams sync never ran → UserDetail.team_id stayed null.
-
-mujhe plan btao ki nai nai ho rha hai 
