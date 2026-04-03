@@ -939,7 +939,10 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 return JsonResponse({"error": "Missing redirect_uri"}, status=400)
 
             # Create state (encodes frontend redirect)
+            # Use admin_id from query param, else fall back to the authenticated request user
             admin_id = request.GET.get("admin_id")
+            if not admin_id and request.user and request.user.is_authenticated:
+                admin_id = str(request.user.id)
             state_data = {
                 "redirect_uri": frontend_redirect,
                 "nonce": secrets.token_urlsafe(8),
