@@ -1287,6 +1287,12 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                 # Auto-create Vaptfix team with 4 channels
                 vaptfix_team = auto_create_vaptfix_team(access_token)
 
+                # Save team_id on the admin user so member-creation sync can use it
+                team_id_from_team = vaptfix_team.get("team_id") if vaptfix_team else None
+                if team_id_from_team:
+                    user.ms_team_id = team_id_from_team
+                    user.save(update_fields=["ms_team_id"])
+
                 logger.info(f"Microsoft Teams OAuth login successful: {user.email}")
 
                 return Response({
