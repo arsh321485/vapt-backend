@@ -994,7 +994,7 @@ def _create_vaptfix_channels(team_id, headers):
             ch_resp = requests.post(channels_url, headers=headers, json={
                 "displayName": channel_name,
                 "description": f"{channel_name} channel",
-                "membershipType": "private"
+                "membershipType": "standard"
             }, timeout=15)
             results.append({"channelName": channel_name, "status": "created" if ch_resp.status_code in (200, 201) else "failed"})
         except Exception as e:
@@ -1242,6 +1242,8 @@ class MicrosoftTeamsCallbackView(APIView):
                     console.log({json.dumps(vaptfix_team)});
 
                     // Post message to opener if popup
+                    var teamsUrl = {json.dumps(vaptfix_team.get('teams_url') if vaptfix_team else None)};
+                    var redirectUrl = teamsUrl || "https://teams.microsoft.com";
                     if (window.opener) {{
                         window.opener.postMessage({{
                             type: "TEAMS_CONNECTED",
@@ -1252,10 +1254,8 @@ class MicrosoftTeamsCallbackView(APIView):
                             django_refresh_token: "{django_refresh_token}",
                             vaptfix_team: {json.dumps(vaptfix_team)}
                         }}, "{frontend_redirect}");
-                        window.close();
-                    }} else {{
-                        window.location.href = "{frontend_redirect}";
                     }}
+                    window.location.href = redirectUrl;
                 </script>
             </body>
             </html>
@@ -1762,7 +1762,7 @@ class CreateTeamView(generics.GenericAPIView):
             payload = {
                 "displayName": channel_name,
                 "description": f"{channel_name} channel",
-                "membershipType": "private"
+                "membershipType": "standard"
             }
             try:
                 resp = requests.post(url, headers=headers, json=payload, timeout=15)
