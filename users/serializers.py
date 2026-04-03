@@ -220,12 +220,24 @@ class AdminTestingTypeSerializer(serializers.ModelSerializer):
 
 # User Profile Serializer
 class UserProfileSerializer(serializers.ModelSerializer):
+    ms_connected = serializers.SerializerMethodField()
+    slack_connected = serializers.SerializerMethodField()
+
+    def get_ms_connected(self, obj):
+        return bool(obj.ms_access_token and obj.ms_team_id)
+
+    def get_slack_connected(self, obj):
+        return bool(obj.slack_bot_token)
 
     class Meta:
         model = User
         fields = [
             "id",
             "email",
+            "login_provider",
+            "ms_team_id",
+            "ms_connected",
+            "slack_connected",
             "created_at",
             "updated_at",
             "last_login",
@@ -233,6 +245,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "email",
+            "login_provider",
+            "ms_team_id",
+            "ms_connected",
+            "slack_connected",
             "created_at",
             "updated_at",
             "last_login",
