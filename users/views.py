@@ -1042,7 +1042,7 @@ def auto_create_vaptfix_team(access_token):
                         "team_id": team_id,
                         "team_name": "Vaptfix",
                         "status": "already_exists",
-                        "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None,
+                        "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
                         "channels": channels_result
                     }
     except Exception as e:
@@ -1107,7 +1107,7 @@ def auto_create_vaptfix_team(access_token):
             "team_id": team_id,
             "team_name": "Vaptfix",
             "status": "created",
-            "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None,
+            "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
             "channels": channels_result
         }
 
@@ -1244,6 +1244,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     // Post message to opener if popup
                     if (window.opener) {{
                         window.opener.postMessage({{
+                            type: "TEAMS_CONNECTED",
                             success: true,
                             user: {json.dumps(user_data)},
                             tokens: {json.dumps(token_data)},
@@ -1251,10 +1252,10 @@ class MicrosoftTeamsCallbackView(APIView):
                             django_refresh_token: "{django_refresh_token}",
                             vaptfix_team: {json.dumps(vaptfix_team)}
                         }}, "{frontend_redirect}");
+                        window.close();
+                    }} else {{
+                        window.location.href = "{frontend_redirect}";
                     }}
-
-                    // Redirect immediately to Microsoft Teams website
-                    window.location.href = "https://teams.microsoft.com";
                 </script>
             </body>
             </html>
@@ -1901,7 +1902,7 @@ class CreateTeamView(generics.GenericAPIView):
                             "description": description,
                             "visibility": visibility,
                             "location": team_location,
-                            "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None
+                            "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None
                         },
                         "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
@@ -1927,7 +1928,7 @@ class CreateTeamView(generics.GenericAPIView):
                         "status": "completed",
                         "team_id": team_id,
                         "location": team_location,
-                        "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None,
+                        "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
                         "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
                     
@@ -1951,7 +1952,7 @@ class CreateTeamView(generics.GenericAPIView):
                                 "description": description,
                                 "visibility": visibility,
                                 "data": response_data,
-                                "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations" if team_id else None
+                                "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None
                             },
                             "default_channels": channels_result
                         }, status=status.HTTP_201_CREATED)
