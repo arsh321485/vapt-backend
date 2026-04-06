@@ -2961,10 +2961,29 @@ class SlackOAuthCallbackView(APIView):
             django_access_token = str(refresh.access_token)
             django_refresh_token = str(refresh)
 
-            # ✅ Step 5: Directly redirect to Slack platform
+            # ✅ Step 5: postMessage to parent then redirect to Slack
             team_id = team_info.get("id")
             slack_redirect_url = f"https://app.slack.com/client/{team_id}" if team_id else "https://slack.com"
-            return HttpResponseRedirect(slack_redirect_url)
+            html = f"""
+            <html>
+            <head><title>Slack Connected</title></head>
+            <body>
+                <script>
+                    if (window.opener) {{
+                        window.opener.postMessage({{
+                            type: "SLACK_CONNECTED",
+                            bot_token: {json.dumps(bot_token)},
+                            slack_user_id: {json.dumps(user_id)},
+                            django_access_token: {json.dumps(django_access_token)},
+                            django_refresh_token: {json.dumps(django_refresh_token)}
+                        }}, "*");
+                    }}
+                    window.location.href = {json.dumps(slack_redirect_url)};
+                </script>
+            </body>
+            </html>
+            """
+            return HttpResponse(html)
 
         except Exception as e:
             logger.exception("Slack OAuth callback exception")
