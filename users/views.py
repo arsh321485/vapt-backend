@@ -5095,6 +5095,7 @@ class JiraTransitionIssueView(APIView):
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class SlackEventsView(APIView):
     """
     Receives Slack event callbacks.
