@@ -129,6 +129,12 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
             logger.warning(f"[SlackSync] Channel not found for role={role} slack_name={slack_name} (public only)")
             results.append({"role": role, "status": "channel_not_found"})
             continue
+        # Bot must be in the channel before it can invite others
+        requests.post(
+            "https://slack.com/api/conversations.join",
+            headers=headers,
+            json={"channel": channel_id},
+        )
         logger.info(f"[SlackSync] Inviting slack_user_id={slack_user_id} to channel_id={channel_id} role={role}")
         invite_resp = requests.post(
             "https://slack.com/api/conversations.invite",
