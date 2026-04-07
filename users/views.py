@@ -881,6 +881,18 @@ class MicrosoftTeamsCallbackView(APIView):
             token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, headers=headers)
             token_data = token_response.json()
 
+            # Extract tenant_id from id_token JWT (tid claim)
+            tenant_id = ""
+            id_token = token_data.get("id_token", "")
+            if id_token:
+                try:
+                    payload_part = id_token.split(".")[1]
+                    payload_part += "=" * (4 - len(payload_part) % 4)
+                    jwt_payload = json.loads(base64.urlsafe_b64decode(payload_part))
+                    tenant_id = jwt_payload.get("tid", "")
+                except Exception:
+                    pass
+
             if token_response.status_code != 200:
                 logger.error(f"Token exchange failed: {token_data}")
                 return JsonResponse({"error": "Token exchange failed", "details": token_data},
@@ -1243,13 +1255,17 @@ class MicrosoftTeamsCallbackView(APIView):
 
                     // Post message to opener if popup
                     var teamsUrl = {json.dumps(vaptfix_team.get('teams_url') if vaptfix_team else None)};
+                    var tenantId = "{tenant_id}";
+                    if (teamsUrl && tenantId) {{
+                        teamsUrl = teamsUrl + "&tenantId=" + tenantId;
+                    }}
                     var redirectUrl = teamsUrl || "https://teams.microsoft.com";
                     if (window.opener) {{
                         window.opener.postMessage({{
                             type: "TEAMS_CONNECTED",
                             success: true,
                             user: {json.dumps(user_data)},
-                            tokens: {json.dumps(token_data)},
+                            tokens: {{...{json.dumps(token_data)}, tenant_id: "{tenant_id}"}},
                             django_access_token: "{django_access_token}",
                             django_refresh_token: "{django_refresh_token}",
                             vaptfix_team: {json.dumps(vaptfix_team)}
