@@ -1,8 +1,3 @@
-Enable Events
-Your app can subscribe to be notified of events in Slack (for example, when a user adds a reaction or creates a file) at a URL you choose. Learn more.
-Request URL Your URL didn't respond with the value of the challenge parameter.
-https://vaptbackend.secureitlab.com/api/admin/users/slack/events/
-        
-We’ll send HTTP POST requests to this URL when events occur. As soon as you enter a URL, we’ll send a request with a challenge parameter, and your endpoint must respond with the challenge value. Learn more.
+abhi bhi slack ke plotform se user add ho rhe hai but o database me save nai ho rhe hai 
 
-retry bol rha hai 
+o check kro 
