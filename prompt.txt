@@ -1,3 +1,0 @@
-abhi bhi slack ke plotform se user add ho rhe hai but o database me save nai ho rhe hai 
-
-o check kro 
