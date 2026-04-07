@@ -5117,11 +5117,15 @@ class SlackEventsView(APIView):
         if event_type == "url_verification":
             return Response({"challenge": payload.get("challenge")})
 
-        # Handle event callbacks
+        # Handle event callbacks — run in background so Slack gets 200 immediately
         if event_type == "event_callback":
             event = payload.get("event", {})
             team_id = payload.get("team_id", event.get("team", ""))
-            self._handle_event(event, team_id)
+            threading.Thread(
+                target=self._handle_event,
+                args=(event, team_id),
+                daemon=True,
+            ).start()
 
         return Response({"ok": True})
 
@@ -5137,7 +5141,7 @@ class SlackEventsView(APIView):
                 return False
         except (ValueError, TypeError):
             return False
-        body = request.body.decode("utf-8")
+        body = request._request.body.decode("utf-8")
         base = f"v0:{timestamp}:{body}"
         computed = "v0=" + hmac.new(
             signing_secret.encode(), base.encode(), hashlib.sha256
@@ -5170,6 +5174,17 @@ class SlackEventsView(APIView):
         elif etype == "channel_unarchive":
             logger.info(f"Slack channel unarchived: {event.get('channel')}")
 
+        elif etype == "team_join":
+            # Fires when ANY user joins the workspace — most reliable trigger
+            user_obj = event.get("user", {})
+            if isinstance(user_obj, dict):
+                slack_user_id = user_obj.get("id")
+            else:
+                slack_user_id = user_obj  # sometimes just a string ID
+            tid = team_id or event.get("team", "")
+            logger.info(f"[SlackEvent] team_join: user={slack_user_id} team={tid}")
+            self._save_slack_member_to_user_detail(slack_user_id, tid)
+
         elif etype == "member_joined_channel":
             slack_user_id = event.get("user")
             tid = team_id or event.get("team", "")
@@ -5194,8 +5209,11 @@ class SlackEventsView(APIView):
 
             # Find admin who owns this Slack workspace
             admin = User.objects.filter(slack_team_id=team_id).first()
-            if not admin or not admin.slack_bot_token:
-                logger.warning(f"[SlackEvent] No admin found for team_id={team_id}")
+            if not admin:
+                logger.warning(f"[SlackEvent] No admin found for team_id={team_id} — check slack_team_id field in DB")
+                return
+            if not admin.slack_bot_token:
+                logger.warning(f"[SlackEvent] Admin {admin.email} has no slack_bot_token")
                 return
 
             # Fetch user profile from Slack
