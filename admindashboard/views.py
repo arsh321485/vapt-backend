@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 import re
 
 from .serializers import (
@@ -675,27 +675,32 @@ class AdminMitigationTimelineAPIView(APIView):
             total_days = critical_days + high_days + medium_days + low_days
             total_hours = days_to_hours(total_days)
 
-            # Remaining days calculation
-            base_date = (rc.updated_at or rc.created_at).date()
-            today = date.today()
+            # Remaining days calculation — full datetime used for real-time countdown
+            base_datetime = rc.updated_at or rc.created_at
+            if base_datetime.tzinfo is None:
+                base_datetime = base_datetime.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
 
             def _remaining(n_days):
-                deadline = base_date + timedelta(days=n_days)
-                delta = (deadline - today).days
-                if delta < 0:
-                    return {"remaining_days": abs(delta), "remaining_label": "Overdue", "status": "overdue"}
-                weeks, days_left = divmod(delta, 7)
+                deadline_dt = base_datetime + timedelta(days=n_days)
+                delta = deadline_dt - now
+                total_seconds = delta.total_seconds()
+                if total_seconds <= 0:
+                    overdue_days = math.ceil(abs(total_seconds) / 86400)
+                    return {"remaining_days": overdue_days, "remaining_label": "Overdue", "status": "overdue"}
+                remaining_days = math.ceil(total_seconds / 86400)
+                weeks, days_left = divmod(remaining_days, 7)
                 if weeks > 0 and days_left > 0:
                     label = f"{weeks} week{'s' if weeks > 1 else ''} {days_left} day{'s' if days_left > 1 else ''}"
                 elif weeks > 0:
                     label = f"{weeks} week{'s' if weeks > 1 else ''}"
                 else:
                     label = f"{days_left} day{'s' if days_left > 1 else ''}"
-                return {"remaining_days": delta, "remaining_label": label, "status": "active"}
+                return {"remaining_days": remaining_days, "remaining_label": label, "status": "active"}
 
             payload = {
                 "report_id": report_id,
-                "base_date": str(base_date),
+                "base_date": str(base_datetime.date()),
                 "critical": {
                     "raw": rc.critical,
                     "days": critical_days,

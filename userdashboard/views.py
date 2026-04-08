@@ -3,6 +3,8 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 import re
+import math
+from datetime import timedelta, datetime, timezone
 
 from vaptfix.mongo_client import MongoContext
 
@@ -472,11 +474,35 @@ class UserMitigationTimelineAPIView(APIView):
             l = _parse_timeline_to_days(rc.low)
             t = c + h + m + l
 
+            # Real-time countdown using full datetime (not just date)
+            base_datetime = rc.updated_at or rc.created_at
+            if base_datetime.tzinfo is None:
+                base_datetime = base_datetime.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+
+            def _remaining(n_days):
+                deadline_dt = base_datetime + timedelta(days=n_days)
+                delta = deadline_dt - now
+                total_seconds = delta.total_seconds()
+                if total_seconds <= 0:
+                    overdue_days = math.ceil(abs(total_seconds) / 86400)
+                    return {"remaining_days": overdue_days, "remaining_label": "Overdue", "status": "overdue"}
+                remaining_days = math.ceil(total_seconds / 86400)
+                weeks, days_left = divmod(remaining_days, 7)
+                if weeks > 0 and days_left > 0:
+                    label = f"{weeks} week{'s' if weeks > 1 else ''} {days_left} day{'s' if days_left > 1 else ''}"
+                elif weeks > 0:
+                    label = f"{weeks} week{'s' if weeks > 1 else ''}"
+                else:
+                    label = f"{days_left} day{'s' if days_left > 1 else ''}"
+                return {"remaining_days": remaining_days, "remaining_label": label, "status": "active"}
+
             result = {
-                "critical": {"raw": rc.critical, "days": c, "label": _days_to_label(c)},
-                "high":     {"raw": rc.high,     "days": h, "label": _days_to_label(h)},
-                "medium":   {"raw": rc.medium,   "days": m, "label": _days_to_label(m)},
-                "low":      {"raw": rc.low,       "days": l, "label": _days_to_label(l)},
+                "base_date": str(base_datetime.date()),
+                "critical": {"raw": rc.critical, "days": c, "label": _days_to_label(c), **_remaining(c)},
+                "high":     {"raw": rc.high,     "days": h, "label": _days_to_label(h), **_remaining(h)},
+                "medium":   {"raw": rc.medium,   "days": m, "label": _days_to_label(m), **_remaining(m)},
+                "low":      {"raw": rc.low,       "days": l, "label": _days_to_label(l), **_remaining(l)},
                 "total":    {"days": t, "hours": _days_to_hours(t), "label": _days_to_label(t)}
             }
             return Response(result)

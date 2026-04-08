@@ -14,7 +14,8 @@ from .serializers import (
 import logging
 import calendar
 import re
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -214,29 +215,35 @@ class RiskCriteriaCalendarView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # base_date = updated_at if criteria was updated, else created_at
-        base_date = (risk.updated_at or risk.created_at).date()
-        today = date.today()
+        # base_datetime = updated_at if criteria was updated, else created_at (full datetime for real-time countdown)
+        base_datetime = risk.updated_at or risk.created_at
+        if base_datetime.tzinfo is None:
+            base_datetime = base_datetime.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
 
-        def _remaining(deadline_date):
-            delta = (deadline_date - today).days
-            if delta < 0:
-                return {"days": abs(delta), "status": "overdue"}
-            weeks, days = divmod(delta, 7)
+        def _remaining(n_days):
+            deadline_dt = base_datetime + timedelta(days=n_days)
+            delta = deadline_dt - now
+            total_seconds = delta.total_seconds()
+            if total_seconds <= 0:
+                overdue_days = math.ceil(abs(total_seconds) / 86400)
+                return {"days": overdue_days, "status": "overdue"}
+            remaining_days = math.ceil(total_seconds / 86400)
+            weeks, days = divmod(remaining_days, 7)
             if weeks > 0 and days > 0:
                 label = f"{weeks} week{'s' if weeks > 1 else ''} {days} day{'s' if days > 1 else ''}"
             elif weeks > 0:
                 label = f"{weeks} week{'s' if weeks > 1 else ''}"
             else:
                 label = f"{days} day{'s' if days > 1 else ''}"
-            return {"days": delta, "label": label, "status": "active"}
+            return {"days": remaining_days, "label": label, "status": "active"}
 
         # Calculate deadline dates with remaining days
         deadlines = {}
         for severity, n_days in [("critical", critical_days), ("high", high_days),
                                   ("medium", medium_days), ("low", low_days)]:
-            deadline_date = base_date + timedelta(days=n_days)
-            remaining = _remaining(deadline_date)
+            deadline_date = (base_datetime + timedelta(days=n_days)).date()
+            remaining = _remaining(n_days)
             deadlines[severity] = {
                 "days":           n_days,
                 "deadline_date":  str(deadline_date),
@@ -279,7 +286,7 @@ class RiskCriteriaCalendarView(APIView):
             {
                 "message": "Calendar data retrieved successfully",
                 "risk_criteria_id": str(risk._id),
-                "base_date": str(base_date),
+                "base_date": str(base_datetime.date()),
                 "deadlines": deadlines,
                 "calendar": {
                     "month": f"{year:04d}-{month:02d}",
