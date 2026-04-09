@@ -506,7 +506,7 @@ class SendPasswordResetEmailView(generics.GenericAPIView):
             uid = urlsafe_base64_encode(force_bytes(user.pk))  # This will use the UUID id
             token = PasswordResetTokenGenerator().make_token(user)
 
-            reset_link = f"https://vapt-frontend-liart.vercel.app/reset-password/{uid}/{token}/"
+            reset_link = f"https://vapt-fron1.vercel.app/reset-password/{uid}/{token}/"
 
             data = {
                 "to_email": user_email,
@@ -581,7 +581,7 @@ class UserForgotPasswordView(generics.GenericAPIView):
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = PasswordResetTokenGenerator().make_token(user)
 
-        reset_link = f"https://vapt-frontend-liart.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
+        reset_link = f"https://vapt-fron1.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
 
         # Load logo
         import os, base64
@@ -2201,7 +2201,7 @@ class AddUserToChannelView(generics.GenericAPIView):
 
                         uid = urlsafe_base64_encode(force_bytes(django_user.pk))
                         token = PasswordResetTokenGenerator().make_token(django_user)
-                        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+                        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
                         set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
                         udcv = UserDetailCreateView()
@@ -4079,7 +4079,7 @@ class SlackInviteUserView(APIView):
 
                 uid = urlsafe_base64_encode(force_bytes(django_user.pk))
                 token = PasswordResetTokenGenerator().make_token(django_user)
-                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
                 set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
                 email_sent, error = udcv.send_welcome_email(
@@ -4185,7 +4185,7 @@ class SlackInviteUserView(APIView):
 
                 uid = urlsafe_base64_encode(force_bytes(django_user.pk))
                 token = PasswordResetTokenGenerator().make_token(django_user)
-                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
                 set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
                 email_sent, error = view.send_welcome_email(
@@ -4278,7 +4278,7 @@ class JiraOAuthCallbackView(APIView):
             from django.http import HttpResponseRedirect
             from urllib.parse import urlencode
 
-            frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+            frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
             params = urlencode({
                 'access_token': tokens.get('access_token', ''),
                 'refresh_token': tokens.get('refresh_token', ''),
@@ -5315,7 +5315,7 @@ class SlackEventsView(APIView):
 
                     uid = urlsafe_base64_encode(force_bytes(django_user.pk))
                     token = PasswordResetTokenGenerator().make_token(django_user)
-                    frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+                    frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
                     set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
                     view = UserDetailCreateView()
@@ -5529,7 +5529,7 @@ class TeamsWebhookView(APIView):
             uid = urlsafe_base64_encode(force_bytes(django_user.pk))
             token = PasswordResetTokenGenerator().make_token(django_user)
             set_password_url = (
-                f"https://vapt-frontend-liart.vercel.app/auth"
+                f"https://vapt-fron1.vercel.app/auth"
                 f"?mode=set-password&uid={uid}&token={token}"
             )
 
