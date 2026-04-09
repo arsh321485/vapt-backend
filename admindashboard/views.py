@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from datetime import date, timedelta, datetime, timezone
 import re
+import math
 
 from .serializers import (
     TotalAssetsSerializer, AvgScoreSerializer,
