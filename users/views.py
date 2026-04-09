@@ -1170,6 +1170,18 @@ class MicrosoftTeamsCallbackView(APIView):
             token_data = token_response.json()
             print("🔑 Token Response:", token_data)
 
+            # Extract tenant_id from id_token JWT (tid claim)
+            tenant_id = ""
+            id_token = token_data.get("id_token", "")
+            if id_token:
+                try:
+                    payload_part = id_token.split(".")[1]
+                    payload_part += "=" * (4 - len(payload_part) % 4)
+                    jwt_payload = json.loads(base64.urlsafe_b64decode(payload_part))
+                    tenant_id = jwt_payload.get("tid", "")
+                except Exception:
+                    pass
+
             if token_response.status_code != 200 or "access_token" not in token_data:
                 return JsonResponse({
                     "error": "Token exchange failed",
