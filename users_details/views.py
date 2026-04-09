@@ -126,9 +126,22 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
             continue
         channel_id = channel_map.get(slack_name)
         if not channel_id:
-            logger.warning(f"[SlackSync] Channel not found for role={role} slack_name={slack_name} (public only)")
-            results.append({"role": role, "status": "channel_not_found"})
-            continue
+            # Channel does not exist — auto-create it as a public channel
+            logger.info(f"[SlackSync] Channel '{slack_name}' not found, auto-creating...")
+            create_resp = requests.post(
+                "https://slack.com/api/conversations.create",
+                headers=headers,
+                json={"name": slack_name, "is_private": False},
+            )
+            create_data = create_resp.json()
+            if create_data.get("ok"):
+                channel_id = create_data["channel"]["id"]
+                channel_map[slack_name] = channel_id
+                logger.info(f"[SlackSync] Created channel '{slack_name}' id={channel_id}")
+            else:
+                logger.warning(f"[SlackSync] Could not create channel '{slack_name}': {create_data.get('error')}")
+                results.append({"role": role, "status": "channel_not_found", "error": create_data.get("error")})
+                continue
         # Bot must be in the channel before it can invite others
         requests.post(
             "https://slack.com/api/conversations.join",

@@ -1054,7 +1054,7 @@ def auto_create_vaptfix_team(access_token):
                         "team_id": team_id,
                         "team_name": "Vaptfix",
                         "status": "already_exists",
-                        "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
+                        "teams_url": f"msteams://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
                         "channels": channels_result
                     }
     except Exception as e:
@@ -1266,12 +1266,16 @@ class MicrosoftTeamsCallbackView(APIView):
                     console.log({json.dumps(vaptfix_team)});
 
                     // Post message to opener if popup
-                    var teamsUrl = {json.dumps(vaptfix_team.get('teams_url') if vaptfix_team else None)};
+                    var teamsDeepLink = {json.dumps(vaptfix_team.get('teams_url') if vaptfix_team else None)};
                     var tenantId = "{tenant_id}";
-                    if (teamsUrl && tenantId) {{
-                        teamsUrl = teamsUrl + "&tenantId=" + tenantId;
+                    if (teamsDeepLink && tenantId) {{
+                        teamsDeepLink = teamsDeepLink + "&tenantId=" + tenantId;
                     }}
-                    var redirectUrl = teamsUrl || "https://teams.microsoft.com";
+                    // Fallback web URL for browsers that don't support msteams:// protocol
+                    var webUrl = teamsDeepLink
+                        ? teamsDeepLink.replace("msteams://", "https://")
+                        : "https://teams.microsoft.com";
+
                     if (window.opener) {{
                         window.opener.postMessage({{
                             type: "TEAMS_CONNECTED",
@@ -1283,7 +1287,13 @@ class MicrosoftTeamsCallbackView(APIView):
                             vaptfix_team: {json.dumps(vaptfix_team)}
                         }}, "{frontend_redirect}");
                     }}
-                    window.location.href = redirectUrl;
+                    // Try Teams desktop app first (msteams:// protocol), fallback to web after 2s
+                    if (teamsDeepLink) {{
+                        window.location.href = teamsDeepLink;
+                        setTimeout(function() {{ window.location.href = webUrl; }}, 2000);
+                    }} else {{
+                        window.location.href = webUrl;
+                    }}
                 </script>
             </body>
             </html>
@@ -1956,7 +1966,7 @@ class CreateTeamView(generics.GenericAPIView):
                         "status": "completed",
                         "team_id": team_id,
                         "location": team_location,
-                        "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
+                        "teams_url": f"msteams://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
                         "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
                     
