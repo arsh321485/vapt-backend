@@ -159,8 +159,8 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://vapt-frontend-liart.vercel.app")
-VAPTFIX_LOGIN_URL = os.getenv("VAPTFIX_LOGIN_URL", "https://vapt-frontend-liart.vercel.app/auth?tab=user")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://vapt-fron1.vercel.app")
+VAPTFIX_LOGIN_URL = os.getenv("VAPTFIX_LOGIN_URL", "https://vapt-fron1.vercel.app/auth?tab=user")
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://vaptbackend.secureitlab.com")
 
 
