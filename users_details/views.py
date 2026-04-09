@@ -882,7 +882,9 @@ class UserDetailCreateView(generics.CreateAPIView):
                 f"slack_bot_token_set={bool(slack_bot_token)} roles={roles} target_email={email}"
             )
             if slack_bot_token and roles:
-                slack_user_id = lookup_slack_user_by_email(slack_bot_token, email)
+                # Try to get slack_user_id from the member's own User record first (already stored at OAuth time)
+                member_user = User.objects.filter(email=email).first()
+                slack_user_id = getattr(member_user, "slack_user_id", None) or lookup_slack_user_by_email(slack_bot_token, email)
                 if slack_user_id:
                     slack_results, channel_ids = sync_member_to_slack_channels(
                         bot_token=slack_bot_token,
