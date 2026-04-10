@@ -1615,25 +1615,58 @@ class ListTeamsView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     renderer_classes = [UserRenderer]
 
+    def _refresh_ms_token(self, user):
+        """Try to refresh Microsoft access token using stored refresh token."""
+        refresh_token = getattr(user, "ms_refresh_token", None)
+        if not refresh_token:
+            return None
+        try:
+            token_payload = {
+                "grant_type": "refresh_token",
+                "client_id": settings.MICROSOFT_CLIENT_ID,
+                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+                "scope": "https://graph.microsoft.com/.default offline_access",
+            }
+            resp = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
+            data = resp.json()
+            new_token = data.get("access_token")
+            if new_token:
+                user.ms_access_token = new_token
+                if data.get("refresh_token"):
+                    user.ms_refresh_token = data["refresh_token"]
+                user.save(update_fields=["ms_access_token", "ms_refresh_token"])
+                return new_token
+        except Exception as e:
+            logger.warning(f"[ListTeamsView] Token refresh failed: {e}")
+        return None
+
     def post(self, request, *args, **kwargs):
         try:
             serializer = self.get_serializer(data=request.data)
-            
+
             if serializer.is_valid(raise_exception=True):
                 access_token = serializer.validated_data['access_token']
-                
+
                 url = "https://graph.microsoft.com/v1.0/me/joinedTeams"
                 headers = {
                     'Authorization': f'Bearer {access_token}',
                     'Content-Type': 'application/json'
                 }
-                
+
                 response = requests.get(url, headers=headers, timeout=10)
-                
+
+                # Token expired — try auto-refresh once
+                if response.status_code == 401:
+                    new_token = self._refresh_ms_token(request.user)
+                    if new_token:
+                        headers['Authorization'] = f'Bearer {new_token}'
+                        response = requests.get(url, headers=headers, timeout=10)
+
                 if response.status_code == 200:
                     teams_data = response.json()
                     teams_list = []
-                    
+
                     for team in teams_data.get('value', []):
                         teams_list.append({
                             "id": team.get("id"),
@@ -1642,8 +1675,9 @@ class ListTeamsView(generics.GenericAPIView):
                             "visibility": team.get("visibility"),
                             "webUrl": team.get("webUrl")
                         })
-                    
+
                     return Response({
+                        "status": True,
                         "teams": teams_list,
                         "count": len(teams_list)
                     }, status=status.HTTP_200_OK)
@@ -1653,14 +1687,16 @@ class ListTeamsView(generics.GenericAPIView):
                         error_data = response.json()
                     except:
                         pass
-                    
+
                     return Response({
+                        "status": False,
                         "error": f"Failed to fetch teams: {error_data.get('error', {}).get('message', 'Unknown error')}"
                     }, status=status.HTTP_400_BAD_REQUEST)
-                    
+
         except Exception as e:
             logger.error(f"List teams error: {str(e)}")
             return Response({
+                "status": False,
                 "error": "Failed to fetch teams. Please try again."
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
