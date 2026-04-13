@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.views import APIView
 from rest_framework import serializers
 from django.contrib.auth import login
@@ -3738,24 +3739,24 @@ class DeleteSlackChannelView(APIView):
                 'message': f'An error occurred while deleting channel: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 class ListSlackChannelsView(APIView):
-    """List Slack channels using bot token from Authorization header"""
-    authentication_classes = []
-    permission_classes = [AllowAny]
+    """List Slack channels using bot token from admin DB record or Authorization header"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
     def get(self, request):
         try:
-            # Get Slack bot token from Authorization header
-            auth_header = request.headers.get('Authorization', '')
-            if not auth_header.startswith('Bearer '):
-                return Response({
-                    'success': False,
-                    'message': 'Authorization header with Bearer token is required'
-                }, status=400)
-            
-            access_token = auth_header.replace('Bearer ', '').strip()
+            # Prefer the Slack bot token stored in the admin's DB record.
+            # Fall back to a Slack token passed explicitly in the Authorization header
+            # (legacy path — only used if the header starts with 'xox' which is a Slack token prefix).
+            access_token = getattr(request.user, "slack_bot_token", None)
+            if not access_token:
+                auth_header = request.headers.get('Authorization', '')
+                candidate = auth_header.replace('Bearer ', '').strip()
+                if candidate.startswith('xox'):
+                    access_token = candidate
             if not access_token:
                 return Response({
                     'success': False,
-                    'message': 'Slack bot token is required'
+                    'message': 'Slack not connected. Please connect Slack first.'
                 }, status=400)
 
             # Optional query params
