@@ -139,9 +139,27 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
                 channel_map[slack_name] = channel_id
                 logger.info(f"[SlackSync] Created channel '{slack_name}' id={channel_id}")
             else:
-                logger.warning(f"[SlackSync] Could not create channel '{slack_name}': {create_data.get('error')}")
-                results.append({"role": role, "status": "channel_not_found", "error": create_data.get("error")})
-                continue
+                err = create_data.get("error")
+                logger.warning(f"[SlackSync] Could not create channel '{slack_name}': {err}")
+                if err == "name_taken":
+                    # Channel exists but bot is not in it (so conversations.list didn't return it).
+                    # Retry with exclude_archived=false to find the existing channel ID.
+                    retry_resp = requests.get(
+                        "https://slack.com/api/conversations.list",
+                        headers=headers,
+                        params={"types": "public_channel,private_channel", "limit": 1000, "exclude_archived": False},
+                    )
+                    retry_map = {ch["name"].lower(): ch["id"] for ch in retry_resp.json().get("channels", [])}
+                    channel_id = retry_map.get(slack_name)
+                    if channel_id:
+                        channel_map[slack_name] = channel_id
+                        logger.info(f"[SlackSync] Resolved existing channel '{slack_name}' id={channel_id} after name_taken retry")
+                    else:
+                        results.append({"role": role, "status": "channel_not_found", "error": err})
+                        continue
+                else:
+                    results.append({"role": role, "status": "channel_not_found", "error": err})
+                    continue
         # Bot must be in the channel before it can invite others
         requests.post(
             "https://slack.com/api/conversations.join",
