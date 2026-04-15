@@ -221,6 +221,10 @@ def _parse_markdown_table(table_str: str) -> list:
 
         row = {columns[i]: cells[i] for i in range(len(columns))}
         row["sub_tasks"] = _parse_action_sub_tasks(row.get("action", ""))
+        # Convert artifacts_tools_used from comma-separated string to array
+        raw_tools = row.get("artifacts_tools_used", "")
+        if isinstance(raw_tools, str):
+            row["artifacts_tools_used"] = [t.strip() for t in raw_tools.split(",") if t.strip()]
         rows.append(row)
 
     return rows

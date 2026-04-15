@@ -916,7 +916,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
     """
     import time
     import uuid as _uuid
-    from .mitigation_tool import MitigationGenerationTool, _parse_troubleshooting_guide
+    from .mitigation_tool import MitigationGenerationTool, _parse_troubleshooting_guide, _detect_os
 
     # Prevent duplicate threads for the same report_id
     with _running_card_jobs_lock:
@@ -993,6 +993,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "description": vuln_description,
                     "host_name": host_name,
                     "operating_system": operating_system,
+                    "os_category": _detect_os(operating_system),
                     "plugin_output": first_plugin_output,
                     "plugin_output_url": first_plugin_output_url,
                 })
@@ -1031,6 +1032,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         for vuln in vulns_to_process:
             vuln_plugin_name = vuln["plugin_name"]
             vuln_host_name   = vuln.get("host_name", "") or ""
+            vuln_os_category = vuln.get("os_category", "windows")
 
             # ── Step 1: Skip if card already exists for this exact (report_id, plugin_name, host_name) ──
             already_exists = db[VULN_CARD_COLLECTION].find_one({
@@ -1043,15 +1045,15 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 cached += 1
                 continue
 
-            # ── Step 2: Check if any card for this plugin_name exists in DB (any report/admin) ──
+            # ── Step 2: Check if any card for this plugin_name + OS category exists in DB ──
             cached_card = db[VULN_CARD_COLLECTION].find_one(
-                {"vulnerability_name": vuln_plugin_name},
+                {"vulnerability_name": vuln_plugin_name, "os_category": vuln_os_category},
                 sort=[("created_at", -1)],
             )
 
             if cached_card:
                 # Reuse mitigation data from existing card — no GPT call needed
-                print(f"[AutoGenCards] Cache hit for '{vuln_plugin_name}', copying from existing card", flush=True)
+                print(f"[AutoGenCards] Cache hit for '{vuln_plugin_name}' ({vuln_os_category}), copying from existing card", flush=True)
                 document = {
                     "card_id":            str(_uuid.uuid4()),
                     "report_id":          report_id,
@@ -1059,6 +1061,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "admin_id":           admin_id,
                     "vulnerability_name": vuln_plugin_name,
                     "host_name":          vuln_host_name,
+                    "os_category":        vuln_os_category,
                     "description":        vuln["description"],
                     "mitigation_table":   cached_card.get("mitigation_table", []),
                     "resource_id":        vuln_host_name or cached_card.get("resource_id"),
@@ -1109,6 +1112,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "admin_id":           admin_id,
                     "vulnerability_name": vuln_plugin_name,
                     "host_name":          vuln_host_name,
+                    "os_category":        vuln_os_category,
                     "description":        vuln["description"],
                     "mitigation_table":   mitigation_table_arr,
                     "resource_id":        vc.get("resource_id"),
@@ -1209,7 +1213,7 @@ class GenerateVulnerabilityCardView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        from .mitigation_tool import MitigationGenerationTool
+        from .mitigation_tool import MitigationGenerationTool, _detect_os
 
         report_id = request.data.get("report_id", "").strip()
         if not report_id:
@@ -1281,6 +1285,7 @@ class GenerateVulnerabilityCardView(APIView):
                             "plugin_output": vuln.get("plugin_output", ""),
                             "host_name": host_name,
                             "operating_system": host_os,
+                            "os_category": _detect_os(host_os),
                             "risk_factor": vuln.get("risk_factor", ""),
                         })
 
@@ -1356,6 +1361,7 @@ class GenerateVulnerabilityCardView(APIView):
                     "admin_email": getattr(request.user, "email", ""),
                     "admin_id": str(request.user.id),
                     "vulnerability_name": vuln_plugin_name,
+                    "os_category": vuln.get("os_category", "windows"),
                     "description": vuln["description"],
                     "plugin_output": vuln.get("plugin_output", "") or None,
                     "mitigation_table": mitigation_table_arr,
