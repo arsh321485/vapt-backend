@@ -1088,6 +1088,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     plugin_output=vuln.get("plugin_output", "") or "",
                     report_id=report_id,
                     host_name=vuln_host_name,
+                    operating_system=vuln.get("operating_system", "") or "",
                 )
 
                 if not result["success"]:

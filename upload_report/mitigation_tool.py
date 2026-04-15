@@ -26,15 +26,26 @@ def _get_openai_client():
     return openai.OpenAI(api_key=api_key)
 
 
+def _detect_os(operating_system: str) -> str:
+    """Return 'linux' if OS string indicates Linux, else 'windows'."""
+    if operating_system and "linux" in operating_system.lower():
+        return "linux"
+    return "windows"
+
+
 def _build_prompt(
     plugin_name: str,
     description: str,
     plugin_output: str = "",
     host_name: str = "",
+    operating_system: str = "",
 ) -> str:
     """Build the full 3-task prompt sent to OpenAI."""
 
     host_line = f"\n- **Affected Host (use as resource_id):** {host_name.strip()}" if host_name and host_name.strip() else ""
+    os_label = _detect_os(operating_system)
+    os_display = "Linux" if os_label == "linux" else "Windows"
+    os_line = f"\n- **Operating System:** {operating_system.strip()}" if operating_system and operating_system.strip() else f"\n- **Operating System:** Windows (default)"
 
     plugin_output_section = ""
     if plugin_output and plugin_output.strip():
@@ -43,7 +54,7 @@ def _build_prompt(
     intro = f"""You are a cybersecurity remediation expert with deep technical knowledge.
 
 ## Vulnerability Information
-- **Vulnerability Name:** {plugin_name}{host_line}
+- **Vulnerability Name:** {plugin_name}{host_line}{os_line}
 - **Description:**
 {description}{plugin_output_section}
 
@@ -60,14 +71,19 @@ CRITICAL GUIDELINES:
   * "Architectural Flaws" — for design-level weaknesses, structural issues, authentication/authorization flaws
 """
 
-    tasks = """
+    os_table_instruction = (
+        f"- Each step must target **{os_display}** systems ONLY. Do NOT include steps for the other OS.\n"
+        f"- The 'Operating System' column in every row must be set to **{os_display}**."
+    )
+
+    tasks = f"""
 ---
 
 ## TASK 1 — MITIGATION TABLE
 
 Provide a highly detailed, step-by-step mitigation table with the following rules:
-- Each step must appear TWICE: once for **Windows** and once for **Linux** (two rows per logical step).
-- You MUST include a **minimum of 8 distinct steps** (16 rows total).
+{os_table_instruction}
+- Include ALL steps required to fully remediate this specific vulnerability. Do not pad with unnecessary steps.
 - Each "Commands for Action" cell must contain copy-paste-ready, production-quality commands with full paths and parameters.
 - For code vulnerabilities: provide exact code snippets, before/after examples, regex patterns.
 - For config vulnerabilities: provide complete config file content, backup/rollback commands.
@@ -85,7 +101,7 @@ Use ONLY what can be determined from the vulnerability information above.
 For fields that cannot be determined, use null.
 
 ```json
-{
+{{
   "resource_id": "<use the Affected Host IP/hostname from above — do NOT leave null if host is provided>",
   "region": "<network subnet or zone derived from host IP, e.g. '192.168.1.x subnet' or null if not determinable>",
   "affected_packages": "<comma-separated list of affected software/packages>",
@@ -100,7 +116,7 @@ For fields that cannot be determined, use null.
   "deadline": "<recommended deadline — e.g. 24 hours for Critical, 7 days for High, 30 days for Medium, 90 days for Low>",
   "artifacts_tools": "<comma-separated list of tools required>",
   "post_mitigation_troubleshooting_guide": "<3-5 numbered steps to verify the fix and handle common post-fix issues>"
-}
+}}
 ```
 
 ---
@@ -204,6 +220,7 @@ def _parse_markdown_table(table_str: str) -> list:
             cells += [""] * (len(columns) - len(cells))
 
         row = {columns[i]: cells[i] for i in range(len(columns))}
+        row["sub_tasks"] = _parse_action_sub_tasks(row.get("action", ""))
         rows.append(row)
 
     return rows
@@ -292,6 +309,62 @@ def _parse_troubleshooting_guide(text: str) -> list:
         steps.append({"step_number": "1", "action": text.strip()})
 
     return steps
+
+
+def _parse_action_sub_tasks(action_text: str) -> list:
+    """
+    Parse numbered items in an action field into sub_tasks.
+
+    Input:
+        "1. Open the vulnerable file...\n2. Search for functions:\n- PHP: exec()\n- Python: os.system()\n3. Identify..."
+
+    Output:
+        [
+            {"number": "1", "description": "Open the vulnerable file...", "items": []},
+            {"number": "2", "description": "Search for functions:", "items": ["PHP: exec()", "Python: os.system()"]},
+            {"number": "3", "description": "Identify...", "items": []}
+        ]
+    """
+    if not action_text:
+        return []
+
+    sub_tasks = []
+    current = None
+
+    for line in action_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        m = re.match(r'^(\d+)\.\s+(.+)', stripped)
+        if m:
+            if current:
+                sub_tasks.append(current)
+            current = {
+                "number": m.group(1),
+                "description": m.group(2).strip(),
+                "items": [],
+            }
+        elif stripped.startswith('-') and current is not None:
+            item_text = stripped.lstrip('-').strip()
+            if item_text:
+                current["items"].append(item_text)
+        elif current is not None:
+            # continuation line of current description
+            current["description"] += " " + stripped
+
+    if current:
+        sub_tasks.append(current)
+
+    # If no numbered items found but text exists, treat whole text as single sub_task
+    if not sub_tasks and action_text.strip():
+        sub_tasks.append({
+            "number": "1",
+            "description": action_text.strip(),
+            "items": [],
+        })
+
+    return sub_tasks
 
 
 def _parse_raw_response_sections(raw_text: str) -> list:
@@ -418,6 +491,7 @@ class MitigationGenerationTool:
         plugin_output: str = "",
         report_id: str = "",
         host_name: str = "",
+        operating_system: str = "",
     ) -> dict:
         """
         Execute the mitigation generation.
@@ -437,7 +511,7 @@ class MitigationGenerationTool:
 
         try:
             client = _get_openai_client()
-            prompt = _build_prompt(plugin_name, description, plugin_output, host_name)
+            prompt = _build_prompt(plugin_name, description, plugin_output, host_name, operating_system)
 
             response = client.chat.completions.create(
                 model=MODEL_NAME,
