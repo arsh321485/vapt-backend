@@ -1164,11 +1164,10 @@ class ClosedVulnerabilitiesByAssetAPIView(APIView):
             feedback_coll = db[FIX_STEP_FEEDBACK_COLLECTION]
             final_feedback_coll = db[FIX_FINAL_FEEDBACK_COLLECTION]
 
-            # Fetch all closed vulnerabilities for this report + asset
+            # Fetch all closed vulnerabilities for this report + asset (by anyone, not just admin)
             closed_cursor = closed_coll.find({
                 "report_id": str(report_id),
                 "host_name": host_name,
-                "closed_by": admin_id
             }).sort("closed_at", -1)
 
             results = []
@@ -1362,10 +1361,15 @@ class FixVulnerabilityStepsAPIView(APIView):
                     "step_name": row.get("step_name", f"Step {step_num}"),
                     "criticality": row.get("criticality", ""),
                     "effort_estimate": row.get("effort_estimate", ""),
+                    "sub_tasks": [],
                     "windows": {},
                     "linux": {},
                 }
                 step_order.append(step_num)
+
+            # Promote sub_tasks to step level (take from first OS row that has them)
+            if not steps_dict[step_num]["sub_tasks"] and os_data.get("sub_tasks"):
+                steps_dict[step_num]["sub_tasks"] = os_data["sub_tasks"]
 
             steps_dict[step_num][os_key] = os_data
 
@@ -1456,6 +1460,9 @@ class FixVulnerabilityStepsAPIView(APIView):
     def get(self, request, fix_vuln_id):
         try:
           with MongoContext() as db:
+            admin_id = str(request.user.id)
+            admin_email = getattr(request.user, "email", "")
+
             fix_coll = db[FIX_VULN_COLLECTION]
             steps_coll = db[FIX_VULN_STEPS_COLLECTION]
             closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
@@ -1552,10 +1559,16 @@ class FixVulnerabilityStepsAPIView(APIView):
             # Parse mitigation_table into structured per-step data
             steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
 
-            # Detect host OS: stored OS takes priority (ensures GET/POST consistency),
-            # then ?os= param, then nessus detection
+            # Detect host OS priority:
+            # 1. vuln_card.os_category (set when AI generated the card)
+            # 2. ?os= query param
+            # 3. fix_doc.operating_system (persisted from first POST)
+            # 4. nessus host_information detection
+            _card_os = (vuln_card.get("os_category") or "").strip().lower()
             os_param = request.query_params.get("os", "").strip().lower()
-            if os_param in ("windows", "linux"):
+            if _card_os in ("windows", "linux"):
+                operating_system = "Windows" if _card_os == "windows" else "Linux"
+            elif os_param in ("windows", "linux"):
                 operating_system = "Windows" if os_param == "windows" else "Linux"
             elif fix_doc.get("operating_system"):
                 operating_system = fix_doc["operating_system"]
@@ -1585,11 +1598,40 @@ class FixVulnerabilityStepsAPIView(APIView):
 
             total_steps = len(step_order)
 
-            # Saved step records from DB, indexed by step_number
-            saved_steps = {
-                s["step_number"]: s
-                for s in steps_coll.find({"fix_vulnerability_id": fix_vuln_id})
-            }
+            # Find user fix docs for same vulnerability (not created by admin)
+            # so admin can see which steps users have completed
+            user_fix_ids = []
+            user_closed_any = False
+            for udoc in fix_coll.find({
+                "report_id": report_id,
+                "host_name": host_name,
+                "plugin_name": plugin_name,
+                "created_by": {"$ne": admin_id},
+            }):
+                user_fix_ids.append(str(udoc["_id"]))
+            for cdoc in closed_coll.find({
+                "report_id": report_id,
+                "host_name": host_name,
+                "plugin_name": plugin_name,
+            }):
+                fid = cdoc.get("fix_vulnerability_id", "")
+                if fid and fid not in user_fix_ids:
+                    user_fix_ids.append(fid)
+                # If any user closed this vulnerability, admin status = closed too
+                if cdoc.get("closed_by") != admin_id:
+                    user_closed_any = True
+
+            # Reflect user closure in admin status
+            if user_closed_any:
+                status_value = "closed"
+
+            # Build saved_steps from user step records — completed status takes priority
+            saved_steps = {}
+            lookup_ids = user_fix_ids if user_fix_ids else [fix_vuln_id]
+            for s in steps_coll.find({"fix_vulnerability_id": {"$in": lookup_ids}}):
+                snum = s["step_number"]
+                if snum not in saved_steps or s.get("status") == "completed":
+                    saved_steps[snum] = s
 
             # Build step list
             steps = []
@@ -1608,14 +1650,15 @@ class FixVulnerabilityStepsAPIView(APIView):
                     "step_number": step_num,
                 })
 
+                _os_key = "linux" if operating_system and operating_system.lower() in ("linux", "unix") else "windows"
                 step_data = {
                     "_id": str(saved["_id"]) if saved else "",
                     "step_number": display_idx,
                     "step_name": step_meta["step_name"],
                     "criticality": step_meta["criticality"],
                     "effort_estimate": step_meta["effort_estimate"],
-                    "windows": step_meta["windows"],
-                    "linux": step_meta["linux"],
+                    "sub_tasks": step_meta.get("sub_tasks", []),
+                    _os_key: step_meta[_os_key],
                     "assigned_team": assigned_team,
                     "assigned_team_members": [
                         {
@@ -1650,9 +1693,6 @@ class FixVulnerabilityStepsAPIView(APIView):
             completed_count = sum(1 for s in steps if s["status"] == "completed")
             next_step = (completed_count + 1) if completed_count < total_steps else None
 
-            admin_id = str(request.user.id)
-            admin_email = getattr(request.user, "email", "")
-
             return Response(
                 {
                     "message": "Steps fetched successfully",
@@ -1684,12 +1724,16 @@ class FixVulnerabilityStepsAPIView(APIView):
             )
 
     # =====================
-    # POST → Complete next step (AUTO-SEQUENTIAL)
-    # step_number and step_name are auto-fetched from vulnerability_cards mitigation_table
-    # Frontend only passes: status (optional), comment (optional)
-    # Body: { "comment": "...", "status": "completed" }
+    # POST → Blocked for Admin (read-only)
+    # Only users can complete steps via UserFixVulnerabilityStepsAPIView
     # =====================
     def post(self, request, fix_vuln_id):
+        return Response(
+            {"detail": "Admin can only read steps. Step completion is done by users only."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    def _post_disabled(self, request, fix_vuln_id):
         admin_id = str(request.user.id)
 
         comment = request.data.get("comment", "")
@@ -2140,6 +2184,13 @@ class FixVulnerabilityFinalFeedbackAPIView(APIView):
     VALID_FIX_RESULTS = ["resolved", "partially_resolved", "not_resolved"]
 
     def post(self, request, fix_vuln_id):
+        """Final feedback submission is restricted to users only."""
+        return Response(
+            {"detail": "Admin can only read feedback. Feedback submission is done by users only."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    def _post_disabled(self, request, fix_vuln_id):
         """Submit final feedback - ONLY after vulnerability is CLOSED."""
         admin_id = str(request.user.id)
 
@@ -2285,15 +2336,42 @@ class FixVulnerabilityFinalFeedbackAPIView(APIView):
             )
 
     def get(self, request, fix_vuln_id):
-        """Retrieve final feedback for a closed vulnerability."""
+        """Retrieve final feedback for a closed vulnerability (admin read-only)."""
+        admin_id = str(request.user.id)
+        admin_email = getattr(request.user, 'email', '')
+
         with MongoContext() as db:
             fix_coll = db[FIX_VULN_COLLECTION]
             closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
             final_feedback_coll = db[FIX_FINAL_FEEDBACK_COLLECTION]
 
-            # Check vulnerability status
-            open_vuln = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
-            if open_vuln:
+            # Find admin's fix doc to get vulnerability details
+            admin_fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+            if not admin_fix_doc:
+                admin_fix_doc = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
+            if not admin_fix_doc:
+                return Response(
+                    {"detail": "Fix vulnerability not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            report_id   = admin_fix_doc.get("report_id", "")
+            plugin_name = admin_fix_doc.get("plugin_name", "")
+            host_name   = admin_fix_doc.get("host_name", "")
+
+            # Find user's closed doc for the same vulnerability
+            user_closed_doc = closed_coll.find_one({
+                "report_id":   report_id,
+                "plugin_name": plugin_name,
+                "host_name":   host_name,
+                "closed_by":   {"$ne": admin_id},
+            })
+
+            # Determine overall status
+            vuln_status = "closed" if user_closed_doc else "open"
+            closed_vuln = user_closed_doc or admin_fix_doc
+
+            if vuln_status == "open":
                 return Response(
                     {
                         "fix_vulnerability_id": fix_vuln_id,
@@ -2304,21 +2382,17 @@ class FixVulnerabilityFinalFeedbackAPIView(APIView):
                     status=status.HTTP_200_OK
                 )
 
-            closed_vuln = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
-            if not closed_vuln:
-                return Response(
-                    {"detail": "Fix vulnerability not found"},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-
-            # Get admin info from request
-            admin_id = str(request.user.id)
-            admin_email = getattr(request.user, 'email', '')
-
-            # Get final feedback
-            feedback = final_feedback_coll.find_one({
-                "fix_vulnerability_id": fix_vuln_id
-            })
+            # Look up feedback using user's fix_vulnerability_id
+            user_fix_vuln_id = user_closed_doc.get("fix_vulnerability_id", fix_vuln_id)
+            feedback = final_feedback_coll.find_one(
+                {"fix_vulnerability_id": user_fix_vuln_id}
+            )
+            # Fallback: search by vulnerability_name + host_name
+            if not feedback:
+                feedback = final_feedback_coll.find_one({
+                    "vulnerability_name": plugin_name,
+                    "host_name": host_name,
+                })
 
             if not feedback:
                 return Response(
@@ -2326,8 +2400,8 @@ class FixVulnerabilityFinalFeedbackAPIView(APIView):
                         "fix_vulnerability_id": fix_vuln_id,
                         "admin_id": admin_id,
                         "admin_email": admin_email,
-                        "vulnerability_name": closed_vuln.get("plugin_name", ""),
-                        "host_name": closed_vuln.get("host_name", ""),
+                        "vulnerability_name": plugin_name,
+                        "host_name": host_name,
                         "severity": closed_vuln.get("risk_factor", ""),
                         "status": "closed",
                         "message": "No final feedback submitted yet",
@@ -2341,8 +2415,8 @@ class FixVulnerabilityFinalFeedbackAPIView(APIView):
                     "fix_vulnerability_id": fix_vuln_id,
                     "admin_id": admin_id,
                     "admin_email": admin_email,
-                    "vulnerability_name": closed_vuln.get("plugin_name", ""),
-                    "host_name": closed_vuln.get("host_name", ""),
+                    "vulnerability_name": plugin_name,
+                    "host_name": host_name,
                     "severity": closed_vuln.get("risk_factor", ""),
                     "status": "closed",
                     "closed_at": _normalize_iso(closed_vuln.get("closed_at")),
@@ -3231,10 +3305,28 @@ class VulnerabilityTimelineAPIView(APIView):
                 "icon": "arrow",
             })
 
-            # 4. Steps Done — only completed steps, ordered by step_number
+            # 4. Steps Done — collect from user fix docs for same vulnerability
+            user_fix_ids = []
+            for udoc in db[FIX_VULN_COLLECTION].find({
+                "report_id":   report_id,
+                "host_name":   host_name,
+                "plugin_name": plugin_name,
+                "created_by":  {"$ne": admin_id},
+            }):
+                user_fix_ids.append(str(udoc["_id"]))
+            for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find({
+                "report_id":   report_id,
+                "host_name":   host_name,
+                "plugin_name": plugin_name,
+            }):
+                fid = cdoc.get("fix_vulnerability_id", "")
+                if fid and fid not in user_fix_ids:
+                    user_fix_ids.append(fid)
+
+            lookup_ids = user_fix_ids if user_fix_ids else [fix_vuln_id]
             completed_steps = list(
                 db[FIX_VULN_STEPS_COLLECTION].find({
-                    "fix_vulnerability_id": fix_vuln_id,
+                    "fix_vulnerability_id": {"$in": lookup_ids},
                     "status": "completed",
                 }).sort("step_number", 1)
             )

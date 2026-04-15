@@ -759,10 +759,15 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     "step_name": row.get("step_name", f"Step {step_num}"),
                     "criticality": row.get("criticality", ""),
                     "effort_estimate": row.get("effort_estimate", ""),
+                    "sub_tasks": [],
                     "windows": {},
                     "linux": {},
                 }
                 step_order.append(step_num)
+
+            # Promote sub_tasks to step level (take from first OS row that has them)
+            if not steps_dict[step_num]["sub_tasks"] and os_data.get("sub_tasks"):
+                steps_dict[step_num]["sub_tasks"] = os_data["sub_tasks"]
 
             steps_dict[step_num][os_key] = os_data
 
@@ -956,10 +961,16 @@ class UserFixVulnerabilityStepsAPIView(APIView):
 
                 steps_dict, step_order = self._parse_mitigation_steps(mitigation_table)
 
-                # Detect host OS: stored OS takes priority (ensures GET/POST consistency),
-                # then ?os= param, then nessus detection
+                # Detect host OS priority:
+                # 1. vuln_card.os_category (set when AI generated the card)
+                # 2. ?os= query param
+                # 3. fix_doc.operating_system (persisted from first POST)
+                # 4. nessus host_information detection
+                _card_os = (vuln_card.get("os_category") or "").strip().lower()
                 os_param = request.query_params.get("os", "").strip().lower()
-                if os_param in ("windows", "linux"):
+                if _card_os in ("windows", "linux"):
+                    operating_system = "Windows" if _card_os == "windows" else "Linux"
+                elif os_param in ("windows", "linux"):
                     operating_system = "Windows" if os_param == "windows" else "Linux"
                 elif fix_doc.get("operating_system"):
                     operating_system = fix_doc["operating_system"]
@@ -1007,14 +1018,15 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         "step_number": step_num,
                     })
 
+                    _os_key = "linux" if operating_system and operating_system.lower() in ("linux", "unix") else "windows"
                     step_data = {
                         "_id": str(saved["_id"]) if saved else "",
                         "step_number": display_idx,
                         "step_name": step_meta["step_name"],
                         "criticality": step_meta["criticality"],
                         "effort_estimate": step_meta["effort_estimate"],
-                        "windows": step_meta["windows"],
-                        "linux": step_meta["linux"],
+                        "sub_tasks": step_meta.get("sub_tasks", []),
+                        _os_key: step_meta[_os_key],
                         "assigned_team": assigned_team,
                         "assigned_team_members": [
                             {"user_id": m.get("user_id"), "name": m.get("name"), "email": m.get("email")}
@@ -1552,12 +1564,39 @@ class UserFixVulnerabilityFinalFeedbackAPIView(APIView):
                     "fix_vulnerability_id": fix_vuln_id,
                     "status": "completed",
                 })
-                if completed_steps < 6:
+
+                # Dynamic total_steps from mitigation_table (not hardcoded 6)
+                plugin_name = closed_vuln.get("plugin_name", "")
+                report_id   = closed_vuln.get("report_id", "")
+                host_name   = closed_vuln.get("host_name", "")
+                vuln_card = (
+                    db[VULN_CARD_COLLECTION].find_one({
+                        "report_id": report_id,
+                        "vulnerability_name": plugin_name,
+                        "host_name": host_name,
+                    })
+                    or db[VULN_CARD_COLLECTION].find_one({
+                        "report_id": report_id,
+                        "vulnerability_name": plugin_name,
+                    })
+                    or {}
+                )
+                mitigation_table = vuln_card.get("mitigation_table", [])
+                steps_dict, step_order = UserFixVulnerabilityStepsAPIView()._parse_mitigation_steps(mitigation_table)
+                host_os = closed_vuln.get("operating_system", "") or "Windows"
+                if step_order:
+                    os_key = "linux" if host_os.lower() in ("linux", "unix") else "windows"
+                    os_filtered = [s for s in step_order if steps_dict[s].get(os_key)]
+                    if os_filtered:
+                        step_order = os_filtered
+                total_steps = len(step_order) if step_order else completed_steps
+
+                if completed_steps < total_steps:
                     return Response(
                         {
-                            "detail": f"All 6 steps must be completed before submitting feedback. {6 - completed_steps} step(s) still pending.",
+                            "detail": f"All {total_steps} steps must be completed before submitting feedback. {total_steps - completed_steps} step(s) still pending.",
                             "completed_steps": completed_steps,
-                            "pending_steps": 6 - completed_steps,
+                            "pending_steps": total_steps - completed_steps,
                         },
                         status=status.HTTP_400_BAD_REQUEST
                     )
