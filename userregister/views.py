@@ -356,20 +356,41 @@ class UserFixVulnerabilityCreateAPIView(APIView):
                 if existing_closed:
                     return Response(
                         {
-                            "detail": "Cannot create fix — vulnerability is already Closed",
-                            "fix_vulnerability_id": existing_closed.get("fix_vulnerability_id", ""),
-                            "plugin_name": plugin_name_req,
-                            "status": "closed",
+                            "message": "Fix vulnerability already closed",
+                            "data": {
+                                "_id": str(existing_closed.get("_id", "")),
+                                "fix_vulnerability_id": existing_closed.get("fix_vulnerability_id", ""),
+                                "report_id": existing_closed.get("report_id"),
+                                "id": existing_closed.get("id"),
+                                "vulnerability_name": existing_closed.get("plugin_name"),
+                                "asset": existing_closed.get("host_name"),
+                                "severity": existing_closed.get("risk_factor"),
+                                "port": existing_closed.get("port", ""),
+                                "description": existing_closed.get("description", ""),
+                                "assigned_team": existing_closed.get("assigned_team", ""),
+                                "assigned_team_members": existing_closed.get("assigned_team_members", []),
+                                "solution": existing_closed.get("solution", ""),
+                                "status": "closed",
+                                "vulnerability_type": existing_closed.get("vulnerability_type", ""),
+                                "affected_ports_ranges": existing_closed.get("affected_ports_ranges", []),
+                                "file_path": existing_closed.get("file_path", []),
+                                "vendor_fix_available": existing_closed.get("vendor_fix_available", False),
+                                "created_at": _normalize_iso(existing_closed.get("created_at")),
+                                "closed_at": _normalize_iso(existing_closed.get("closed_at")),
+                            }
                         },
-                        status=status.HTTP_400_BAD_REQUEST
+                        status=status.HTTP_200_OK
                     )
 
-                # Duplicate check
-                existing_fix = fix_coll.find_one({
+                # Duplicate check — use stable fields (plugin_name), NOT id which is a fresh UUID each visit
+                dup_query = {
                     "report_id": str(report_id),
                     "host_name": host_name,
-                    "id": id_req,
-                })
+                    "plugin_name": plugin_name_req,
+                }
+                if port_req:
+                    dup_query["port"] = str(port_req)
+                existing_fix = fix_coll.find_one(dup_query)
                 if existing_fix:
                     return Response(
                         {
