@@ -88,8 +88,8 @@ def _normalize_teams(teams):
 def _resolve_requester(doc):
     """
     Returns requester display name for a support_requests document.
-    - user_id present → UserDetail first_name + last_name
-    - admin_id only   → User email
+    - user_id present → the user who raised the request (email from auth User)
+    - admin_id only   → admin email
     - fallback        → stored requested_by value
     """
     from django.contrib.auth import get_user_model
@@ -97,13 +97,12 @@ def _resolve_requester(doc):
     user_id  = doc.get("user_id")
     admin_id = doc.get("admin_id")
 
-    if user_id and UserDetail:
+    if user_id:
         try:
-            ud = UserDetail.objects.filter(admin_id=str(user_id)).first()
-            if ud:
-                full_name = f"{ud.first_name} {ud.last_name}".strip()
-                if full_name:
-                    return full_name
+            User = get_user_model()
+            u = User.objects.filter(pk=str(user_id)).only("email").first()
+            if u:
+                return u.email
         except Exception:
             pass
 
@@ -2042,12 +2041,68 @@ class UserSupportRequestsByReportAPIView(APIView):
         )
 
 
+class UserSupportRequestsByHostAPIView(APIView):
+    """
+    GET  /api/user/register/support-requests/host/<host_name>/
+
+    Returns all support requests for a given asset (host_name) that belong to
+    the logged-in user's assigned teams (case-insensitive).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, host_name):
+        teams, _admin = _get_user_context(request.user.email)
+        if not teams:
+            return Response(
+                {"detail": "No team assigned to this user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        teams_lower_set = {t.lower() for t in teams}
+
+        with MongoContext() as db:
+            support_coll = db[SUPPORT_REQUEST_COLLECTION]
+
+            cursor = support_coll.find(
+                {"host_name": host_name}
+            ).sort("requested_at", -1)
+
+            results = []
+            for doc in cursor:
+                doc_team = (doc.get("assigned_team") or "").strip().lower()
+                if doc_team not in teams_lower_set:
+                    continue
+                results.append({
+                    "_id":                   str(doc.get("_id")),
+                    "report_id":             doc.get("report_id"),
+                    "vulnerability_id":      doc.get("vulnerability_id"),
+                    "vul_name":              doc.get("vul_name"),
+                    "host_name":             doc.get("host_name"),
+                    "assigned_team":         doc.get("assigned_team"),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    "step_number":           doc.get("step_number"),
+                    "description":           doc.get("description"),
+                    "status":                doc.get("status"),
+                    "requested_by":          _resolve_requester(doc),
+                    "requested_at":          _normalize_iso(doc.get("requested_at")),
+                })
+
+        return Response(
+            {
+                "message": "Support requests fetched successfully",
+                "host_name": host_name,
+                "count": len(results),
+                "results": results,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 # ─── Inline serializer ───────────────────────────────────────────────────────
 from rest_framework import serializers as drf_serializers
 
 class _RaiseSupportRequestSerializer(drf_serializers.Serializer):
-    step = drf_serializers.CharField()
-    description = drf_serializers.CharField()
+    step_number  = drf_serializers.IntegerField(min_value=1)
+    description  = drf_serializers.CharField()
 
 
 # ─── UserRaiseSupportRequestAPIView ──────────────────────────────────────────
@@ -2067,9 +2122,9 @@ class UserRaiseSupportRequestAPIView(APIView):
         serializer = _RaiseSupportRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        step_requested = serializer.validated_data["step"]
-        description    = serializer.validated_data["description"]
-        user_id        = str(request.user.id)
+        step_number = serializer.validated_data["step_number"]
+        description = serializer.validated_data["description"]
+        user_id     = str(request.user.id)
 
         # Get user's teams
         teams, admin_user = _get_user_context(request.user.email)
@@ -2082,11 +2137,14 @@ class UserRaiseSupportRequestAPIView(APIView):
 
         with MongoContext() as db:
             fix_coll     = db[FIX_VULN_COLLECTION]
+            closed_coll  = db[FIX_VULN_CLOSED_COLLECTION]
             support_coll = db[SUPPORT_REQUEST_COLLECTION]
 
-            # ── Fetch fix vulnerability ──────────────────────────────────────
+            # ── Fetch fix vulnerability (open or closed) ─────────────────────
             try:
                 vuln = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+                if not vuln:
+                    vuln = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
             except Exception:
                 return Response(
                     {"detail": "Invalid vulnerability ID"},
@@ -2106,14 +2164,15 @@ class UserRaiseSupportRequestAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # ── Duplicate check ──────────────────────────────────────────────
+            # ── Duplicate check: one request per step per user ───────────────
             existing = support_coll.find_one({
                 "vulnerability_id": fix_vuln_id,
-                "user_id": user_id,
+                "user_id":          user_id,
+                "step_number":      step_number,
             })
             if existing:
                 return Response(
-                    {"detail": "Support request already raised for this vulnerability"},
+                    {"detail": f"Support request already raised for step {step_number}"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -2128,8 +2187,7 @@ class UserRaiseSupportRequestAPIView(APIView):
                 "host_name":             vuln.get("host_name"),
                 "assigned_team":         assigned_team,
                 "assigned_team_members": vuln.get("assigned_team_members", []),
-                "steps":                 vuln.get("mitigation_steps", []),
-                "step_requested":        step_requested,
+                "step_number":           step_number,
                 "description":           description,
                 "status":                "open",
                 "requested_by":          request.user.email,
@@ -2165,44 +2223,38 @@ class UserRaiseSupportRequestByVulnerabilityAPIView(APIView):
         with MongoContext() as db:
             support_coll = db[SUPPORT_REQUEST_COLLECTION]
 
-            support_req = support_coll.find_one({
+            cursor = support_coll.find({
                 "vulnerability_id": fix_vuln_id,
-                "user_id": user_id,
-            })
+                "user_id":          user_id,
+            }).sort("step_number", 1)
 
-            if not support_req:
-                return Response(
-                    {
-                        "exists": False,
-                        "detail": "No support request found for this vulnerability",
-                    },
-                    status=status.HTTP_200_OK,
-                )
+            results = []
+            for doc in cursor:
+                results.append({
+                    "_id":                   str(doc.get("_id")),
+                    "report_id":             doc.get("report_id"),
+                    "vulnerability_id":      doc.get("vulnerability_id"),
+                    "vul_name":              doc.get("vul_name"),
+                    "host_name":             doc.get("host_name"),
+                    "assigned_team":         doc.get("assigned_team"),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    "step_number":           doc.get("step_number"),
+                    "description":           doc.get("description"),
+                    "status":                doc.get("status"),
+                    "requested_by":          _resolve_requester(doc),
+                    "requested_at":          _normalize_iso(doc.get("requested_at")),
+                })
 
-            data = {
-                "_id":                   str(support_req.get("_id")),
-                "report_id":             support_req.get("report_id"),
-                "vulnerability_id":      support_req.get("vulnerability_id"),
-                "vul_name":              support_req.get("vul_name"),
-                "host_name":             support_req.get("host_name"),
-                "assigned_team":         support_req.get("assigned_team"),
-                "assigned_team_members": support_req.get("assigned_team_members", []),
-                "steps":                 support_req.get("steps", []),
-                "step_requested":        support_req.get("step_requested"),
-                "description":           support_req.get("description"),
-                "status":                support_req.get("status"),
-                "requested_by":          _resolve_requester(support_req),
-                "requested_at":          _normalize_iso(support_req.get("requested_at")),
-            }
-
-            return Response(
-                {
-                    "exists": True,
-                    "message": "Support request fetched successfully",
-                    "data": data,
-                },
-                status=status.HTTP_200_OK,
-            )
+        return Response(
+            {
+                "exists": len(results) > 0,
+                "message": "Support requests fetched successfully",
+                "vulnerability_id": fix_vuln_id,
+                "count": len(results),
+                "results": results,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
