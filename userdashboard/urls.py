@@ -9,6 +9,7 @@ from .views import (
     UserMeanTimeRemediateAPIView,
     UserSupportRequestsAPIView,
     UserPatchManagementAPIView,
+    UserInProcessRemediationTimelineAPIView,
     # UserDashboardSummaryAPIView,
 )
 
@@ -26,4 +27,5 @@ urlpatterns = [
     path("mean-time-remediate/",     UserMeanTimeRemediateAPIView.as_view(),     name="user-mean-time-remediate"),
     path("support-requests/",        UserSupportRequestsAPIView.as_view(),       name="user-support-requests"),
     path("patch-management/",        UserPatchManagementAPIView.as_view(),       name="user-patch-management"),
+    path("remediation-timeline/in-process/", UserInProcessRemediationTimelineAPIView.as_view(), name="user-remediation-timeline-in-process"),
 ]

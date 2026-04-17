@@ -11,6 +11,7 @@ from .views import (
     AdminReportStatusAPIView, AdminDistributionByTeamAPIView,
     AdminDistributionByTeamDetailAPIView, AdminDetailedVulnerabilitiesAPIView,
     AdminAssetsByTeamAPIView,
+    AdminInProcessRemediationTimelineAPIView,
 )
 
 urlpatterns = [
@@ -35,5 +36,6 @@ urlpatterns = [
     path("dashboard/distribution-by-team/detail/", AdminDistributionByTeamDetailAPIView.as_view(), name="admin-distribution-by-team-detail"),
     path("dashboard/detailed-vulnerabilities/", AdminDetailedVulnerabilitiesAPIView.as_view(), name="admin-detailed-vulnerabilities"),
     path("dashboard/assets-by-team/", AdminAssetsByTeamAPIView.as_view(), name="admin-assets-by-team"),
+    path("dashboard/remediation-timeline/in-process/", AdminInProcessRemediationTimelineAPIView.as_view(), name="admin-remediation-timeline-in-process"),
 ]
 
