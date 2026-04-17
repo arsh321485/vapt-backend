@@ -18,6 +18,7 @@ NESSUS_COLLECTION = "nessus_reports"
 SUPPORT_REQUEST_COLLECTION = "support_requests"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
+FIX_VULN_STEPS_COLLECTION = "fix_vulnerability_steps"
 VULN_CARD_COLLECTION = "vulnerability_cards"
 
 
@@ -419,6 +420,121 @@ def _load_latest_report_for_admin(db, admin_email, admin_id=None):
         {"admin_email": admin_email},
         sort=[("uploaded_at", -1)]
     )
+
+
+def _extract_total_steps(mitigation_table):
+    """Return dynamic step count from mitigation table."""
+    if not isinstance(mitigation_table, list):
+        return 0
+    step_nums = set()
+    for row in mitigation_table:
+        if not isinstance(row, dict):
+            continue
+        try:
+            step_num = int(row.get("step_no", 0))
+        except (TypeError, ValueError):
+            continue
+        if step_num > 0:
+            step_nums.add(step_num)
+    return len(step_nums)
+
+
+def _normalize_team(raw_team):
+    raw = (raw_team or "").strip()
+    return raw if raw else ""
+
+
+def _normalize_risk(raw_risk):
+    risk = (raw_risk or "").strip()
+    return risk.title() if risk else ""
+
+
+class AdminInProcessRemediationTimelineAPIView(APIView):
+    """
+    Returns vulnerabilities where remediation is started but not completed:
+    completed_steps > 0 and completed_steps < total_steps
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_id = str(request.user.id)
+            admin_email = request.user.email
+
+            with MongoContext() as db:
+                report_doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+                if not report_doc:
+                    return Response({"report_id": None, "total": 0, "items": []}, status=status.HTTP_200_OK)
+
+                report_id = str(report_doc.get("report_id") or report_doc.get("_id", ""))
+
+                card_by_host = {}
+                card_by_name = {}
+                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
+                    vuln_name = (card.get("vulnerability_name") or "").strip()
+                    host_name = (card.get("host_name") or "").strip()
+                    if not vuln_name:
+                        continue
+                    if host_name:
+                        card_by_host[(vuln_name, host_name)] = card
+                    if vuln_name not in card_by_name:
+                        card_by_name[vuln_name] = card
+
+                fix_docs = list(db[FIX_VULN_COLLECTION].find({
+                    "created_by": admin_id,
+                    "report_id": report_id,
+                }))
+
+                steps_coll = db[FIX_VULN_STEPS_COLLECTION]
+                items = []
+
+                for fix_doc in fix_docs:
+                    fix_id = str(fix_doc.get("_id", ""))
+                    if not fix_id:
+                        continue
+
+                    vuln_name = (fix_doc.get("plugin_name") or "").strip()
+                    asset = (fix_doc.get("host_name") or "").strip()
+                    if not vuln_name:
+                        continue
+
+                    card = card_by_host.get((vuln_name, asset)) or card_by_name.get(vuln_name) or {}
+                    mitigation_table = card.get("mitigation_table") or fix_doc.get("steps_to_fix") or []
+                    total_steps = _extract_total_steps(mitigation_table) or 6
+
+                    completed_steps = steps_coll.count_documents({
+                        "fix_vulnerability_id": fix_id,
+                        "status": "completed",
+                    })
+
+                    # Include only started-but-not-complete vulnerabilities.
+                    if completed_steps <= 0 or completed_steps >= total_steps:
+                        continue
+
+                    progress_percent = int(round((completed_steps / total_steps) * 100))
+
+                    items.append({
+                        "fix_vulnerability_id": fix_id,
+                        "vulnerability_name": vuln_name,
+                        "asset": asset,
+                        "completed_steps": completed_steps,
+                        "total_steps": total_steps,
+                        "progress_percent": progress_percent,
+                        "timeline_status": "in_process",
+                        "risk_factor": _normalize_risk(card.get("risk_factor") or fix_doc.get("risk_factor") or fix_doc.get("severity")),
+                        "assigned_team": _normalize_team(card.get("assigned_team") or fix_doc.get("assigned_team")),
+                    })
+
+                items.sort(key=lambda x: (-x["progress_percent"], x["vulnerability_name"], x["asset"]))
+                return Response({"report_id": report_id, "total": len(items), "items": items}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "error occurred", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class AdminTotalAssetsAPIView(APIView):

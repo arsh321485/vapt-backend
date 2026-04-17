@@ -11,7 +11,9 @@ from vaptfix.mongo_client import MongoContext
 NESSUS_COLLECTION        = "nessus_reports"
 VULN_CARD_COLLECTION     = "vulnerability_cards"
 SUPPORT_REQUEST_COLLECTION = "support_requests"
+FIX_VULN_COLLECTION = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
+FIX_VULN_STEPS_COLLECTION = "fix_vulnerability_steps"
 
 try:
     from users_details.models import UserDetail
@@ -132,6 +134,22 @@ def _format_wdh_label(wdh):
 def _normalize_teams(teams):
     """Lowercase map for case-insensitive team matching."""
     return {t.lower(): t for t in teams}
+
+
+def _extract_total_steps(mitigation_table):
+    if not isinstance(mitigation_table, list):
+        return 0
+    step_nums = set()
+    for row in mitigation_table:
+        if not isinstance(row, dict):
+            continue
+        try:
+            step_num = int(row.get("step_no", 0))
+        except (TypeError, ValueError):
+            continue
+        if step_num > 0:
+            step_nums.add(step_num)
+    return len(step_nums)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -724,6 +742,104 @@ class UserPatchManagementAPIView(APIView):
                     })
 
                 return Response({"teams": result})
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(e)}, status=500)
+
+
+class UserInProcessRemediationTimelineAPIView(APIView):
+    """
+    GET /api/user/dashboard/remediation-timeline/in-process/
+    Shows only started-but-not-completed vulnerabilities:
+    completed_steps > 0 and completed_steps < total_steps
+    Optional: ?team=Patch+Management
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response({"report_id": None, "teams": [], "total": 0, "items": []})
+
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams = [selected_team] if selected_team and selected_team in teams else teams
+            teams_lower = _normalize_teams(active_teams)
+
+            with MongoContext() as db:
+                report_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+                if not report_doc:
+                    return Response({"report_id": None, "teams": active_teams, "total": 0, "items": []})
+
+                report_id = str(report_doc.get("report_id") or report_doc.get("_id", ""))
+                admin_id = str(admin_user.id)
+
+                card_by_host = {}
+                card_by_name = {}
+                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
+                    vuln_name = (card.get("vulnerability_name") or "").strip()
+                    host_name = (card.get("host_name") or "").strip()
+                    if not vuln_name:
+                        continue
+                    if host_name:
+                        card_by_host[(vuln_name, host_name)] = card
+                    if vuln_name not in card_by_name:
+                        card_by_name[vuln_name] = card
+
+                steps_coll = db[FIX_VULN_STEPS_COLLECTION]
+                fix_docs = list(db[FIX_VULN_COLLECTION].find({
+                    "created_by": admin_id,
+                    "report_id": report_id,
+                }))
+
+                items = []
+                for fix_doc in fix_docs:
+                    fix_id = str(fix_doc.get("_id", ""))
+                    vuln_name = (fix_doc.get("plugin_name") or "").strip()
+                    asset = (fix_doc.get("host_name") or "").strip()
+                    if not fix_id or not vuln_name:
+                        continue
+
+                    card = card_by_host.get((vuln_name, asset)) or card_by_name.get(vuln_name) or {}
+                    assigned_team_raw = (card.get("assigned_team") or fix_doc.get("assigned_team") or "").strip()
+                    assigned_team = teams_lower.get(assigned_team_raw.lower())
+                    if not assigned_team:
+                        continue
+
+                    mitigation_table = card.get("mitigation_table") or fix_doc.get("steps_to_fix") or []
+                    total_steps = _extract_total_steps(mitigation_table) or 6
+
+                    completed_steps = steps_coll.count_documents({
+                        "fix_vulnerability_id": fix_id,
+                        "status": "completed",
+                    })
+
+                    if completed_steps <= 0 or completed_steps >= total_steps:
+                        continue
+
+                    progress_percent = int(round((completed_steps / total_steps) * 100))
+                    risk_raw = card.get("risk_factor") or fix_doc.get("risk_factor") or fix_doc.get("severity") or ""
+
+                    items.append({
+                        "fix_vulnerability_id": fix_id,
+                        "vulnerability_name": vuln_name,
+                        "asset": asset,
+                        "completed_steps": completed_steps,
+                        "total_steps": total_steps,
+                        "progress_percent": progress_percent,
+                        "timeline_status": "in_process",
+                        "risk_factor": str(risk_raw).strip().title() if risk_raw else "",
+                        "assigned_team": assigned_team,
+                    })
+
+                items.sort(key=lambda x: (-x["progress_percent"], x["vulnerability_name"], x["asset"]))
+                return Response({
+                    "report_id": report_id,
+                    "teams": active_teams,
+                    "total": len(items),
+                    "items": items,
+                })
 
         except Exception as e:
             import traceback; traceback.print_exc()

@@ -2674,9 +2674,35 @@ class SupportRequestByReportAPIView(APIView):
                 }
             ).sort("requested_at", -1)
 
+            support_docs = list(cursor)
+
+            # Build vulnerability_id -> severity map from fix_vulnerabilities for fallback.
+            fix_coll = db[FIX_VULN_COLLECTION]
+            object_ids = []
+            for sdoc in support_docs:
+                raw_vid = str(sdoc.get("vulnerability_id") or "").strip()
+                if not raw_vid:
+                    continue
+                try:
+                    object_ids.append(ObjectId(raw_vid))
+                except Exception:
+                    continue
+
+            fix_severity_by_id = {}
+            if object_ids:
+                for fdoc in fix_coll.find({"_id": {"$in": object_ids}}):
+                    fid = str(fdoc.get("_id"))
+                    sev = (fdoc.get("risk_factor") or fdoc.get("severity") or "").strip().title()
+                    fix_severity_by_id[fid] = sev
+
             results = []
 
-            for doc in cursor:
+            for doc in support_docs:
+                vulnerability_id = str(doc.get("vulnerability_id") or "").strip()
+                severity = (
+                    (doc.get("severity") or doc.get("risk_factor") or "").strip().title()
+                    or fix_severity_by_id.get(vulnerability_id, "")
+                )
                 results.append({
                     "_id": str(doc.get("_id")),
                     "report_id": doc.get("report_id"),
@@ -2684,6 +2710,7 @@ class SupportRequestByReportAPIView(APIView):
                     "vulnerability_id": doc.get("vulnerability_id"),
                     "vul_name": doc.get("vul_name"),
                     "host_name": doc.get("host_name"),
+                    "severity": severity,
                     "assigned_team": doc.get("assigned_team"),
                     "assigned_team_members": doc.get("assigned_team_members", []),
                     # "steps": doc.get("steps", []),
