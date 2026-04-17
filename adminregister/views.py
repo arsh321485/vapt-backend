@@ -735,7 +735,7 @@ class FixVulnerabilityCreateAPIView(APIView):
                     {
                         "message": "Fix vulnerability already closed",
                         "data": {
-                            "_id": str(existing_closed.get("_id", "")),
+                            "_id": existing_closed.get("fix_vulnerability_id", str(existing_closed.get("_id", ""))),
                             "fix_vulnerability_id": existing_closed.get("fix_vulnerability_id", ""),
                             "report_id": existing_closed.get("report_id"),
                             "admin_id": admin_id,
