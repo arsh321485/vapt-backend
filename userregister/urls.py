@@ -10,6 +10,7 @@ from .views import (
     UserRaiseSupportRequestAPIView,
     UserRaiseSupportRequestByVulnerabilityAPIView,
     UserSupportRequestsByReportAPIView,
+    UserSupportRequestsByHostAPIView,
     UserCreateTicketAPIView,
     UserTicketByReportAPIView,
     UserTicketOpenListAPIView,
@@ -87,6 +88,13 @@ urlpatterns = [
         "support-requests/report/<str:report_id>/",
         UserSupportRequestsByReportAPIView.as_view(),
         name="user-support-requests-by-report",
+    ),
+
+    # 10b. All support requests by host/asset (team-filtered)
+    path(
+        "support-requests/host/<str:host_name>/",
+        UserSupportRequestsByHostAPIView.as_view(),
+        name="user-support-requests-by-host",
     ),
 
     # 11. Create ticket

@@ -39,8 +39,8 @@ def _normalize_iso(dt):
 def _resolve_requester(doc):
     """
     Returns requester display name for a support_requests document.
-    - user_id present → UserDetail first_name + last_name
-    - admin_id only   → User email
+    - user_id present → the user who raised the request (email from auth User)
+    - admin_id only   → admin email
     - fallback        → stored requested_by value
     """
     from django.contrib.auth import get_user_model
@@ -50,12 +50,10 @@ def _resolve_requester(doc):
 
     if user_id:
         try:
-            from users_details.models import UserDetail
-            ud = UserDetail.objects.filter(admin_id=str(user_id)).first()
-            if ud:
-                full_name = f"{ud.first_name} {ud.last_name}".strip()
-                if full_name:
-                    return full_name
+            User = get_user_model()
+            u = User.objects.filter(pk=str(user_id)).only("email").first()
+            if u:
+                return u.email
         except Exception:
             pass
 
@@ -2570,73 +2568,51 @@ class FixVulnerabilityFinalFeedbackAPIView(APIView):
 
 class RaiseSupportRequestAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [JSONParser]
 
     def post(self, request, report_id, vulnerability_id):
-        serializer = RaiseSupportRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        return Response(
+            {"detail": "Admin cannot raise support requests. Only users can raise support requests."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
-        step_requested = serializer.validated_data["step"]
-        description = serializer.validated_data["description"]
-
+    def get(self, request, report_id, vulnerability_id):
         admin_id = str(request.user.id)
 
         with MongoContext() as db:
-            fix_coll = db[FIX_VULN_COLLECTION]
             support_coll = db["support_requests"]
 
-            # ✅ Prevent duplicate support request
-            existing_request = support_coll.find_one({
+            cursor = support_coll.find({
                 "vulnerability_id": vulnerability_id,
-                "admin_id": admin_id
-            })
-
-            if existing_request:
-                return Response(
-                    {"detail": "Support request already raised for this vulnerability"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # ✅ Fetch fix vulnerability
-            vuln = fix_coll.find_one({"_id": ObjectId(vulnerability_id)})
-            if not vuln:
-                return Response(
-                    {"detail": "Vulnerability not found"},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-
-            assigned_team = vuln.get("assigned_team")
-
-            support_doc = {
-                "report_id": report_id,
                 "admin_id": admin_id,
+            }).sort("requested_at", -1)
 
+            results = []
+            for doc in cursor:
+                results.append({
+                    "_id":                   str(doc.get("_id")),
+                    "report_id":             doc.get("report_id"),
+                    "vulnerability_id":      doc.get("vulnerability_id"),
+                    "vul_name":              doc.get("vul_name"),
+                    "host_name":             doc.get("host_name"),
+                    "assigned_team":         doc.get("assigned_team"),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    "step_number":           doc.get("step_number"),
+                    "step_requested":        doc.get("step_requested"),
+                    "description":           doc.get("description"),
+                    "status":                doc.get("status"),
+                    "requested_by":          _resolve_requester(doc),
+                    "requested_at":          _normalize_iso(doc.get("requested_at")),
+                })
+
+        return Response(
+            {
+                "message": "Support requests fetched successfully",
                 "vulnerability_id": vulnerability_id,
-                "vul_name": vuln.get("plugin_name"),
-                "host_name": vuln.get("host_name"),
-
-                "assigned_team": assigned_team,
-                "assigned_team_members": vuln.get("assigned_team_members", []),
-                "steps": vuln.get("mitigation_steps", []),
-
-                "step_requested": step_requested,
-                "description": description,
-
-                "status": "open",
-                "requested_by": assigned_team,
-                "requested_at": datetime.utcnow()
-            }
-
-            result = support_coll.insert_one(support_doc)
-            support_doc["_id"] = str(result.inserted_id)
-
-            return Response(
-                {
-                    "message": "Support request raised successfully",
-                    "data": support_doc
-                },
-                status=status.HTTP_201_CREATED
-            )
+                "count": len(results),
+                "results": results,
+            },
+            status=status.HTTP_200_OK,
+        )
   
 class RaiseSupportRequestByVulnerabilityAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -2647,44 +2623,38 @@ class RaiseSupportRequestByVulnerabilityAPIView(APIView):
         with MongoContext() as db:
             support_coll = db["support_requests"]
 
-            support_req = support_coll.find_one({
+            cursor = support_coll.find({
                 "vulnerability_id": vulnerability_id,
-                "admin_id": admin_id  # 🔒 only own admin data
-            })
+                "admin_id": admin_id,
+            }).sort("step_number", 1)
 
-            if not support_req:
-                return Response(
-                    {
-                        "exists": False,
-                        "detail": "No support request found for this vulnerability"
-                    },
-                    status=status.HTTP_200_OK
-                )
+            results = []
+            for doc in cursor:
+                results.append({
+                    "_id":                   str(doc.get("_id")),
+                    "report_id":             doc.get("report_id"),
+                    "vulnerability_id":      doc.get("vulnerability_id"),
+                    "vul_name":              doc.get("vul_name"),
+                    "host_name":             doc.get("host_name"),
+                    "assigned_team":         doc.get("assigned_team"),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    "step_number":           doc.get("step_number"),
+                    "description":           doc.get("description"),
+                    "status":                doc.get("status"),
+                    "requested_by":          _resolve_requester(doc),
+                    "requested_at":          _normalize_iso(doc.get("requested_at")),
+                })
 
-            data = {
-                "_id": str(support_req.get("_id")),
-                "report_id": support_req.get("report_id"),
-                "vulnerability_id": support_req.get("vulnerability_id"),
-                "vul_name": support_req.get("vul_name"),
-                "host_name": support_req.get("host_name"),
-                "assigned_team": support_req.get("assigned_team"),
-                "assigned_team_members": support_req.get("assigned_team_members", []),
-                "steps": support_req.get("steps", []),
-                "step_requested": support_req.get("step_requested"),
-                "description": support_req.get("description"),
-                "status": support_req.get("status"),
-                "requested_by": _resolve_requester(support_req),
-                "requested_at": support_req.get("requested_at"),
-            }
-
-            return Response(
-                {
-                    "exists": True,
-                    "message": "Raise Support request fetched successfully",
-                    "data": data
-                },
-                status=status.HTTP_200_OK
-            )
+        return Response(
+            {
+                "exists": len(results) > 0,
+                "message": "Support requests fetched successfully",
+                "vulnerability_id": vulnerability_id,
+                "count": len(results),
+                "results": results,
+            },
+            status=status.HTTP_200_OK,
+        )
           
 
 
