@@ -210,6 +210,33 @@ def lookup_slack_user_by_email(bot_token, email):
     return None
 
 
+def invite_user_to_slack_workspace(bot_token, email):
+    """
+    Invite user to Slack workspace by email.
+    Returns a normalized result dict.
+    """
+    if not bot_token or not email:
+        return {"status": "failed", "error": "missing_token_or_email", "invited": False}
+
+    headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
+    try:
+        resp = requests.post(
+            "https://slack.com/api/users.admin.invite",
+            headers=headers,
+            json={"email": email},
+            timeout=10,
+        )
+        data = resp.json() if resp is not None else {}
+        if data.get("ok"):
+            return {"status": "invited", "error": None, "invited": True}
+        err = data.get("error")
+        if err in {"already_invited", "already_in_team"}:
+            return {"status": "already_member", "error": err, "invited": False}
+        return {"status": "failed", "error": err or "unknown_error", "invited": False}
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc), "invited": False}
+
+
 def sync_member_to_teams_channels(access_token, team_id, user_email, member_roles):
     """
     Add a user to the VAPTFIX team. Once added to the team, the user automatically
@@ -893,7 +920,7 @@ class UserDetailCreateView(generics.CreateAPIView):
                     logger.warning(f"[UserDetailCreate] Teams sync skipped: missing roles for {email}")
 
             # Sync to Slack — use token from request body first, else fall back to admin's stored token
-            slack_sync_result = []
+            slack_sync_result = {}
             slack_bot_token = request.data.get("slack_bot_token") or getattr(admin_user, "slack_bot_token", None)
             logger.info(
                 f"[UserDetailCreate] Slack sync check: admin_id={getattr(admin_user, 'id', None)} "
@@ -909,7 +936,12 @@ class UserDetailCreateView(generics.CreateAPIView):
                         slack_user_id=slack_user_id,
                         member_roles=roles,
                     )
-                    slack_sync_result = slack_results
+                    slack_sync_result = {
+                        "status": "success",
+                        "workspace": {"invited": False, "already_member": True},
+                        "user_lookup": {"email": email, "slack_user_id": slack_user_id},
+                        "channels": slack_results,
+                    }
                     if channel_ids:
                         user_detail.slack_channel_ids = list(set(channel_ids))
                         user_detail.save(update_fields=["slack_channel_ids"])
@@ -941,7 +973,25 @@ class UserDetailCreateView(generics.CreateAPIView):
 
                         threading.Thread(target=_send_slack_platform_email, daemon=True).start()
                 else:
-                    slack_sync_result = [{"status": "failed", "error": "User not found in Slack workspace for this email"}]
+                    invite_result = invite_user_to_slack_workspace(slack_bot_token, email)
+                    if invite_result.get("status") in {"invited", "already_member"}:
+                        slack_sync_result = {
+                            "status": "pending_workspace_join" if invite_result.get("status") == "invited" else "already_member_no_lookup",
+                            "workspace": {
+                                "invited": invite_result.get("status") == "invited",
+                                "already_member": invite_result.get("status") == "already_member",
+                                "invite_email": email,
+                            },
+                            "channels": [],
+                            "note": "User invited to Slack workspace. Channel mapping will apply after Slack account becomes discoverable.",
+                        }
+                    else:
+                        slack_sync_result = {
+                            "status": "failed",
+                            "workspace": {"invited": False, "already_member": False},
+                            "channels": [],
+                            "error": invite_result.get("error") or "User not found in Slack workspace for this email",
+                        }
                     logger.warning(
                         f"[UserDetailCreate] Slack sync failed: lookupByEmail returned None for target_email={email} "
                         f"admin_id={admin_user.id}"
@@ -949,8 +999,10 @@ class UserDetailCreateView(generics.CreateAPIView):
             else:
                 if not slack_bot_token:
                     logger.warning(f"[UserDetailCreate] Slack sync skipped: missing slack_bot_token for admin_id={admin_user.id}")
+                    slack_sync_result = {"status": "skipped", "error": "missing_slack_bot_token"}
                 elif not roles:
                     logger.warning(f"[UserDetailCreate] Slack sync skipped: missing roles for {email}")
+                    slack_sync_result = {"status": "skipped", "error": "missing_roles"}
 
             response_data = {
                 "message": "User detail created successfully",
