@@ -16,8 +16,10 @@ import calendar
 import re
 from datetime import date, timedelta, datetime, timezone
 import math
+from vaptfix.mongo_client import MongoContext
 
 logger = logging.getLogger(__name__)
+TIMELINE_EXTENSION_COLLECTION = "timeline_extension_requests"
 
 
 def parse_days(value):
@@ -272,14 +274,74 @@ class RiskCriteriaCalendarView(APIView):
             d = info["deadline_date"]
             deadline_map.setdefault(d, []).append(severity)
 
+        # Add approved extension events (team-wise)
+        team_filter = (request.query_params.get("team") or "").strip().lower()
+        severity_filter = (request.query_params.get("severity") or "").strip().lower()
+        extension_events = []
+        with MongoContext() as db:
+            ext_query = {"admin_id": str(request.user.id), "status": "approved"}
+            report_id = (request.query_params.get("report_id") or "").strip()
+            if report_id:
+                ext_query["report_id"] = report_id
+
+            for req in db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1):
+                severity = (req.get("severity") or "").strip().lower()
+                team_name = (req.get("team_name") or "").strip()
+                if severity_filter and severity != severity_filter:
+                    continue
+                if team_filter and team_name.lower() != team_filter:
+                    continue
+
+                if severity == "critical":
+                    base_days = critical_days
+                elif severity == "high":
+                    base_days = high_days
+                elif severity == "medium":
+                    base_days = medium_days
+                elif severity == "low":
+                    base_days = low_days
+                else:
+                    continue
+
+                ext_days = int(req.get("requested_extension_days") or 0)
+                effective_days = base_days + ext_days
+                event_date = (base_datetime + timedelta(days=effective_days)).date()
+                event_date_str = str(event_date)
+
+                event = {
+                    "request_id": str(req.get("_id")),
+                    "severity": severity,
+                    "title": f"{severity.title()} Level Deadline - {team_name or 'Team'}",
+                    "assigned_to_team": team_name,
+                    "asset": req.get("asset"),
+                    "vulnerability_name": req.get("vulnerability_name"),
+                    "status": req.get("status", "approved"),
+                    "due": event_date_str,
+                    "extended_by_days": ext_days,
+                    "requested_date": str(req.get("request_date")) if req.get("request_date") else None,
+                    "historical_detail": {
+                        "vulnerability_identified": req.get("request_date"),
+                        "assigned_to_team": team_name,
+                        "remediation_in_progress_due": event_date_str,
+                    },
+                    "extension_requested": {
+                        "reason": req.get("reason") or "",
+                        "note": f"{ext_days} days extension granted" if ext_days > 0 else "No extension requested"
+                    }
+                }
+                extension_events.append(event)
+                deadline_map.setdefault(event_date_str, []).append(f"{severity}:{team_name}")
+
         # Build full calendar for requested month
         num_days = calendar.monthrange(year, month)[1]
         days = []
         for day in range(1, num_days + 1):
             day_str = str(date(year, month, day))
+            day_events = [e for e in extension_events if e["due"] == day_str]
             days.append({
                 "date": day_str,
                 "severities": deadline_map.get(day_str, []),
+                "events": day_events,
             })
 
         return Response(
@@ -288,6 +350,7 @@ class RiskCriteriaCalendarView(APIView):
                 "risk_criteria_id": str(risk._id),
                 "base_date": str(base_datetime.date()),
                 "deadlines": deadlines,
+                "extension_events": extension_events,
                 "calendar": {
                     "month": f"{year:04d}-{month:02d}",
                     "days": days,
@@ -295,3 +358,175 @@ class RiskCriteriaCalendarView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class RiskCriteriaCalendarWeekView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, risk_id, *args, **kwargs):
+        # Validate and fetch risk criteria
+        try:
+            obj_id = ObjectId(risk_id)
+        except Exception:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Invalid Risk Criteria ID")
+
+        try:
+            risk = RiskCriteria.objects.get(_id=obj_id)
+        except RiskCriteria.DoesNotExist:
+            raise Http404
+        if str(risk.admin_id).strip() != str(request.user.id).strip():
+            raise Http404
+
+        date_param = request.query_params.get("date")
+        try:
+            target_date = date.fromisoformat(date_param) if date_param else date.today()
+        except Exception:
+            return Response({"message": "Invalid date format. Use YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Parse criteria days
+        try:
+            critical_days = parse_days(risk.critical)
+            high_days = parse_days(risk.high)
+            medium_days = parse_days(risk.medium)
+            low_days = parse_days(risk.low)
+        except (ValueError, TypeError) as e:
+            return Response({"message": f"Risk criteria day values are invalid: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        base_datetime = risk.updated_at or risk.created_at
+        if base_datetime.tzinfo is None:
+            base_datetime = base_datetime.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+
+        def _remaining(n_days):
+            deadline_dt = base_datetime + timedelta(days=n_days)
+            delta = deadline_dt - now
+            total_seconds = delta.total_seconds()
+            if total_seconds <= 0:
+                return {"days": math.ceil(abs(total_seconds) / 86400), "status": "overdue"}
+            return {"days": math.ceil(total_seconds / 86400), "status": "active"}
+
+        deadlines = {}
+        for severity, n_days in [("critical", critical_days), ("high", high_days), ("medium", medium_days), ("low", low_days)]:
+            deadline_date = (base_datetime + timedelta(days=n_days)).date()
+            remaining = _remaining(n_days)
+            deadlines[severity] = {
+                "days": n_days,
+                "deadline_date": str(deadline_date),
+                "remaining_days": remaining["days"],
+                "status": remaining["status"],
+            }
+
+        deadline_map = {}
+        for severity, info in deadlines.items():
+            deadline_map.setdefault(info["deadline_date"], []).append(severity)
+
+        team_filter = (request.query_params.get("team") or "").strip().lower()
+        severity_filter = (request.query_params.get("severity") or "").strip().lower()
+        extension_events = []
+        with MongoContext() as db:
+            ext_query = {"admin_id": str(request.user.id), "status": "approved"}
+            report_id = (request.query_params.get("report_id") or "").strip()
+            if report_id:
+                ext_query["report_id"] = report_id
+            for req in db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1):
+                severity = (req.get("severity") or "").strip().lower()
+                team_name = (req.get("team_name") or "").strip()
+                if severity_filter and severity != severity_filter:
+                    continue
+                if team_filter and team_name.lower() != team_filter:
+                    continue
+                if severity == "critical":
+                    base_days = critical_days
+                elif severity == "high":
+                    base_days = high_days
+                elif severity == "medium":
+                    base_days = medium_days
+                elif severity == "low":
+                    base_days = low_days
+                else:
+                    continue
+                ext_days = int(req.get("requested_extension_days") or 0)
+                event_date = (base_datetime + timedelta(days=base_days + ext_days)).date()
+                event_date_str = str(event_date)
+                event = {
+                    "request_id": str(req.get("_id")),
+                    "severity": severity,
+                    "title": f"{severity.title()} Level Deadline - {team_name or 'Team'}",
+                    "assigned_to_team": team_name,
+                    "asset": req.get("asset"),
+                    "vulnerability_name": req.get("vulnerability_name"),
+                    "status": req.get("status", "approved"),
+                    "due": event_date_str,
+                    "extended_by_days": ext_days,
+                    "requested_date": str(req.get("request_date")) if req.get("request_date") else None,
+                    "historical_detail": {
+                        "vulnerability_identified": req.get("request_date"),
+                        "assigned_to_team": team_name,
+                        "remediation_in_progress_due": event_date_str,
+                    },
+                    "extension_requested": {
+                        "reason": req.get("reason") or "",
+                        "note": f"{ext_days} days extension granted" if ext_days > 0 else "No extension requested",
+                    },
+                }
+                extension_events.append(event)
+                deadline_map.setdefault(event_date_str, []).append(f"{severity}:{team_name}")
+
+        week_start = target_date - timedelta(days=target_date.weekday())
+        week_days = []
+        for i in range(7):
+            d = week_start + timedelta(days=i)
+            d_str = str(d)
+            week_days.append({
+                "date": d_str,
+                "severities": deadline_map.get(d_str, []),
+                "events": [e for e in extension_events if e["due"] == d_str],
+            })
+
+        return Response({
+            "message": "Week calendar data retrieved successfully",
+            "risk_criteria_id": str(risk._id),
+            "base_date": str(base_datetime.date()),
+            "deadlines": deadlines,
+            "week": {
+                "start_date": str(week_start),
+                "end_date": str(week_start + timedelta(days=6)),
+                "days": week_days,
+            },
+            "extension_events": extension_events,
+        }, status=status.HTTP_200_OK)
+
+
+class RiskCriteriaCalendarDayView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, risk_id, *args, **kwargs):
+        date_param = request.query_params.get("date")
+        try:
+            target_date = date.fromisoformat(date_param) if date_param else date.today()
+        except Exception:
+            return Response({"message": "Invalid date format. Use YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Reuse week payload logic and return one day.
+        week_response = RiskCriteriaCalendarWeekView().get(request, risk_id, *args, **kwargs)
+        if week_response.status_code != status.HTTP_200_OK:
+            return week_response
+
+        payload = dict(week_response.data)
+        day_str = str(target_date)
+        day_entry = None
+        for d in payload.get("week", {}).get("days", []):
+            if d.get("date") == day_str:
+                day_entry = d
+                break
+        if not day_entry:
+            day_entry = {"date": day_str, "severities": [], "events": []}
+
+        return Response({
+            "message": "Day calendar data retrieved successfully",
+            "risk_criteria_id": payload.get("risk_criteria_id"),
+            "base_date": payload.get("base_date"),
+            "deadlines": payload.get("deadlines"),
+            "day": day_entry,
+        }, status=status.HTTP_200_OK)
