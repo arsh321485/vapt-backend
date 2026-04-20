@@ -1015,6 +1015,17 @@ def _create_vaptfix_channels(team_id, headers):
     return results
 
 
+def _build_teams_tab_urls(team_id, tenant_id=None):
+    """Build stable deep links that open the Teams tab (not chat)."""
+    if not team_id:
+        return {"web_url": None, "desktop_url": None}
+    web_url = f"https://teams.microsoft.com/_#/l/team/{team_id}/conversations?groupId={team_id}"
+    if tenant_id:
+        web_url = f"{web_url}&tenantId={tenant_id}"
+    desktop_url = web_url.replace("https://", "msteams://")
+    return {"web_url": web_url, "desktop_url": desktop_url}
+
+
 def auto_create_vaptfix_team(access_token):
     """
     Auto-create a team named 'VAPTFIX' with 4 default channels if it doesn't already exist.
@@ -1055,7 +1066,9 @@ def auto_create_vaptfix_team(access_token):
                         "team_id": team_id,
                         "team_name": "Vaptfix",
                         "status": "already_exists",
-                        "teams_url": f"msteams://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
+                        "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
+                        "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
+                        "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
                         "channels": channels_result
                     }
     except Exception as e:
@@ -1120,7 +1133,9 @@ def auto_create_vaptfix_team(access_token):
             "team_id": team_id,
             "team_name": "Vaptfix",
             "status": "created",
-            "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
+            "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
+            "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
+            "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
             "channels": channels_result
         }
 
@@ -1266,16 +1281,21 @@ class MicrosoftTeamsCallbackView(APIView):
                     console.log("=== VAPTFIX Team ===");
                     console.log({json.dumps(vaptfix_team)});
 
-                    // Post message to opener if popup
-                    var teamsDeepLink = {json.dumps(vaptfix_team.get('teams_url') if vaptfix_team else None)};
+                    // Prefer explicit Teams tab links so app opens Team view, not Chat.
+                    var teamId = {json.dumps(vaptfix_team.get('team_id') if vaptfix_team else None)};
                     var tenantId = "{tenant_id}";
-                    if (teamsDeepLink && tenantId) {{
-                        teamsDeepLink = teamsDeepLink + "&tenantId=" + tenantId;
+                    var teamsWebUrl = {json.dumps(vaptfix_team.get('teams_tab_url') if vaptfix_team else None)};
+                    var teamsDesktopUrl = {json.dumps(vaptfix_team.get('teams_desktop_url') if vaptfix_team else None)};
+                    if (!teamsWebUrl && teamId) {{
+                        teamsWebUrl = "https://teams.microsoft.com/_#/l/team/" + teamId + "/conversations?groupId=" + teamId;
                     }}
-                    // Fallback web URL for browsers that don't support msteams:// protocol
-                    var webUrl = teamsDeepLink
-                        ? teamsDeepLink.replace("msteams://", "https://")
-                        : "https://teams.microsoft.com";
+                    if (teamsWebUrl && tenantId && teamsWebUrl.indexOf("tenantId=") === -1) {{
+                        teamsWebUrl = teamsWebUrl + "&tenantId=" + tenantId;
+                    }}
+                    if (!teamsDesktopUrl && teamsWebUrl) {{
+                        teamsDesktopUrl = teamsWebUrl.replace("https://", "msteams://");
+                    }}
+                    var webUrl = teamsWebUrl || "https://teams.microsoft.com";
 
                     if (window.opener) {{
                         window.opener.postMessage({{
@@ -1285,12 +1305,13 @@ class MicrosoftTeamsCallbackView(APIView):
                             tokens: {{...{json.dumps(token_data)}, tenant_id: "{tenant_id}"}},
                             django_access_token: "{django_access_token}",
                             django_refresh_token: "{django_refresh_token}",
-                            vaptfix_team: {json.dumps(vaptfix_team)}
+                            vaptfix_team: {json.dumps(vaptfix_team)},
+                            redirect_target: "team_tab"
                         }}, "{frontend_redirect}");
                     }}
-                    // Try Teams desktop app first (msteams:// protocol), fallback to web after 2s
-                    if (teamsDeepLink) {{
-                        window.location.href = teamsDeepLink;
+                    // Try Teams desktop app first, fallback to Teams web team tab.
+                    if (teamsDesktopUrl) {{
+                        window.location.href = teamsDesktopUrl;
                         setTimeout(function() {{ window.location.href = webUrl; }}, 2000);
                     }} else {{
                         window.location.href = webUrl;
@@ -1977,7 +1998,9 @@ class CreateTeamView(generics.GenericAPIView):
                             "description": description,
                             "visibility": visibility,
                             "location": team_location,
-                            "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None
+                            "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
+                            "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
+                            "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
                         },
                         "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
@@ -2003,7 +2026,9 @@ class CreateTeamView(generics.GenericAPIView):
                         "status": "completed",
                         "team_id": team_id,
                         "location": team_location,
-                        "teams_url": f"msteams://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None,
+                        "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
+                        "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
+                        "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
                         "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
                     
@@ -2027,7 +2052,9 @@ class CreateTeamView(generics.GenericAPIView):
                                 "description": description,
                                 "visibility": visibility,
                                 "data": response_data,
-                                "teams_url": f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}" if team_id else None
+                                "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
+                                "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
+                                "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
                             },
                             "default_channels": channels_result
                         }, status=status.HTTP_201_CREATED)
