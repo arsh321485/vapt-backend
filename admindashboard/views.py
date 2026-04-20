@@ -1233,8 +1233,11 @@ class AdminVulnerabilitiesFixedAPIView(APIView):
 
                 # Build query for closed (fixed) vulnerabilities
                 closed_query = {
-                    "created_by": admin_id,
-                    "status": "closed"
+                    "status": "closed",
+                    "$or": [
+                        {"created_by": admin_id},  # legacy/admin-created closures
+                        {"admin_id": admin_id},    # user-created closures under this admin
+                    ],
                 }
                 if report_id:
                     closed_query["report_id"] = str(report_id)
