@@ -10,6 +10,10 @@ from .views import (
     UserSupportRequestsAPIView,
     UserPatchManagementAPIView,
     UserInProcessRemediationTimelineAPIView,
+    UserMitigationTimelineExtensionAPIView,
+    UserMitigationTimelineExtensionOptionsAPIView,
+    UserMitigationTimelineExtensionCreateAPIView,
+    UserMitigationTimelineExtensionReportAPIView,
     # UserDashboardSummaryAPIView,
 )
 
@@ -28,4 +32,8 @@ urlpatterns = [
     path("support-requests/",        UserSupportRequestsAPIView.as_view(),       name="user-support-requests"),
     path("patch-management/",        UserPatchManagementAPIView.as_view(),       name="user-patch-management"),
     path("remediation-timeline/in-process/", UserInProcessRemediationTimelineAPIView.as_view(), name="user-remediation-timeline-in-process"),
+    path("mitigation-timeline-extension/", UserMitigationTimelineExtensionAPIView.as_view(), name="user-mitigation-timeline-extension"),
+    path("mitigation-timeline-extension/options/", UserMitigationTimelineExtensionOptionsAPIView.as_view(), name="user-mitigation-timeline-extension-options"),
+    path("mitigation-timeline-extension/request/", UserMitigationTimelineExtensionCreateAPIView.as_view(), name="user-mitigation-timeline-extension-request"),
+    path("mitigation-timeline-extension/report/", UserMitigationTimelineExtensionReportAPIView.as_view(), name="user-mitigation-timeline-extension-report"),
 ]

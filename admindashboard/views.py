@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from datetime import date, timedelta, datetime, timezone
 import re
 import math
+from bson import ObjectId
 
 from .serializers import (
     TotalAssetsSerializer, AvgScoreSerializer,
@@ -20,6 +21,7 @@ FIX_VULN_COLLECTION = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 FIX_VULN_STEPS_COLLECTION = "fix_vulnerability_steps"
 VULN_CARD_COLLECTION = "vulnerability_cards"
+TIMELINE_EXTENSION_COLLECTION = "timeline_extension_requests"
 
 
 TEAM_NAMES = [
@@ -449,6 +451,30 @@ def _normalize_risk(raw_risk):
     return risk.title() if risk else ""
 
 
+def _normalize_severity_key(raw):
+    sev = (raw or "").strip().lower()
+    if sev.startswith("crit"):
+        return "critical"
+    if sev.startswith("high"):
+        return "high"
+    if sev.startswith("med"):
+        return "medium"
+    if sev.startswith("low"):
+        return "low"
+    return None
+
+
+def _format_days_for_rc(days):
+    safe_days = max(0, int(days or 0))
+    return f"{safe_days} Days"
+
+
+def _to_iso(dt_val):
+    if hasattr(dt_val, "isoformat"):
+        return dt_val.isoformat()
+    return str(dt_val) if dt_val else None
+
+
 class AdminInProcessRemediationTimelineAPIView(APIView):
     """
     Returns vulnerabilities where remediation is started but not completed:
@@ -480,13 +506,37 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                     if vuln_name not in card_by_name:
                         card_by_name[vuln_name] = card
 
+                # Include both:
+                # 1) admin-created records (created_by = admin_id)
+                # 2) user-created records under this admin (admin_id = admin_id)
                 fix_docs = list(db[FIX_VULN_COLLECTION].find({
-                    "created_by": admin_id,
                     "report_id": report_id,
+                    "$or": [
+                        {"created_by": admin_id},
+                        {"admin_id": admin_id},
+                    ],
+                }))
+                closed_docs = list(db[FIX_VULN_CLOSED_COLLECTION].find({
+                    "report_id": report_id,
+                    "$or": [
+                        {"created_by": admin_id},
+                        {"admin_id": admin_id},
+                    ],
                 }))
 
                 steps_coll = db[FIX_VULN_STEPS_COLLECTION]
-                items = []
+                closed_fix_ids = set()
+                closed_keys = set()
+                for cdoc in closed_docs:
+                    cfid = str(cdoc.get("fix_vulnerability_id") or "").strip()
+                    if cfid:
+                        closed_fix_ids.add(cfid)
+                    cpname = (cdoc.get("plugin_name") or "").strip()
+                    chost = (cdoc.get("host_name") or "").strip()
+                    if cpname and chost:
+                        closed_keys.add((cpname, chost))
+
+                dedup_items = {}
 
                 for fix_doc in fix_docs:
                     fix_id = str(fix_doc.get("_id", ""))
@@ -496,6 +546,10 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                     vuln_name = (fix_doc.get("plugin_name") or "").strip()
                     asset = (fix_doc.get("host_name") or "").strip()
                     if not vuln_name:
+                        continue
+
+                    # Do not show vulnerabilities that are already closed.
+                    if fix_id in closed_fix_ids or (vuln_name, asset) in closed_keys:
                         continue
 
                     card = card_by_host.get((vuln_name, asset)) or card_by_name.get(vuln_name) or {}
@@ -512,8 +566,7 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                         continue
 
                     progress_percent = int(round((completed_steps / total_steps) * 100))
-
-                    items.append({
+                    item = {
                         "fix_vulnerability_id": fix_id,
                         "vulnerability_name": vuln_name,
                         "asset": asset,
@@ -523,8 +576,21 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                         "timeline_status": "in_process",
                         "risk_factor": _normalize_risk(card.get("risk_factor") or fix_doc.get("risk_factor") or fix_doc.get("severity")),
                         "assigned_team": _normalize_team(card.get("assigned_team") or fix_doc.get("assigned_team")),
-                    })
+                    }
 
+                    # Deduplicate repeated rows for same vuln+asset; keep most progressed/latest.
+                    dedup_key = (vuln_name, asset)
+                    created_at = fix_doc.get("created_at")
+                    if hasattr(created_at, "timestamp"):
+                        created_rank = created_at.timestamp()
+                    else:
+                        created_rank = 0
+                    rank = (completed_steps, created_rank)
+                    prev = dedup_items.get(dedup_key)
+                    if not prev or rank > prev["rank"]:
+                        dedup_items[dedup_key] = {"rank": rank, "item": item}
+
+                items = [v["item"] for v in dedup_items.values()]
                 items.sort(key=lambda x: (-x["progress_percent"], x["vulnerability_name"], x["asset"]))
                 return Response({"report_id": report_id, "total": len(items), "items": items}, status=status.HTTP_200_OK)
 
@@ -535,6 +601,240 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                 {"detail": "error occurred", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class AdminMitigationTimelineExtensionAPIView(APIView):
+    """
+    Team-wise severity counts for mitigation timeline extension card.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_id = str(request.user.id)
+            admin_email = request.user.email
+            team_order = TEAM_NAMES
+
+            with MongoContext() as db:
+                report_doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+                if not report_doc:
+                    return Response({
+                        "report_id": None,
+                        "teams": [{"team": t, "critical": 0, "high": 0, "medium": 0, "low": 0} for t in team_order],
+                    }, status=status.HTTP_200_OK)
+
+                report_id = str(report_doc.get("report_id") or report_doc.get("_id", ""))
+
+                buckets = {t: {"team": t, "critical": 0, "high": 0, "medium": 0, "low": 0} for t in team_order}
+                team_lookup = {t.lower(): t for t in team_order}
+
+                # Build plugin_name -> normalized severity map from latest report.
+                plugin_risk = {}
+                for host in report_doc.get("vulnerabilities_by_host", []):
+                    for vuln in host.get("vulnerabilities", []):
+                        pname = (
+                            vuln.get("plugin_name")
+                            or vuln.get("pluginname")
+                            or vuln.get("name")
+                            or ""
+                        ).strip()
+                        if not pname or pname in plugin_risk:
+                            continue
+                        raw = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
+                        if raw.startswith("crit"):
+                            plugin_risk[pname] = "critical"
+                        elif raw.startswith("high"):
+                            plugin_risk[pname] = "high"
+                        elif raw.startswith("med"):
+                            plugin_risk[pname] = "medium"
+                        elif raw.startswith("low"):
+                            plugin_risk[pname] = "low"
+
+                # Count ALL assigned vulnerabilities from cards (not only in-process fix records).
+                seen = set()
+                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
+                    vuln_name = (card.get("vulnerability_name") or "").strip()
+                    host_name = (card.get("host_name") or "").strip()
+                    raw_team = (card.get("assigned_team") or "").strip()
+                    team = team_lookup.get(raw_team.lower())
+                    if not vuln_name or not team:
+                        continue
+
+                    key = (vuln_name, host_name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    risk = plugin_risk.get(vuln_name)
+                    if risk in ("critical", "high", "medium", "low"):
+                        buckets[team][risk] += 1
+
+                return Response(
+                    {"report_id": report_id, "teams": [buckets[t] for t in team_order]},
+                    status=status.HTTP_200_OK,
+                )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"detail": "error occurred", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class AdminMitigationTimelineExtensionReportAPIView(APIView):
+    """List mitigation timeline extension requests for admin."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_id = str(request.user.id)
+            admin_email = request.user.email
+            team_filter = (request.query_params.get("team") or "").strip().lower()
+            severity_filter = _normalize_severity_key(request.query_params.get("severity"))
+            status_filter = (request.query_params.get("status") or "").strip().lower()
+            explicit_report_id = (request.query_params.get("report_id") or "").strip()
+
+            with MongoContext() as db:
+                coll = db[TIMELINE_EXTENSION_COLLECTION]
+                report_id = explicit_report_id
+                if not report_id:
+                    latest = _load_latest_report_for_admin(db, admin_email, admin_id)
+                    report_id = str(latest.get("report_id") or latest.get("_id", "")) if latest else None
+
+                query = {"admin_id": admin_id}
+                if report_id:
+                    query["report_id"] = report_id
+                if status_filter in {"review", "approved", "rejected"}:
+                    query["status"] = status_filter
+
+                docs = list(coll.find(query).sort("request_date", -1))
+                results = []
+                severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+
+                for doc in docs:
+                    severity_key = _normalize_severity_key(doc.get("severity"))
+                    if not severity_key:
+                        continue
+                    team_name = (doc.get("team_name") or "").strip()
+                    if team_filter and team_name.lower() != team_filter:
+                        continue
+                    if severity_filter and severity_key != severity_filter:
+                        continue
+
+                    severity_counts[severity_key] += 1
+                    results.append({
+                        "request_id": str(doc.get("_id")),
+                        "report_id": doc.get("report_id"),
+                        "severity": severity_key,
+                        "asset": doc.get("asset"),
+                        "vul_name": doc.get("vulnerability_name"),
+                        "status": doc.get("status", "review"),
+                        "requested_by": doc.get("team_name"),
+                        "request_date": _to_iso(doc.get("request_date")),
+                        "extension_days": int(doc.get("requested_extension_days") or 0),
+                        "reason": doc.get("reason") or "",
+                    })
+
+                return Response({
+                    "report_id": report_id,
+                    "count": len(results),
+                    "severity_counts": severity_counts,
+                    "results": results,
+                })
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response({"detail": "error occurred", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class AdminMitigationTimelineExtensionStatusAPIView(APIView):
+    """Approve or reject mitigation timeline extension request."""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, request_id):
+        try:
+            admin_id = str(request.user.id)
+            new_status = (request.data.get("status") or "").strip().lower()
+            admin_comment = (request.data.get("admin_comment") or "").strip()
+            if new_status not in {"approved", "rejected"}:
+                return Response({"detail": "status must be approved or rejected"}, status=status.HTTP_400_BAD_REQUEST)
+
+            with MongoContext() as db:
+                coll = db[TIMELINE_EXTENSION_COLLECTION]
+                try:
+                    obj_id = ObjectId(request_id)
+                except Exception:
+                    return Response({"detail": "invalid request_id"}, status=status.HTTP_400_BAD_REQUEST)
+
+                doc = coll.find_one({"_id": obj_id, "admin_id": admin_id})
+                if not doc:
+                    return Response({"detail": "request not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                if (doc.get("status") or "review") != "review":
+                    return Response({"detail": "request already actioned"}, status=status.HTTP_400_BAD_REQUEST)
+
+                update_payload = {
+                    "status": new_status,
+                    "admin_action_by": admin_id,
+                    "admin_action_at": datetime.utcnow(),
+                    "admin_comment": admin_comment,
+                }
+
+                risk_criteria_updated = False
+                updated_risk = None
+
+                if new_status == "approved":
+                    severity_key = _normalize_severity_key(doc.get("severity"))
+                    extension_days = int(doc.get("requested_extension_days") or 0)
+                    original_days = int(doc.get("original_deadline_days") or 0)
+                    rc = _get_latest_riskcriteria_for_user(request.user)
+
+                    if rc and severity_key and extension_days > 0:
+                        if severity_key == "critical":
+                            current_days = parse_timeline_to_days(rc.critical)
+                            new_days = current_days + extension_days
+                            rc.critical = _format_days_for_rc(new_days)
+                        elif severity_key == "high":
+                            current_days = parse_timeline_to_days(rc.high)
+                            new_days = current_days + extension_days
+                            rc.high = _format_days_for_rc(new_days)
+                        elif severity_key == "medium":
+                            current_days = parse_timeline_to_days(rc.medium)
+                            new_days = current_days + extension_days
+                            rc.medium = _format_days_for_rc(new_days)
+                        else:
+                            current_days = parse_timeline_to_days(rc.low)
+                            new_days = current_days + extension_days
+                            rc.low = _format_days_for_rc(new_days)
+
+                        rc.save()
+                        risk_criteria_updated = True
+                        updated_risk = {
+                            "severity": severity_key,
+                            "previous_timeline_days": current_days,
+                            "extension_days": extension_days,
+                            "new_timeline_days": new_days,
+                        }
+                    update_payload["risk_criteria_updated"] = risk_criteria_updated
+                    update_payload["effective_deadline_days"] = original_days + extension_days
+
+                coll.update_one({"_id": obj_id}, {"$set": update_payload})
+                updated = coll.find_one({"_id": obj_id})
+
+                return Response({
+                    "message": "Request status updated",
+                    "request_id": str(updated.get("_id")),
+                    "status": updated.get("status"),
+                    "risk_criteria_updated": risk_criteria_updated,
+                    "updated_risk_criteria": updated_risk,
+                })
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response({"detail": "error occurred", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class AdminTotalAssetsAPIView(APIView):
