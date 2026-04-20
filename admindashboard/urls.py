@@ -12,6 +12,9 @@ from .views import (
     AdminDistributionByTeamDetailAPIView, AdminDetailedVulnerabilitiesAPIView,
     AdminAssetsByTeamAPIView,
     AdminInProcessRemediationTimelineAPIView,
+    AdminMitigationTimelineExtensionAPIView,
+    AdminMitigationTimelineExtensionReportAPIView,
+    AdminMitigationTimelineExtensionStatusAPIView,
 )
 
 urlpatterns = [
@@ -37,5 +40,8 @@ urlpatterns = [
     path("dashboard/detailed-vulnerabilities/", AdminDetailedVulnerabilitiesAPIView.as_view(), name="admin-detailed-vulnerabilities"),
     path("dashboard/assets-by-team/", AdminAssetsByTeamAPIView.as_view(), name="admin-assets-by-team"),
     path("dashboard/remediation-timeline/in-process/", AdminInProcessRemediationTimelineAPIView.as_view(), name="admin-remediation-timeline-in-process"),
+    path("dashboard/mitigation-timeline-extension/", AdminMitigationTimelineExtensionAPIView.as_view(), name="admin-mitigation-timeline-extension"),
+    path("dashboard/mitigation-timeline-extension/report/", AdminMitigationTimelineExtensionReportAPIView.as_view(), name="admin-mitigation-timeline-extension-report"),
+    path("dashboard/mitigation-timeline-extension/<str:request_id>/status/", AdminMitigationTimelineExtensionStatusAPIView.as_view(), name="admin-mitigation-timeline-extension-status"),
 ]
 

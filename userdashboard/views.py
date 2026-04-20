@@ -14,6 +14,7 @@ SUPPORT_REQUEST_COLLECTION = "support_requests"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 FIX_VULN_STEPS_COLLECTION = "fix_vulnerability_steps"
+TIMELINE_EXTENSION_COLLECTION = "timeline_extension_requests"
 
 try:
     from users_details.models import UserDetail
@@ -150,6 +151,41 @@ def _extract_total_steps(mitigation_table):
         if step_num > 0:
             step_nums.add(step_num)
     return len(step_nums)
+
+
+def _normalize_severity_key(raw):
+    sev = (raw or "").strip().lower()
+    if sev.startswith("crit"):
+        return "critical"
+    if sev.startswith("high"):
+        return "high"
+    if sev.startswith("med"):
+        return "medium"
+    if sev.startswith("low"):
+        return "low"
+    return None
+
+
+def _to_iso(dt_val):
+    if hasattr(dt_val, "isoformat"):
+        return dt_val.isoformat()
+    return str(dt_val) if dt_val else None
+
+
+def _build_plugin_severity_map(report_doc):
+    plugin_risk = {}
+    for host in report_doc.get("vulnerabilities_by_host", []):
+        for vuln in host.get("vulnerabilities", []):
+            pname = (
+                vuln.get("plugin_name")
+                or vuln.get("pluginname")
+                or vuln.get("name")
+                or ""
+            ).strip()
+            if not pname or pname in plugin_risk:
+                continue
+            plugin_risk[pname] = _normalize_severity_key(vuln.get("risk_factor") or vuln.get("severity") or "")
+    return plugin_risk
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -788,17 +824,44 @@ class UserInProcessRemediationTimelineAPIView(APIView):
                         card_by_name[vuln_name] = card
 
                 steps_coll = db[FIX_VULN_STEPS_COLLECTION]
+                # Include both admin-created and team-user-created records
+                # for this admin/report, then apply team filter below.
                 fix_docs = list(db[FIX_VULN_COLLECTION].find({
-                    "created_by": admin_id,
                     "report_id": report_id,
+                    "$or": [
+                        {"created_by": admin_id},
+                        {"admin_id": admin_id},
+                    ],
+                }))
+                closed_docs = list(db[FIX_VULN_CLOSED_COLLECTION].find({
+                    "report_id": report_id,
+                    "$or": [
+                        {"created_by": admin_id},
+                        {"admin_id": admin_id},
+                    ],
                 }))
 
-                items = []
+                closed_fix_ids = set()
+                closed_keys = set()
+                for cdoc in closed_docs:
+                    cfid = str(cdoc.get("fix_vulnerability_id") or "").strip()
+                    if cfid:
+                        closed_fix_ids.add(cfid)
+                    cpname = (cdoc.get("plugin_name") or "").strip()
+                    chost = (cdoc.get("host_name") or "").strip()
+                    if cpname and chost:
+                        closed_keys.add((cpname, chost))
+
+                dedup_items = {}
                 for fix_doc in fix_docs:
                     fix_id = str(fix_doc.get("_id", ""))
                     vuln_name = (fix_doc.get("plugin_name") or "").strip()
                     asset = (fix_doc.get("host_name") or "").strip()
                     if not fix_id or not vuln_name:
+                        continue
+
+                    # Do not show vulnerabilities that are already closed.
+                    if fix_id in closed_fix_ids or (vuln_name, asset) in closed_keys:
                         continue
 
                     card = card_by_host.get((vuln_name, asset)) or card_by_name.get(vuln_name) or {}
@@ -821,7 +884,7 @@ class UserInProcessRemediationTimelineAPIView(APIView):
                     progress_percent = int(round((completed_steps / total_steps) * 100))
                     risk_raw = card.get("risk_factor") or fix_doc.get("risk_factor") or fix_doc.get("severity") or ""
 
-                    items.append({
+                    item = {
                         "fix_vulnerability_id": fix_id,
                         "vulnerability_name": vuln_name,
                         "asset": asset,
@@ -831,14 +894,356 @@ class UserInProcessRemediationTimelineAPIView(APIView):
                         "timeline_status": "in_process",
                         "risk_factor": str(risk_raw).strip().title() if risk_raw else "",
                         "assigned_team": assigned_team,
-                    })
+                    }
 
+                    # Deduplicate repeated rows for same vuln+asset; keep most progressed/latest.
+                    dedup_key = (vuln_name, asset)
+                    created_at = fix_doc.get("created_at")
+                    if hasattr(created_at, "timestamp"):
+                        created_rank = created_at.timestamp()
+                    else:
+                        created_rank = 0
+                    rank = (completed_steps, created_rank)
+                    prev = dedup_items.get(dedup_key)
+                    if not prev or rank > prev["rank"]:
+                        dedup_items[dedup_key] = {"rank": rank, "item": item}
+
+                items = [v["item"] for v in dedup_items.values()]
                 items.sort(key=lambda x: (-x["progress_percent"], x["vulnerability_name"], x["asset"]))
                 return Response({
                     "report_id": report_id,
                     "teams": active_teams,
                     "total": len(items),
                     "items": items,
+                })
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(e)}, status=500)
+
+
+class UserMitigationTimelineExtensionAPIView(APIView):
+    """
+    Team-wise severity counts for mitigation timeline extension card (user scope).
+    Includes only teams assigned to user and (when present) vulnerabilities
+    where the user appears in assigned_team_members.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response({"report_id": None, "teams": []})
+
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams = [selected_team] if selected_team and selected_team in teams else teams
+            team_lookup = _normalize_teams(active_teams)
+
+            with MongoContext() as db:
+                report_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+                if not report_doc:
+                    return Response({
+                        "report_id": None,
+                        "teams": [{"team": t, "critical": 0, "high": 0, "medium": 0, "low": 0} for t in active_teams],
+                    })
+
+                report_id = str(report_doc.get("report_id") or report_doc.get("_id", ""))
+
+                buckets = {t: {"team": t, "critical": 0, "high": 0, "medium": 0, "low": 0} for t in active_teams}
+
+                # Build plugin_name -> normalized severity map from latest report.
+                plugin_risk = {}
+                for host in report_doc.get("vulnerabilities_by_host", []):
+                    for vuln in host.get("vulnerabilities", []):
+                        pname = (
+                            vuln.get("plugin_name")
+                            or vuln.get("pluginname")
+                            or vuln.get("name")
+                            or ""
+                        ).strip()
+                        if not pname or pname in plugin_risk:
+                            continue
+                        raw = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
+                        if raw.startswith("crit"):
+                            plugin_risk[pname] = "critical"
+                        elif raw.startswith("high"):
+                            plugin_risk[pname] = "high"
+                        elif raw.startswith("med"):
+                            plugin_risk[pname] = "medium"
+                        elif raw.startswith("low"):
+                            plugin_risk[pname] = "low"
+
+                # Count all vulnerabilities assigned to user's teams from vulnerability_cards.
+                seen = set()
+                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
+                    vuln_name = (card.get("vulnerability_name") or "").strip()
+                    host_name = (card.get("host_name") or "").strip()
+                    raw_team = (card.get("assigned_team") or "").strip()
+                    team = team_lookup.get(raw_team.lower())
+                    if not vuln_name or not team:
+                        continue
+
+                    key = (vuln_name, host_name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    risk = plugin_risk.get(vuln_name)
+                    if risk in ("critical", "high", "medium", "low"):
+                        buckets[team][risk] += 1
+
+                return Response({"report_id": report_id, "teams": [buckets[t] for t in active_teams]})
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(e)}, status=500)
+
+
+class UserMitigationTimelineExtensionOptionsAPIView(APIView):
+    """
+    Form options for extension request.
+    GET /api/user/dashboard/mitigation-timeline-extension/options/?severity=high&asset=1.1.1.1
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response({"report_id": None, "assets": [], "vulnerabilities": []})
+
+            severity_filter = _normalize_severity_key(request.query_params.get("severity"))
+            asset_filter = (request.query_params.get("asset") or "").strip()
+            team_lookup = _normalize_teams(teams)
+
+            with MongoContext() as db:
+                report_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+                if not report_doc:
+                    return Response({"report_id": None, "assets": [], "vulnerabilities": []})
+
+                report_id = str(report_doc.get("report_id") or report_doc.get("_id", ""))
+                plugin_severity = _build_plugin_severity_map(report_doc)
+                rc = _get_admin_riskcriteria(admin_user)
+
+                assets = set()
+                vulnerabilities = set()
+
+                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
+                    team = (card.get("assigned_team") or "").strip()
+                    if not team_lookup.get(team.lower()):
+                        continue
+
+                    vuln_name = (card.get("vulnerability_name") or "").strip()
+                    host_name = (card.get("host_name") or "").strip()
+                    sev = plugin_severity.get(vuln_name)
+                    if severity_filter and sev != severity_filter:
+                        continue
+
+                    if host_name:
+                        assets.add(host_name)
+                    if (not asset_filter or host_name == asset_filter) and vuln_name:
+                        vulnerabilities.add(vuln_name)
+
+                original_deadline_days = None
+                if rc and severity_filter:
+                    if severity_filter == "critical":
+                        original_deadline_days = _parse_timeline_to_days(rc.critical)
+                    elif severity_filter == "high":
+                        original_deadline_days = _parse_timeline_to_days(rc.high)
+                    elif severity_filter == "medium":
+                        original_deadline_days = _parse_timeline_to_days(rc.medium)
+                    else:
+                        original_deadline_days = _parse_timeline_to_days(rc.low)
+
+                return Response({
+                    "report_id": report_id,
+                    "severity": severity_filter,
+                    "assets": sorted(assets),
+                    "vulnerabilities": sorted(vulnerabilities),
+                    "original_deadline_days": original_deadline_days,
+                })
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(e)}, status=500)
+
+
+class UserMitigationTimelineExtensionCreateAPIView(APIView):
+    """
+    Create extension request.
+    POST /api/user/dashboard/mitigation-timeline-extension/request/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response({"detail": "User is not linked to any team"}, status=status.HTTP_403_FORBIDDEN)
+
+            severity = _normalize_severity_key(request.data.get("severity"))
+            asset = (request.data.get("asset") or "").strip()
+            vulnerability_name = (request.data.get("vulnerability_name") or "").strip()
+            reason = (request.data.get("reason") or "").strip()
+            requested_extension_days = int(request.data.get("requested_extension_days") or 0)
+
+            if not severity or not asset or not vulnerability_name or requested_extension_days <= 0 or not reason:
+                return Response({"detail": "severity, asset, vulnerability_name, requested_extension_days, reason are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            team_lookup = _normalize_teams(teams)
+            current_email = (request.user.email or "").strip().lower()
+            current_user_id = str(request.user.id)
+
+            with MongoContext() as db:
+                report_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+                if not report_doc:
+                    return Response({"detail": "No report found"}, status=status.HTTP_404_NOT_FOUND)
+                report_id = str(report_doc.get("report_id") or report_doc.get("_id", ""))
+                plugin_severity = _build_plugin_severity_map(report_doc)
+
+                # Validate user has access to selected vulnerability in selected asset/team.
+                selected_card = None
+                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id, "host_name": asset, "vulnerability_name": vulnerability_name}):
+                    team_name = (card.get("assigned_team") or "").strip()
+                    if not team_lookup.get(team_name.lower()):
+                        continue
+                    members = card.get("assigned_team_members") or []
+                    if members:
+                        is_assigned = False
+                        for m in members:
+                            m_uid = str(m.get("user_id") or "").strip()
+                            m_email = str(m.get("email") or "").strip().lower()
+                            if (m_uid and m_uid == current_user_id) or (m_email and m_email == current_email):
+                                is_assigned = True
+                                break
+                        if not is_assigned:
+                            continue
+                    selected_card = card
+                    break
+
+                if not selected_card:
+                    return Response({"detail": "Selected asset/vulnerability is not assigned to your team"}, status=status.HTTP_403_FORBIDDEN)
+
+                detected_severity = plugin_severity.get(vulnerability_name)
+                if detected_severity and detected_severity != severity:
+                    return Response({"detail": "Selected severity does not match vulnerability severity"}, status=status.HTTP_400_BAD_REQUEST)
+
+                rc = _get_admin_riskcriteria(admin_user)
+                if not rc:
+                    return Response({"detail": "Risk criteria not set by admin"}, status=status.HTTP_404_NOT_FOUND)
+
+                if severity == "critical":
+                    original_days = _parse_timeline_to_days(rc.critical)
+                elif severity == "high":
+                    original_days = _parse_timeline_to_days(rc.high)
+                elif severity == "medium":
+                    original_days = _parse_timeline_to_days(rc.medium)
+                else:
+                    original_days = _parse_timeline_to_days(rc.low)
+
+                coll = db[TIMELINE_EXTENSION_COLLECTION]
+                dup = coll.find_one({
+                    "admin_id": str(admin_user.id),
+                    "report_id": report_id,
+                    "asset": asset,
+                    "vulnerability_name": vulnerability_name,
+                    "severity": severity,
+                    "status": "review",
+                })
+                if dup:
+                    return Response({"detail": "Pending request already exists for this vulnerability"}, status=status.HTTP_400_BAD_REQUEST)
+
+                payload = {
+                    "report_id": report_id,
+                    "admin_id": str(admin_user.id),
+                    "team_name": (selected_card.get("assigned_team") or "").strip(),
+                    "asset": asset,
+                    "vulnerability_name": vulnerability_name,
+                    "severity": severity,
+                    "requested_by_user_id": current_user_id,
+                    "requested_by_email": request.user.email,
+                    "request_date": datetime.utcnow(),
+                    "original_deadline_days": int(original_days or 0),
+                    "requested_extension_days": requested_extension_days,
+                    "reason": reason,
+                    "status": "review",
+                    "risk_criteria_updated": False,
+                }
+                result = coll.insert_one(payload)
+
+                return Response({
+                    "message": "Extension request submitted",
+                    "request_id": str(result.inserted_id),
+                    "status": "review",
+                }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(e)}, status=500)
+
+
+class UserMitigationTimelineExtensionReportAPIView(APIView):
+    """
+    View extension requests report for user teams.
+    GET /api/user/dashboard/mitigation-timeline-extension/report/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response({"count": 0, "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}, "results": []})
+
+            team_lookup = _normalize_teams(teams)
+            severity_filter = _normalize_severity_key(request.query_params.get("severity"))
+            status_filter = (request.query_params.get("status") or "").strip().lower()
+
+            with MongoContext() as db:
+                coll = db[TIMELINE_EXTENSION_COLLECTION]
+                report_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+                report_id = str(report_doc.get("report_id") or report_doc.get("_id", "")) if report_doc else None
+
+                query = {"admin_id": str(admin_user.id)}
+                if report_id:
+                    query["report_id"] = report_id
+                if status_filter in {"review", "approved", "rejected"}:
+                    query["status"] = status_filter
+
+                docs = list(coll.find(query).sort("request_date", -1))
+
+                results = []
+                severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                for doc in docs:
+                    team_name = (doc.get("team_name") or "").strip()
+                    if not team_lookup.get(team_name.lower()):
+                        continue
+
+                    severity = _normalize_severity_key(doc.get("severity"))
+                    if not severity:
+                        continue
+                    if severity_filter and severity != severity_filter:
+                        continue
+
+                    severity_counts[severity] += 1
+                    results.append({
+                        "request_id": str(doc.get("_id")),
+                        "severity": severity,
+                        "asset": doc.get("asset"),
+                        "vul_name": doc.get("vulnerability_name"),
+                        "status": doc.get("status", "review"),
+                        "requested_by": team_name,
+                        "request_date": _to_iso(doc.get("request_date")),
+                        "extension_days": int(doc.get("requested_extension_days") or 0),
+                        "reason": doc.get("reason") or "",
+                    })
+
+                return Response({
+                    "report_id": report_id,
+                    "count": len(results),
+                    "severity_counts": severity_counts,
+                    "results": results,
                 })
 
         except Exception as e:
