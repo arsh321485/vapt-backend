@@ -3024,6 +3024,23 @@ class SlackOAuthCallbackView(APIView):
             user.slack_bot_token = bot_token
             user.save()
 
+            # Step 4a: ensure UserDetail exists for Slack user under this admin.
+            # If callback is for admin itself, this creates a profile row for consistency.
+            try:
+                from users_details.models import UserDetail
+                UserDetail.objects.get_or_create(
+                    admin=user,
+                    email=email,
+                    defaults={
+                        "first_name": firstname or "Slack",
+                        "last_name": lastname or "User",
+                        "user_type": "internal",
+                        "Member_role": [],
+                    },
+                )
+            except Exception:
+                logger.warning("UserDetail upsert failed in Slack OAuth callback", exc_info=True)
+
             # ✅ Step 4b: Ensure vaptfix channels exist and invite user
             channels = {}
             try:
@@ -3189,6 +3206,39 @@ class SlackLoginView(APIView):
                 user.slack_team_id = slack_team.get("id")
                 user.save()
 
+            # 3a. Ensure UserDetail exists when user authenticates from Slack.
+            user_detail_created = False
+            user_detail_updated = False
+            try:
+                from users_details.models import UserDetail
+                name_parts = (slack_name or "Slack User").strip().split()
+                first_name = name_parts[0] if name_parts else "Slack"
+                last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "User"
+                ud, ud_created = UserDetail.objects.get_or_create(
+                    admin=user,
+                    email=slack_email,
+                    defaults={
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "user_type": "internal",
+                        "Member_role": [],
+                    },
+                )
+                user_detail_created = ud_created
+                if not ud_created:
+                    changed = False
+                    if not (ud.first_name or "").strip() and first_name:
+                        ud.first_name = first_name
+                        changed = True
+                    if not (ud.last_name or "").strip() and last_name:
+                        ud.last_name = last_name
+                        changed = True
+                    if changed:
+                        ud.save(update_fields=["first_name", "last_name"])
+                        user_detail_updated = True
+            except Exception:
+                logger.warning("UserDetail upsert failed in Slack login", exc_info=True)
+
             # 3b. Ensure vaptfix channels exist and invite user
             channels = {}
             try:
@@ -3220,6 +3270,12 @@ class SlackLoginView(APIView):
                         "is_superuser": user.is_superuser,
                         "slack_user_id": user.slack_user_id,
                         "last_login": user.last_login.isoformat() if user.last_login else None
+                    },
+                    "vaptfix_sync": {
+                        "user_created": created,
+                        "user_detail_created": user_detail_created,
+                        "user_detail_updated": user_detail_updated,
+                        "needs_role_assignment": True,
                     }
                 }
             }, status=status.HTTP_200_OK)
