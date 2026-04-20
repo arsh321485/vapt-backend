@@ -8,7 +8,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.views import APIView
 from rest_framework import serializers
-from django.contrib.auth import login
+from django.contrib.auth import login, get_user_model
 from .models import User
 from django.apps import apps
 from django.contrib.auth.hashers import make_password
@@ -23,7 +23,7 @@ import threading
 import re
 import hashlib
 import hmac
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 import logging
 import uuid
 from django.conf import settings
@@ -1009,21 +1009,45 @@ def _create_vaptfix_channels(team_id, headers):
                 "description": f"{channel_name} channel",
                 "membershipType": "standard"
             }, timeout=15)
-            results.append({"channelName": channel_name, "status": "created" if ch_resp.status_code in (200, 201) else "failed"})
+            ch_data = {}
+            try:
+                ch_data = ch_resp.json()
+            except Exception:
+                ch_data = {}
+            results.append({
+                "channelName": channel_name,
+                "channelId": ch_data.get("id"),
+                "status": "created" if ch_resp.status_code in (200, 201) else "failed"
+            })
         except Exception as e:
             results.append({"channelName": channel_name, "status": "failed", "error": str(e)})
     return results
 
 
-def _build_teams_tab_urls(team_id, tenant_id=None):
+def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name="General"):
     """Build stable deep links that open the Teams tab (not chat)."""
     if not team_id:
-        return {"web_url": None, "desktop_url": None}
-    web_url = f"https://teams.microsoft.com/_#/l/team/{team_id}/conversations?groupId={team_id}"
+        return {"web_url": None, "desktop_url": None, "web_url_alt": None}
+    web_url = f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}"
     if tenant_id:
         web_url = f"{web_url}&tenantId={tenant_id}"
+    # Alternate URL for environments that still rely on hash-routing.
+    web_url_alt = web_url.replace("https://teams.microsoft.com/l/team/", "https://teams.microsoft.com/_#/l/team/")
+    channel_web_url = None
+    if channel_id:
+        safe_name = quote(channel_name or "General")
+        channel_web_url = f"https://teams.microsoft.com/l/channel/{channel_id}/{safe_name}?groupId={team_id}"
+        if tenant_id:
+            channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
     desktop_url = web_url.replace("https://", "msteams://")
-    return {"web_url": web_url, "desktop_url": desktop_url}
+    channel_desktop_url = channel_web_url.replace("https://", "msteams://") if channel_web_url else None
+    return {
+        "web_url": web_url,
+        "web_url_alt": web_url_alt,
+        "desktop_url": desktop_url,
+        "channel_web_url": channel_web_url,
+        "channel_desktop_url": channel_desktop_url,
+    }
 
 
 def auto_create_vaptfix_team(access_token):
@@ -1062,13 +1086,23 @@ def auto_create_vaptfix_team(access_token):
                                 })
                     except Exception as e:
                         logger.warning(f"Error fetching channels: {str(e)}")
+                    preferred_channel_id = None
+                    for ch in channels_result:
+                        nm = (ch.get("channelName") or "").strip().lower()
+                        if nm == "general":
+                            preferred_channel_id = ch.get("channelId")
+                            break
+                    if not preferred_channel_id and channels_result:
+                        preferred_channel_id = channels_result[0].get("channelId")
+                    urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id)
                     return {
                         "team_id": team_id,
                         "team_name": "Vaptfix",
                         "status": "already_exists",
-                        "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
-                        "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
-                        "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
+                        "teams_url": urls.get("channel_web_url") or urls.get("web_url"),
+                        "teams_tab_url": urls.get("web_url"),
+                        "teams_tab_url_alt": urls.get("web_url_alt"),
+                        "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("desktop_url"),
                         "channels": channels_result
                     }
     except Exception as e:
@@ -1127,15 +1161,25 @@ def auto_create_vaptfix_team(access_token):
 
         # Step 3: Create 4 default channels using the shared helper
         channels_result = _create_vaptfix_channels(team_id, headers)
+        preferred_channel_id = None
+        for ch in channels_result:
+            nm = (ch.get("channelName") or "").strip().lower()
+            if nm == "general":
+                preferred_channel_id = ch.get("channelId")
+                break
+        if not preferred_channel_id and channels_result:
+            preferred_channel_id = channels_result[0].get("channelId")
+        urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id)
 
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
         return {
             "team_id": team_id,
             "team_name": "Vaptfix",
             "status": "created",
-            "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
-            "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
-            "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
+            "teams_url": urls.get("channel_web_url") or urls.get("web_url"),
+            "teams_tab_url": urls.get("web_url"),
+            "teams_tab_url_alt": urls.get("web_url_alt"),
+            "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("desktop_url"),
             "channels": channels_result
         }
 
@@ -1284,13 +1328,17 @@ class MicrosoftTeamsCallbackView(APIView):
                     // Prefer explicit Teams tab links so app opens Team view, not Chat.
                     var teamId = {json.dumps(vaptfix_team.get('team_id') if vaptfix_team else None)};
                     var tenantId = "{tenant_id}";
-                    var teamsWebUrl = {json.dumps(vaptfix_team.get('teams_tab_url') if vaptfix_team else None)};
+                    var teamsWebUrl = {json.dumps(vaptfix_team.get('teams_url') if vaptfix_team else None)};
+                    var teamsWebUrlAlt = {json.dumps(vaptfix_team.get('teams_tab_url_alt') if vaptfix_team else None)};
                     var teamsDesktopUrl = {json.dumps(vaptfix_team.get('teams_desktop_url') if vaptfix_team else None)};
                     if (!teamsWebUrl && teamId) {{
                         teamsWebUrl = "https://teams.microsoft.com/_#/l/team/" + teamId + "/conversations?groupId=" + teamId;
                     }}
                     if (teamsWebUrl && tenantId && teamsWebUrl.indexOf("tenantId=") === -1) {{
                         teamsWebUrl = teamsWebUrl + "&tenantId=" + tenantId;
+                    }}
+                    if (teamsWebUrlAlt && tenantId && teamsWebUrlAlt.indexOf("tenantId=") === -1) {{
+                        teamsWebUrlAlt = teamsWebUrlAlt + "&tenantId=" + tenantId;
                     }}
                     if (!teamsDesktopUrl && teamsWebUrl) {{
                         teamsDesktopUrl = teamsWebUrl.replace("https://", "msteams://");
@@ -1312,9 +1360,17 @@ class MicrosoftTeamsCallbackView(APIView):
                     // Try Teams desktop app first, fallback to Teams web team tab.
                     if (teamsDesktopUrl) {{
                         window.location.href = teamsDesktopUrl;
-                        setTimeout(function() {{ window.location.href = webUrl; }}, 2000);
+                        setTimeout(function() {{
+                            window.location.href = webUrl;
+                            if (teamsWebUrlAlt) {{
+                                setTimeout(function() {{ window.location.href = teamsWebUrlAlt; }}, 1500);
+                            }}
+                        }}, 2000);
                     }} else {{
                         window.location.href = webUrl;
+                        if (teamsWebUrlAlt) {{
+                            setTimeout(function() {{ window.location.href = teamsWebUrlAlt; }}, 1500);
+                        }}
                     }}
                 </script>
             </body>
