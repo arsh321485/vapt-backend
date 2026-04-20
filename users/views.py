@@ -3209,6 +3209,7 @@ class SlackLoginView(APIView):
             # 3a. Ensure UserDetail exists when user authenticates from Slack.
             user_detail_created = False
             user_detail_updated = False
+            needs_role_assignment = True
             try:
                 from users_details.models import UserDetail
                 name_parts = (slack_name or "Slack User").strip().split()
@@ -3236,6 +3237,8 @@ class SlackLoginView(APIView):
                     if changed:
                         ud.save(update_fields=["first_name", "last_name"])
                         user_detail_updated = True
+                roles = ud.Member_role or []
+                needs_role_assignment = len(roles) == 0
             except Exception:
                 logger.warning("UserDetail upsert failed in Slack login", exc_info=True)
 
@@ -3275,7 +3278,7 @@ class SlackLoginView(APIView):
                         "user_created": created,
                         "user_detail_created": user_detail_created,
                         "user_detail_updated": user_detail_updated,
-                        "needs_role_assignment": True,
+                        "needs_role_assignment": needs_role_assignment,
                     }
                 }
             }, status=status.HTTP_200_OK)
