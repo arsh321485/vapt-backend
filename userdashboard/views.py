@@ -458,7 +458,7 @@ class UserVulnerabilitiesFixedAPIView(APIView):
 
                 report_id   = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
                 plugin_risk = _build_plugin_risk_map(nessus_doc)
-                admin_id    = str(admin_user.id)
+                current_user_id = str(request.user.id)
 
                 # Get plugin_names that belong to user's teams
                 team_plugins = set()
@@ -471,7 +471,7 @@ class UserVulnerabilitiesFixedAPIView(APIView):
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                 for vuln in db[FIX_VULN_CLOSED_COLLECTION].find({
-                    "created_by": admin_id,
+                    "created_by": current_user_id,
                     "status": "closed",
                     "report_id": str(report_id)
                 }):
