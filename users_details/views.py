@@ -1540,3 +1540,82 @@ class UserDetailByAdminAPIView(generics.ListAPIView):
             },
             status=status.HTTP_200_OK
         )
+
+
+class UserDetailSlackResyncView(generics.GenericAPIView):
+    """
+    Re-sync Slack channel membership for a team member.
+    POST /api/admin/users-details/user-detail/<detail_id>/resync-slack/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, detail_id):
+        try:
+            obj_id = ObjectId(detail_id)
+        except Exception:
+            return Response({"detail": "Invalid detail_id"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user_detail = get_object_or_404(UserDetail, _id=obj_id, admin=request.user)
+        roles = user_detail.Member_role or []
+        if not roles:
+            return Response(
+                {
+                    "message": "Slack resync skipped",
+                    "slack_sync": {"status": "skipped", "error": "missing_roles"},
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        bot_token = request.data.get("slack_bot_token") or getattr(request.user, "slack_bot_token", None)
+        if not bot_token:
+            return Response(
+                {
+                    "message": "Slack resync skipped",
+                    "slack_sync": {"status": "skipped", "error": "missing_slack_bot_token"},
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        member_user = get_user_model().objects.filter(email=user_detail.email).first()
+        slack_user_id = getattr(member_user, "slack_user_id", None) or lookup_slack_user_by_email(bot_token, user_detail.email)
+        if not slack_user_id:
+            invite_result = invite_user_to_slack_workspace(bot_token, user_detail.email)
+            return Response(
+                {
+                    "message": "Slack resync pending",
+                    "slack_sync": {
+                        "status": "pending_workspace_join" if invite_result.get("status") == "invited" else "failed",
+                        "workspace": {
+                            "invited": invite_result.get("status") == "invited",
+                            "already_member": invite_result.get("status") == "already_member",
+                            "invite_email": user_detail.email,
+                        },
+                        "channels": [],
+                        "error": invite_result.get("error"),
+                    },
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        slack_results, channel_ids = sync_member_to_slack_channels(
+            bot_token=bot_token,
+            slack_user_id=slack_user_id,
+            member_roles=roles,
+        )
+        if channel_ids:
+            user_detail.slack_channel_ids = list(set(channel_ids))
+            user_detail.save(update_fields=["slack_channel_ids"])
+
+        return Response(
+            {
+                "message": "Slack resync completed",
+                "data": UserDetailSerializer(user_detail).data,
+                "slack_sync": {
+                    "status": "success",
+                    "workspace": {"invited": False, "already_member": True},
+                    "user_lookup": {"email": user_detail.email, "slack_user_id": slack_user_id},
+                    "channels": slack_results,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
