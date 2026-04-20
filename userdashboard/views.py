@@ -1013,9 +1013,22 @@ class UserMitigationTimelineExtensionOptionsAPIView(APIView):
             if not teams or not admin_user:
                 return Response({"report_id": None, "assets": [], "vulnerabilities": []})
 
-            severity_filter = _normalize_severity_key(request.query_params.get("severity"))
+            raw_team = (request.query_params.get("team") or "").strip()
+            raw_severity = (request.query_params.get("severity") or "").strip()
+            if not raw_team:
+                return Response({"detail": "team query param is required"}, status=status.HTTP_400_BAD_REQUEST)
+            if not raw_severity:
+                return Response({"detail": "severity query param is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            severity_filter = _normalize_severity_key(raw_severity)
+            if not severity_filter:
+                return Response({"detail": "invalid severity. Use critical/high/medium/low"}, status=status.HTTP_400_BAD_REQUEST)
+
             asset_filter = (request.query_params.get("asset") or "").strip()
             team_lookup = _normalize_teams(teams)
+            selected_team = team_lookup.get(raw_team.lower())
+            if not selected_team:
+                return Response({"detail": "selected team is not assigned to this user"}, status=status.HTTP_403_FORBIDDEN)
 
             with MongoContext() as db:
                 report_doc = _load_latest_report(db, admin_user.id, admin_user.email)
@@ -1031,13 +1044,13 @@ class UserMitigationTimelineExtensionOptionsAPIView(APIView):
 
                 for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
                     team = (card.get("assigned_team") or "").strip()
-                    if not team_lookup.get(team.lower()):
+                    if team.lower() != selected_team.lower():
                         continue
 
                     vuln_name = (card.get("vulnerability_name") or "").strip()
                     host_name = (card.get("host_name") or "").strip()
                     sev = plugin_severity.get(vuln_name)
-                    if severity_filter and sev != severity_filter:
+                    if sev != severity_filter:
                         continue
 
                     if host_name:
@@ -1058,6 +1071,7 @@ class UserMitigationTimelineExtensionOptionsAPIView(APIView):
 
                 return Response({
                     "report_id": report_id,
+                    "team": selected_team,
                     "severity": severity_filter,
                     "assets": sorted(assets),
                     "vulnerabilities": sorted(vulnerabilities),

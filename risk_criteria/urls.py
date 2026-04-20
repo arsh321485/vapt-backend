@@ -6,6 +6,8 @@ from .views import (
     RiskCriteriaUpdateView,
     RiskCriteriaDeleteView,
     RiskCriteriaCalendarView,
+    RiskCriteriaCalendarWeekView,
+    RiskCriteriaCalendarDayView,
 )
 
 app_name = 'risk_criteria'
@@ -17,4 +19,6 @@ urlpatterns = [
     path('risks/<str:risk_id>/update/', RiskCriteriaUpdateView.as_view(), name='risk-update'),
     path('risks/<str:risk_id>/delete/', RiskCriteriaDeleteView.as_view(), name='risk-delete'),
     path('risks/<str:risk_id>/calendar/', RiskCriteriaCalendarView.as_view(), name='risk-calendar'),
+    path('risks/<str:risk_id>/calendar/week/', RiskCriteriaCalendarWeekView.as_view(), name='risk-calendar-week'),
+    path('risks/<str:risk_id>/calendar/day/', RiskCriteriaCalendarDayView.as_view(), name='risk-calendar-day'),
 ]

@@ -464,11 +464,6 @@ def _normalize_severity_key(raw):
     return None
 
 
-def _format_days_for_rc(days):
-    safe_days = max(0, int(days or 0))
-    return f"{safe_days} Days"
-
-
 def _to_iso(dt_val):
     if hasattr(dt_val, "isoformat"):
         return dt_val.isoformat()
@@ -789,33 +784,14 @@ class AdminMitigationTimelineExtensionStatusAPIView(APIView):
                     severity_key = _normalize_severity_key(doc.get("severity"))
                     extension_days = int(doc.get("requested_extension_days") or 0)
                     original_days = int(doc.get("original_deadline_days") or 0)
-                    rc = _get_latest_riskcriteria_for_user(request.user)
-
-                    if rc and severity_key and extension_days > 0:
-                        if severity_key == "critical":
-                            current_days = parse_timeline_to_days(rc.critical)
-                            new_days = current_days + extension_days
-                            rc.critical = _format_days_for_rc(new_days)
-                        elif severity_key == "high":
-                            current_days = parse_timeline_to_days(rc.high)
-                            new_days = current_days + extension_days
-                            rc.high = _format_days_for_rc(new_days)
-                        elif severity_key == "medium":
-                            current_days = parse_timeline_to_days(rc.medium)
-                            new_days = current_days + extension_days
-                            rc.medium = _format_days_for_rc(new_days)
-                        else:
-                            current_days = parse_timeline_to_days(rc.low)
-                            new_days = current_days + extension_days
-                            rc.low = _format_days_for_rc(new_days)
-
-                        rc.save()
-                        risk_criteria_updated = True
+                    # IMPORTANT: approving extension must NOT mutate global RiskCriteria.
+                    # We only persist request-level effective deadline.
+                    if severity_key:
                         updated_risk = {
                             "severity": severity_key,
-                            "previous_timeline_days": current_days,
+                            "previous_timeline_days": original_days,
                             "extension_days": extension_days,
-                            "new_timeline_days": new_days,
+                            "new_timeline_days": original_days + extension_days,
                         }
                     update_payload["risk_criteria_updated"] = risk_criteria_updated
                     update_payload["effective_deadline_days"] = original_days + extension_days
