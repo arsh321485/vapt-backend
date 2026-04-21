@@ -1,5 +1,0 @@
-SupportRequestByReportAPIView
-
-UserSupportRequestsByReportAPIView
-
-ye dono api me jo vuln closed ho jati hai o status me nai aa rha hai to kya issue hai o check kro 

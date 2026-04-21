@@ -508,7 +508,7 @@ class SendPasswordResetEmailView(generics.GenericAPIView):
             uid = urlsafe_base64_encode(force_bytes(user.pk))  # This will use the UUID id
             token = PasswordResetTokenGenerator().make_token(user)
 
-            reset_link = f"https://vapt-fron1.vercel.app/reset-password/{uid}/{token}/"
+            reset_link = f"https://vaptfix.ai/reset-password/{uid}/{token}/"
 
             data = {
                 "to_email": user_email,
@@ -583,7 +583,7 @@ class UserForgotPasswordView(generics.GenericAPIView):
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = PasswordResetTokenGenerator().make_token(user)
 
-        reset_link = f"https://vapt-fron1.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
+        reset_link = f"https://vaptfix.ai/auth?mode=set-password&uid={uid}&token={token}"
 
         # Load logo
         import os, base64
@@ -5914,7 +5914,7 @@ class TeamsWebhookView(APIView):
             uid = urlsafe_base64_encode(force_bytes(django_user.pk))
             token = PasswordResetTokenGenerator().make_token(django_user)
             set_password_url = (
-                f"https://vapt-fron1.vercel.app/auth"
+                f"https://vaptfix.ai/auth"
                 f"?mode=set-password&uid={uid}&token={token}"
             )
 
