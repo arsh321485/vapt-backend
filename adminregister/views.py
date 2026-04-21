@@ -2695,6 +2695,21 @@ class SupportRequestByReportAPIView(APIView):
                     sev = (fdoc.get("risk_factor") or fdoc.get("severity") or "").strip().title()
                     fix_severity_by_id[fid] = sev
 
+            # Build closed vulnerability ID set from fix_vulnerabilities_closed
+            all_vuln_ids = [
+                str(d.get("vulnerability_id") or "").strip()
+                for d in support_docs
+                if d.get("vulnerability_id")
+            ]
+            closed_vuln_ids = set()
+            if all_vuln_ids:
+                with MongoContext() as db2:
+                    for cdoc in db2[FIX_VULN_CLOSED_COLLECTION].find(
+                        {"fix_vulnerability_id": {"$in": all_vuln_ids}},
+                        {"fix_vulnerability_id": 1}
+                    ):
+                        closed_vuln_ids.add(cdoc.get("fix_vulnerability_id", ""))
+
             results = []
 
             for doc in support_docs:
@@ -2702,6 +2717,10 @@ class SupportRequestByReportAPIView(APIView):
                 severity = (
                     (doc.get("severity") or doc.get("risk_factor") or "").strip().title()
                     or fix_severity_by_id.get(vulnerability_id, "")
+                )
+                effective_status = (
+                    "closed" if vulnerability_id in closed_vuln_ids
+                    else doc.get("status")
                 )
                 results.append({
                     "_id": str(doc.get("_id")),
@@ -2716,7 +2735,7 @@ class SupportRequestByReportAPIView(APIView):
                     # "steps": doc.get("steps", []),
                     "step_requested": doc.get("step_requested"),
                     "description": doc.get("description"),
-                    "status": doc.get("status"),
+                    "status": effective_status,
                     "requested_by": _resolve_requester(doc),
                     "requested_at": doc.get("requested_at"),
                 })

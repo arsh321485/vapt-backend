@@ -1,3 +1,5 @@
-me users app me icon.jpg krke bad liye hai to aap ms team ke liye vhi vala icon le le 
+SupportRequestByReportAPIView
 
-code krke update kr do 
+UserSupportRequestsByReportAPIView
+
+ye dono api me jo vuln closed ho jati hai o status me nai aa rha hai to kya issue hai o check kro 
