@@ -2030,6 +2030,21 @@ class UserSupportRequestsByReportAPIView(APIView):
                 if full:
                     id_to_name[uid_str] = full
 
+        # Build closed vulnerability ID set from fix_vulnerabilities_closed
+        all_vuln_ids = [
+            str(d.get("vulnerability_id") or "").strip()
+            for d in raw_docs
+            if d.get("vulnerability_id")
+        ]
+        closed_vuln_ids = set()
+        if all_vuln_ids:
+            with MongoContext() as db2:
+                for cdoc in db2[FIX_VULN_CLOSED_COLLECTION].find(
+                    {"fix_vulnerability_id": {"$in": all_vuln_ids}},
+                    {"fix_vulnerability_id": 1}
+                ):
+                    closed_vuln_ids.add(cdoc.get("fix_vulnerability_id", ""))
+
         results = []
         for doc in raw_docs:
             uid = str(doc.get("user_id") or doc.get("admin_id") or "")
@@ -2038,6 +2053,10 @@ class UserSupportRequestsByReportAPIView(APIView):
             severity = (
                 (doc.get("severity") or doc.get("risk_factor") or "").strip().title()
                 or fix_severity_by_id.get(vulnerability_id, "")
+            )
+            effective_status = (
+                "closed" if vulnerability_id in closed_vuln_ids
+                else doc.get("status")
             )
             results.append({
                 "_id":                   str(doc.get("_id")),
@@ -2050,7 +2069,7 @@ class UserSupportRequestsByReportAPIView(APIView):
                 "assigned_team_members": doc.get("assigned_team_members", []),
                 "step_requested":        doc.get("step_requested"),
                 "description":           doc.get("description"),
-                "status":                doc.get("status"),
+                "status":                effective_status,
                 "requested_by":          requester_name,
                 "requested_at":          _normalize_iso(doc.get("requested_at")),
             })
