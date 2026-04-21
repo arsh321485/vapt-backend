@@ -1345,6 +1345,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     }}
                     var webUrl = teamsWebUrl || "https://teams.microsoft.com";
 
+                    var targetUrl = teamsDesktopUrl || teamsWebUrlAlt || webUrl;
                     if (window.opener) {{
                         window.opener.postMessage({{
                             type: "TEAMS_CONNECTED",
@@ -1356,21 +1357,14 @@ class MicrosoftTeamsCallbackView(APIView):
                             vaptfix_team: {json.dumps(vaptfix_team)},
                             redirect_target: "team_tab"
                         }}, "{frontend_redirect}");
-                    }}
-                    // Try Teams desktop app first, fallback to Teams web team tab.
-                    if (teamsDesktopUrl) {{
-                        window.location.href = teamsDesktopUrl;
+                        // Keep VAPTFIX parent tab untouched; open Teams in this popup/new tab only.
+                        window.location.replace(targetUrl);
                         setTimeout(function() {{
-                            window.location.href = webUrl;
-                            if (teamsWebUrlAlt) {{
-                                setTimeout(function() {{ window.location.href = teamsWebUrlAlt; }}, 1500);
-                            }}
-                        }}, 2000);
+                            try {{ window.close(); }} catch (e) {{}}
+                        }}, 3000);
                     }} else {{
-                        window.location.href = webUrl;
-                        if (teamsWebUrlAlt) {{
-                            setTimeout(function() {{ window.location.href = teamsWebUrlAlt; }}, 1500);
-                        }}
+                        // If callback opens in same tab, do not navigate away from VAPTFIX.
+                        document.body.innerHTML = "<p>Microsoft Teams connected successfully. You can close this tab and continue in VAPTFIX.</p>";
                     }}
                 </script>
             </body>
