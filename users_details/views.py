@@ -514,7 +514,7 @@ class UserDetailCreateView(generics.CreateAPIView):
         full_name = f"{first_name} {last_name}".strip() or "Team Member"
         admin_display = admin_email or "your administrator"
         today_str = datetime.date.today().strftime("%B %d, %Y")
-        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai')
 
         logo_b64 = self._load_logo_b64()
         logo_html = self._logo_html(logo_b64)
@@ -573,7 +573,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             </table>
             <!-- Buttons -->
             <div style="margin:0 0 28px 0;">
-              <a href="https://vapt-frontend-liart.vercel.app/auth?mode=signin"
+              <a href="https://vaptfix.ai/auth?mode=signin"
                  style="background-color:#1e1b4b;color:#ffffff;padding:12px 24px;
                         text-decoration:none;border-radius:30px;font-size:14px;
                         font-weight:bold;display:inline-block;">
@@ -634,7 +634,7 @@ class UserDetailCreateView(generics.CreateAPIView):
 
         logo_b64 = self._load_logo_b64()
         logo_html = self._logo_html(logo_b64)
-        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-frontend-liart.vercel.app')
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai')
 
         html_content = f"""<!DOCTYPE html>
 <html>
@@ -679,7 +679,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             </div>
             <!-- Go to Dashboard -->
             <div style="text-align:center;margin:0 0 8px 0;">
-              <a href="https://vapt-frontend-liart.vercel.app/auth?mode=signin"
+              <a href="https://vaptfix.ai/auth?mode=signin"
                  style="background-color:#1e1b4b;color:#ffffff;padding:13px 34px;
                         text-decoration:none;border-radius:30px;font-size:15px;
                         font-weight:bold;display:inline-block;">
@@ -864,7 +864,7 @@ class UserDetailCreateView(generics.CreateAPIView):
 
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = PasswordResetTokenGenerator().make_token(user)
-            set_password_url = f"https://vapt-frontend-liart.vercel.app/auth?mode=set-password&uid={uid}&token={token}"
+            set_password_url = f"https://vaptfix.ai/auth?mode=set-password&uid={uid}&token={token}"
 
             # Send emails in background so the API response is not blocked
             admin_email = getattr(admin_user, "email", "")
