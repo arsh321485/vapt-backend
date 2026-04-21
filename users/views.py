@@ -1041,17 +1041,17 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
         web_url = f"{web_url}&tenantId={tenant_id}"
     # Alternate URL for environments that still rely on hash-routing.
     web_url_alt = web_url.replace("https://teams.microsoft.com/l/team/", "https://teams.microsoft.com/_#/l/team/")
-    general_safe_name = quote("General")
-    general_web_url = f"https://teams.microsoft.com/l/channel/19%3ageneral/{general_safe_name}?groupId={team_id}"
-    if tenant_id:
-        general_web_url = f"{general_web_url}&tenantId={tenant_id}"
-    general_web_url_alt = general_web_url.replace("https://teams.microsoft.com/l/channel/", "https://teams.microsoft.com/_#/l/channel/")
     channel_web_url = None
     if channel_id:
         safe_name = quote(channel_name or "General")
         channel_web_url = f"https://teams.microsoft.com/l/channel/{channel_id}/{safe_name}?groupId={team_id}"
         if tenant_id:
             channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
+    general_web_url = channel_web_url if ((channel_name or "").strip().lower() == "general" and channel_web_url) else web_url
+    if "/l/channel/" in general_web_url:
+        general_web_url_alt = general_web_url.replace("https://teams.microsoft.com/l/channel/", "https://teams.microsoft.com/_#/l/channel/")
+    else:
+        general_web_url_alt = general_web_url.replace("https://teams.microsoft.com/l/team/", "https://teams.microsoft.com/_#/l/team/")
     desktop_url = web_url.replace("https://", "msteams://")
     general_desktop_url = general_web_url.replace("https://", "msteams://")
     channel_desktop_url = channel_web_url.replace("https://", "msteams://") if channel_web_url else None
@@ -1065,6 +1065,30 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
         "channel_web_url": channel_web_url,
         "channel_desktop_url": channel_desktop_url,
     }
+
+
+def _get_team_channels(team_id, headers):
+    channels = []
+    if not team_id:
+        return channels
+    try:
+        ch_resp = requests.get(
+            f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
+            headers=headers, timeout=10
+        )
+        if ch_resp.status_code == 200:
+            channels = ch_resp.json().get("value", []) or []
+    except Exception:
+        logger.warning(f"Unable to fetch channels for team_id={team_id}", exc_info=True)
+    return channels
+
+
+def _pick_general_channel_id(channels):
+    for ch in channels or []:
+        nm = (ch.get("displayName") or ch.get("channelName") or "").strip().lower()
+        if nm == "general":
+            return ch.get("id") or ch.get("channelId")
+    return None
 
 
 def _get_vaptfix_team_icon_bytes():
@@ -1175,12 +1199,7 @@ def auto_create_vaptfix_team(access_token):
                                 })
                     except Exception as e:
                         logger.warning(f"Error fetching channels: {str(e)}")
-                    preferred_channel_id = None
-                    for ch in channels_result:
-                        nm = (ch.get("channelName") or "").strip().lower()
-                        if nm == "general":
-                            preferred_channel_id = ch.get("channelId")
-                            break
+                    preferred_channel_id = _pick_general_channel_id(channels_result)
                     if not preferred_channel_id and channels_result:
                         preferred_channel_id = channels_result[0].get("channelId")
                     urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id)
@@ -1252,12 +1271,8 @@ def auto_create_vaptfix_team(access_token):
         # Step 3: Create 4 default channels using the shared helper
         channels_result = _create_vaptfix_channels(team_id, headers)
         _set_vaptfix_team_icon(team_id, access_token)
-        preferred_channel_id = None
-        for ch in channels_result:
-            nm = (ch.get("channelName") or "").strip().lower()
-            if nm == "general":
-                preferred_channel_id = ch.get("channelId")
-                break
+        all_channels = _get_team_channels(team_id, headers)
+        preferred_channel_id = _pick_general_channel_id(all_channels) or _pick_general_channel_id(channels_result)
         if not preferred_channel_id and channels_result:
             preferred_channel_id = channels_result[0].get("channelId")
         urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id)
@@ -1435,6 +1450,10 @@ class MicrosoftTeamsCallbackView(APIView):
 
                     var targetUrl = teamsWebUrlAlt || webUrl;
                     var frontendUrl = {json.dumps(frontend_redirect)};
+                    var frontendOrigin = frontendUrl;
+                    try {{
+                        frontendOrigin = new URL(frontendUrl).origin;
+                    }} catch (e) {{}}
                     if (window.opener) {{
                         window.opener.postMessage({{
                             type: "TEAMS_CONNECTED",
@@ -1447,7 +1466,7 @@ class MicrosoftTeamsCallbackView(APIView):
                             redirect_target: "team_tab",
                             teams_target_url: targetUrl,
                             teams_desktop_url: teamsDesktopUrl || null
-                        }}, "{frontend_redirect}");
+                        }}, frontendOrigin);
                         // This callback already runs in a separate OAuth tab.
                         // Open Teams in this same tab so VAPTFIX parent tab stays untouched.
                         window.location.replace(targetUrl);
