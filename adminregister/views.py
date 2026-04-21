@@ -2689,11 +2689,19 @@ class SupportRequestByReportAPIView(APIView):
                     continue
 
             fix_severity_by_id = {}
+            str_ids = [str(oid) for oid in object_ids]
             if object_ids:
+                # Check open fix_vulnerabilities
                 for fdoc in fix_coll.find({"_id": {"$in": object_ids}}):
                     fid = str(fdoc.get("_id"))
                     sev = (fdoc.get("risk_factor") or fdoc.get("severity") or "").strip().title()
                     fix_severity_by_id[fid] = sev
+                # Also check fix_vulnerabilities_closed (vulns deleted from open after closing)
+                for fdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"fix_vulnerability_id": {"$in": str_ids}}):
+                    fid = fdoc.get("fix_vulnerability_id", "")
+                    if fid and fid not in fix_severity_by_id:
+                        sev = (fdoc.get("risk_factor") or fdoc.get("severity") or "").strip().title()
+                        fix_severity_by_id[fid] = sev
 
             # Build closed vulnerability ID set from fix_vulnerabilities_closed
             all_vuln_ids = [
