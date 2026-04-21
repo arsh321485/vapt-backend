@@ -1122,28 +1122,52 @@ def _get_vaptfix_team_icon_bytes():
     return None
 
 
+def _png_to_jpeg_bytes(png_bytes):
+    """Convert PNG bytes to JPEG bytes. Teams desktop app requires JPEG."""
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
 def _set_vaptfix_team_icon(team_id, access_token):
     """
-    Best-effort Teams icon update.
-    Uses group photo endpoint because Team is backed by M365 group.
+    Upload team icon as JPEG (required by Teams desktop app).
+    Groups endpoint is authoritative for M365-backed Teams.
     """
     if not team_id or not access_token:
         return False
 
-    icon_bytes = _get_vaptfix_team_icon_bytes()
-    if not icon_bytes:
+    raw_bytes = _get_vaptfix_team_icon_bytes()
+    if not raw_bytes:
         logger.info("VAPTFIX icon skipped: no icon bytes available")
         return False
 
+    # Convert to JPEG — desktop app ignores PNG uploads
+    jpeg_bytes = _png_to_jpeg_bytes(raw_bytes)
+    if jpeg_bytes:
+        icon_bytes = jpeg_bytes
+        content_type = "image/jpeg"
+    else:
+        # Pillow unavailable — fall back to raw bytes
+        icon_bytes = raw_bytes
+        content_type = "image/png"
+
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Content-Type": "image/png",
+        "Content-Type": content_type,
     }
 
-    # Try Teams photo endpoint first, then Groups endpoint fallback.
+    # Groups endpoint works for both browser and desktop app.
+    # Teams endpoint is a secondary fallback.
     candidate_urls = [
-        f"https://graph.microsoft.com/v1.0/teams/{team_id}/photo/$value",
         f"https://graph.microsoft.com/v1.0/groups/{team_id}/photo/$value",
+        f"https://graph.microsoft.com/v1.0/teams/{team_id}/photo/$value",
     ]
     for url in candidate_urls:
         try:
@@ -1259,7 +1283,16 @@ def auto_create_vaptfix_team(access_token):
 
                 t = threading.Thread(target=_bg_create_channels, args=(access_token, team_id, headers), daemon=True)
                 t.start()
-            return {"team_id": team_id, "team_name": "Vaptfix", "status": "provisioning", "channels": []}
+            prov_urls = _build_teams_tab_urls(team_id)
+            return {
+                "team_id": team_id,
+                "team_name": "Vaptfix",
+                "status": "provisioning",
+                "teams_tab_url": prov_urls.get("general_web_url") or prov_urls.get("web_url"),
+                "teams_tab_url_alt": prov_urls.get("general_web_url_alt") or prov_urls.get("web_url_alt"),
+                "teams_desktop_url": prov_urls.get("general_desktop_url") or prov_urls.get("desktop_url"),
+                "channels": [],
+            }
         else:
             logger.error(f"Failed to create VAPTFIX team: {resp.status_code} {resp.text}")
             return {"team_id": None, "team_name": "Vaptfix", "status": "creation_failed", "error": resp.text, "channels": []}
@@ -1437,7 +1470,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     var teamsWebUrlAlt = {json.dumps(vaptfix_team.get('teams_tab_url_alt') if vaptfix_team else None)};
                     var teamsDesktopUrl = {json.dumps(vaptfix_team.get('teams_desktop_url') if vaptfix_team else None)};
                     if (!teamsWebUrl && teamId) {{
-                        teamsWebUrl = "https://teams.cloud.microsoft/_#/l/team/" + teamId + "/conversations?groupId=" + teamId;
+                        teamsWebUrl = "https://teams.cloud.microsoft/l/team/" + teamId + "/conversations?groupId=" + teamId;
                     }}
                     if (teamsWebUrl && tenantId && teamsWebUrl.indexOf("tenantId=") === -1) {{
                         teamsWebUrl = teamsWebUrl + "&tenantId=" + tenantId;
@@ -1607,6 +1640,52 @@ class MicrosoftTeamsTokenExchangeView(APIView):
                 "error": "Token exchange failed",
                 "detail": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class MicrosoftTeamsTokenRefreshView(APIView):
+    """
+    Silently refresh the MS Teams access token using the stored refresh token.
+    Frontend calls this when the stored access token is expired.
+    Returns a new access_token so the frontend can continue without re-login.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        refresh_token = getattr(user, "ms_refresh_token", None)
+        if not refresh_token:
+            return Response(
+                {"error": "No refresh token stored. Please reconnect Microsoft Teams."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            token_payload = {
+                "grant_type": "refresh_token",
+                "client_id": settings.MICROSOFT_CLIENT_ID,
+                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+                "scope": "https://graph.microsoft.com/.default offline_access",
+            }
+            resp = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
+            data = resp.json()
+            new_token = data.get("access_token")
+            if not new_token:
+                return Response(
+                    {"error": "Token refresh failed. Please reconnect Microsoft Teams.", "details": data},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+            user.ms_access_token = new_token
+            if data.get("refresh_token"):
+                user.ms_refresh_token = data["refresh_token"]
+            user.save(update_fields=["ms_access_token", "ms_refresh_token"])
+            return Response({
+                "access_token": new_token,
+                "expires_in": data.get("expires_in", 3600),
+                "token_type": data.get("token_type", "Bearer"),
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"MS Teams token refresh error: {e}")
+            return Response({"error": "Token refresh failed.", "detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @method_decorator(csrf_exempt, name='dispatch')

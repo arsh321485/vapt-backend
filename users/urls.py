@@ -22,6 +22,7 @@ from .views import (
     MicrosoftTeamsCallbackView,
     MicrosoftTeamsOAuthView,
     MicrosoftTeamsTokenExchangeView,
+    MicrosoftTeamsTokenRefreshView,
     CreateTeamsChannelView,
     SendTeamsMessageView,
     ListTeamsView,
@@ -117,6 +118,7 @@ urlpatterns = [
     path('microsoft-teams/callback/', MicrosoftTeamsCallbackView.as_view(), name='microsoft-teams-callback'),
     path('microsoft-teams-oauth/', MicrosoftTeamsOAuthView.as_view(), name='microsoft-teams-oauth'), #login
     path('microsoft-teams/token-exchange/', MicrosoftTeamsTokenExchangeView.as_view(), name='microsoft-teams-token-exchange'),
+    path('microsoft-teams/token-refresh/', MicrosoftTeamsTokenRefreshView.as_view(), name='microsoft-teams-token-refresh'),
     path('teams/create/', CreateTeamView.as_view(), name='create-team'),
     path('teams/update/', UpdateTeamView.as_view(), name='update-team'),              
     path('teams/delete/', DeleteTeamView.as_view(), name='delete-team'),              
