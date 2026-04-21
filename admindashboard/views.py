@@ -1516,13 +1516,24 @@ class AdminDistributionByTeamAPIView(APIView):
                 # Normalize team names for case-insensitive matching
                 team_names_lower = {name.lower(): name for name in TEAM_NAMES}
 
-                # Count distribution directly from vulnerability_cards
+                # Build set of closed plugin_names — covers admin-closed and user-closed
+                admin_id = str(request.user.id)
+                closed_plugins = set()
+                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
+                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
+                ):
+                    closed_plugins.add(doc_c.get("plugin_name", ""))
+
+                # Count distribution directly from vulnerability_cards (excluding closed)
                 # Each card = one unique vulnerability — avoids inflating counts from multi-host repeats
                 counts = {name: 0 for name in TEAM_NAMES}
                 counts["Unassigned"] = 0
                 total = 0
 
                 for card in vuln_card_coll.find({"report_id": report_id}):
+                    plugin_name = (card.get("vulnerability_name") or "").strip()
+                    if plugin_name in closed_plugins:
+                        continue
                     raw_team = (card.get("assigned_team", "") or "").strip()
                     matched_team = team_names_lower.get(raw_team.lower())
                     if matched_team:
@@ -1615,9 +1626,10 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                                 plugin_risk[pname] = None
 
                 # ── closed plugin_names set for this report ─────────────────────
+                # Match both admin-closed (created_by=admin) and user-closed (admin_id=admin)
                 closed_plugins = set()
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": report_id, "created_by": admin_id}
+                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
                 ):
                     closed_plugins.add(doc_c.get("plugin_name", ""))
 
@@ -1728,9 +1740,10 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                                 plugin_risk[pname] = None
 
                 # ── closed plugin_names for this report ─────────────────────────
+                # Match both admin-closed (created_by=admin) and user-closed (admin_id=admin)
                 closed_plugins = set()
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": report_id, "created_by": admin_id}
+                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
                 ):
                     closed_plugins.add(doc_c.get("plugin_name", ""))
 
