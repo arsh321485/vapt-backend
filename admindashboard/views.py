@@ -1516,13 +1516,16 @@ class AdminDistributionByTeamAPIView(APIView):
                 # Normalize team names for case-insensitive matching
                 team_names_lower = {name.lower(): name for name in TEAM_NAMES}
 
-                # Build set of closed plugin_names — covers admin-closed and user-closed
+                # Build set of closed (plugin_name, host_name) pairs — per-host match only
                 admin_id = str(request.user.id)
-                closed_plugins = set()
+                closed_vuln_keys = set()
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
                     {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
                 ):
-                    closed_plugins.add(doc_c.get("plugin_name", ""))
+                    pname = (doc_c.get("plugin_name") or "").strip()
+                    hname = (doc_c.get("host_name") or "").strip()
+                    if pname:
+                        closed_vuln_keys.add((pname, hname))
 
                 # Count distribution directly from vulnerability_cards (excluding closed)
                 # Each card = one unique vulnerability — avoids inflating counts from multi-host repeats
@@ -1532,7 +1535,8 @@ class AdminDistributionByTeamAPIView(APIView):
 
                 for card in vuln_card_coll.find({"report_id": report_id}):
                     plugin_name = (card.get("vulnerability_name") or "").strip()
-                    if plugin_name in closed_plugins:
+                    host_name   = (card.get("host_name") or "").strip()
+                    if (plugin_name, host_name) in closed_vuln_keys:
                         continue
                     raw_team = (card.get("assigned_team", "") or "").strip()
                     matched_team = team_names_lower.get(raw_team.lower())
@@ -1625,13 +1629,16 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                             else:
                                 plugin_risk[pname] = None
 
-                # ── closed plugin_names set for this report ─────────────────────
+                # ── closed (plugin_name, host_name) pairs — per-host match only ──
                 # Match both admin-closed (created_by=admin) and user-closed (admin_id=admin)
-                closed_plugins = set()
+                closed_vuln_keys = set()
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
                     {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
                 ):
-                    closed_plugins.add(doc_c.get("plugin_name", ""))
+                    pname = (doc_c.get("plugin_name") or "").strip()
+                    hname = (doc_c.get("host_name") or "").strip()
+                    if pname:
+                        closed_vuln_keys.add((pname, hname))
 
                 # ── initialize team buckets ─────────────────────────────────────
                 all_teams = TEAM_NAMES + ["Unassigned"]
@@ -1648,12 +1655,13 @@ class AdminDistributionByTeamDetailAPIView(APIView):
 
                 # ── iterate vulnerability_cards (one unique vuln per card) ───────
                 for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
-                    plugin_name = card.get("vulnerability_name", "")
+                    plugin_name = (card.get("vulnerability_name") or "").strip()
+                    host_name   = (card.get("host_name") or "").strip()
                     raw_team    = (card.get("assigned_team", "") or "").strip()
                     team_key    = team_names_lower.get(raw_team.lower(), "") or "Unassigned"
 
                     risk_label  = plugin_risk.get(plugin_name)
-                    is_closed   = plugin_name in closed_plugins
+                    is_closed   = (plugin_name, host_name) in closed_vuln_keys
                     vuln_status = "closed" if is_closed else "open"
 
                     bucket = teams[team_key]
@@ -1739,13 +1747,16 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             else:
                                 plugin_risk[pname] = None
 
-                # ── closed plugin_names for this report ─────────────────────────
+                # ── closed (plugin_name, host_name) pairs — per-host match only ──
                 # Match both admin-closed (created_by=admin) and user-closed (admin_id=admin)
-                closed_plugins = set()
+                closed_vuln_keys = set()
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
                     {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
                 ):
-                    closed_plugins.add(doc_c.get("plugin_name", ""))
+                    pname = (doc_c.get("plugin_name") or "").strip()
+                    hname = (doc_c.get("host_name") or "").strip()
+                    if pname:
+                        closed_vuln_keys.add((pname, hname))
 
                 # ── card lookup ──────────────────────────────────────────────────
                 # Primary key: (plugin_name, host_name) for exact per-host match.
@@ -1796,7 +1807,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
 
                         found_date    = info.get("found_date")
                         risk_factor   = plugin_risk.get(plugin_name)
-                        vuln_status   = "closed" if plugin_name in closed_plugins else "open"
+                        vuln_status   = "closed" if (plugin_name, h_name) in closed_vuln_keys else "open"
                         assigned_team = (info.get("assigned_team") or "").strip()
 
                         vulnerabilities.append({
