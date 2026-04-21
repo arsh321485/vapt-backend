@@ -1448,8 +1448,9 @@ class MicrosoftTeamsCallbackView(APIView):
                             teams_target_url: targetUrl,
                             teams_desktop_url: teamsDesktopUrl || null
                         }}, "{frontend_redirect}");
-                        // Do not auto-open Teams here; parent app should open it from a direct user action.
-                        document.body.innerHTML = "<p>Microsoft Teams connected successfully. Return to VAPTFIX tab and click Open in Teams.</p>";
+                        // This callback already runs in a separate OAuth tab.
+                        // Open Teams in this same tab so VAPTFIX parent tab stays untouched.
+                        window.location.replace(targetUrl);
                         setTimeout(function() {{
                             try {{ window.close(); }} catch (e) {{}}
                         }}, 3000);
