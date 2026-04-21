@@ -1447,7 +1447,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     }}
                     var webUrl = teamsWebUrl || "https://teams.cloud.microsoft";
 
-                    var targetUrl = teamsWebUrlAlt || webUrl;
+                    var targetUrl = teamsWebUrl || webUrl;
                     var frontendUrl = {json.dumps(frontend_redirect)};
                     var frontendOrigin = frontendUrl;
                     try {{
