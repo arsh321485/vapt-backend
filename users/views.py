@@ -831,7 +831,7 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 f"&response_type=code"
                 f"&redirect_uri={backend_redirect}"
                 f"&response_mode=query"
-                f"&scope=https://graph.microsoft.com/User.Read offline_access openid email profile"
+                f"&scope=https://graph.microsoft.com/User.Read Team.ReadBasic.All TeamSettings.Read.All Channel.ReadBasic.All ChannelMessage.Send GroupMember.ReadWrite.All offline_access openid email profile"
                 f"&prompt=select_account"
                 f"&state={state}"
             )
@@ -1148,15 +1148,20 @@ def _set_vaptfix_team_icon(team_id, access_token):
         logger.info("VAPTFIX icon skipped: no icon bytes available")
         return False
 
-    # Convert to JPEG — desktop app ignores PNG uploads
-    jpeg_bytes = _png_to_jpeg_bytes(raw_bytes)
-    if jpeg_bytes:
-        icon_bytes = jpeg_bytes
+    icon_path = getattr(settings, "VAPTFIX_TEAMS_ICON_PATH", "") or ""
+    if icon_path.lower().endswith((".jpg", ".jpeg")) or raw_bytes[:3] == b'\xff\xd8\xff':
+        # Already JPEG — use directly
+        icon_bytes = raw_bytes
         content_type = "image/jpeg"
     else:
-        # Pillow unavailable — fall back to raw bytes
-        icon_bytes = raw_bytes
-        content_type = "image/png"
+        # PNG — convert to JPEG for desktop app compatibility
+        jpeg_bytes = _png_to_jpeg_bytes(raw_bytes)
+        if jpeg_bytes:
+            icon_bytes = jpeg_bytes
+            content_type = "image/jpeg"
+        else:
+            icon_bytes = raw_bytes
+            content_type = "image/png"
 
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -1917,11 +1922,12 @@ class ListTeamsView(generics.GenericAPIView):
 
                 response = requests.get(url, headers=headers, timeout=10)
 
-                # Token expired — try auto-refresh once
-                if response.status_code == 401:
-                    new_token = self._refresh_ms_token(request.user)
-                    if new_token:
-                        headers['Authorization'] = f'Bearer {new_token}'
+                # Token expired or forbidden — try auto-refresh once
+                refreshed_token = None
+                if response.status_code in (401, 403):
+                    refreshed_token = self._refresh_ms_token(request.user)
+                    if refreshed_token:
+                        headers['Authorization'] = f'Bearer {refreshed_token}'
                         response = requests.get(url, headers=headers, timeout=10)
 
                 if response.status_code == 200:
@@ -1937,11 +1943,15 @@ class ListTeamsView(generics.GenericAPIView):
                             "webUrl": team.get("webUrl")
                         })
 
-                    return Response({
+                    resp_data = {
                         "status": True,
                         "teams": teams_list,
                         "count": len(teams_list)
-                    }, status=status.HTTP_200_OK)
+                    }
+                    # Return new token so frontend can update localStorage
+                    if refreshed_token:
+                        resp_data["refreshed_access_token"] = refreshed_token
+                    return Response(resp_data, status=status.HTTP_200_OK)
                 else:
                     error_data = {}
                     try:
