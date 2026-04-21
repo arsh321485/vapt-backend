@@ -1027,12 +1027,24 @@ def _create_vaptfix_channels(team_id, headers):
 def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name="General"):
     """Build stable deep links that open the Teams tab (not chat)."""
     if not team_id:
-        return {"web_url": None, "desktop_url": None, "web_url_alt": None}
+        return {
+            "web_url": None,
+            "desktop_url": None,
+            "web_url_alt": None,
+            "general_web_url": None,
+            "general_web_url_alt": None,
+            "general_desktop_url": None,
+        }
     web_url = f"https://teams.microsoft.com/l/team/{team_id}/conversations?groupId={team_id}"
     if tenant_id:
         web_url = f"{web_url}&tenantId={tenant_id}"
     # Alternate URL for environments that still rely on hash-routing.
     web_url_alt = web_url.replace("https://teams.microsoft.com/l/team/", "https://teams.microsoft.com/_#/l/team/")
+    general_safe_name = quote("General")
+    general_web_url = f"https://teams.microsoft.com/l/channel/19%3ageneral/{general_safe_name}?groupId={team_id}"
+    if tenant_id:
+        general_web_url = f"{general_web_url}&tenantId={tenant_id}"
+    general_web_url_alt = general_web_url.replace("https://teams.microsoft.com/l/channel/", "https://teams.microsoft.com/_#/l/channel/")
     channel_web_url = None
     if channel_id:
         safe_name = quote(channel_name or "General")
@@ -1040,11 +1052,15 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
         if tenant_id:
             channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
     desktop_url = web_url.replace("https://", "msteams://")
+    general_desktop_url = general_web_url.replace("https://", "msteams://")
     channel_desktop_url = channel_web_url.replace("https://", "msteams://") if channel_web_url else None
     return {
         "web_url": web_url,
         "web_url_alt": web_url_alt,
         "desktop_url": desktop_url,
+        "general_web_url": general_web_url,
+        "general_web_url_alt": general_web_url_alt,
+        "general_desktop_url": general_desktop_url,
         "channel_web_url": channel_web_url,
         "channel_desktop_url": channel_desktop_url,
     }
@@ -1099,10 +1115,10 @@ def auto_create_vaptfix_team(access_token):
                         "team_id": team_id,
                         "team_name": "Vaptfix",
                         "status": "already_exists",
-                        "teams_url": urls.get("channel_web_url") or urls.get("web_url"),
-                        "teams_tab_url": urls.get("web_url"),
-                        "teams_tab_url_alt": urls.get("web_url_alt"),
-                        "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("desktop_url"),
+                        "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+                        "teams_tab_url": urls.get("general_web_url") or urls.get("web_url"),
+                        "teams_tab_url_alt": urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+                        "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
                         "channels": channels_result
                     }
     except Exception as e:
@@ -1176,10 +1192,10 @@ def auto_create_vaptfix_team(access_token):
             "team_id": team_id,
             "team_name": "Vaptfix",
             "status": "created",
-            "teams_url": urls.get("channel_web_url") or urls.get("web_url"),
-            "teams_tab_url": urls.get("web_url"),
-            "teams_tab_url_alt": urls.get("web_url_alt"),
-            "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("desktop_url"),
+            "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+            "teams_tab_url": urls.get("general_web_url") or urls.get("web_url"),
+            "teams_tab_url_alt": urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+            "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
             "channels": channels_result
         }
 
@@ -1328,7 +1344,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     // Prefer explicit Teams tab links so app opens Team view, not Chat.
                     var teamId = {json.dumps(vaptfix_team.get('team_id') if vaptfix_team else None)};
                     var tenantId = "{tenant_id}";
-                    var teamsWebUrl = {json.dumps(vaptfix_team.get('teams_url') if vaptfix_team else None)};
+                    var teamsWebUrl = {json.dumps(vaptfix_team.get('teams_tab_url') if vaptfix_team else None)};
                     var teamsWebUrlAlt = {json.dumps(vaptfix_team.get('teams_tab_url_alt') if vaptfix_team else None)};
                     var teamsDesktopUrl = {json.dumps(vaptfix_team.get('teams_desktop_url') if vaptfix_team else None)};
                     if (!teamsWebUrl && teamId) {{
@@ -2050,8 +2066,9 @@ class CreateTeamView(generics.GenericAPIView):
                             "description": description,
                             "visibility": visibility,
                             "location": team_location,
-                            "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
-                            "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
+                            "teams_url": _build_teams_tab_urls(team_id).get("general_web_url") or _build_teams_tab_urls(team_id).get("web_url"),
+                            "teams_tab_url": _build_teams_tab_urls(team_id).get("general_web_url") or _build_teams_tab_urls(team_id).get("web_url"),
+                            "teams_tab_url_alt": _build_teams_tab_urls(team_id).get("general_web_url_alt") or _build_teams_tab_urls(team_id).get("web_url_alt"),
                             "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
                         },
                         "default_channels": channels_result
@@ -2078,8 +2095,9 @@ class CreateTeamView(generics.GenericAPIView):
                         "status": "completed",
                         "team_id": team_id,
                         "location": team_location,
-                        "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
-                        "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
+                        "teams_url": _build_teams_tab_urls(team_id).get("general_web_url") or _build_teams_tab_urls(team_id).get("web_url"),
+                        "teams_tab_url": _build_teams_tab_urls(team_id).get("general_web_url") or _build_teams_tab_urls(team_id).get("web_url"),
+                        "teams_tab_url_alt": _build_teams_tab_urls(team_id).get("general_web_url_alt") or _build_teams_tab_urls(team_id).get("web_url_alt"),
                         "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
                         "default_channels": channels_result
                     }, status=status.HTTP_201_CREATED)
@@ -2104,8 +2122,9 @@ class CreateTeamView(generics.GenericAPIView):
                                 "description": description,
                                 "visibility": visibility,
                                 "data": response_data,
-                                "teams_url": _build_teams_tab_urls(team_id).get("web_url"),
-                                "teams_tab_url": _build_teams_tab_urls(team_id).get("web_url"),
+                                "teams_url": _build_teams_tab_urls(team_id).get("general_web_url") or _build_teams_tab_urls(team_id).get("web_url"),
+                                "teams_tab_url": _build_teams_tab_urls(team_id).get("general_web_url") or _build_teams_tab_urls(team_id).get("web_url"),
+                                "teams_tab_url_alt": _build_teams_tab_urls(team_id).get("general_web_url_alt") or _build_teams_tab_urls(team_id).get("web_url_alt"),
                                 "teams_desktop_url": _build_teams_tab_urls(team_id).get("desktop_url"),
                             },
                             "default_channels": channels_result
