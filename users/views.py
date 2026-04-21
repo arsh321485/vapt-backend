@@ -1066,6 +1066,77 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
     }
 
 
+def _get_vaptfix_team_icon_bytes():
+    """
+    Resolve VAPTFIX icon bytes from local path first, then logo URL.
+    Optional env/settings:
+      - VAPTFIX_TEAMS_ICON_PATH: absolute/relative file path
+      - VAPTFIX_LOGO_URL: public URL
+    """
+    icon_path = getattr(settings, "VAPTFIX_TEAMS_ICON_PATH", "") or ""
+    logo_url = getattr(settings, "VAPTFIX_LOGO_URL", "") or ""
+
+    try:
+        if icon_path:
+            resolved = icon_path
+            if not os.path.isabs(resolved):
+                resolved = os.path.join(settings.BASE_DIR, resolved)
+            if os.path.exists(resolved):
+                with open(resolved, "rb") as f:
+                    return f.read()
+    except Exception:
+        logger.warning("Failed to read VAPTFIX_TEAMS_ICON_PATH", exc_info=True)
+
+    try:
+        if logo_url:
+            resp = requests.get(logo_url, timeout=15)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+    except Exception:
+        logger.warning("Failed to fetch VAPTFIX_LOGO_URL for Teams icon", exc_info=True)
+
+    return None
+
+
+def _set_vaptfix_team_icon(team_id, access_token):
+    """
+    Best-effort Teams icon update.
+    Uses group photo endpoint because Team is backed by M365 group.
+    """
+    if not team_id or not access_token:
+        return False
+
+    icon_bytes = _get_vaptfix_team_icon_bytes()
+    if not icon_bytes:
+        logger.info("VAPTFIX icon skipped: no icon bytes available")
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "image/png",
+    }
+
+    # Try Teams photo endpoint first, then Groups endpoint fallback.
+    candidate_urls = [
+        f"https://graph.microsoft.com/v1.0/teams/{team_id}/photo/$value",
+        f"https://graph.microsoft.com/v1.0/groups/{team_id}/photo/$value",
+    ]
+    for url in candidate_urls:
+        try:
+            resp = requests.put(url, headers=headers, data=icon_bytes, timeout=20)
+            if resp.status_code in (200, 201, 204):
+                logger.info(f"VAPTFIX team icon updated for team_id={team_id} via {url}")
+                return True
+            logger.warning(
+                f"VAPTFIX icon upload failed for team_id={team_id} url={url} "
+                f"status={resp.status_code} body={resp.text[:300]}"
+            )
+        except Exception:
+            logger.warning(f"VAPTFIX icon upload exception for team_id={team_id} url={url}", exc_info=True)
+
+    return False
+
+
 def auto_create_vaptfix_team(access_token):
     """
     Auto-create a team named 'VAPTFIX' with 4 default channels if it doesn't already exist.
@@ -1086,6 +1157,7 @@ def auto_create_vaptfix_team(access_token):
                 if team.get('displayName') == 'Vaptfix':
                     team_id = team.get('id')
                     logger.info(f"VAPTFIX team already exists: {team_id}")
+                    _set_vaptfix_team_icon(team_id, access_token)
                     # Fetch existing channels
                     channels_result = []
                     try:
@@ -1164,6 +1236,7 @@ def auto_create_vaptfix_team(access_token):
                             pass
                         logger.info(f"VAPTFIX team not ready, retry {attempt + 1}/5")
                     _create_vaptfix_channels(tid, hdrs)
+                    _set_vaptfix_team_icon(tid, token)
 
                 t = threading.Thread(target=_bg_create_channels, args=(access_token, team_id, headers), daemon=True)
                 t.start()
@@ -1177,6 +1250,7 @@ def auto_create_vaptfix_team(access_token):
 
         # Step 3: Create 4 default channels using the shared helper
         channels_result = _create_vaptfix_channels(team_id, headers)
+        _set_vaptfix_team_icon(team_id, access_token)
         preferred_channel_id = None
         for ch in channels_result:
             nm = (ch.get("channelName") or "").strip().lower()
