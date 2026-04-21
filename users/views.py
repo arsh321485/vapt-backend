@@ -1346,6 +1346,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     var webUrl = teamsWebUrl || "https://teams.microsoft.com";
 
                     var targetUrl = teamsDesktopUrl || teamsWebUrlAlt || webUrl;
+                    var frontendUrl = {json.dumps(frontend_redirect)};
                     if (window.opener) {{
                         window.opener.postMessage({{
                             type: "TEAMS_CONNECTED",
@@ -1363,8 +1364,9 @@ class MicrosoftTeamsCallbackView(APIView):
                             try {{ window.close(); }} catch (e) {{}}
                         }}, 3000);
                     }} else {{
-                        // If callback opens in same tab, do not navigate away from VAPTFIX.
-                        document.body.innerHTML = "<p>Microsoft Teams connected successfully. You can close this tab and continue in VAPTFIX.</p>";
+                        // Same-tab OAuth fallback: open Teams in a new tab and keep VAPTFIX in current tab.
+                        window.open(targetUrl, "_blank", "noopener,noreferrer");
+                        window.location.replace(frontendUrl);
                     }}
                 </script>
             </body>
