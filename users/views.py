@@ -2527,7 +2527,7 @@ class AddUserToChannelView(generics.GenericAPIView):
 
                         uid = urlsafe_base64_encode(force_bytes(django_user.pk))
                         token = PasswordResetTokenGenerator().make_token(django_user)
-                        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
+                        frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai')
                         set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
                         udcv = UserDetailCreateView()
@@ -4464,7 +4464,7 @@ class SlackInviteUserView(APIView):
 
                 uid = urlsafe_base64_encode(force_bytes(django_user.pk))
                 token = PasswordResetTokenGenerator().make_token(django_user)
-                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
+                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai')
                 set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
                 email_sent, error = udcv.send_welcome_email(
@@ -4570,7 +4570,7 @@ class SlackInviteUserView(APIView):
 
                 uid = urlsafe_base64_encode(force_bytes(django_user.pk))
                 token = PasswordResetTokenGenerator().make_token(django_user)
-                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
+                frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai')
                 set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
                 email_sent, error = view.send_welcome_email(
@@ -4663,7 +4663,7 @@ class JiraOAuthCallbackView(APIView):
             from django.http import HttpResponseRedirect
             from urllib.parse import urlencode
 
-            frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
+            frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai')
             params = urlencode({
                 'access_token': tokens.get('access_token', ''),
                 'refresh_token': tokens.get('refresh_token', ''),
@@ -5700,7 +5700,7 @@ class SlackEventsView(APIView):
 
                     uid = urlsafe_base64_encode(force_bytes(django_user.pk))
                     token = PasswordResetTokenGenerator().make_token(django_user)
-                    frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vapt-fron1.vercel.app')
+                    frontend_url = getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai')
                     set_password_url = f"{frontend_url}/auth?mode=set-password&uid={uid}&token={token}"
 
                     view = UserDetailCreateView()
