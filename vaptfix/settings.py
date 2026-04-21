@@ -24,7 +24,8 @@ localhost,
 deaf387e4d71.ngrok-free.app,
 localhost:5173,
 38.242.247.151,
-vaptbackend.secureitlab.com
+vaptbackend.secureitlab.com,
+vaptfix.ai
 """.split(",")]
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
@@ -159,10 +160,10 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://vapt-fron1.vercel.app")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://vaptfix.ai")
 VAPTFIX_LOGO_URL = os.getenv("VAPTFIX_LOGO_URL", f"{FRONTEND_URL.rstrip('/')}/logo.png")
 VAPTFIX_TEAMS_ICON_PATH = os.getenv("VAPTFIX_TEAMS_ICON_PATH", os.path.join(BASE_DIR, "users", "static", "users", "icon.jpg"))
-VAPTFIX_LOGIN_URL = os.getenv("VAPTFIX_LOGIN_URL", "https://vapt-fron1.vercel.app/auth?tab=user")
+VAPTFIX_LOGIN_URL = os.getenv("VAPTFIX_LOGIN_URL", "https://vaptfix.ai/auth?tab=user")
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://vaptbackend.secureitlab.com")
 
 
@@ -260,7 +261,8 @@ https://slack.com,
 https://api.slack.com,
 https://auth.atlassian.com,
 https://api.atlassian.com,
-https://vaptbackend.secureitlab.com
+https://vaptbackend.secureitlab.com,
+https://vaptfix.ai
 """.split(",")]
 
 CORS_ALLOW_CREDENTIALS = True
