@@ -15,6 +15,7 @@ from django.contrib.auth.hashers import make_password
 from django.shortcuts import redirect
 from django.utils import timezone
 import requests
+import os
 import secrets
 import traceback
 import json
@@ -1430,12 +1431,9 @@ class MicrosoftTeamsCallbackView(APIView):
                     if (teamsWebUrlAlt && tenantId && teamsWebUrlAlt.indexOf("tenantId=") === -1) {{
                         teamsWebUrlAlt = teamsWebUrlAlt + "&tenantId=" + tenantId;
                     }}
-                    if (!teamsDesktopUrl && teamsWebUrl) {{
-                        teamsDesktopUrl = teamsWebUrl.replace("https://", "msteams://");
-                    }}
                     var webUrl = teamsWebUrl || "https://teams.microsoft.com";
 
-                    var targetUrl = teamsDesktopUrl || teamsWebUrlAlt || webUrl;
+                    var targetUrl = teamsWebUrlAlt || webUrl;
                     var frontendUrl = {json.dumps(frontend_redirect)};
                     if (window.opener) {{
                         window.opener.postMessage({{
@@ -1446,16 +1444,17 @@ class MicrosoftTeamsCallbackView(APIView):
                             django_access_token: "{django_access_token}",
                             django_refresh_token: "{django_refresh_token}",
                             vaptfix_team: {json.dumps(vaptfix_team)},
-                            redirect_target: "team_tab"
+                            redirect_target: "team_tab",
+                            teams_target_url: targetUrl,
+                            teams_desktop_url: teamsDesktopUrl || null
                         }}, "{frontend_redirect}");
-                        // Keep VAPTFIX parent tab untouched; open Teams in this popup/new tab only.
-                        window.location.replace(targetUrl);
+                        // Do not auto-open Teams here; parent app should open it from a direct user action.
+                        document.body.innerHTML = "<p>Microsoft Teams connected successfully. Return to VAPTFIX tab and click Open in Teams.</p>";
                         setTimeout(function() {{
                             try {{ window.close(); }} catch (e) {{}}
                         }}, 3000);
                     }} else {{
-                        // Same-tab OAuth fallback: open Teams in a new tab and keep VAPTFIX in current tab.
-                        window.open(targetUrl, "_blank", "noopener,noreferrer");
+                        // Same-tab callback: never auto-open Teams, just return user to VAPTFIX app.
                         window.location.replace(frontendUrl);
                     }}
                 </script>
