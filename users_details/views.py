@@ -357,14 +357,8 @@ class UserDetailCreateView(generics.CreateAPIView):
         return None
 
     def _logo_html(self, logo_b64):
-        logo_url = getattr(settings, "VAPTFIX_LOGO_URL", "")
-        # Prefer URL-based logo for Gmail compatibility; CID remains fallback.
-        if logo_url:
-            return f'<img src="{logo_url}" alt="VaptFix Pro" style="height:48px;" />'
         if logo_b64:
-            return '<img src="cid:vaptfix_logo" alt="VaptFix Pro" style="height:48px;" />'
-        if getattr(settings, "VAPTFIX_LOGO_URL", ""):
-            return f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VaptFix Pro" style="height:48px;" />'
+            return f'<img src="data:image/png;base64,{logo_b64}" alt="VaptFix Pro" style="height:48px;" />'
         return '<span style="color:#ffffff; font-size:20px; font-weight:bold; letter-spacing:1px;">VaptFix Pro</span>'
 
     def _attach_logo(self, message, logo_b64):

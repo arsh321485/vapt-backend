@@ -80,10 +80,8 @@ class Util:
             with open(logo_path, "rb") as f:
                 logo_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        if getattr(settings, "VAPTFIX_LOGO_URL", ""):
-            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
-        elif logo_b64:
-            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+        if logo_b64:
+            logo_html = f'<img src="data:image/png;base64,{logo_b64}" alt="VAPTFIX" style="height:60px;" />'
         else:
             logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
 
@@ -164,11 +162,8 @@ class Util:
             with open(logo_path, "rb") as f:
                 logo_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        # Use CID if logo file found, else fallback to URL or text
-        if getattr(settings, "VAPTFIX_LOGO_URL", ""):
-            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
-        elif logo_b64:
-            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+        if logo_b64:
+            logo_html = f'<img src="data:image/png;base64,{logo_b64}" alt="VAPTFIX" style="height:60px;" />'
         else:
             logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
 
@@ -259,10 +254,8 @@ class Util:
         if os.path.exists(logo_path):
             with open(logo_path, "rb") as f:
                 logo_b64 = base64.b64encode(f.read()).decode("utf-8")
-        if getattr(settings, "VAPTFIX_LOGO_URL", ""):
-            logo_html = f'<img src="{settings.VAPTFIX_LOGO_URL}" alt="VAPTFIX" style="height:60px;" />'
-        elif logo_b64:
-            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+        if logo_b64:
+            logo_html = f'<img src="data:image/png;base64,{logo_b64}" alt="VAPTFIX" style="height:60px;" />'
         else:
             logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
         return logo_b64, logo_html
