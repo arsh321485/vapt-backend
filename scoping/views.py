@@ -78,6 +78,13 @@ class UploadStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        def _fmt_seconds(seconds):
+            sec = max(0, int(seconds or 0))
+            mins, rem = divmod(sec, 60)
+            if mins > 0:
+                return f"{mins} min {rem} sec"
+            return f"{rem} sec"
+
         try:
             from upload_report.models import UploadReport
 
@@ -102,23 +109,31 @@ class UploadStatusView(APIView):
             else:
                 qs = UploadReport.objects.filter(admin=request.user)
 
-            file_uploaded = qs.exists()
-            logger.warning(f"[UploadStatus] UploadReport count={qs.count()} file_uploaded={file_uploaded}")
+            reports = list(qs.order_by("uploaded_at"))
+            file_uploaded = len(reports) > 0
+            logger.warning(f"[UploadStatus] UploadReport count={len(reports)} file_uploaded={file_uploaded}")
 
             if not file_uploaded:
                 return Response({"file_uploaded": False}, status=status.HTTP_200_OK)
 
+            processing_started_at = reports[0].uploaded_at
+            elapsed_seconds = int((timezone.now() - processing_started_at).total_seconds()) if processing_started_at else 0
+
             # File exists — now check if all vulnerability cards are generated
             try:
                 from vaptfix.mongo_client import get_shared_client, get_shared_db
-                from bson import ObjectId
 
                 mongo_client = get_shared_client()
                 db = get_shared_db(mongo_client)
 
                 # Check each uploaded report's card generation status
                 all_cards_ready = True
-                for report in qs:
+                total_reports = len(reports)
+                ready_reports = 0
+                total_vulns = 0
+                generated_cards = 0
+
+                for report in reports:
                     report_id = str(report._id)
 
                     # Get nessus report from MongoDB
@@ -132,32 +147,56 @@ class UploadStatusView(APIView):
                         all_cards_ready = False
                         break
 
+                    report_total_vulns = int(nessus_doc.get("total_vulnerabilities", 0) or 0)
+                    total_vulns += report_total_vulns
+
                     # Check completion flag set by _auto_generate_cards_bg
                     if nessus_doc.get("cards_generation_complete", False):
                         logger.warning(f"[UploadStatus] report_id={report_id} cards_generation_complete=True")
+                        ready_reports += 1
+                        if report_total_vulns > 0:
+                            generated_cards += report_total_vulns
                         continue
 
                     # Flag not set — fallback: check if any cards exist (uploaded before this fix)
                     cards_count = db["vulnerability_cards"].count_documents({"report_id": report_id})
                     logger.warning(f"[UploadStatus] report_id={report_id} cards_generation_complete=False, cards_count={cards_count}")
+                    generated_cards += cards_count
 
-                    total_vulns = nessus_doc.get("total_vulnerabilities", 0)
-                    if total_vulns > 0 and cards_count >= total_vulns:
+                    if report_total_vulns > 0 and cards_count >= report_total_vulns:
                         # All cards generated — mark as complete so future checks are faster
                         db["nessus_reports"].update_one(
                             {"report_id": report_id},
                             {"$set": {"cards_generation_complete": True}}
                         )
+                        ready_reports += 1
                         continue
 
                     # No flag, no cards — still generating
                     all_cards_ready = False
                     break
 
+                # ETA model:
+                # - base startup: 45 sec
+                # - 2 sec per vulnerability card
+                estimated_total_seconds = max(60, 45 + (total_vulns * 2))
+                remaining_seconds = max(0, estimated_total_seconds - elapsed_seconds)
+
                 if not all_cards_ready:
                     return Response({
                         "file_uploaded": False,
                         "cards_generating": True,
+                        "reports_total": total_reports,
+                        "reports_ready": ready_reports,
+                        "cards_total": total_vulns,
+                        "cards_generated": generated_cards,
+                        "processing_started_at": processing_started_at,
+                        "elapsed_seconds": elapsed_seconds,
+                        "elapsed_time_text": _fmt_seconds(elapsed_seconds),
+                        "estimated_total_seconds": estimated_total_seconds,
+                        "estimated_total_text": _fmt_seconds(estimated_total_seconds),
+                        "remaining_seconds": remaining_seconds,
+                        "remaining_time_text": _fmt_seconds(remaining_seconds),
                     }, status=status.HTTP_200_OK)
 
             except Exception as card_err:
@@ -169,7 +208,10 @@ class UploadStatusView(APIView):
             file_uploaded = False
 
         return Response({
-            "file_uploaded": file_uploaded
+            "file_uploaded": file_uploaded,
+            "processing_started_at": processing_started_at if file_uploaded else None,
+            "elapsed_seconds": elapsed_seconds if file_uploaded else 0,
+            "elapsed_time_text": _fmt_seconds(elapsed_seconds) if file_uploaded else "0 sec",
         }, status=status.HTTP_200_OK)
 
 

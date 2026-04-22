@@ -2,6 +2,7 @@ import os
 import uuid
 import json
 import datetime
+import time
 import threading
 import logging
 from typing import Optional, Dict, Any, List
@@ -66,6 +67,38 @@ class UploadReportView(APIView):
         '.pdf', '.csv', '.xlsx', '.xls', '.xml', '.nessus',
         '.html', '.htm', '.bmp', '.tiff'
     }
+
+    def _seconds_to_text(self, seconds: float) -> str:
+        seconds_int = max(0, int(round(seconds)))
+        mins, secs = divmod(seconds_int, 60)
+        if mins > 0:
+            return f"{mins} min {secs} sec"
+        return f"{secs} sec"
+
+    def _estimate_processing_seconds(self, file_size_bytes: int, ext: str, member_type: str) -> int:
+        size_mb = (file_size_bytes or 0) / (1024 * 1024)
+
+        if ext in (".nessus", ".xml", ".html", ".htm"):
+            estimate = 20 + (size_mb * 4.0)
+        elif ext in (".xlsx", ".xls", ".csv"):
+            estimate = 8 + (size_mb * 1.5)
+        else:
+            estimate = 6 + (size_mb * 1.0)
+
+        if member_type == "both":
+            estimate *= 1.35
+
+        return int(max(8, min(estimate, 3600)))
+
+    def _save_file_and_hash(self, uploaded_file, file_path: str):
+        hasher = hashlib.sha256()
+        bytes_written = 0
+        with open(file_path, "wb+") as dest:
+            for chunk in uploaded_file.chunks():
+                hasher.update(chunk)
+                dest.write(chunk)
+                bytes_written += len(chunk)
+        return hasher.hexdigest(), bytes_written
     
     def _generate_file_hash(self, uploaded_file):
         hasher = hashlib.sha256()
@@ -183,19 +216,6 @@ class UploadReportView(APIView):
 
                 # Insert into nessus_reports collection
                 db["nessus_reports"].insert_one(document)
-
-                # Create indexes for efficient querying
-                db["nessus_reports"].create_index("report_id", unique=True)
-                db["nessus_reports"].create_index("location_id")
-                db["nessus_reports"].create_index("uploaded_at")
-                db["nessus_reports"].create_index([("vulnerabilities_by_host.host_name", 1)])
-                # IMPORTANT: Index on risk_factor for filtering
-                db["nessus_reports"].create_index([
-                    ("vulnerabilities_by_host.vulnerabilities.risk_factor", 1)
-                ])
-                db["nessus_reports"].create_index([
-                    ("vulnerabilities_by_host.vulnerabilities.plugin_id", 1)
-                ])
             else:
                 # For other report types, store in generic collection
                 document["parsed_data"] = parsed_data
@@ -506,6 +526,7 @@ class UploadReportView(APIView):
     
     #Multiple file upload
     def post(self, request):
+        api_start = time.perf_counter()
         try:
             from .parsers import dispatch_parse
 
@@ -567,10 +588,21 @@ class UploadReportView(APIView):
 
             for uploaded_file in uploaded_files:
                 file_path = None
+                file_start = time.perf_counter()
+                file_size_bytes = int(getattr(uploaded_file, "size", 0) or 0)
+                ext = os.path.splitext(uploaded_file.name)[1].lower()
+                estimated_seconds = self._estimate_processing_seconds(file_size_bytes, ext, member_type)
+                timings_ms = {
+                    "save_and_hash_ms": 0,
+                    "duplicate_check_ms": 0,
+                    "parse_ms": 0,
+                    "mongo_ms": 0,
+                    "response_build_ms": 0,
+                    "total_ms": 0,
+                }
 
                 try:
                     # 🔹 Extension check
-                    ext = os.path.splitext(uploaded_file.name)[1].lower()
                     if ext not in self.ALLOWED_EXTENSIONS:
                         errors.append({
                             "file": uploaded_file.name,
@@ -578,34 +610,35 @@ class UploadReportView(APIView):
                         })
                         continue
 
-                    # 🔹 FILE HASH (duplicate check)
-                    file_hash = self._generate_file_hash(uploaded_file)
+                    # 🔹 Save file + hash in single pass (faster than two reads)
+                    target_admin_id = str(target_admin.id)
+                    relative_filename = f"reports/{target_admin_id}/{uploaded_file.name}"
+                    file_path = os.path.join(settings.MEDIA_ROOT, relative_filename)
+                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
+                    save_hash_start = time.perf_counter()
+                    file_hash, bytes_written = self._save_file_and_hash(uploaded_file, file_path)
+                    timings_ms["save_and_hash_ms"] = int((time.perf_counter() - save_hash_start) * 1000)
+
+                    dup_start = time.perf_counter()
                     if UploadReport.objects.filter(
                         admin=target_admin,
                         file_hash=file_hash
                     ).exists():
+                        if file_path and os.path.exists(file_path):
+                            os.remove(file_path)
+                        timings_ms["duplicate_check_ms"] = int((time.perf_counter() - dup_start) * 1000)
                         errors.append({
                             "file": uploaded_file.name,
                             "error": "Duplicate file detected. This file was already uploaded."
                         })
                         continue
-
-                    # 🔹 Save file
-                    # Save under target admin folder to avoid overwrite
-                    target_admin_id = str(target_admin.id)
-
-                    relative_filename = f"reports/{target_admin_id}/{uploaded_file.name}"
-                    file_path = os.path.join(settings.MEDIA_ROOT, relative_filename)
-
-                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-                    with open(file_path, "wb+") as dest:
-                        for chunk in uploaded_file.chunks():
-                            dest.write(chunk)
+                    timings_ms["duplicate_check_ms"] = int((time.perf_counter() - dup_start) * 1000)
 
                     # 🔹 Parse file (your existing parser)
+                    parse_start = time.perf_counter()
                     parsed_data = dispatch_parse(file_path, uploaded_file.name)
+                    timings_ms["parse_ms"] = int((time.perf_counter() - parse_start) * 1000)
 
                     if "error" in parsed_data:
                         raise Exception(parsed_data["error"])
@@ -624,6 +657,7 @@ class UploadReportView(APIView):
                     )
 
                     for mt in member_types_to_create:
+                        mongo_start = time.perf_counter()
                         upload_report = UploadReport.objects.create(
                             file=relative_filename,
                             file_hash=file_hash,
@@ -663,10 +697,13 @@ class UploadReportView(APIView):
                         file_url = request.build_absolute_uri(
                             settings.MEDIA_URL + relative_filename
                         )
+                        timings_ms["mongo_ms"] += int((time.perf_counter() - mongo_start) * 1000)
 
+                        response_start = time.perf_counter()
                         upload_results.append({
                             "report_id": report_id,
                             "file_name": uploaded_file.name,
+                            "file_size_bytes": file_size_bytes or bytes_written,
                             "file_url": file_url,
                             "admin_id": str(target_admin.id),
                             "admin_email": target_admin.email,
@@ -675,8 +712,22 @@ class UploadReportView(APIView):
                             "parsed_count": parsed_count,
                             "mongodb_stored": mongodb_stored,
                             "report_type": parsed_data.get("type"),
-                            "structured_data_preview": self._create_preview(parsed_data)
+                            "structured_data_preview": self._create_preview(parsed_data),
+                            "estimated_time_seconds": estimated_seconds,
+                            "estimated_time_text": self._seconds_to_text(estimated_seconds),
                         })
+                        timings_ms["response_build_ms"] += int((time.perf_counter() - response_start) * 1000)
+
+                    file_total_seconds = time.perf_counter() - file_start
+                    timings_ms["total_ms"] = int(file_total_seconds * 1000)
+
+                    # Apply same file-level timing to all result rows created for this source file.
+                    for result in reversed(upload_results):
+                        if result.get("file_name") != uploaded_file.name:
+                            break
+                        result["actual_time_seconds"] = round(file_total_seconds, 2)
+                        result["actual_time_text"] = self._seconds_to_text(file_total_seconds)
+                        result["timings_ms"] = timings_ms
 
                 except Exception as file_exc:
                     if file_path and os.path.exists(file_path):
@@ -692,7 +743,9 @@ class UploadReportView(APIView):
                 "message": "Files Uploaded Successfully",
                 "count": len(upload_results),
                 "results": upload_results,
-                "errors": errors
+                "errors": errors,
+                "total_processing_time_seconds": round(time.perf_counter() - api_start, 2),
+                "total_processing_time_text": self._seconds_to_text(time.perf_counter() - api_start),
             }, status=201)
 
         except Exception as exc:
