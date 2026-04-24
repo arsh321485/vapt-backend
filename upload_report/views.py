@@ -684,6 +684,20 @@ class UploadReportView(APIView):
                             member_type=mt
                         )
 
+                        # Store actual upload processing time for UploadStatusView ETA
+                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html"):
+                            upload_processing_seconds = int(round(time.perf_counter() - file_start))
+                            try:
+                                from vaptfix.mongo_client import get_shared_client, get_shared_db
+                                _mc = get_shared_client()
+                                _db = get_shared_db(_mc)
+                                _db["nessus_reports"].update_one(
+                                    {"report_id": report_id},
+                                    {"$set": {"upload_processing_seconds": upload_processing_seconds}}
+                                )
+                            except Exception as _upe:
+                                logger.warning(f"[UploadTiming] Could not store upload_processing_seconds: {_upe}")
+
                         # Auto-generate vulnerability cards in background (only for nessus reports)
                         print(f"[AutoGenCards] mongodb_stored={mongodb_stored}, report_type={parsed_data.get('type')}", flush=True)
                         if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html"):
@@ -929,8 +943,8 @@ class UploadReportDeleteAPIView(APIView):
                 file_path = report.file.path
                 if os.path.exists(file_path):
                     os.remove(file_path)
-            except Exception:
-                pass  # do not fail delete if file missing
+            except Exception as e:
+                logger.warning("Failed to remove report file from disk: %s", e)
 
         # 🔹 OPTIONAL: delete MongoDB data
         try:
@@ -938,8 +952,8 @@ class UploadReportDeleteAPIView(APIView):
             db["nessus_reports"].delete_one(
                 {"report_id": str(report._id)}
             )
-        except Exception:
-            pass  # Mongo cleanup should not block API
+        except Exception as e:
+            logger.warning("Mongo cleanup failed during report delete: %s", e)
 
         # 🔹 Delete DB record
         report.delete()
@@ -1002,6 +1016,12 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             # Lock already existed — another process/thread is handling this
             print(f"[AutoGenCards] Lock already held by another process for report_id={report_id}, skipping", flush=True)
             return
+
+        # Store agent start time so UploadStatusView can compute accurate elapsed
+        db[NESSUS_COLLECTION].update_one(
+            {"report_id": report_id},
+            {"$set": {"cards_generation_started_at": datetime.datetime.utcnow()}}
+        )
 
         # Fetch nessus report from MongoDB
         nessus_doc = db[NESSUS_COLLECTION].find_one({"report_id": report_id})

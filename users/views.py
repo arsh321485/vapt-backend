@@ -15,6 +15,28 @@ from django.contrib.auth.hashers import make_password
 from django.shortcuts import redirect
 from django.utils import timezone
 import requests
+
+REQUEST_TIMEOUT_SECONDS = 15
+
+def _http_get(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.get(url, **kwargs)
+
+def _http_post(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.post(url, **kwargs)
+
+def _http_put(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.put(url, **kwargs)
+
+def _http_delete(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.delete(url, **kwargs)
+
+def _http_patch(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.patch(url, **kwargs)
 import os
 import secrets
 import traceback
@@ -316,7 +338,8 @@ class AdminSignupVerifyOTPView(APIView):
         from django.utils import timezone as tz
         age_seconds = (tz.now() - session.created_at).total_seconds()
         if age_seconds > 300:
-            session.delete()
+            # Use queryset delete for Djongo compatibility (model instance pk can be None)
+            SignupOTPSession.objects.filter(email=email).delete()
             return Response({"error": "OTP has expired. Please start again."}, status=400)
 
         if session.otp != str(otp):
@@ -335,8 +358,9 @@ class AdminSignupVerifyOTPView(APIView):
             logger.error(f"Failed to create user: {str(e)}")
             return Response({"error": "Failed to create account"}, status=500)
 
-        # Delete session immediately after successful verification
-        session.delete()
+        # Delete session immediately after successful verification.
+        # Use queryset delete for Djongo compatibility (model instance pk can be None).
+        SignupOTPSession.objects.filter(email=email).delete()
 
         # Generate tokens
         refresh = RefreshToken.for_user(user)
@@ -344,8 +368,8 @@ class AdminSignupVerifyOTPView(APIView):
         # Send welcome email
         try:
             Util.send_admin_welcome_email(user.email)
-        except:
-            pass  # Don't fail signup if email fails
+        except Exception as e:
+            logger.warning("Welcome email send failed for %s: %s", user.email, e)
 
         return Response({
             "message": "Welcome! Your admin account has been created successfully",
@@ -876,7 +900,7 @@ class MicrosoftTeamsCallbackView(APIView):
             }
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-            token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, headers=headers, timeout=15)
+            token_response = _http_post(settings.MICROSOFT_TOKEN_URL, data=token_payload, headers=headers, timeout=15)
             token_data = token_response.json()
 
             # Extract tenant_id from id_token JWT (tid claim)
@@ -901,7 +925,7 @@ class MicrosoftTeamsCallbackView(APIView):
                 return JsonResponse({"error": "No access token returned"}, status=400)
 
             # ✅ Fetch Microsoft user info
-            user_info = requests.get(
+            user_info = _http_get(
                 "https://graph.microsoft.com/v1.0/me",
                 headers={"Authorization": f"Bearer {access_token}"}, timeout=15
             ).json()
@@ -1001,7 +1025,7 @@ def _create_vaptfix_channels(team_id, headers):
     results = []
     for channel_name in default_channels:
         try:
-            ch_resp = requests.post(channels_url, headers=headers, json={
+            ch_resp = _http_post(channels_url, headers=headers, json={
                 "displayName": channel_name,
                 "description": f"{channel_name} channel",
                 "membershipType": "standard"
@@ -1067,7 +1091,7 @@ def _get_team_channels(team_id, headers):
     if not team_id:
         return channels
     try:
-        ch_resp = requests.get(
+        ch_resp = _http_get(
             f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
             headers=headers, timeout=10
         )
@@ -1109,7 +1133,7 @@ def _get_vaptfix_team_icon_bytes():
 
     try:
         if logo_url:
-            resp = requests.get(logo_url, timeout=15)
+            resp = _http_get(logo_url, timeout=15)
             if resp.status_code == 200 and resp.content:
                 return resp.content
     except Exception:
@@ -1172,7 +1196,7 @@ def _set_vaptfix_team_icon(team_id, access_token):
     ]
     for url in candidate_urls:
         try:
-            resp = requests.put(url, headers=headers, data=icon_bytes, timeout=20)
+            resp = _http_put(url, headers=headers, data=icon_bytes, timeout=20)
             if resp.status_code in (200, 201, 204):
                 logger.info(f"VAPTFIX team icon updated for team_id={team_id} via {url}")
                 return True
@@ -1199,7 +1223,7 @@ def auto_create_vaptfix_team(access_token):
     # Step 1: Check if VAPTFIX team already exists
     try:
         search_url = "https://graph.microsoft.com/v1.0/me/joinedTeams"
-        resp = requests.get(search_url, headers=headers, timeout=10)
+        resp = _http_get(search_url, headers=headers, timeout=10)
         if resp.status_code == 200:
             teams = resp.json().get('value', [])
             for team in teams:
@@ -1210,7 +1234,7 @@ def auto_create_vaptfix_team(access_token):
                     # Fetch existing channels
                     channels_result = []
                     try:
-                        ch_resp = requests.get(
+                        ch_resp = _http_get(
                             f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
                             headers=headers, timeout=10
                         )
@@ -1249,7 +1273,7 @@ def auto_create_vaptfix_team(access_token):
             "description": "Vaptfix Security Management Team",
             "visibility": "private",
         }
-        resp = requests.post(create_url, headers=headers, json=payload, timeout=30)
+        resp = _http_post(create_url, headers=headers, json=payload, timeout=30)
 
         team_id = None
         if resp.status_code in (200, 201):
@@ -1270,7 +1294,7 @@ def auto_create_vaptfix_team(access_token):
                     for attempt in range(5):
                         time.sleep(10)
                         try:
-                            check = requests.get(
+                            check = _http_get(
                                 f"https://graph.microsoft.com/v1.0/teams/{tid}",
                                 headers=hdrs, timeout=10
                             )
@@ -1363,7 +1387,7 @@ class MicrosoftTeamsCallbackView(APIView):
                 "code": code,
                 "redirect_uri": settings.MICROSOFT_REDIRECT_URI,
             }
-            token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
+            token_response = _http_post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
             token_data = token_response.json()
             print("🔑 Token Response:", token_data)
 
@@ -1388,7 +1412,7 @@ class MicrosoftTeamsCallbackView(APIView):
             access_token = token_data["access_token"]
 
             # Get user info from Microsoft Graph
-            user_info = requests.get(
+            user_info = _http_get(
                 "https://graph.microsoft.com/v1.0/me",
                 headers={"Authorization": f"Bearer {access_token}"}, timeout=15
             ).json()
@@ -1615,7 +1639,7 @@ class MicrosoftTeamsTokenExchangeView(APIView):
                 "scope": "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Team.Create https://graph.microsoft.com/Group.ReadWrite.All https://graph.microsoft.com/Channel.Create offline_access"
             }
 
-            token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
+            token_response = _http_post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
             token_data = token_response.json()
 
             if token_response.status_code != 200 or "access_token" not in token_data:
@@ -1665,7 +1689,7 @@ class MicrosoftTeamsTokenRefreshView(APIView):
                 "refresh_token": refresh_token,
                 "scope": "https://graph.microsoft.com/.default offline_access",
             }
-            resp = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
+            resp = _http_post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
             data = resp.json()
             new_token = data.get("access_token")
             if not new_token:
@@ -1702,13 +1726,13 @@ class CreateTeamsChannelView(generics.GenericAPIView):
             }
             
             # Check user profile and permissions
-            response = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers, timeout=10)
+            response = _http_get("https://graph.microsoft.com/v1.0/me", headers=headers, timeout=10)
             
             if response.status_code != 200:
                 return False, f"Token validation failed: {response.status_code}"
             
             # Additional check - try to access teams
-            teams_response = requests.get("https://graph.microsoft.com/v1.0/me/joinedTeams", headers=headers, timeout=10)
+            teams_response = _http_get("https://graph.microsoft.com/v1.0/me/joinedTeams", headers=headers, timeout=10)
             
             if teams_response.status_code == 403:
                 return False, "Insufficient permissions. Token needs Team.ReadBasic.All and Channel.Create scopes"
@@ -1753,7 +1777,7 @@ class CreateTeamsChannelView(generics.GenericAPIView):
                 
                 logger.info(f"Creating channel: {payload}")
                 
-                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                response = _http_post(url, headers=headers, json=payload, timeout=30)
                 
                 if response.status_code == 201:
                     channel_data = response.json()
@@ -1835,7 +1859,7 @@ class SendTeamsMessageView(generics.GenericAPIView):
                     }
                 }
                 
-                response = requests.post(url, headers=headers, json=payload, timeout=10)
+                response = _http_post(url, headers=headers, json=payload, timeout=10)
                 
                 if response.status_code == 201:
                     message_data = response.json()
@@ -1888,7 +1912,7 @@ class ListTeamsView(generics.GenericAPIView):
                 "refresh_token": refresh_token,
                 "scope": "https://graph.microsoft.com/.default offline_access",
             }
-            resp = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
+            resp = _http_post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
             data = resp.json()
             new_token = data.get("access_token")
             if new_token:
@@ -1914,7 +1938,7 @@ class ListTeamsView(generics.GenericAPIView):
                     'Content-Type': 'application/json'
                 }
 
-                response = requests.get(url, headers=headers, timeout=10)
+                response = _http_get(url, headers=headers, timeout=10)
 
                 # Token expired or forbidden — try auto-refresh once
                 refreshed_token = None
@@ -1922,7 +1946,7 @@ class ListTeamsView(generics.GenericAPIView):
                     refreshed_token = self._refresh_ms_token(request.user)
                     if refreshed_token:
                         headers['Authorization'] = f'Bearer {refreshed_token}'
-                        response = requests.get(url, headers=headers, timeout=10)
+                        response = _http_get(url, headers=headers, timeout=10)
 
                 if response.status_code == 200:
                     teams_data = response.json()
@@ -1985,7 +2009,7 @@ class ListChannelsView(generics.GenericAPIView):
                     'Content-Type': 'application/json'
                 }
                 
-                response = requests.get(url, headers=headers, timeout=10)
+                response = _http_get(url, headers=headers, timeout=10)
                 
                 if response.status_code == 200:
                     channels_data = response.json()
@@ -2036,13 +2060,13 @@ class CreateTeamView(generics.GenericAPIView):
             }
             
             # Check user profile
-            response = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers, timeout=10)
+            response = _http_get("https://graph.microsoft.com/v1.0/me", headers=headers, timeout=10)
             
             if response.status_code != 200:
                 return False, f"Token validation failed: {response.status_code}"
             
             # Check if user can create teams (try to list joined teams)
-            teams_response = requests.get("https://graph.microsoft.com/v1.0/me/joinedTeams", headers=headers, timeout=10)
+            teams_response = _http_get("https://graph.microsoft.com/v1.0/me/joinedTeams", headers=headers, timeout=10)
             
             if teams_response.status_code == 403:
                 return False, "Insufficient permissions. Token needs Team.Create and Group.ReadWrite.All scopes"
@@ -2064,7 +2088,7 @@ class CreateTeamView(generics.GenericAPIView):
             # Using groups endpoint because teams are built on Office 365 groups
             search_url = f"https://graph.microsoft.com/v1.0/groups?$filter=displayName eq '{team_name}' and resourceProvisioningOptions/Any(x:x eq 'Team')"
             
-            response = requests.get(search_url, headers=headers, timeout=10)
+            response = _http_get(search_url, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
@@ -2104,7 +2128,7 @@ class CreateTeamView(generics.GenericAPIView):
                 "membershipType": "standard"
             }
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=15)
+                resp = _http_post(url, headers=headers, json=payload, timeout=15)
                 if resp.status_code in (200, 201):
                     channel_data = resp.json()
                     results.append({
@@ -2137,7 +2161,7 @@ class CreateTeamView(generics.GenericAPIView):
             for attempt in range(retries):
                 time.sleep(d)
                 try:
-                    resp = requests.get(
+                    resp = _http_get(
                         f"https://graph.microsoft.com/v1.0/teams/{tid}",
                         headers=hdrs, timeout=10
                     )
@@ -2214,7 +2238,7 @@ class CreateTeamView(generics.GenericAPIView):
                 
                 logger.info(f"Creating team: {payload}")
                 
-                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                response = _http_post(url, headers=headers, json=payload, timeout=30)
                 
                 if response.status_code == 201:
                     # Team creation is successful and completed immediately
@@ -2379,7 +2403,7 @@ class AddUserToChannelView(generics.GenericAPIView):
             
             # Search for user by email
             url = f"https://graph.microsoft.com/v1.0/users/{email}"
-            response = requests.get(url, headers=headers, timeout=10)
+            response = _http_get(url, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 user_data = response.json()
@@ -2406,7 +2430,7 @@ class AddUserToChannelView(generics.GenericAPIView):
                 "roles": [role] if role == "owner" else []
             }
             
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response = _http_post(url, headers=headers, json=payload, timeout=10)
             
             if response.status_code in [201, 409]:  # 409 means user already exists
                 return True, "User added to team successfully"
@@ -2437,7 +2461,7 @@ class AddUserToChannelView(generics.GenericAPIView):
                 "roles": [role] if role == "owner" else []
             }
             
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response = _http_post(url, headers=headers, json=payload, timeout=10)
             
             if response.status_code in [201, 409]:  # 409 means user already exists
                 return True, "User added to channel successfully"
@@ -2627,7 +2651,7 @@ class UpdateChannelView(generics.GenericAPIView):
             if description is not None:
                 payload["description"] = description
 
-            response = requests.patch(url, headers=headers, json=payload, timeout=30)
+            response = _http_patch(url, headers=headers, json=payload, timeout=30)
 
             if response.status_code == 204:
                 return Response({
@@ -2693,7 +2717,7 @@ class DeleteChannelView(generics.GenericAPIView):
                 
                 logger.info(f"Deleting channel {channel_id} from team {team_id}")
                 
-                response = requests.delete(url, headers=headers, timeout=30)
+                response = _http_delete(url, headers=headers, timeout=30)
                 
                 if response.status_code == 204:
                     return Response({
@@ -2757,7 +2781,7 @@ class UpdateTeamView(generics.GenericAPIView):
             }
             
             # Check user profile
-            response = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers, timeout=10)
+            response = _http_get("https://graph.microsoft.com/v1.0/me", headers=headers, timeout=10)
             
             if response.status_code != 200:
                 return False, f"Token validation failed: {response.status_code}"
@@ -2775,7 +2799,7 @@ class UpdateTeamView(generics.GenericAPIView):
                 'Content-Type': 'application/json'
             }
             
-            response = requests.get(f"https://graph.microsoft.com/v1.0/teams/{team_id}", headers=headers, timeout=10)
+            response = _http_get(f"https://graph.microsoft.com/v1.0/teams/{team_id}", headers=headers, timeout=10)
             
             if response.status_code == 200:
                 return response.json()
@@ -2796,7 +2820,7 @@ class UpdateTeamView(generics.GenericAPIView):
             # Search for teams with the same display name
             search_url = f"https://graph.microsoft.com/v1.0/groups?$filter=displayName eq '{team_name}' and resourceProvisioningOptions/Any(x:x eq 'Team')"
             
-            response = requests.get(search_url, headers=headers, timeout=10)
+            response = _http_get(search_url, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
@@ -2874,7 +2898,7 @@ class UpdateTeamView(generics.GenericAPIView):
                 
                 logger.info(f"Updating team {team_id}: {payload}")
                 
-                response = requests.patch(url, headers=headers, json=payload, timeout=30)
+                response = _http_patch(url, headers=headers, json=payload, timeout=30)
                 
                 # Microsoft Graph API returns 204 No Content for successful PATCH operations
                 if response.status_code == 204:
@@ -3006,7 +3030,7 @@ class DeleteTeamView(generics.GenericAPIView):
                 
                 logger.info(f"Deleting team {team_id}")
                 
-                response = requests.delete(url, headers=headers, timeout=30)
+                response = _http_delete(url, headers=headers, timeout=30)
                 
                 if response.status_code == 204:
                     return Response({
@@ -3071,7 +3095,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
     headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
 
     # List existing channels — Slack always stores names as lowercase
-    resp = requests.get(
+    resp = _http_get(
         "https://slack.com/api/conversations.list",
         headers=headers,
         params={"types": "public_channel", "limit": 1000}, timeout=15
@@ -3084,7 +3108,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
         if name in existing:
             channel_ids[name] = existing[name]
         else:
-            create_resp = requests.post(
+            create_resp = _http_post(
                 "https://slack.com/api/conversations.create",
                 headers=headers,
                 json={"name": name, "is_private": False}, timeout=15
@@ -3094,7 +3118,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
                 channel_ids[name] = ch_data.get("channel", {}).get("id")
             elif ch_data.get("error") == "name_taken":
                 # Already exists but not in listing (e.g. archived) — re-fetch
-                retry_resp = requests.get(
+                retry_resp = _http_get(
                     "https://slack.com/api/conversations.list",
                     headers=headers,
                     params={"types": "public_channel,private_channel", "limit": 1000}, timeout=15
@@ -3110,7 +3134,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
             continue
 
         # Bot joins channel
-        requests.post(
+        _http_post(
             "https://slack.com/api/conversations.join",
             headers=headers,
             json={"channel": channel_id}, timeout=15
@@ -3118,7 +3142,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
 
         # Invite the logged-in Slack user
         if slack_user_id:
-            invite_resp = requests.post(
+            invite_resp = _http_post(
                 "https://slack.com/api/conversations.invite",
                 headers=headers,
                 json={"channel": channel_id, "users": slack_user_id}, timeout=15
@@ -3153,7 +3177,7 @@ class SlackOAuthUrlView(APIView):
             base_url = request.data.get("base_url", "")
             if not base_url:
                 try:
-                    ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels", timeout=15).json()
+                    ngrok_resp = _http_get("http://127.0.0.1:4040/api/tunnels", timeout=15).json()
                     https_tunnel = next(
                         (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
                         None
@@ -3201,7 +3225,7 @@ class SlackOAuthCallbackView(APIView):
             redirect_uri = getattr(settings, "SLACK_REDIRECT_URI", "")
             if not redirect_uri:
                 try:
-                    ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels", timeout=15).json()
+                    ngrok_resp = _http_get("http://127.0.0.1:4040/api/tunnels", timeout=15).json()
                     https_tunnel = next(
                         (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
                         None
@@ -3222,7 +3246,7 @@ class SlackOAuthCallbackView(APIView):
             }
 
             try:
-                token_res = requests.post(token_url, data=token_data, timeout=10)
+                token_res = _http_post(token_url, data=token_data, timeout=10)
                 token_json = token_res.json()
             except Exception as e:
                 logger.error(f"Slack token exchange failed: {str(e)}")
@@ -3261,7 +3285,7 @@ class SlackOAuthCallbackView(APIView):
 
             # ✅ Step 3: Fetch user profile from Slack
             user_id = authed_user.get("id")
-            user_info = requests.get(
+            user_info = _http_get(
                 "https://slack.com/api/users.info",
                 params={"user": user_id},
                 headers={"Authorization": f"Bearer {bot_token}"}, timeout=15
@@ -3411,7 +3435,7 @@ class SlackLoginView(APIView):
 
         try:
             # 1. Get Slack user identity (PRIMARY email source)
-            user_identity = requests.get(
+            user_identity = _http_get(
                 "https://slack.com/api/users.identity",
                 headers={"Authorization": f"Bearer {user_token}"}, timeout=15
             ).json()
@@ -3431,12 +3455,12 @@ class SlackLoginView(APIView):
                 slack_name = slack_user.get("name")
             else:
                 # Fallback: bot token users.info
-                bot_response = requests.get(
+                bot_response = _http_get(
                     "https://slack.com/api/auth.test",
                     headers={"Authorization": f"Bearer {bot_token}"}, timeout=15
                 ).json()
 
-                user_info = requests.get(
+                user_info = _http_get(
                     "https://slack.com/api/users.info",
                     headers={"Authorization": f"Bearer {bot_token}"},
                     params={"user": bot_response.get("user_id")}, timeout=15
@@ -3580,7 +3604,7 @@ class SlackOAuthView(APIView):
             # ✅ 1. Verify token and get identity info
             auth_test_url = "https://slack.com/api/auth.test"
             headers = {"Authorization": f"Bearer {access_token}"}
-            auth_response = requests.get(auth_test_url, headers=headers, timeout=15)
+            auth_response = _http_get(auth_test_url, headers=headers, timeout=15)
             auth_json = auth_response.json()
 
             if not auth_json.get("ok"):
@@ -3594,7 +3618,7 @@ class SlackOAuthView(APIView):
             bot_info = {}
             if auth_json.get("bot_id"):
                 bot_info_url = "https://slack.com/api/bots.info"
-                bot_info_response = requests.get(
+                bot_info_response = _http_get(
                     bot_info_url,
                     headers=headers,
                     params={"bot": auth_json.get("bot_id")}, timeout=15
@@ -3648,7 +3672,7 @@ class SlackValidateTokenView(APIView):
             headers = {'Authorization': f'Bearer {access_token}'}
             
             # Get auth test (validates token)
-            auth_test_response = requests.get('https://slack.com/api/auth.test', headers=headers, timeout=15)
+            auth_test_response = _http_get('https://slack.com/api/auth.test', headers=headers, timeout=15)
             auth_test_data = auth_test_response.json()
             
             if not auth_test_data.get('ok'):
@@ -3659,7 +3683,7 @@ class SlackValidateTokenView(APIView):
             
             # Get detailed user info
             user_id = auth_test_data.get('user_id')
-            user_response = requests.get(
+            user_response = _http_get(
                 'https://slack.com/api/users.info', 
                 headers=headers, 
                 params={'user': user_id}, timeout=15
@@ -3672,7 +3696,7 @@ class SlackValidateTokenView(APIView):
 
                 # If email is null (bot token used), try users.identity for human user email
                 if not email:
-                    identity_resp = requests.get(
+                    identity_resp = _http_get(
                         'https://slack.com/api/users.identity',
                         headers=headers, timeout=15
                     ).json()
@@ -3789,7 +3813,7 @@ class SendSlackMessageView(APIView):
             'Content-Type': 'application/json'
         }
         
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = _http_post(url, headers=headers, json=payload, timeout=30)
         result = response.json()
         
         if result.get('ok'):
@@ -3893,7 +3917,7 @@ class JoinSlackChannelView(APIView):
         }
         payload = {'channel': channel}
 
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = _http_post(url, headers=headers, json=payload, timeout=30)
         result = response.json()
 
         if result.get('ok'):
@@ -3953,7 +3977,7 @@ class CreateSlackChannelView(APIView):
                 'is_private': is_private
             }
             
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
+            response = _http_post(url, headers=headers, json=payload, timeout=15)
             result = response.json()
             
             if result.get('ok'):
@@ -4008,7 +4032,7 @@ class UpdateSlackChannelView(APIView):
         }
         payload = {'channel': channel_id, 'name': new_name}
 
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = _http_post(url, headers=headers, json=payload, timeout=15)
         result = response.json()
 
         if result.get('ok'):
@@ -4050,7 +4074,7 @@ class DeleteSlackChannelView(APIView):
                 'channel': channel_id
             }
 
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
+            response = _http_post(url, headers=headers, json=payload, timeout=15)
             result = response.json()
 
             if result.get('ok'):
@@ -4103,7 +4127,7 @@ class ListSlackChannelsView(APIView):
                 'types': types
             }
 
-            response = requests.get(url, headers=headers, params=params, timeout=15)
+            response = _http_get(url, headers=headers, params=params, timeout=15)
             result = response.json()
 
             if not result.get('ok'):
@@ -4190,7 +4214,7 @@ class AddUserToSlackChannelView(APIView):
         resolved_role = "Viewer"
         resolved_ch_name = ""
         try:
-            ch_info = requests.get(
+            ch_info = _http_get(
                 "https://slack.com/api/conversations.info",
                 params={"channel": channel},
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -4265,7 +4289,7 @@ class AddUserToSlackChannelView(APIView):
             "users": user_id  # Can be multiple, comma-separated
         }
 
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = _http_post(url, headers=headers, json=payload, timeout=30)
         result = response.json()
 
         if result.get("ok") or result.get("error") == "already_in_channel":
@@ -4312,7 +4336,7 @@ class SlackUserListView(APIView):
             "Content-Type": "application/json"
         }
 
-        response = requests.get(url, headers=headers, timeout=15)
+        response = _http_get(url, headers=headers, timeout=15)
         data = response.json()
 
         if not data.get("ok"):
@@ -4363,7 +4387,7 @@ class SlackInviteUserView(APIView):
         }
         payload = {"channel": channel, "users": ",".join(slack_user_ids)}
 
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = _http_post(url, headers=headers, json=payload, timeout=15)
         data = response.json()
 
         if not data.get("ok"):
@@ -4372,7 +4396,7 @@ class SlackInviteUserView(APIView):
         # Determine role from channel name using Slack conversations.info
         role = "Viewer"
         try:
-            ch_info = requests.get(
+            ch_info = _http_get(
                 "https://slack.com/api/conversations.info",
                 params={"channel": channel},
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -4488,7 +4512,7 @@ class SlackInviteUserView(APIView):
 
     def _save_and_email_invited_user(self, slack_user_id, bot_token, admin, role="Viewer"):
         """Fetch Slack profile, save to UserDetail, send set-password welcome email."""
-        user_info = requests.get(
+        user_info = _http_get(
             "https://slack.com/api/users.info",
             params={"user": slack_user_id},
             headers={"Authorization": f"Bearer {bot_token}"},
@@ -4626,7 +4650,7 @@ class JiraOAuthCallbackView(APIView):
             logger.info(f"Exchanging code for token at {settings.JIRA_TOKEN_URL} | redirect_uri={settings.JIRA_REDIRECT_URI}")
 
             try:
-                token_response = requests.post(
+                token_response = _http_post(
                     settings.JIRA_TOKEN_URL,
                     json=token_data,
                     headers={'Content-Type': 'application/json'},
@@ -4732,7 +4756,7 @@ class JiraOAuthView(APIView):
                 'redirect_uri': settings.JIRA_REDIRECT_URI
             }
 
-            token_response = requests.post(
+            token_response = _http_post(
                 settings.JIRA_TOKEN_URL,
                 json=token_data,
                 headers={'Content-Type': 'application/json'}, timeout=15
@@ -4747,7 +4771,7 @@ class JiraOAuthView(APIView):
             tokens = token_response.json()
 
             # Fetch user info
-            user_response = requests.get(
+            user_response = _http_get(
                 'https://api.atlassian.com/me',
                 headers={'Authorization': f"Bearer {tokens['access_token']}"}, timeout=15
             )
@@ -4818,7 +4842,7 @@ class JiraValidateTokenView(APIView):
                 return Response({'error': 'Access token is required'},
                                 status=status.HTTP_400_BAD_REQUEST)
 
-            response = requests.get(
+            response = _http_get(
                 'https://api.atlassian.com/me',
                 headers={'Authorization': f'Bearer {access_token}'}, timeout=15
             )
@@ -4847,7 +4871,7 @@ class JiraGetUserView(APIView):
                 return Response({'error': 'JIRA access token is required'},
                                 status=status.HTTP_400_BAD_REQUEST)
 
-            response = requests.get(
+            response = _http_get(
                 'https://api.atlassian.com/me',
                 headers={'Authorization': f'Bearer {access_token}'}, timeout=15
             )
@@ -4878,7 +4902,7 @@ class JiraListProjectsView(APIView):
                 return Response({'error': 'Access token and cloud ID required'},
                                 status=status.HTTP_400_BAD_REQUEST)
 
-            response = requests.get(
+            response = _http_get(
                 f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project',
                 headers={
                     'Authorization': f'Bearer {access_token}',
@@ -4920,7 +4944,7 @@ class JiraCreateProjectView(APIView):
             }
 
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project"
-            response = requests.post(
+            response = _http_post(
                 url,
                 json=payload,
                 headers={
@@ -4978,7 +5002,7 @@ class JiraCreateIssueView(APIView):
                 }
             }
 
-            response = requests.post(
+            response = _http_post(
                 f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue',
                 json=issue_data,
                 headers={
@@ -5008,7 +5032,7 @@ class JiraGetIssueView(APIView):
         cloud_id = request.headers.get('Jira-Cloud-Id')
 
         url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}"
-        response = requests.get(
+        response = _http_get(
             url,
             headers={
                 "Authorization": f"Bearer {access_token}",
@@ -5028,7 +5052,7 @@ class JiraUpdateIssueView(APIView):
         payload = {"fields": request.data}
 
         url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}"
-        response = requests.put(
+        response = _http_put(
             url,
             json=payload,
             headers={
@@ -5051,7 +5075,7 @@ class JiraDeleteIssueView(APIView):
         cloud_id = request.headers.get('Jira-Cloud-Id')
 
         url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}"
-        response = requests.delete(
+        response = _http_delete(
             url,
             headers={"Authorization": f"Bearer {access_token}"}, timeout=15
         )
@@ -5074,7 +5098,7 @@ class JiraSearchIssuesView(APIView):
             if not access_token or not cloud_id:
                 return Response({'error': 'Missing Jira headers'}, status=400)
 
-            response = requests.get(
+            response = _http_get(
                 f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search/jql',
                 headers={
                     'Authorization': f'Bearer {access_token}',
@@ -5106,7 +5130,7 @@ class JiraAssignIssueView(APIView):
         url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/assignee"
         payload = {"accountId": account_id}
 
-        response = requests.put(
+        response = _http_put(
             url,
             json=payload,
             headers={
@@ -5134,7 +5158,7 @@ class JiraGetResourcesView(APIView):
                 return Response({'error': 'Access token is required'},
                                 status=status.HTTP_400_BAD_REQUEST)
 
-            response = requests.get(
+            response = _http_get(
                 'https://api.atlassian.com/oauth/token/accessible-resources',
                 headers={'Authorization': f'Bearer {access_token}'}, timeout=15
             )
@@ -5186,7 +5210,7 @@ class JiraAddCommentView(APIView):
                 }
             }
 
-            response = requests.post(
+            response = _http_post(
                 f'https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/comment',
                 json=comment_data,
                 headers={
@@ -5227,7 +5251,7 @@ class JiraTokenRefreshView(APIView):
                 'refresh_token': refresh_token,
             }
 
-            response = requests.post(
+            response = _http_post(
                 settings.JIRA_TOKEN_URL,
                 json=token_data,
                 headers={'Content-Type': 'application/json'}, timeout=15
@@ -5277,7 +5301,7 @@ class JiraGetProjectView(APIView):
                 return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
 
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project/{project_key}"
-            response = requests.get(url, headers={
+            response = _http_get(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
             }, timeout=15)
@@ -5303,7 +5327,7 @@ class JiraUpdateProjectView(APIView):
                 return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
 
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project/{project_key}"
-            response = requests.put(url, json=request.data, headers={
+            response = _http_put(url, json=request.data, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json',
                 'Content-Type': 'application/json'
@@ -5334,7 +5358,7 @@ class JiraDeleteProjectView(APIView):
                 return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
 
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project/{project_key}"
-            response = requests.delete(url, headers={
+            response = _http_delete(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
             }, timeout=15)
@@ -5363,7 +5387,7 @@ class JiraListCommentsView(APIView):
                 return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
 
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/comment"
-            response = requests.get(url, headers={
+            response = _http_get(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
             }, timeout=15)
@@ -5400,7 +5424,7 @@ class JiraUpdateCommentView(APIView):
             }
 
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/comment/{comment_id}"
-            response = requests.put(url, json=comment_data, headers={
+            response = _http_put(url, json=comment_data, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json',
                 'Content-Type': 'application/json'
@@ -5427,7 +5451,7 @@ class JiraDeleteCommentView(APIView):
                 return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
 
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/comment/{comment_id}"
-            response = requests.delete(url, headers={
+            response = _http_delete(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
             }, timeout=15)
@@ -5456,7 +5480,7 @@ class JiraListTransitionsView(APIView):
                 return Response({'error': 'Access token and cloud ID required'}, status=status.HTTP_400_BAD_REQUEST)
 
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/transitions"
-            response = requests.get(url, headers={
+            response = _http_get(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
             }, timeout=15)
@@ -5486,7 +5510,7 @@ class JiraTransitionIssueView(APIView):
 
             payload = {'transition': {'id': str(transition_id)}}
             url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/transitions"
-            response = requests.post(url, json=payload, headers={
+            response = _http_post(url, json=payload, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json',
                 'Content-Type': 'application/json'
@@ -5624,7 +5648,7 @@ class SlackEventsView(APIView):
                 return
 
             # Fetch user profile from Slack
-            user_info = requests.get(
+            user_info = _http_get(
                 "https://slack.com/api/users.info",
                 params={"user": slack_user_id},
                 headers={"Authorization": f"Bearer {admin.slack_bot_token}"},
@@ -5758,7 +5782,7 @@ class CreateTeamsSubscriptionView(APIView):
             "Content-Type": "application/json",
         }
 
-        resp = requests.post(
+        resp = _http_post(
             "https://graph.microsoft.com/v1.0/subscriptions",
             headers=headers,
             json=payload,
@@ -5848,7 +5872,7 @@ class TeamsWebhookView(APIView):
             }
 
             # Fetch member details from MS Graph
-            member_resp = requests.get(
+            member_resp = _http_get(
                 f"https://graph.microsoft.com/v1.0/teams/{team_id}/members/{member_id}",
                 headers=headers,
                 timeout=10,

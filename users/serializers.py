@@ -20,6 +20,28 @@ import logging
 logger = logging.getLogger(__name__)
 from django.contrib.auth import get_user_model
 import requests
+
+REQUEST_TIMEOUT_SECONDS = 15
+
+def _http_get(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.get(url, **kwargs)
+
+def _http_post(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.post(url, **kwargs)
+
+def _http_put(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.put(url, **kwargs)
+
+def _http_delete(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.delete(url, **kwargs)
+
+def _http_patch(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.patch(url, **kwargs)
 import secrets
 from django.conf import settings
 from .utils import verify_recaptcha
@@ -497,7 +519,7 @@ class GoogleOAuthSerializer(serializers.Serializer):
     ):
         if access_token:
             url = "https://www.googleapis.com/oauth2/v2/userinfo"
-            response = requests.get(
+            response = _http_get(
                 url,
                 headers={"Authorization": f"Bearer {access_token}"},
                 timeout=10
@@ -508,7 +530,7 @@ class GoogleOAuthSerializer(serializers.Serializer):
 
         else:
             url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
-            response = requests.get(url, timeout=10)
+            response = _http_get(url, timeout=10)
             if response.status_code != 200:
                 raise serializers.ValidationError("Invalid Google ID token")
 
@@ -576,14 +598,14 @@ class GoogleOAuthSerializer(serializers.Serializer):
 #             if access_token:
 #                 # OAuth access token path
 #                 google_user_info_url = f"https://www.googleapis.com/oauth2/v2/userinfo?access_token={access_token}"
-#                 response = requests.get(google_user_info_url, timeout=10)
+#                 response = _http_get(google_user_info_url, timeout=10)
 #                 if response.status_code != 200:
 #                     raise serializers.ValidationError("Invalid Google access token")
 #                 user_data = response.json()
 #             elif id_token:
 #                 # ID token path - verify using tokeninfo
 #                 tokeninfo_url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
-#                 response = requests.get(tokeninfo_url, timeout=10)
+#                 response = _http_get(tokeninfo_url, timeout=10)
 #                 if response.status_code != 200:
 #                     raise serializers.ValidationError("Invalid Google ID token")
 #                 token_info = response.json()
@@ -665,7 +687,7 @@ class MicrosoftTeamsOAuthSerializer(serializers.Serializer):
                 'Content-Type': 'application/json'
             }
             
-            response = requests.get(graph_url, headers=headers, timeout=10)
+            response = _http_get(graph_url, headers=headers, timeout=10)
             
             if response.status_code != 200:
                 logger.error(f"Microsoft Graph API error: {response.status_code} - {response.text}")
@@ -881,7 +903,7 @@ class SlackOAuthCodeSerializer(serializers.Serializer):
                 "redirect_uri": redirect_uri
             }
 
-            token_response = requests.post(token_url, data=token_data, timeout=15)
+            token_response = _http_post(token_url, data=token_data, timeout=15)
             token_result = token_response.json()
 
             if not token_result.get("ok"):
@@ -899,7 +921,7 @@ class SlackOAuthCodeSerializer(serializers.Serializer):
                 raise serializers.ValidationError("User access token not found in Slack response.")
 
             # Fetch user info
-            user_info_response = requests.get(
+            user_info_response = _http_get(
                 "https://slack.com/api/users.identity",
                 headers={"Authorization": f"Bearer {user_token}"},
                 timeout=10

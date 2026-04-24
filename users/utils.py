@@ -80,53 +80,70 @@ class Util:
             with open(logo_path, "rb") as f:
                 logo_b64 = base64.b64encode(f.read()).decode("utf-8")
 
+        # Prefer CID image for better email client compatibility.
         if logo_b64:
-            logo_html = f'<img src="data:image/png;base64,{logo_b64}" alt="VAPTFIX" style="height:60px;" />'
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:42px; display:block; margin:0 auto;" />'
         else:
-            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+            logo_html = (
+                '<div style="font-size:20px; color:#ffffff; font-weight:700; letter-spacing:0.5px;">'
+                'VAPTFIX'
+                '</div>'
+            )
 
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head><meta charset="UTF-8"></head>
-        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
-          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+        <body style="margin:0; padding:0; background-color:#eef0f6; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef0f6; padding:36px 0;">
             <tr>
               <td align="center">
-                <table width="600" cellpadding="0" cellspacing="0"
-                       style="background:#ffffff; border-radius:8px; overflow:hidden;
-                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+                <table width="480" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:22px; overflow:hidden;
+                              box-shadow:0 12px 30px rgba(18, 22, 33, 0.10);">
 
-                  <!-- Header with Logo -->
+                  <!-- Dark header with logo -->
                   <tr>
-                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
-                                border-bottom:1px solid #e8eaed;">
+                    <td style="background-color:#23124d; padding:20px 30px; text-align:center;">
                       {logo_html}
                     </td>
                   </tr>
 
                   <!-- Body -->
                   <tr>
-                    <td style="padding:40px;">
-                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">Admin Signup – OTP Verification</h2>
-                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
-
-                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                    <td style="padding:34px 34px 20px 34px; text-align:center;">
+                      <h1 style="color:#1f2040; margin:0; font-size:36px; line-height:1.05;">Admin Signup - OTP Verification</h1>
+                      <p style="color:#545a6a; font-size:15px; line-height:1.6; margin:20px 0 18px 0;">
                         Your One-Time Password (OTP) for VAPTFIX Admin Signup is:
-                        <strong style="font-size:22px; color:#1a1a2e; letter-spacing:4px;">{otp}</strong>
                       </p>
 
-                      <p style="color:#444; font-size:15px; line-height:1.6;">
-                        This OTP is valid for <strong>5 minutes</strong>.
+                      <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 auto 22px auto;">
+                        <tr>
+                          <td align="center">
+                            <div style="display:inline-block; background:#f0f2f7; border-radius:10px; padding:16px 28px;
+                                        font-size:54px; letter-spacing:10px; color:#1f2040; font-weight:700;">
+                              {otp}
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <table width="100%" cellpadding="0" cellspacing="0"
+                             style="background:#e5f8ff; border-radius:8px; margin:0 auto 12px auto;">
+                        <tr>
+                          <td style="padding:14px 14px; color:#2e3d4f; font-size:14px; line-height:1.6; text-align:left;">
+                            This OTP is valid for <strong>5 minutes</strong>.
                         Please do not share this OTP with anyone for security reasons.
-                      </p>
+                          </td>
+                        </tr>
+                      </table>
                     </td>
                   </tr>
 
                   <!-- Footer -->
                   <tr>
-                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
-                      <p style="color:#888; font-size:12px; margin:0;">
+                    <td style="padding:18px 34px 24px 34px; text-align:center;">
+                      <p style="color:#9a9dad; font-size:12px; letter-spacing:1.2px; margin:0;">
                         &copy; 2026 VAPTFIX. All rights reserved.
                       </p>
                     </td>
@@ -163,37 +180,39 @@ class Util:
                 logo_b64 = base64.b64encode(f.read()).decode("utf-8")
 
         if logo_b64:
-            logo_html = f'<img src="data:image/png;base64,{logo_b64}" alt="VAPTFIX" style="height:60px;" />'
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:42px; display:block; margin:0 auto;" />'
         else:
-            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+            logo_html = (
+                '<div style="font-size:20px; color:#ffffff; font-weight:700; letter-spacing:0.5px;">'
+                'VAPTFIX'
+                '</div>'
+            )
 
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head><meta charset="UTF-8"></head>
-        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
-          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+        <body style="margin:0; padding:0; background-color:#eef0f6; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef0f6; padding:36px 0;">
             <tr>
               <td align="center">
-                <table width="600" cellpadding="0" cellspacing="0"
-                       style="background:#ffffff; border-radius:8px; overflow:hidden;
-                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+                <table width="480" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:22px; overflow:hidden;
+                              box-shadow:0 12px 30px rgba(18, 22, 33, 0.10);">
 
-                  <!-- Header — no background, just logo -->
+                  <!-- Header (same style as OTP mail) -->
                   <tr>
-                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
-                                border-bottom:1px solid #e8eaed;">
+                    <td style="background-color:#23124d; padding:20px 30px; text-align:center;">
                       {logo_html}
                     </td>
                   </tr>
 
                   <!-- Body -->
                   <tr>
-                    <td style="padding:40px;">
-                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">
+                    <td style="padding:34px 34px 20px 34px;">
+                      <h1 style="color:#1f2040; margin:0 0 16px 0; font-size:36px; line-height:1.05; text-align:center;">
                         Administrator Account Created Successfully
-                      </h2>
-                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
+                      </h1>
 
                       <p style="color:#444; font-size:15px; line-height:1.6;">
                         Dear Administrator,
@@ -222,8 +241,8 @@ class Util:
 
                   <!-- Footer -->
                   <tr>
-                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
-                      <p style="color:#888; font-size:12px; margin:0;">
+                    <td style="padding:18px 34px 24px 34px; text-align:center;">
+                      <p style="color:#9a9dad; font-size:12px; letter-spacing:1.2px; margin:0;">
                         &copy; 2026 VAPTFIX. All rights reserved.
                       </p>
                     </td>

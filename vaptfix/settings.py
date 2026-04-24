@@ -114,7 +114,8 @@ DATABASES = {
         'ENGINE': 'djongo',
         'NAME': 'vaptfix',
         'CLIENT': {
-            'host': os.getenv("MONGO_DB_URL"),
+            # Use resolved env with fallback (MONGO_DB_URL -> MONGO_URI)
+            'host': MONGO_DB_URL,
             'maxPoolSize': 200,
             'minPoolSize': 10,
             'maxIdleTimeMS': 60000,
