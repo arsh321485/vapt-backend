@@ -330,6 +330,20 @@ class UploadReportAdmin(admin.ModelAdmin):
 
                     if mongodb_stored:
                         upload_actual_seconds = time.perf_counter() - op_started
+
+                        # Store actual upload processing time for UploadStatusView ETA
+                        if parsed_data.get("type") in ("nessus", "nessus_html"):
+                            try:
+                                mongo_uri = self._get_mongo_uri()
+                                with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as _client:
+                                    _db = self._get_mongo_db(_client)
+                                    _db["nessus_reports"].update_one(
+                                        {"report_id": str(obj._id)},
+                                        {"$set": {"upload_processing_seconds": int(round(upload_actual_seconds))}}
+                                    )
+                            except Exception as _upe:
+                                logger.warning(f"[AdminUploadTiming] Could not store upload_processing_seconds: {_upe}")
+
                         agent_eta_seconds = self._estimate_agent_seconds(parsed_count, parsed_data.get("type"))
                         total_eta_seconds = upload_estimate_seconds + agent_eta_seconds
                         messages.success(

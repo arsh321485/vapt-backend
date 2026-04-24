@@ -17,6 +17,28 @@ import os
 import threading
 import requests
 
+REQUEST_TIMEOUT_SECONDS = 15
+
+def _http_get(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.get(url, **kwargs)
+
+def _http_post(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.post(url, **kwargs)
+
+def _http_put(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.put(url, **kwargs)
+
+def _http_delete(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.delete(url, **kwargs)
+
+def _http_patch(url, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.patch(url, **kwargs)
+
 logger = logging.getLogger('users_details')
 
 
@@ -110,7 +132,7 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
     )
 
     # Fetch existing channel list — Slack stores names as lowercase
-    resp = requests.get(
+    resp = _http_get(
         "https://slack.com/api/conversations.list",
         headers=headers,
         # Slack channels can be private; include both types so role->channel mapping works.
@@ -128,7 +150,7 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
         if not channel_id:
             # Channel does not exist — auto-create it as a public channel
             logger.info(f"[SlackSync] Channel '{slack_name}' not found, auto-creating...")
-            create_resp = requests.post(
+            create_resp = _http_post(
                 "https://slack.com/api/conversations.create",
                 headers=headers,
                 json={"name": slack_name, "is_private": False}, timeout=15
@@ -144,7 +166,7 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
                 if err == "name_taken":
                     # Channel exists but bot is not in it (so conversations.list didn't return it).
                     # Retry with exclude_archived=false to find the existing channel ID.
-                    retry_resp = requests.get(
+                    retry_resp = _http_get(
                         "https://slack.com/api/conversations.list",
                         headers=headers,
                         params={"types": "public_channel,private_channel", "limit": 1000, "exclude_archived": False}, timeout=15
@@ -161,13 +183,13 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
                     results.append({"role": role, "status": "channel_not_found", "error": err})
                     continue
         # Bot must be in the channel before it can invite others
-        requests.post(
+        _http_post(
             "https://slack.com/api/conversations.join",
             headers=headers,
             json={"channel": channel_id}, timeout=15
         )
         logger.info(f"[SlackSync] Inviting slack_user_id={slack_user_id} to channel_id={channel_id} role={role}")
-        invite_resp = requests.post(
+        invite_resp = _http_post(
             "https://slack.com/api/conversations.invite",
             headers=headers,
             json={"channel": channel_id, "users": slack_user_id}, timeout=15
@@ -196,7 +218,7 @@ def lookup_slack_user_by_email(bot_token, email):
         return None
     headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
     logger.info(f"[SlackLookup] lookupByEmail email={email} bot_token_set={bool(bot_token)}")
-    resp = requests.get(
+    resp = _http_get(
         "https://slack.com/api/users.lookupByEmail",
         headers=headers,
         params={"email": email}, timeout=15
@@ -220,7 +242,7 @@ def invite_user_to_slack_workspace(bot_token, email):
 
     headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
     try:
-        resp = requests.post(
+        resp = _http_post(
             "https://slack.com/api/users.admin.invite",
             headers=headers,
             json={"email": email},
@@ -260,7 +282,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
             f"[TeamsSync] Start: team_id={team_id} user_email={user_email} roles={member_roles} access_token_set={bool(access_token)}"
         )
         # Get user's Azure AD ID by email
-        user_resp = requests.get(
+        user_resp = _http_get(
             f"https://graph.microsoft.com/v1.0/users/{user_email}",
             headers=headers, timeout=10
         )
@@ -279,7 +301,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
             "roles": [],
             "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
         }
-        team_member_resp = requests.post(
+        team_member_resp = _http_post(
             f"https://graph.microsoft.com/v1.0/teams/{team_id}/members",
             headers=headers, json=team_member_payload, timeout=10
         )
@@ -295,7 +317,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
 
         # For standard channels, team membership = channel access (no individual add needed)
         # Only add to private/shared channels individually
-        channels_resp = requests.get(
+        channels_resp = _http_get(
             f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
             headers=headers, timeout=10
         )
@@ -324,7 +346,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
                         "roles": [],
                         "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
                     }
-                    add_resp = requests.post(
+                    add_resp = _http_post(
                         f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{matching_channel['id']}/members",
                         headers=headers, json=add_payload, timeout=10
                     )
@@ -501,8 +523,8 @@ class UserDetailCreateView(generics.CreateAPIView):
             if detail:
                 first_name = detail.first_name or first_name
                 last_name = detail.last_name or last_name
-        except Exception:
-            pass  # fallback to passed values
+        except Exception as e:
+            logger.warning("Could not load latest name from UserDetail for %s: %s", email, e)
 
         roles_list = roles if isinstance(roles, list) else [str(roles)]
         full_name = f"{first_name} {last_name}".strip() or "Team Member"

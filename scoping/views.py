@@ -1,3 +1,4 @@
+import datetime as _dt
 import logging
 from django.utils import timezone
 from rest_framework.views import APIView
@@ -117,7 +118,6 @@ class UploadStatusView(APIView):
                 return Response({"file_uploaded": False}, status=status.HTTP_200_OK)
 
             processing_started_at = reports[0].uploaded_at
-            elapsed_seconds = int((timezone.now() - processing_started_at).total_seconds()) if processing_started_at else 0
 
             # File exists — now check if all vulnerability cards are generated
             try:
@@ -132,20 +132,28 @@ class UploadStatusView(APIView):
                 ready_reports = 0
                 total_vulns = 0
                 generated_cards = 0
+                total_upload_processing_seconds = 0
+                cards_started_at = None
 
                 for report in reports:
                     report_id = str(report._id)
 
-                    # Get nessus report from MongoDB
+                    # Get nessus report from MongoDB (includes timing fields for ETA)
                     nessus_doc = db["nessus_reports"].find_one(
                         {"report_id": report_id},
-                        {"total_vulnerabilities": 1, "report_type": 1, "cards_generation_complete": 1}
+                        {"total_vulnerabilities": 1, "report_type": 1, "cards_generation_complete": 1,
+                         "upload_processing_seconds": 1, "cards_generation_started_at": 1}
                     )
 
                     if not nessus_doc:
                         # Document not yet created — agent still initializing
                         all_cards_ready = False
                         break
+
+                    # Accumulate timing data
+                    total_upload_processing_seconds += int(nessus_doc.get("upload_processing_seconds") or 0)
+                    if cards_started_at is None:
+                        cards_started_at = nessus_doc.get("cards_generation_started_at")
 
                     report_total_vulns = int(nessus_doc.get("total_vulnerabilities", 0) or 0)
                     total_vulns += report_total_vulns
@@ -176,10 +184,20 @@ class UploadStatusView(APIView):
                     all_cards_ready = False
                     break
 
-                # ETA model:
-                # - base startup: 45 sec
-                # - 2 sec per vulnerability card
-                estimated_total_seconds = max(60, 45 + (total_vulns * 2))
+                agent_eta_seconds = max(45, 45 + (total_vulns * 2))
+                estimated_total_seconds = total_upload_processing_seconds + agent_eta_seconds
+
+                # Elapsed: use cards_generation_started_at (naive UTC from MongoDB) to avoid
+                # timezone-aware vs naive mismatch that caused negative elapsed → 630 min bug
+                if cards_started_at:
+                    elapsed_seconds = max(0, int((_dt.datetime.utcnow() - cards_started_at).total_seconds()))
+                elif processing_started_at:
+                    # Fallback: strip tzinfo to compare both as naive UTC
+                    _started = processing_started_at.replace(tzinfo=None) if processing_started_at.tzinfo else processing_started_at
+                    elapsed_seconds = max(0, int((_dt.datetime.utcnow() - _started).total_seconds()))
+                else:
+                    elapsed_seconds = 0
+
                 remaining_seconds = max(0, estimated_total_seconds - elapsed_seconds)
 
                 if not all_cards_ready:
