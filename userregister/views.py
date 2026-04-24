@@ -14,8 +14,6 @@ import logging
 from vaptfix.mongo_client import MongoContext
 
 logger = logging.getLogger(__name__)
-
-
 def _parse_timeline_to_days(value: str) -> int:
     """Convert timeline string to days. e.g. '5 Days'->5, '1 Week'->7"""
     if not value:
@@ -103,8 +101,8 @@ def _resolve_requester(doc):
             u = User.objects.filter(pk=str(user_id)).only("email").first()
             if u:
                 return u.email
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
 
     if admin_id:
         try:
@@ -112,8 +110,8 @@ def _resolve_requester(doc):
             u = User.objects.filter(pk=str(admin_id)).only("email").first()
             if u:
                 return u.email
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
 
     return doc.get("requested_by", "")
 
@@ -482,8 +480,8 @@ class UserFixVulnerabilityCreateAPIView(APIView):
                             "name": f"{m.first_name} {m.last_name}".strip(),
                             "email": m.email,
                         })
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
                 description       = selected_vuln.get("description", "")
                 description_points = selected_vuln.get("description_points", [])
@@ -765,8 +763,8 @@ class UserFixVulnerabilityStepsAPIView(APIView):
         for row in mitigation_table:
             try:
                 step_num = int(row.get("step_no", 0))
-            except (ValueError, TypeError):
-                continue
+            except (ValueError, TypeError) as e:
+                logger.warning("Suppressed error: %s", e)
             if step_num <= 0:
                 continue
 
@@ -1378,8 +1376,8 @@ class UserFixStepFeedbackAPIView(APIView):
                     for row in mitigation_table:
                         try:
                             step_nums.add(int(row.get("step_no", 0)))
-                        except (ValueError, TypeError):
-                            pass
+                        except (ValueError, TypeError) as e:
+                            logger.warning("Suppressed error: %s", e)
                     step_nums.discard(0)
                     total_steps = max(step_nums) if step_nums else 6
                 else:
@@ -1989,8 +1987,8 @@ class UserSupportRequestsByReportAPIView(APIView):
                     continue
                 try:
                     object_ids.append(ObjectId(raw_vid))
-                except Exception:
-                    continue
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
             fix_severity_by_id = {}
             if object_ids:
@@ -2339,8 +2337,8 @@ def _batch_fix_map(db, tickets):
         if fid:
             try:
                 ids.append(ObjectId(fid))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Suppressed error: %s", e)
     fix_map = {}
     if ids:
         for fix_doc in db[FIX_VULN_COLLECTION].find({"_id": {"$in": ids}}):
@@ -2508,8 +2506,8 @@ class UserTicketOpenListAPIView(APIView):
             for fid in fix_vuln_ids_in_tickets:
                 try:
                     active_obj_ids.append(ObjectId(fid))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
             # Method 1: absent from fix_vulnerabilities = closed/deleted
             active_ids = set()

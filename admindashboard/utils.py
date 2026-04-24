@@ -13,8 +13,8 @@ def get_mongo_uri() -> Optional[str]:
                 return host
         elif client_cfg:
             return client_cfg
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Suppressed error: %s", e)
     return getattr(settings, "MONGO_DB_URL", None)
 
 def get_mongo_db(client: pymongo.MongoClient):
@@ -22,14 +22,14 @@ def get_mongo_db(client: pymongo.MongoClient):
         db = client.get_default_database()
         if db:
             return db
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Suppressed error: %s", e)
     try:
         name = settings.DATABASES['default'].get('NAME')
         if name:
             return client[name]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Suppressed error: %s", e)
     return client.get_database("vaptfix")
 
 def safe_float_from(value: Any) -> Optional[float]:
@@ -97,3 +97,5 @@ def humanize_hours(hours: float) -> str:
     return f"{rem} hrs" if rem else "0 hrs"
 
 from vaptfix.mongo_client import MongoContext, get_shared_client as get_mongo_client
+import logging
+logger = logging.getLogger(__name__)

@@ -6,7 +6,8 @@ import pymongo
 
 from .models import SupportRequestView, TicketView, VulnCardView
 from users.models import User
-
+import logging
+logger = logging.getLogger(__name__)
 SUPPORT_REQUEST_COLLECTION = "support_requests"
 TICKETS_COLLECTION = "tickets"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
@@ -27,14 +28,14 @@ def get_mongo_db():
             db = client.get_default_database()
             if db:
                 return db
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         try:
             dbname = settings.DATABASES['default'].get('NAME')
             if dbname:
                 return client[dbname]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         return client["vaptfix"]
     except Exception:
         return None

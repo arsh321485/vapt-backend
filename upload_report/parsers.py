@@ -7,7 +7,7 @@ import os
 import re
 import html
 import json
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from typing import Dict, Any, List, Optional
 import pandas as pd
 from PyPDF2 import PdfReader

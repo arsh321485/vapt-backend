@@ -30,7 +30,7 @@ import uuid
 from django.conf import settings
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from urllib.parse import urlencode
-import random
+import secrets
 from django.conf import settings
 from pymongo import MongoClient
 from django.core.cache import cache
@@ -276,7 +276,7 @@ class AdminSignupSendOTPView(APIView):
 
         # Store OTP + PASSWORD in DB so all Gunicorn workers can access it.
         # Replaces cache.set (LocMemCache is per-process — breaks with multiple workers).
-        otp = str(random.randint(100000, 999999))
+        otp = str(secrets.randbelow(900000) + 100000)
         from .models import SignupOTPSession
         SignupOTPSession.objects.update_or_create(
             email=email,
@@ -847,8 +847,6 @@ class MicrosoftTeamsCallbackView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        logger = logging.getLogger(__name__)
-
         try:
             code = request.GET.get("code")
             state = request.GET.get("state")
@@ -878,7 +876,7 @@ class MicrosoftTeamsCallbackView(APIView):
             }
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-            token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, headers=headers)
+            token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, headers=headers, timeout=15)
             token_data = token_response.json()
 
             # Extract tenant_id from id_token JWT (tid claim)
@@ -890,8 +888,8 @@ class MicrosoftTeamsCallbackView(APIView):
                     payload_part += "=" * (4 - len(payload_part) % 4)
                     jwt_payload = json.loads(base64.urlsafe_b64decode(payload_part))
                     tenant_id = jwt_payload.get("tid", "")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
             if token_response.status_code != 200:
                 logger.error(f"Token exchange failed: {token_data}")
@@ -905,7 +903,7 @@ class MicrosoftTeamsCallbackView(APIView):
             # ✅ Fetch Microsoft user info
             user_info = requests.get(
                 "https://graph.microsoft.com/v1.0/me",
-                headers={"Authorization": f"Bearer {access_token}"}
+                headers={"Authorization": f"Bearer {access_token}"}, timeout=15
             ).json()
             print("👤 Microsoft user info:", user_info)
 
@@ -1278,8 +1276,8 @@ def auto_create_vaptfix_team(access_token):
                             )
                             if check.status_code == 200:
                                 break
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning("Suppressed error: %s", e)
                         logger.info(f"VAPTFIX team not ready, retry {attempt + 1}/5")
                     _create_vaptfix_channels(tid, hdrs)
                     _set_vaptfix_team_icon(tid, token)
@@ -1333,8 +1331,6 @@ class MicrosoftTeamsCallbackView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        logger = logging.getLogger(__name__)
-
         try:
             code = request.GET.get("code")
             state = request.GET.get("state")
@@ -1367,7 +1363,7 @@ class MicrosoftTeamsCallbackView(APIView):
                 "code": code,
                 "redirect_uri": settings.MICROSOFT_REDIRECT_URI,
             }
-            token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload)
+            token_response = requests.post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
             token_data = token_response.json()
             print("🔑 Token Response:", token_data)
 
@@ -1380,8 +1376,8 @@ class MicrosoftTeamsCallbackView(APIView):
                     payload_part += "=" * (4 - len(payload_part) % 4)
                     jwt_payload = json.loads(base64.urlsafe_b64decode(payload_part))
                     tenant_id = jwt_payload.get("tid", "")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
             if token_response.status_code != 200 or "access_token" not in token_data:
                 return JsonResponse({
@@ -1394,7 +1390,7 @@ class MicrosoftTeamsCallbackView(APIView):
             # Get user info from Microsoft Graph
             user_info = requests.get(
                 "https://graph.microsoft.com/v1.0/me",
-                headers={"Authorization": f"Bearer {access_token}"}
+                headers={"Authorization": f"Bearer {access_token}"}, timeout=15
             ).json()
             print("👤 User info:", user_info)
 
@@ -1774,8 +1770,8 @@ class CreateTeamsChannelView(generics.GenericAPIView):
                     error_data = {}
                     try:
                         error_data = response.json()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
                     
                     # Enhanced error handling
                     error_code = error_data.get('error', {}).get('code', 'Unknown')
@@ -1854,8 +1850,8 @@ class SendTeamsMessageView(generics.GenericAPIView):
                     error_data = {}
                     try:
                         error_data = response.json()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
                     
                     if response.status_code == 403:
                         return Response({
@@ -1954,8 +1950,8 @@ class ListTeamsView(generics.GenericAPIView):
                     error_data = {}
                     try:
                         error_data = response.json()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
 
                     return Response({
                         "status": False,
@@ -2012,8 +2008,8 @@ class ListChannelsView(generics.GenericAPIView):
                     error_data = {}
                     try:
                         error_data = response.json()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
                     
                     return Response({
                         "error": f"Failed to fetch channels: {error_data.get('error', {}).get('message', 'Unknown error')}"
@@ -2148,8 +2144,8 @@ class CreateTeamView(generics.GenericAPIView):
                     if resp.status_code == 200:
                         _create_vaptfix_channels(tid, hdrs)
                         return
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
                 logger.info(f"Team {tid} not ready yet, retry {attempt + 1}/{retries}")
             logger.warning(f"Team {tid} provisioning timed out — channels not created.")
 
@@ -2319,8 +2315,8 @@ class CreateTeamView(generics.GenericAPIView):
                     error_data = {}
                     try:
                         error_data = response.json()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
                     
                     # Enhanced error handling
                     error_code = error_data.get('error', {}).get('code', 'Unknown')
@@ -2418,8 +2414,8 @@ class AddUserToChannelView(generics.GenericAPIView):
                 error_data = {}
                 try:
                     error_data = response.json()
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
                 return False, f"Failed to add user to team: {error_data.get('error', {}).get('message', 'Unknown error')}"
                 
         except Exception as e:
@@ -2449,8 +2445,8 @@ class AddUserToChannelView(generics.GenericAPIView):
                 error_data = {}
                 try:
                     error_data = response.json()
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
                 return False, f"Failed to add user to channel: {error_data.get('error', {}).get('message', 'Unknown error')}"
                 
         except Exception as e:
@@ -2709,8 +2705,8 @@ class DeleteChannelView(generics.GenericAPIView):
                     error_data = {}
                     try:
                         error_data = response.json()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
                     
                     error_code = error_data.get('error', {}).get('code', 'Unknown')
                     error_message = error_data.get('error', {}).get('message', 'Unknown error')
@@ -2931,8 +2927,8 @@ class UpdateTeamView(generics.GenericAPIView):
                     error_data = {}
                     try:
                         error_data = response.json()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
                     
                     error_code = error_data.get('error', {}).get('code', 'Unknown')
                     error_message = error_data.get('error', {}).get('message', 'Unknown error')
@@ -3022,8 +3018,8 @@ class DeleteTeamView(generics.GenericAPIView):
                     error_data = {}
                     try:
                         error_data = response.json()
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
                     
                     error_code = error_data.get('error', {}).get('code', 'Unknown')
                     error_message = error_data.get('error', {}).get('message', 'Unknown error')
@@ -3078,7 +3074,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
     resp = requests.get(
         "https://slack.com/api/conversations.list",
         headers=headers,
-        params={"types": "public_channel", "limit": 1000},
+        params={"types": "public_channel", "limit": 1000}, timeout=15
     )
     existing = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
 
@@ -3091,7 +3087,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
             create_resp = requests.post(
                 "https://slack.com/api/conversations.create",
                 headers=headers,
-                json={"name": name, "is_private": False},
+                json={"name": name, "is_private": False}, timeout=15
             )
             ch_data = create_resp.json()
             if ch_data.get("ok"):
@@ -3101,7 +3097,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
                 retry_resp = requests.get(
                     "https://slack.com/api/conversations.list",
                     headers=headers,
-                    params={"types": "public_channel,private_channel", "limit": 1000},
+                    params={"types": "public_channel,private_channel", "limit": 1000}, timeout=15
                 )
                 retry_existing = {ch["name"].lower(): ch["id"] for ch in retry_resp.json().get("channels", [])}
                 channel_ids[name] = retry_existing.get(name)
@@ -3117,7 +3113,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
         requests.post(
             "https://slack.com/api/conversations.join",
             headers=headers,
-            json={"channel": channel_id},
+            json={"channel": channel_id}, timeout=15
         )
 
         # Invite the logged-in Slack user
@@ -3125,7 +3121,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
             invite_resp = requests.post(
                 "https://slack.com/api/conversations.invite",
                 headers=headers,
-                json={"channel": channel_id, "users": slack_user_id},
+                json={"channel": channel_id, "users": slack_user_id}, timeout=15
             )
             invite_data = invite_resp.json()
             if not invite_data.get("ok") and invite_data.get("error") not in ("already_in_channel", "cant_invite_self"):
@@ -3157,7 +3153,7 @@ class SlackOAuthUrlView(APIView):
             base_url = request.data.get("base_url", "")
             if not base_url:
                 try:
-                    ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
+                    ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels", timeout=15).json()
                     https_tunnel = next(
                         (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
                         None
@@ -3205,7 +3201,7 @@ class SlackOAuthCallbackView(APIView):
             redirect_uri = getattr(settings, "SLACK_REDIRECT_URI", "")
             if not redirect_uri:
                 try:
-                    ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels").json()
+                    ngrok_resp = requests.get("http://127.0.0.1:4040/api/tunnels", timeout=15).json()
                     https_tunnel = next(
                         (t for t in ngrok_resp.get("tunnels", []) if t["public_url"].startswith("https://")),
                         None
@@ -3268,7 +3264,7 @@ class SlackOAuthCallbackView(APIView):
             user_info = requests.get(
                 "https://slack.com/api/users.info",
                 params={"user": user_id},
-                headers={"Authorization": f"Bearer {bot_token}"},
+                headers={"Authorization": f"Bearer {bot_token}"}, timeout=15
             ).json()
 
             if not user_info.get("ok"):
@@ -3417,7 +3413,7 @@ class SlackLoginView(APIView):
             # 1. Get Slack user identity (PRIMARY email source)
             user_identity = requests.get(
                 "https://slack.com/api/users.identity",
-                headers={"Authorization": f"Bearer {user_token}"}
+                headers={"Authorization": f"Bearer {user_token}"}, timeout=15
             ).json()
 
             slack_user_id = None
@@ -3437,13 +3433,13 @@ class SlackLoginView(APIView):
                 # Fallback: bot token users.info
                 bot_response = requests.get(
                     "https://slack.com/api/auth.test",
-                    headers={"Authorization": f"Bearer {bot_token}"}
+                    headers={"Authorization": f"Bearer {bot_token}"}, timeout=15
                 ).json()
 
                 user_info = requests.get(
                     "https://slack.com/api/users.info",
                     headers={"Authorization": f"Bearer {bot_token}"},
-                    params={"user": bot_response.get("user_id")}
+                    params={"user": bot_response.get("user_id")}, timeout=15
                 ).json()
 
                 slack_user = user_info.get("user", {}) if user_info.get("ok") else {}
@@ -3584,7 +3580,7 @@ class SlackOAuthView(APIView):
             # ✅ 1. Verify token and get identity info
             auth_test_url = "https://slack.com/api/auth.test"
             headers = {"Authorization": f"Bearer {access_token}"}
-            auth_response = requests.get(auth_test_url, headers=headers)
+            auth_response = requests.get(auth_test_url, headers=headers, timeout=15)
             auth_json = auth_response.json()
 
             if not auth_json.get("ok"):
@@ -3601,7 +3597,7 @@ class SlackOAuthView(APIView):
                 bot_info_response = requests.get(
                     bot_info_url,
                     headers=headers,
-                    params={"bot": auth_json.get("bot_id")}
+                    params={"bot": auth_json.get("bot_id")}, timeout=15
                 )
                 bot_info = bot_info_response.json().get("bot", {})
 
@@ -3652,7 +3648,7 @@ class SlackValidateTokenView(APIView):
             headers = {'Authorization': f'Bearer {access_token}'}
             
             # Get auth test (validates token)
-            auth_test_response = requests.get('https://slack.com/api/auth.test', headers=headers)
+            auth_test_response = requests.get('https://slack.com/api/auth.test', headers=headers, timeout=15)
             auth_test_data = auth_test_response.json()
             
             if not auth_test_data.get('ok'):
@@ -3666,7 +3662,7 @@ class SlackValidateTokenView(APIView):
             user_response = requests.get(
                 'https://slack.com/api/users.info', 
                 headers=headers, 
-                params={'user': user_id}
+                params={'user': user_id}, timeout=15
             )
             user_data = user_response.json()
             
@@ -3678,7 +3674,7 @@ class SlackValidateTokenView(APIView):
                 if not email:
                     identity_resp = requests.get(
                         'https://slack.com/api/users.identity',
-                        headers=headers
+                        headers=headers, timeout=15
                     ).json()
                     if identity_resp.get('ok'):
                         email = identity_resp.get('user', {}).get('email')
@@ -3957,7 +3953,7 @@ class CreateSlackChannelView(APIView):
                 'is_private': is_private
             }
             
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, json=payload, timeout=15)
             result = response.json()
             
             if result.get('ok'):
@@ -4012,7 +4008,7 @@ class UpdateSlackChannelView(APIView):
         }
         payload = {'channel': channel_id, 'name': new_name}
 
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
         result = response.json()
 
         if result.get('ok'):
@@ -4054,7 +4050,7 @@ class DeleteSlackChannelView(APIView):
                 'channel': channel_id
             }
 
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, json=payload, timeout=15)
             result = response.json()
 
             if result.get('ok'):
@@ -4107,7 +4103,7 @@ class ListSlackChannelsView(APIView):
                 'types': types
             }
 
-            response = requests.get(url, headers=headers, params=params)
+            response = requests.get(url, headers=headers, params=params, timeout=15)
             result = response.json()
 
             if not result.get('ok'):
@@ -4316,7 +4312,7 @@ class SlackUserListView(APIView):
             "Content-Type": "application/json"
         }
 
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=15)
         data = response.json()
 
         if not data.get("ok"):
@@ -4367,7 +4363,7 @@ class SlackInviteUserView(APIView):
         }
         payload = {"channel": channel, "users": ",".join(slack_user_ids)}
 
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
         data = response.json()
 
         if not data.get("ok"):
@@ -4739,7 +4735,7 @@ class JiraOAuthView(APIView):
             token_response = requests.post(
                 settings.JIRA_TOKEN_URL,
                 json=token_data,
-                headers={'Content-Type': 'application/json'}
+                headers={'Content-Type': 'application/json'}, timeout=15
             )
 
             if token_response.status_code != 200:
@@ -4753,7 +4749,7 @@ class JiraOAuthView(APIView):
             # Fetch user info
             user_response = requests.get(
                 'https://api.atlassian.com/me',
-                headers={'Authorization': f"Bearer {tokens['access_token']}"}
+                headers={'Authorization': f"Bearer {tokens['access_token']}"}, timeout=15
             )
 
             if user_response.status_code != 200:
@@ -4824,7 +4820,7 @@ class JiraValidateTokenView(APIView):
 
             response = requests.get(
                 'https://api.atlassian.com/me',
-                headers={'Authorization': f'Bearer {access_token}'}
+                headers={'Authorization': f'Bearer {access_token}'}, timeout=15
             )
 
             if response.status_code == 200:
@@ -4853,7 +4849,7 @@ class JiraGetUserView(APIView):
 
             response = requests.get(
                 'https://api.atlassian.com/me',
-                headers={'Authorization': f'Bearer {access_token}'}
+                headers={'Authorization': f'Bearer {access_token}'}, timeout=15
             )
 
             if response.status_code != 200:
@@ -4887,7 +4883,7 @@ class JiraListProjectsView(APIView):
                 headers={
                     'Authorization': f'Bearer {access_token}',
                     'Accept': 'application/json'
-                }
+                }, timeout=15
             )
 
             if response.status_code != 200:
@@ -4931,7 +4927,7 @@ class JiraCreateProjectView(APIView):
                     "Authorization": f"Bearer {access_token}",
                     "Accept": "application/json",
                     "Content-Type": "application/json"
-                }
+                }, timeout=15
             )
 
             jira_data = response.json()
@@ -4989,7 +4985,7 @@ class JiraCreateIssueView(APIView):
                     'Authorization': f'Bearer {access_token}',
                     'Accept': 'application/json',
                     'Content-Type': 'application/json'
-                }
+                }, timeout=15
             )
 
             if response.status_code not in [200, 201]:
@@ -5017,7 +5013,7 @@ class JiraGetIssueView(APIView):
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json"
-            }
+            }, timeout=15
         )
 
         return Response(response.json(), status=response.status_code)
@@ -5039,7 +5035,7 @@ class JiraUpdateIssueView(APIView):
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json",
                 "Content-Type": "application/json"
-            }
+            }, timeout=15
         )
 
         return Response(
@@ -5057,7 +5053,7 @@ class JiraDeleteIssueView(APIView):
         url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}"
         response = requests.delete(
             url,
-            headers={"Authorization": f"Bearer {access_token}"}
+            headers={"Authorization": f"Bearer {access_token}"}, timeout=15
         )
 
         return Response(
@@ -5087,7 +5083,7 @@ class JiraSearchIssuesView(APIView):
                 params={
                     'jql': jql,
                     'fields': 'summary,status,assignee,priority,issuetype,created,updated,description,reporter,project'
-                }
+                }, timeout=15
             )
 
             if response.status_code != 200:
@@ -5117,7 +5113,7 @@ class JiraAssignIssueView(APIView):
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json",
                 "Content-Type": "application/json"
-            }
+            }, timeout=15
         )
 
         return Response(
@@ -5140,7 +5136,7 @@ class JiraGetResourcesView(APIView):
 
             response = requests.get(
                 'https://api.atlassian.com/oauth/token/accessible-resources',
-                headers={'Authorization': f'Bearer {access_token}'}
+                headers={'Authorization': f'Bearer {access_token}'}, timeout=15
             )
 
             if response.status_code != 200:
@@ -5197,7 +5193,7 @@ class JiraAddCommentView(APIView):
                     'Authorization': f'Bearer {access_token}',
                     'Accept': 'application/json',
                     'Content-Type': 'application/json'
-                }
+                }, timeout=15
             )
 
             if response.status_code not in [200, 201]:
@@ -5234,7 +5230,7 @@ class JiraTokenRefreshView(APIView):
             response = requests.post(
                 settings.JIRA_TOKEN_URL,
                 json=token_data,
-                headers={'Content-Type': 'application/json'}
+                headers={'Content-Type': 'application/json'}, timeout=15
             )
 
             if response.status_code != 200:
@@ -5284,7 +5280,7 @@ class JiraGetProjectView(APIView):
             response = requests.get(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
-            })
+            }, timeout=15)
 
             return Response(response.json(), status=response.status_code)
 
@@ -5311,7 +5307,7 @@ class JiraUpdateProjectView(APIView):
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json',
                 'Content-Type': 'application/json'
-            })
+            }, timeout=15)
 
             jira_data = response.json()
             if response.status_code in [200, 201]:
@@ -5341,7 +5337,7 @@ class JiraDeleteProjectView(APIView):
             response = requests.delete(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
-            })
+            }, timeout=15)
 
             if response.status_code == 204:
                 return Response({'message': 'Project deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
@@ -5370,7 +5366,7 @@ class JiraListCommentsView(APIView):
             response = requests.get(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
-            })
+            }, timeout=15)
 
             return Response(response.json(), status=response.status_code)
 
@@ -5408,7 +5404,7 @@ class JiraUpdateCommentView(APIView):
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json',
                 'Content-Type': 'application/json'
-            })
+            }, timeout=15)
 
             return Response(response.json(), status=response.status_code)
 
@@ -5434,7 +5430,7 @@ class JiraDeleteCommentView(APIView):
             response = requests.delete(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
-            })
+            }, timeout=15)
 
             if response.status_code == 204:
                 return Response({'message': 'Comment deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
@@ -5463,7 +5459,7 @@ class JiraListTransitionsView(APIView):
             response = requests.get(url, headers={
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
-            })
+            }, timeout=15)
 
             return Response(response.json(), status=response.status_code)
 
@@ -5494,7 +5490,7 @@ class JiraTransitionIssueView(APIView):
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json',
                 'Content-Type': 'application/json'
-            })
+            }, timeout=15)
 
             if response.status_code == 204:
                 return Response({'message': 'Issue status changed successfully'}, status=status.HTTP_200_OK)

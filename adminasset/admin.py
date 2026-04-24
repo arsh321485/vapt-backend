@@ -5,7 +5,8 @@ from django.urls import path
 import pymongo
 
 from .models import AdminAssetsView
-
+import logging
+logger = logging.getLogger(__name__)
 NESSUS_COLLECTION = "nessus_reports"
 HOLD_COLLECTION = "hold_assets"
 
@@ -26,14 +27,14 @@ def get_mongo_db():
             db = client.get_default_database()
             if db:
                 return db
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         try:
             dbname = settings.DATABASES['default'].get('NAME')
             if dbname:
                 return client[dbname]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         return client["vaptfix"]
     except Exception:
         return None

@@ -12,8 +12,8 @@ from typing import Optional
 
 import pymongo
 from django.conf import settings
-
-
+import logging
+logger = logging.getLogger(__name__)
 _client: Optional[pymongo.MongoClient] = None
 _lock = threading.Lock()
 
@@ -23,8 +23,8 @@ def _get_mongo_uri() -> Optional[str]:
         host = settings.DATABASES["default"]["CLIENT"]["host"]
         if host:
             return host
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Suppressed error: %s", e)
     return getattr(settings, "MONGO_DB_URL", None)
 
 
@@ -35,8 +35,8 @@ def _get_db_name(uri: str) -> str:
             name = re.split(r"[/?]", path)[0]
             if name:
                 return name
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Suppressed error: %s", e)
     return settings.DATABASES.get("default", {}).get("NAME") or "vaptfix"
 
 
