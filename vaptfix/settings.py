@@ -258,6 +258,7 @@ http://localhost:5502,
 http://127.0.0.1:5502,
 https://vapt-frontend-liart.vercel.app,
 https://vapt-fron1.vercel.app,
+https://www.vaptfix.ai,
 https://login.microsoftonline.com,
 https://graph.microsoft.com,
 https://slack.com,
@@ -269,6 +270,12 @@ https://vaptfix.ai
 """.split(",")]
 
 CORS_ALLOW_CREDENTIALS = True
+
+# Allow primary production domain and optional www subdomain.
+# Keeps strict allowlist while avoiding origin mismatch issues in browsers.
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://(www\.)?vaptfix\.ai$",
+]
 
 CORS_ALLOW_METHODS = [
     'DELETE',
@@ -289,6 +296,13 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+]
+
+# Needed when using cookies/session/csrf-secured endpoints from these origins.
+CSRF_TRUSTED_ORIGINS = [
+    "https://vaptfix.ai",
+    "https://www.vaptfix.ai",
+    "https://vaptbackend.secureitlab.com",
 ]
 
 # CORS_ALLOW_ALL_ORIGINS = True  
