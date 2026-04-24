@@ -19,24 +19,24 @@ import requests
 REQUEST_TIMEOUT_SECONDS = 15
 
 def _http_get(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.get(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.get(url, timeout=timeout, **kwargs)
 
 def _http_post(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.post(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.post(url, timeout=timeout, **kwargs)
 
 def _http_put(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.put(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.put(url, timeout=timeout, **kwargs)
 
 def _http_delete(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.delete(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.delete(url, timeout=timeout, **kwargs)
 
 def _http_patch(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.patch(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.patch(url, timeout=timeout, **kwargs)
 import os
 import secrets
 import traceback

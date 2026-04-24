@@ -16,9 +16,11 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault("is_active", True)
 
         user = self.model(email=email, **extra_fields)
-        if password is not None:
+        if password is None:
+            user.set_unusable_password()
+        else:
             validate_password(password, user)
-        user.set_password(password)
+            user.set_password(password)
         user.save(using=self._db)
         return user
 

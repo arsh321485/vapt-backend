@@ -24,24 +24,24 @@ import requests
 REQUEST_TIMEOUT_SECONDS = 15
 
 def _http_get(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.get(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.get(url, timeout=timeout, **kwargs)
 
 def _http_post(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.post(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.post(url, timeout=timeout, **kwargs)
 
 def _http_put(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.put(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.put(url, timeout=timeout, **kwargs)
 
 def _http_delete(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.delete(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.delete(url, timeout=timeout, **kwargs)
 
 def _http_patch(url, **kwargs):
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.patch(url, **kwargs)
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+    return requests.patch(url, timeout=timeout, **kwargs)
 import secrets
 from django.conf import settings
 from .utils import verify_recaptcha
@@ -518,7 +518,7 @@ class GoogleOAuthSerializer(serializers.Serializer):
         id_token: Optional[str] = None
     ):
         if access_token:
-            url = "https://www.googleapis.com/oauth2/v2/userinfo"
+            url = settings.GOOGLE_USERINFO_URL
             response = _http_get(
                 url,
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -529,7 +529,7 @@ class GoogleOAuthSerializer(serializers.Serializer):
             data = response.json()
 
         else:
-            url = f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
+            url = f"{settings.GOOGLE_TOKENINFO_URL}?id_token={id_token}"
             response = _http_get(url, timeout=10)
             if response.status_code != 200:
                 raise serializers.ValidationError("Invalid Google ID token")

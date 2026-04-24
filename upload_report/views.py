@@ -31,8 +31,12 @@ from django.contrib.auth.decorators import login_required
 # Serve uploaded report files (uses Django session auth for admin access)
 @login_required(login_url='/admin/login/')
 def serve_report_file(request, path):
+    normalized_input = (path or "").replace("\\", "/")
+    if normalized_input.startswith("/") or ".." in normalized_input.split("/"):
+        raise Http404("File not found")
+
     base = os.path.realpath(settings.MEDIA_ROOT)
-    file_path = os.path.realpath(os.path.join(settings.MEDIA_ROOT, path))
+    file_path = os.path.realpath(os.path.join(settings.MEDIA_ROOT, normalized_input))
 
     if not file_path.startswith(base + os.sep) and file_path != base:
         raise Http404("File not found")
@@ -41,7 +45,7 @@ def serve_report_file(request, path):
         raise Http404("File not found")
 
     # Determine content type based on file extension
-    ext = os.path.splitext(path)[1].lower()
+    ext = os.path.splitext(normalized_input)[1].lower()
     content_types = {
         '.html': 'text/html',
         '.htm': 'text/html',
