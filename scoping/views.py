@@ -86,6 +86,38 @@ class UploadStatusView(APIView):
                 return f"{mins} min {rem} sec"
             return f"{rem} sec"
 
+        def _safe_seconds(value, *, max_allowed=7200):
+            """
+            Normalize persisted timing values and ignore corrupted outliers.
+            """
+            try:
+                sec = int(float(value or 0))
+            except (TypeError, ValueError):
+                return 0
+            if sec < 0 or sec > max_allowed:
+                return 0
+            return sec
+
+        def _estimate_upload_seconds_from_parsed(parsed_count):
+            # Fallback estimate so frontend can show upload timing immediately.
+            count = max(0, int(parsed_count or 0))
+            return int(max(8, min(20 + (count * 0.2), 3600)))
+
+        def _to_naive_utc(dt_obj):
+            if not dt_obj:
+                return None
+            if getattr(dt_obj, "tzinfo", None):
+                return dt_obj.replace(tzinfo=None)
+            return dt_obj
+
+        file_uploaded = False
+        processing_started_at = None
+        elapsed_seconds = 0
+        upload_total_seconds = 0
+        agent_estimated_seconds = 0
+        estimated_total_seconds = 0
+        remaining_seconds = 0
+
         try:
             from upload_report.models import UploadReport
 
@@ -133,7 +165,8 @@ class UploadStatusView(APIView):
                 total_vulns = 0
                 generated_cards = 0
                 total_upload_processing_seconds = 0
-                cards_started_at = None
+                fallback_upload_estimated_seconds = 0
+                cards_started_at_list = []
 
                 for report in reports:
                     report_id = str(report._id)
@@ -145,15 +178,26 @@ class UploadStatusView(APIView):
                          "upload_processing_seconds": 1, "cards_generation_started_at": 1}
                     )
 
+                    report_parsed_count = int(getattr(report, "parsed_count", 0) or 0)
+
                     if not nessus_doc:
                         # Document not yet created — agent still initializing
+                        fallback_upload_estimated_seconds += _estimate_upload_seconds_from_parsed(report_parsed_count)
+                        total_vulns += report_parsed_count
                         all_cards_ready = False
-                        break
+                        continue
 
                     # Accumulate timing data
-                    total_upload_processing_seconds += int(nessus_doc.get("upload_processing_seconds") or 0)
-                    if cards_started_at is None:
-                        cards_started_at = nessus_doc.get("cards_generation_started_at")
+                    persisted_upload_seconds = _safe_seconds(nessus_doc.get("upload_processing_seconds"))
+                    if persisted_upload_seconds > 0:
+                        total_upload_processing_seconds += persisted_upload_seconds
+                    else:
+                        fallback_upload_estimated_seconds += _estimate_upload_seconds_from_parsed(
+                            nessus_doc.get("total_vulnerabilities", report_parsed_count)
+                        )
+                    started_at = _to_naive_utc(nessus_doc.get("cards_generation_started_at"))
+                    if started_at:
+                        cards_started_at_list.append(started_at)
 
                     report_total_vulns = int(nessus_doc.get("total_vulnerabilities", 0) or 0)
                     total_vulns += report_total_vulns
@@ -182,18 +226,21 @@ class UploadStatusView(APIView):
 
                     # No flag, no cards — still generating
                     all_cards_ready = False
-                    break
+                    continue
 
                 agent_eta_seconds = max(45, 45 + (total_vulns * 2))
-                estimated_total_seconds = total_upload_processing_seconds + agent_eta_seconds
+                upload_total_seconds = total_upload_processing_seconds + fallback_upload_estimated_seconds
+                agent_estimated_seconds = agent_eta_seconds
+                estimated_total_seconds = upload_total_seconds + agent_estimated_seconds
 
                 # Elapsed: use cards_generation_started_at (naive UTC from MongoDB) to avoid
                 # timezone-aware vs naive mismatch that caused negative elapsed → 630 min bug
+                cards_started_at = min(cards_started_at_list) if cards_started_at_list else None
                 if cards_started_at:
                     elapsed_seconds = max(0, int((_dt.datetime.utcnow() - cards_started_at).total_seconds()))
                 elif processing_started_at:
                     # Fallback: strip tzinfo to compare both as naive UTC
-                    _started = processing_started_at.replace(tzinfo=None) if processing_started_at.tzinfo else processing_started_at
+                    _started = _to_naive_utc(processing_started_at)
                     elapsed_seconds = max(0, int((_dt.datetime.utcnow() - _started).total_seconds()))
                 else:
                     elapsed_seconds = 0
@@ -209,6 +256,10 @@ class UploadStatusView(APIView):
                         "cards_total": total_vulns,
                         "cards_generated": generated_cards,
                         "processing_started_at": processing_started_at,
+                        "upload_total_seconds": upload_total_seconds,
+                        "upload_total_text": _fmt_seconds(upload_total_seconds),
+                        "agent_estimated_seconds": agent_estimated_seconds,
+                        "agent_estimated_text": _fmt_seconds(agent_estimated_seconds),
                         "elapsed_seconds": elapsed_seconds,
                         "elapsed_time_text": _fmt_seconds(elapsed_seconds),
                         "estimated_total_seconds": estimated_total_seconds,
@@ -228,8 +279,16 @@ class UploadStatusView(APIView):
         return Response({
             "file_uploaded": file_uploaded,
             "processing_started_at": processing_started_at if file_uploaded else None,
+            "upload_total_seconds": upload_total_seconds if file_uploaded else 0,
+            "upload_total_text": _fmt_seconds(upload_total_seconds) if file_uploaded else "0 sec",
+            "agent_estimated_seconds": agent_estimated_seconds if file_uploaded else 0,
+            "agent_estimated_text": _fmt_seconds(agent_estimated_seconds) if file_uploaded else "0 sec",
             "elapsed_seconds": elapsed_seconds if file_uploaded else 0,
             "elapsed_time_text": _fmt_seconds(elapsed_seconds) if file_uploaded else "0 sec",
+            "estimated_total_seconds": estimated_total_seconds if file_uploaded else 0,
+            "estimated_total_text": _fmt_seconds(estimated_total_seconds) if file_uploaded else "0 sec",
+            "remaining_seconds": remaining_seconds if file_uploaded else 0,
+            "remaining_time_text": _fmt_seconds(remaining_seconds) if file_uploaded else "0 sec",
         }, status=status.HTTP_200_OK)
 
 

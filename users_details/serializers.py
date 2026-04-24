@@ -6,6 +6,49 @@ from .models import UserDetail
 
 User = get_user_model()
 
+
+def _extract_domain(email: str) -> str:
+    value = (email or "").strip().lower()
+    if "@" not in value:
+        return ""
+    return value.rsplit("@", 1)[1]
+
+
+def _enforce_user_type_email_domain(user_type: str, email: str, admin_email: str):
+    """
+    Business rule:
+    - internal users must use same domain as admin
+    - external users must use a different domain than admin
+    """
+    normalized_type = (user_type or "").strip().lower()
+    member_email = (email or "").strip().lower()
+    admin_domain = _extract_domain(admin_email)
+    member_domain = _extract_domain(member_email)
+
+    if not normalized_type or not member_email:
+        return
+
+    if not admin_domain or not member_domain:
+        raise serializers.ValidationError({
+            "email": "Invalid email format for admin or member."
+        })
+
+    if normalized_type == "internal" and member_domain != admin_domain:
+        raise serializers.ValidationError({
+            "email": (
+                f"Internal users must use the same domain as admin "
+                f"(@{admin_domain})."
+            )
+        })
+
+    if normalized_type == "external" and member_domain == admin_domain:
+        raise serializers.ValidationError({
+            "email": (
+                f"External users cannot use admin domain (@{admin_domain}). "
+                f"Please use a different domain."
+            )
+        })
+
 class UserDetailSerializer(serializers.ModelSerializer):
     admin_id = serializers.CharField(source="admin.id", read_only=True)
     # location_id = serializers.CharField(source="location._id", read_only=True)
@@ -87,6 +130,15 @@ class UserDetailCreateSerializer(serializers.ModelSerializer):
         except User.DoesNotExist:
             raise serializers.ValidationError("Admin with this ID does not exist")
 
+    def validate(self, attrs):
+        admin_user = attrs.get("admin_id")
+        _enforce_user_type_email_domain(
+            user_type=attrs.get("user_type"),
+            email=attrs.get("email"),
+            admin_email=getattr(admin_user, "email", ""),
+        )
+        return attrs
+
     def create(self, validated_data):
         admin = validated_data.pop("admin_id")
         return UserDetail.objects.create(
@@ -162,6 +214,24 @@ class UserDetailUpdateSerializer(serializers.ModelSerializer):
             except User.DoesNotExist:
                 raise serializers.ValidationError("Admin with this ID does not exist")
         return None
+
+    def validate(self, attrs):
+        current_instance = getattr(self, "instance", None)
+        effective_user_type = attrs.get("user_type")
+        effective_email = attrs.get("email")
+        effective_admin = attrs.get("admin_id")
+
+        if current_instance is not None:
+            effective_user_type = effective_user_type or current_instance.user_type
+            effective_email = effective_email or current_instance.email
+            effective_admin = effective_admin or current_instance.admin
+
+        _enforce_user_type_email_domain(
+            user_type=effective_user_type,
+            email=effective_email,
+            admin_email=getattr(effective_admin, "email", ""),
+        )
+        return attrs
 
     def update(self, instance, validated_data):
         if "admin_id" in validated_data:
