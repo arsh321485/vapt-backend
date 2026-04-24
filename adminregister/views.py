@@ -54,8 +54,8 @@ def _resolve_requester(doc):
             u = User.objects.filter(pk=str(user_id)).only("email").first()
             if u:
                 return u.email
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
 
     if admin_id:
         try:
@@ -63,8 +63,8 @@ def _resolve_requester(doc):
             u = User.objects.filter(pk=str(admin_id)).only("email").first()
             if u:
                 return u.email
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
 
     return doc.get("requested_by", "")
 
@@ -1363,8 +1363,8 @@ class FixVulnerabilityStepsAPIView(APIView):
         for row in mitigation_table:
             try:
                 step_num = int(row.get("step_no", 0))
-            except (ValueError, TypeError):
-                continue
+            except (ValueError, TypeError) as e:
+                logger.warning("Suppressed error: %s", e)
             if step_num <= 0:
                 continue
 
@@ -1550,8 +1550,8 @@ class FixVulnerabilityStepsAPIView(APIView):
                         _days = 0
                     if _days > 0:
                         deadline = (_base_dt + timedelta(days=_days)).strftime("%Y-%m-%d")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Suppressed error: %s", e)
 
             # Step 2: Stored deadline fallback (proper ISO date or duration string)
             if not deadline:
@@ -2035,8 +2035,8 @@ class FixStepFeedbackAPIView(APIView):
                 for row in mitigation_table:
                     try:
                         step_nums.add(int(row.get("step_no", 0)))
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e:
+                        logger.warning("Suppressed error: %s", e)
                 step_nums.discard(0)
                 total_steps = max(step_nums) if step_nums else 6
             else:
@@ -2685,8 +2685,8 @@ class SupportRequestByReportAPIView(APIView):
                     continue
                 try:
                     object_ids.append(ObjectId(raw_vid))
-                except Exception:
-                    continue
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
             fix_severity_by_id = {}
             str_ids = [str(oid) for oid in object_ids]
@@ -2961,8 +2961,8 @@ class TicketOpenListAPIView(APIView):
             for fid in fix_vuln_ids_in_tickets:
                 try:
                     active_obj_ids.append(ObjectId(fid))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
             # Method 1: absent from fix_vulnerabilities = closed/deleted
             active_ids = set()
@@ -3297,8 +3297,8 @@ class VulnerabilityTimelineAPIView(APIView):
                         days = 0
                     if days > 0:
                         deadline = base_dt + timedelta(days=days)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Suppressed error: %s", e)
 
             # Step 2: Stored deadline fallback (only proper ISO date, not duration strings)
             if not deadline:

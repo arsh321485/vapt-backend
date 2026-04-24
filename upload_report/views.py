@@ -9,7 +9,6 @@ from typing import Optional, Dict, Any, List
 import hashlib
 
 logger = logging.getLogger(__name__)
-
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -32,7 +31,11 @@ from django.contrib.auth.decorators import login_required
 # Serve uploaded report files (uses Django session auth for admin access)
 @login_required(login_url='/admin/login/')
 def serve_report_file(request, path):
-    file_path = os.path.join(settings.MEDIA_ROOT, path)
+    base = os.path.realpath(settings.MEDIA_ROOT)
+    file_path = os.path.realpath(os.path.join(settings.MEDIA_ROOT, path))
+
+    if not file_path.startswith(base + os.sep) and file_path != base:
+        raise Http404("File not found")
 
     if not os.path.exists(file_path):
         raise Http404("File not found")
@@ -119,15 +122,15 @@ class UploadReportView(APIView):
             db = client.get_default_database()
             if db:
                 return db
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         
         try:
             dbname = settings.DATABASES['default'].get('NAME')
             if dbname:
                 return client[dbname]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         
         return client["vaptfix"]
 
@@ -185,8 +188,8 @@ class UploadReportView(APIView):
                     admin_user = User.objects.filter(email=admin_email).first()
                     if admin_user:
                         admin_id = str(admin_user.id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
             document = {
                 "report_id": report_id,
@@ -612,7 +615,8 @@ class UploadReportView(APIView):
 
                     # 🔹 Save file + hash in single pass (faster than two reads)
                     target_admin_id = str(target_admin.id)
-                    relative_filename = f"reports/{target_admin_id}/{uploaded_file.name}"
+                    safe_filename = os.path.basename(uploaded_file.name)
+                    relative_filename = f"reports/{target_admin_id}/{safe_filename}"
                     file_path = os.path.join(settings.MEDIA_ROOT, relative_filename)
                     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
@@ -1064,13 +1068,13 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         # Drop old (report_id, vulnerability_name) unique index if it exists
         try:
             db[VULN_CARD_COLLECTION].drop_index("report_id_1_vulnerability_name_1")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         # Drop old compound index variants to avoid conflicts
         try:
             db[VULN_CARD_COLLECTION].drop_index("report_id_1_vulnerability_name_1_host_name_1")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         db[VULN_CARD_COLLECTION].create_index(
             [("report_id", 1), ("vulnerability_name", 1), ("host_name", 1)],
             unique=True,
@@ -1225,8 +1229,8 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         try:
             _, _db = _get_mongo_client_and_db()
             _db["card_gen_locks"].delete_one({"report_id": report_id})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         with _running_card_jobs_lock:
             _running_card_jobs.discard(report_id)
 

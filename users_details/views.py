@@ -114,7 +114,7 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
         "https://slack.com/api/conversations.list",
         headers=headers,
         # Slack channels can be private; include both types so role->channel mapping works.
-        params={"types": "public_channel,private_channel", "limit": 1000},
+        params={"types": "public_channel,private_channel", "limit": 1000}, timeout=15
     )
     payload = resp.json() if resp is not None else {}
     channel_map = {ch["name"].lower(): ch["id"] for ch in payload.get("channels", [])}
@@ -131,7 +131,7 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
             create_resp = requests.post(
                 "https://slack.com/api/conversations.create",
                 headers=headers,
-                json={"name": slack_name, "is_private": False},
+                json={"name": slack_name, "is_private": False}, timeout=15
             )
             create_data = create_resp.json()
             if create_data.get("ok"):
@@ -147,7 +147,7 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
                     retry_resp = requests.get(
                         "https://slack.com/api/conversations.list",
                         headers=headers,
-                        params={"types": "public_channel,private_channel", "limit": 1000, "exclude_archived": False},
+                        params={"types": "public_channel,private_channel", "limit": 1000, "exclude_archived": False}, timeout=15
                     )
                     retry_map = {ch["name"].lower(): ch["id"] for ch in retry_resp.json().get("channels", [])}
                     channel_id = retry_map.get(slack_name)
@@ -164,13 +164,13 @@ def sync_member_to_slack_channels(bot_token, slack_user_id, member_roles):
         requests.post(
             "https://slack.com/api/conversations.join",
             headers=headers,
-            json={"channel": channel_id},
+            json={"channel": channel_id}, timeout=15
         )
         logger.info(f"[SlackSync] Inviting slack_user_id={slack_user_id} to channel_id={channel_id} role={role}")
         invite_resp = requests.post(
             "https://slack.com/api/conversations.invite",
             headers=headers,
-            json={"channel": channel_id, "users": slack_user_id},
+            json={"channel": channel_id, "users": slack_user_id}, timeout=15
         )
         invite_data = invite_resp.json()
         if invite_data.get("ok") or invite_data.get("error") == "already_in_channel":
@@ -199,7 +199,7 @@ def lookup_slack_user_by_email(bot_token, email):
     resp = requests.get(
         "https://slack.com/api/users.lookupByEmail",
         headers=headers,
-        params={"email": email},
+        params={"email": email}, timeout=15
     )
     data = resp.json()
     if data.get("ok"):
@@ -730,8 +730,8 @@ class UserDetailCreateView(generics.CreateAPIView):
             if detail:
                 first_name = detail.first_name or first_name
                 last_name = detail.last_name or last_name
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
 
         channels_list = channel_names if isinstance(channel_names, list) else ([channel_names] if channel_names else [])
         channels_html = ""

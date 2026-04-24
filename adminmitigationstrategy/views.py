@@ -93,8 +93,8 @@ class MitigationStrategyByTeamAPIView(APIView):
                     ).first()
                     if upload_obj:
                         report_status = upload_obj.status or "unknown"
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
 
                 # Build closed vulnerability keys set
                 closed_vulns = set()

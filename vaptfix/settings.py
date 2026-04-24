@@ -7,13 +7,15 @@ load_dotenv(override=True)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-MONGO_DB_URL = os.getenv("MONGO_DB_URL")
+MONGO_DB_URL = os.getenv("MONGO_DB_URL") or os.getenv("MONGO_URI")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY environment variable must be set")
 DEBUG = os.getenv("DEBUG", "False") == "True"
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -112,7 +114,7 @@ DATABASES = {
         'ENGINE': 'djongo',
         'NAME': 'vaptfix',
         'CLIENT': {
-            'host': 'mongodb+srv://arshmittal740:ARSHMITTAL12@cluster0.9cj3n.mongodb.net/',
+            'host': os.getenv("MONGO_DB_URL"),
             'maxPoolSize': 200,
             'minPoolSize': 10,
             'maxIdleTimeMS': 60000,

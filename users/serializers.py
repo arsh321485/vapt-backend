@@ -445,11 +445,16 @@ class UserPasswordResetSerializer(serializers.Serializer):
         try:
             user_id = smart_str(urlsafe_base64_decode(uid))
             user = User.objects.get(id=user_id)
-        except:
+        except (User.DoesNotExist, Exception):
             raise serializers.ValidationError("Invalid reset link")
 
         if not PasswordResetTokenGenerator().check_token(user, token):
             raise serializers.ValidationError("Token expired or invalid")
+
+        try:
+            validate_password(password, user)
+        except ValidationError as e:
+            raise serializers.ValidationError({"password": e.messages})
 
         user.set_password(password)
         user.save()
@@ -876,7 +881,7 @@ class SlackOAuthCodeSerializer(serializers.Serializer):
                 "redirect_uri": redirect_uri
             }
 
-            token_response = requests.post(token_url, data=token_data)
+            token_response = requests.post(token_url, data=token_data, timeout=15)
             token_result = token_response.json()
 
             if not token_result.get("ok"):

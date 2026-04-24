@@ -10,7 +10,7 @@ from sendgrid.helpers.mail import (
 )
 from django.conf import settings
 from users.models import User
-import random
+import secrets
 from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class Util:
     @staticmethod
     def send_signup_otp(email, otp=None):
         if otp is None:
-            otp = str(random.randint(100000, 999999))
+            otp = str(secrets.randbelow(900000) + 100000)
 
         # Cache OTP only (password stored separately)
         cache.set(f"signup_otp_{email}", otp, timeout=300)

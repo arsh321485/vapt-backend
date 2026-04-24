@@ -9,11 +9,10 @@ import os
 import datetime
 import threading
 import logging
+import time
 import pymongo
 
 logger = logging.getLogger(__name__)
-
-
 def check_admin_scoping_complete(admin_user):
     """Check if admin has completed both scoping forms (ProjectDetail + TestingMethodology)."""
     try:
@@ -100,6 +99,9 @@ class UploadReportAdmin(admin.ModelAdmin):
     readonly_fields = ()
     exclude = ('file_hash', 'location', 'admin', 'uploaded_at', 'created_at', 'updated_at', 'parsed_count', 'member_type', 'status')
 
+    class Media:
+        js = ("upload_report/admin_upload_timing.js",)
+
     def get_admin_id(self, obj):
         return getattr(obj.admin, "id", None)
     get_admin_id.short_description = "Admin ID"
@@ -116,6 +118,31 @@ class UploadReportAdmin(admin.ModelAdmin):
         uploaded_file.seek(0)
         return hasher.hexdigest()
 
+    def _seconds_to_text(self, seconds):
+        sec = max(0, int(round(seconds or 0)))
+        mins, rem = divmod(sec, 60)
+        if mins > 0:
+            return f"{mins} min {rem} sec"
+        return f"{rem} sec"
+
+    def _estimate_upload_seconds(self, file_size_bytes, filename):
+        ext = os.path.splitext(filename or "")[1].lower()
+        size_mb = (file_size_bytes or 0) / (1024 * 1024)
+        if ext in (".nessus", ".xml", ".html", ".htm"):
+            estimate = 20 + (size_mb * 4.0)
+        elif ext in (".xlsx", ".xls", ".csv"):
+            estimate = 8 + (size_mb * 1.5)
+        else:
+            estimate = 6 + (size_mb * 1.0)
+        return int(max(8, min(estimate, 3600)))
+
+    def _estimate_agent_seconds(self, parsed_count, parsed_type):
+        if parsed_type not in ("nessus", "nessus_html"):
+            return 0
+        vuln_count = int(parsed_count or 0)
+        # Base startup + per-card average generation latency.
+        return int(max(45, min(45 + (vuln_count * 2), 7200)))
+
     def _get_mongo_uri(self):
         """Get MongoDB URI from Django settings."""
         try:
@@ -129,14 +156,14 @@ class UploadReportAdmin(admin.ModelAdmin):
             db = client.get_default_database()
             if db:
                 return db
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         try:
             dbname = settings.DATABASES['default'].get('NAME')
             if dbname:
                 return client[dbname]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
         return client["vaptfix"]
 
     def _prepare_hosts_for_storage(self, hosts):
@@ -194,8 +221,8 @@ class UploadReportAdmin(admin.ModelAdmin):
                         admin_user = User.objects.filter(email=admin_email).first()
                         if admin_user:
                             admin_id = str(admin_user.id)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
 
                 document = {
                     "report_id": report_id,
@@ -237,11 +264,18 @@ class UploadReportAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         """Save model and parse/store file data in MongoDB."""
+        op_started = time.perf_counter()
         admin_user = form.cleaned_data.get('admin_select')
         obj.admin = admin_user
 
         uploaded_file = form.cleaned_data.get('file')
         is_new_file = uploaded_file and hasattr(uploaded_file, 'chunks')
+        upload_estimate_seconds = 0
+        if is_new_file:
+            upload_estimate_seconds = self._estimate_upload_seconds(
+                getattr(uploaded_file, "size", 0),
+                uploaded_file.name
+            )
 
         if is_new_file:
             # Generate file hash
@@ -295,7 +329,17 @@ class UploadReportAdmin(admin.ModelAdmin):
                     )
 
                     if mongodb_stored:
-                        messages.success(request, f"File parsed and stored in database. Found {parsed_count} vulnerabilities.")
+                        upload_actual_seconds = time.perf_counter() - op_started
+                        agent_eta_seconds = self._estimate_agent_seconds(parsed_count, parsed_data.get("type"))
+                        total_eta_seconds = upload_estimate_seconds + agent_eta_seconds
+                        messages.success(
+                            request,
+                            (
+                                f"File parsed and stored in database. Found {parsed_count} vulnerabilities. "
+                                f"Upload processing time: {self._seconds_to_text(upload_actual_seconds)}. "
+                                f"Estimated upload time: {self._seconds_to_text(upload_estimate_seconds)}."
+                            )
+                        )
 
                         # Auto-generate vulnerability cards in background (only for nessus reports, only on new upload)
                         if parsed_data.get("type") in ("nessus", "nessus_html") and not change:
@@ -309,7 +353,14 @@ class UploadReportAdmin(admin.ModelAdmin):
                             t.start()
                             logger.info(f"[AutoGenCards] Background thread started from admin panel for report_id={report_id}")
                             print(f"[AutoGenCards] Background thread started from admin panel for report_id={report_id}", flush=True)
-                            messages.info(request, "Vulnerability cards are being generated in background.")
+                            messages.info(
+                                request,
+                                (
+                                    "Vulnerability cards are being generated in background. "
+                                    f"Estimated agent creation time: {self._seconds_to_text(agent_eta_seconds)}. "
+                                    f"Estimated total (upload + agent): {self._seconds_to_text(total_eta_seconds)}."
+                                )
+                            )
                     else:
                         messages.warning(request, "File saved but MongoDB storage failed.")
                 else:

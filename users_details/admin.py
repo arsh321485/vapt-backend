@@ -124,7 +124,7 @@ def team_list_view(request):
 
     try:
         from django.db.models import Count
-        # Single query: get each admin_id with member count
+# Single query: get each admin_id with member count
         admin_counts = (
             UserDetail.objects
             .values('admin_id')
@@ -145,8 +145,8 @@ def team_list_view(request):
                 "admin_email": email_map.get(aid, aid),
                 "member_count": count,
             })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Suppressed error: %s", e)
 
     rows = ""
     for d in admins_data:
@@ -199,8 +199,8 @@ def team_members_view(request, admin_id):
                 "roles": roles or "-",
                 "created_at": _format_datetime(ud.created_at),
             })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Suppressed error: %s", e)
 
     rows = ""
     for d in members:
