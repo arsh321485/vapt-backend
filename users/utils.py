@@ -391,33 +391,41 @@ class Util:
     @staticmethod
     def send_scoping_admin_confirmation_email(admin_email, org_name):
         """Send confirmation email to admin after scoping form submission."""
-        logo_b64, logo_html = Util._get_logo(settings.BASE_DIR)
+        logo_b64, _ = Util._get_logo(settings.BASE_DIR)
+        if logo_b64:
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:42px; display:block; margin:0 auto;" />'
+        else:
+            logo_html = (
+                '<div style="font-size:20px; color:#ffffff; font-weight:700; letter-spacing:0.5px;">'
+                'VAPTFIX'
+                '</div>'
+            )
 
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head><meta charset="UTF-8"></head>
-        <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
-          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+        <body style="margin:0; padding:0; background-color:#eef0f6; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef0f6; padding:36px 0;">
             <tr>
               <td align="center">
-                <table width="600" cellpadding="0" cellspacing="0"
-                       style="background:#ffffff; border-radius:8px; overflow:hidden;
-                              box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+                <table width="480" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:22px; overflow:hidden;
+                              box-shadow:0 12px 30px rgba(18, 22, 33, 0.10);">
 
-                  <!-- Header -->
+                  <!-- Header (same style as OTP / welcome mail) -->
                   <tr>
-                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
-                                border-bottom:1px solid #e8eaed;">
+                    <td style="background-color:#23124d; padding:20px 30px; text-align:center;">
                       {logo_html}
                     </td>
                   </tr>
 
                   <!-- Body -->
                   <tr>
-                    <td style="padding:40px; text-align:center;">
-                      <h2 style="color:#1a1a2e; margin:0 0 8px 0;">Form Submitted Successfully!</h2>
-                      <hr style="border:none; border-top:2px solid #1a73e8; margin:0 auto 24px auto; width:60px;" />
+                    <td style="padding:34px 34px 20px 34px; text-align:center;">
+                      <h1 style="color:#1f2040; margin:0 0 16px 0; font-size:36px; line-height:1.05;">
+                        Form Submitted Successfully!
+                      </h1>
 
                       <p style="color:#444; font-size:15px; line-height:1.6;">
                         Thank you for completing the scoping form for <strong>{org_name}</strong>.
@@ -431,8 +439,8 @@ class Util:
 
                   <!-- Footer -->
                   <tr>
-                    <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
-                      <p style="color:#888; font-size:12px; margin:0;">
+                    <td style="padding:18px 34px 24px 34px; text-align:center;">
+                      <p style="color:#9a9dad; font-size:12px; letter-spacing:1.2px; margin:0;">
                         &copy; 2026 VAPTFIX. All rights reserved.
                       </p>
                     </td>
