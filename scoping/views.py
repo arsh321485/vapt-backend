@@ -215,6 +215,15 @@ class UploadStatusView(APIView):
                     logger.warning(f"[UploadStatus] report_id={report_id} cards_generation_complete=False, cards_count={cards_count}")
                     generated_cards += cards_count
 
+                    # No vulnerabilities in this report => nothing to generate, treat as ready.
+                    if report_total_vulns == 0:
+                        db["nessus_reports"].update_one(
+                            {"report_id": report_id},
+                            {"$set": {"cards_generation_complete": True, "cards_generated_count": 0}}
+                        )
+                        ready_reports += 1
+                        continue
+
                     if report_total_vulns > 0 and cards_count >= report_total_vulns:
                         # All cards generated — mark as complete so future checks are faster
                         db["nessus_reports"].update_one(
