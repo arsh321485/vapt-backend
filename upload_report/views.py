@@ -984,6 +984,66 @@ _running_card_jobs: set = set()
 _running_card_jobs_lock = threading.Lock()
 
 
+def _where_to_run_label(where_to_run: str) -> str:
+    labels = {
+        "powershell": "PowerShell",
+        "cmd": "Command Prompt (CMD)",
+        "bash": "Bash Shell",
+        "terminal": "Terminal",
+        "sql_console": "SQL Console",
+        "browser": "Web Browser",
+        "application_ui": "Application UI",
+        "not_applicable": "Not Applicable",
+    }
+    return labels.get(where_to_run, "Terminal")
+
+
+def _infer_where_to_run(commands_for_action: str, system_file_path: str = "", operating_system: str = "") -> str:
+    cmd = (commands_for_action or "").strip().lower()
+    path = (system_file_path or "").strip().lower()
+    os_label = (operating_system or "").strip().lower()
+
+    if not cmd:
+        return "not_applicable"
+    if any(k in cmd for k in ("select ", "update ", "insert ", "delete ", "create table", "alter table", "drop table")):
+        return "sql_console"
+    if any(k in cmd for k in ("http://", "https://", "open browser", "navigate to", "web console")):
+        return "browser"
+    if any(k in cmd for k in ("click ", "go to settings", "open control panel", "open services.msc", "group policy")):
+        return "application_ui"
+    if any(k in cmd for k in ("get-", "set-", "new-", "remove-", "restart-service", "powershell", "ps1")):
+        return "powershell"
+    if any(k in cmd for k in ("cmd.exe", "sc.exe", "net start", "net stop", "copy ", "xcopy ")):
+        return "cmd"
+    if any(k in cmd for k in ("apt ", "yum ", "dnf ", "systemctl ", "chmod ", "chown ", "grep ", "sed ", "awk ", "sudo ")):
+        return "bash"
+    if os_label == "windows" or "c:\\" in path:
+        return "terminal"
+    if os_label == "linux" or path.startswith("/"):
+        return "terminal"
+    return "terminal"
+
+
+def _ensure_where_to_run_fields(mitigation_table, operating_system_hint: str = ""):
+    enriched = []
+    for row in (mitigation_table or []):
+        if not isinstance(row, dict):
+            continue
+        new_row = dict(row)
+        where = new_row.get("where_to_run")
+        if not where:
+            where = _infer_where_to_run(
+                new_row.get("commands_for_action", ""),
+                new_row.get("system_file_path", ""),
+                new_row.get("operating_system", operating_system_hint),
+            )
+            new_row["where_to_run"] = where
+        if not new_row.get("where_to_run_label"):
+            new_row["where_to_run_label"] = _where_to_run_label(where)
+        enriched.append(new_row)
+    return enriched
+
+
 def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
     """
     Background thread: auto-generate vulnerability cards after file upload.
@@ -1135,6 +1195,10 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             if cached_card:
                 # Reuse mitigation data from existing card — no GPT call needed
                 print(f"[AutoGenCards] Cache hit for '{vuln_plugin_name}' ({vuln_os_category}), copying from existing card", flush=True)
+                mitigation_table_arr = _ensure_where_to_run_fields(
+                    cached_card.get("mitigation_table", []),
+                    vuln.get("operating_system", "") or "",
+                )
                 document = {
                     "card_id":            str(_uuid.uuid4()),
                     "report_id":          report_id,
@@ -1144,7 +1208,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "host_name":          vuln_host_name,
                     "os_category":        vuln_os_category,
                     "description":        vuln["description"],
-                    "mitigation_table":   cached_card.get("mitigation_table", []),
+                    "mitigation_table":   mitigation_table_arr,
                     "resource_id":        vuln_host_name or cached_card.get("resource_id"),
                     "region":             cached_card.get("region"),
                     "affected_packages":  cached_card.get("affected_packages"),
@@ -1181,7 +1245,10 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     continue
 
                 vc = result.get("vulnerability_card", {})
-                mitigation_table_arr = result.get("mitigation_table", [])
+                mitigation_table_arr = _ensure_where_to_run_fields(
+                    result.get("mitigation_table", []),
+                    vuln.get("operating_system", "") or "",
+                )
                 troubleshooting_steps = _parse_troubleshooting_guide(
                     vc.get("post_mitigation_troubleshooting_guide", "") or ""
                 )
@@ -1425,7 +1492,10 @@ class GenerateVulnerabilityCardView(APIView):
                 vc = result.get("vulnerability_card", {})
 
                 # mitigation_table is a list from the parser
-                mitigation_table_arr = result.get("mitigation_table", [])
+                mitigation_table_arr = _ensure_where_to_run_fields(
+                    result.get("mitigation_table", []),
+                    vuln.get("operating_system", "") or "",
+                )
 
                 # Fix: if AI returns null for resource_id, fall back to host_name from scan data
                 resource_id = vc.get("resource_id") or vuln.get("host_name", "") or None
@@ -1606,6 +1676,7 @@ class VulnerabilityCardDetailView(APIView):
 
             if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
                 card["created_at"] = card["created_at"].isoformat()
+            card["mitigation_table"] = _ensure_where_to_run_fields(card.get("mitigation_table", []))
 
             return Response(
                 {
