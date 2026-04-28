@@ -1340,6 +1340,44 @@ class FixVulnerabilityStepsAPIView(APIView):
         6: "Documentation & Closure - Complete documentation and close the issue",
     }
 
+    def _infer_where_to_run(self, commands_for_action: str, system_file_path: str = "", operating_system: str = "") -> str:
+        cmd = (commands_for_action or "").strip().lower()
+        path = (system_file_path or "").strip().lower()
+        os_label = (operating_system or "").strip().lower()
+
+        if not cmd:
+            return "not_applicable"
+        if any(k in cmd for k in ("select ", "update ", "insert ", "delete ", "create table", "alter table", "drop table")):
+            return "sql_console"
+        if any(k in cmd for k in ("http://", "https://", "open browser", "navigate to", "web console")):
+            return "browser"
+        if any(k in cmd for k in ("click ", "go to settings", "open control panel", "open services.msc", "group policy")):
+            return "application_ui"
+        if any(k in cmd for k in ("get-", "set-", "new-", "remove-", "restart-service", "powershell", "ps1")):
+            return "powershell"
+        if any(k in cmd for k in ("cmd.exe", "sc.exe", "net start", "net stop", "copy ", "xcopy ")):
+            return "cmd"
+        if any(k in cmd for k in ("apt ", "yum ", "dnf ", "systemctl ", "chmod ", "chown ", "grep ", "sed ", "awk ", "sudo ")):
+            return "bash"
+        if os_label == "windows" or "c:\\" in path:
+            return "terminal"
+        if os_label == "linux" or path.startswith("/"):
+            return "terminal"
+        return "terminal"
+
+    def _where_to_run_label(self, where_to_run: str) -> str:
+        labels = {
+            "powershell": "PowerShell",
+            "cmd": "Command Prompt (CMD)",
+            "bash": "Bash Shell",
+            "terminal": "Terminal",
+            "sql_console": "SQL Console",
+            "browser": "Web Browser",
+            "application_ui": "Application UI",
+            "not_applicable": "Not Applicable",
+        }
+        return labels.get(where_to_run, "Terminal")
+
     def _parse_mitigation_steps(self, mitigation_table):
         """
         Group mitigation_table rows by step_no (snake_case keys, as stored by _parse_markdown_table).
@@ -1373,6 +1411,13 @@ class FixVulnerabilityStepsAPIView(APIView):
 
             # Return ALL fields dynamically — every column the AI generated
             os_data = {k: v for k, v in row.items() if k not in META_KEYS}
+            where_to_run = os_data.get("where_to_run") or self._infer_where_to_run(
+                os_data.get("commands_for_action", ""),
+                os_data.get("system_file_path", ""),
+                row.get("operating_system", ""),
+            )
+            os_data["where_to_run"] = where_to_run
+            os_data["where_to_run_label"] = os_data.get("where_to_run_label") or self._where_to_run_label(where_to_run)
 
             if step_num not in steps_dict:
                 steps_dict[step_num] = {
