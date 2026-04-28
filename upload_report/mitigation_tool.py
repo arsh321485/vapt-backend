@@ -221,6 +221,13 @@ def _parse_markdown_table(table_str: str) -> list:
 
         row = {columns[i]: cells[i] for i in range(len(columns))}
         row["sub_tasks"] = _parse_action_sub_tasks(row.get("action", ""))
+        where_to_run = _infer_where_to_run(
+            row.get("commands_for_action", ""),
+            row.get("system_file_path", ""),
+            row.get("operating_system", ""),
+        )
+        row["where_to_run"] = where_to_run
+        row["where_to_run_label"] = _where_to_run_label(where_to_run)
         # Convert artifacts_tools_used from comma-separated string to array
         raw_tools = row.get("artifacts_tools_used", "")
         if isinstance(raw_tools, str):
@@ -369,6 +376,73 @@ def _parse_action_sub_tasks(action_text: str) -> list:
         })
 
     return sub_tasks
+
+
+def _infer_where_to_run(commands_for_action: str, system_file_path: str = "", operating_system: str = "") -> str:
+    """
+    Infer execution context for frontend display.
+
+    Values:
+      - powershell
+      - cmd
+      - bash
+      - terminal
+      - sql_console
+      - browser
+      - application_ui
+      - not_applicable
+    """
+    cmd = (commands_for_action or "").strip().lower()
+    path = (system_file_path or "").strip().lower()
+    os_label = (operating_system or "").strip().lower()
+
+    if not cmd:
+        return "not_applicable"
+
+    sql_keywords = ("select ", "update ", "insert ", "delete ", "create table", "alter table", "drop table")
+    if any(k in cmd for k in sql_keywords):
+        return "sql_console"
+
+    browser_hints = ("http://", "https://", "open browser", "navigate to", "web console")
+    if any(k in cmd for k in browser_hints):
+        return "browser"
+
+    ui_hints = ("click ", "go to settings", "open control panel", "open services.msc", "group policy")
+    if any(k in cmd for k in ui_hints):
+        return "application_ui"
+
+    powershell_hints = ("get-", "set-", "new-", "remove-", "restart-service", "powershell", "ps1")
+    if any(k in cmd for k in powershell_hints):
+        return "powershell"
+
+    cmd_hints = ("cmd.exe", "sc.exe", "net start", "net stop", "copy ", "xcopy ")
+    if any(k in cmd for k in cmd_hints):
+        return "cmd"
+
+    bash_hints = ("apt ", "yum ", "dnf ", "systemctl ", "chmod ", "chown ", "grep ", "sed ", "awk ", "sudo ")
+    if any(k in cmd for k in bash_hints):
+        return "bash"
+
+    if os_label == "windows" or "c:\\" in path:
+        return "terminal"
+    if os_label == "linux" or path.startswith("/"):
+        return "terminal"
+
+    return "terminal"
+
+
+def _where_to_run_label(where_to_run: str) -> str:
+    labels = {
+        "powershell": "PowerShell",
+        "cmd": "Command Prompt (CMD)",
+        "bash": "Bash Shell",
+        "terminal": "Terminal",
+        "sql_console": "SQL Console",
+        "browser": "Web Browser",
+        "application_ui": "Application UI",
+        "not_applicable": "Not Applicable",
+    }
+    return labels.get(where_to_run, "Terminal")
 
 
 def _parse_raw_response_sections(raw_text: str) -> list:
