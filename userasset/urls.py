@@ -76,6 +76,16 @@ urlpatterns = [
         name="user-asset-unhold",
     ),
 
+    # Backward-compatible alias:
+    # Some clients call ".../assets/<host_name>/delete/" (extra 'delete/' suffix).
+    # NOTE: This MUST be declared before the generic delete route, because
+    # `<path:host_name>` in the generic route can otherwise swallow "delete".
+    path(
+        "report/<str:report_id>/assets/<path:host_name>/delete/",
+        UserAssetDeleteAPIView.as_view(),
+        name="user-asset-delete-alias",
+    ),
+
     # DELETE an asset (team-validated)  — MUST be last for <host_name>
     path(
         "report/<str:report_id>/assets/<path:host_name>/",
@@ -99,3 +109,4 @@ urlpatterns = [
         name="user-closed-fix-vulnerabilities-by-host",
     ),
 ]
+

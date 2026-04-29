@@ -423,6 +423,24 @@ def _load_latest_report_for_admin(db, admin_email, admin_id=None):
         sort=[("uploaded_at", -1)]
     )
 
+def _load_latest_report_meta_for_admin(db, admin_email, admin_id=None):
+    """Load only metadata needed for report scoping (report_id/_id)."""
+    coll = db[NESSUS_COLLECTION]
+    projection = {"report_id": 1}
+    if admin_id:
+        doc = coll.find_one(
+            {"admin_id": str(admin_id)},
+            projection,
+            sort=[("uploaded_at", -1)]
+        )
+        if doc:
+            return doc
+    return coll.find_one(
+        {"admin_email": admin_email},
+        projection,
+        sort=[("uploaded_at", -1)]
+    )
+
 
 def _extract_total_steps(mitigation_table):
     """Return dynamic step count from mitigation table."""
@@ -531,6 +549,32 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                     if cpname and chost:
                         closed_keys.add((cpname, chost))
 
+                all_fix_ids = [
+                    str(fix_doc.get("_id", "")).strip()
+                    for fix_doc in fix_docs
+                    if str(fix_doc.get("_id", "")).strip()
+                ]
+                completed_steps_map = {}
+                if all_fix_ids:
+                    grouped_counts = steps_coll.aggregate([
+                        {
+                            "$match": {
+                                "fix_vulnerability_id": {"$in": all_fix_ids},
+                                "status": "completed",
+                            }
+                        },
+                        {
+                            "$group": {
+                                "_id": "$fix_vulnerability_id",
+                                "count": {"$sum": 1},
+                            }
+                        },
+                    ])
+                    completed_steps_map = {
+                        str(row.get("_id") or ""): int(row.get("count") or 0)
+                        for row in grouped_counts
+                    }
+
                 dedup_items = {}
 
                 for fix_doc in fix_docs:
@@ -551,10 +595,7 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                     mitigation_table = card.get("mitigation_table") or fix_doc.get("steps_to_fix") or []
                     total_steps = _extract_total_steps(mitigation_table) or 6
 
-                    completed_steps = steps_coll.count_documents({
-                        "fix_vulnerability_id": fix_id,
-                        "status": "completed",
-                    })
+                    completed_steps = completed_steps_map.get(fix_id, 0)
 
                     # Include only started-but-not-complete vulnerabilities.
                     if completed_steps <= 0 or completed_steps >= total_steps:
@@ -623,46 +664,34 @@ class AdminMitigationTimelineExtensionAPIView(APIView):
                 buckets = {t: {"team": t, "critical": 0, "high": 0, "medium": 0, "low": 0} for t in team_order}
                 team_lookup = {t.lower(): t for t in team_order}
 
-                # Build plugin_name -> normalized severity map from latest report.
-                plugin_risk = {}
-                for host in report_doc.get("vulnerabilities_by_host", []):
-                    for vuln in host.get("vulnerabilities", []):
-                        pname = (
-                            vuln.get("plugin_name")
-                            or vuln.get("pluginname")
-                            or vuln.get("name")
-                            or ""
-                        ).strip()
-                        if not pname or pname in plugin_risk:
-                            continue
-                        raw = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
-                        if raw.startswith("crit"):
-                            plugin_risk[pname] = "critical"
-                        elif raw.startswith("high"):
-                            plugin_risk[pname] = "high"
-                        elif raw.startswith("med"):
-                            plugin_risk[pname] = "medium"
-                        elif raw.startswith("low"):
-                            plugin_risk[pname] = "low"
-
-                # Count ALL assigned vulnerabilities from cards (not only in-process fix records).
+                # Count only APPROVED timeline extension requests (extension time).
+                # This replaces the previous vulnerability_cards based counting.
+                coll = db[TIMELINE_EXTENSION_COLLECTION]
                 seen = set()
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
-                    vuln_name = (card.get("vulnerability_name") or "").strip()
-                    host_name = (card.get("host_name") or "").strip()
-                    raw_team = (card.get("assigned_team") or "").strip()
-                    team = team_lookup.get(raw_team.lower())
-                    if not vuln_name or not team:
+                for doc in coll.find(
+                    {
+                        "admin_id": admin_id,
+                        "report_id": report_id,
+                        "status": "approved",
+                    }
+                ):
+                    severity_key = _normalize_severity_key(doc.get("severity"))
+                    if not severity_key:
                         continue
 
-                    key = (vuln_name, host_name)
-                    if key in seen:
+                    team_name = (doc.get("team_name") or "").strip()
+                    team = team_lookup.get(team_name.lower()) if team_name else None
+                    if not team:
                         continue
-                    seen.add(key)
 
-                    risk = plugin_risk.get(vuln_name)
-                    if risk in ("critical", "high", "medium", "low"):
-                        buckets[team][risk] += 1
+                    asset = (doc.get("asset") or "").strip().lower()
+                    vuln_name = (doc.get("vulnerability_name") or "").strip().lower()
+                    dedup_key = (team_name.lower(), severity_key, asset, vuln_name)
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+
+                    buckets[team][severity_key] += 1
 
                 return Response(
                     {"report_id": report_id, "teams": [buckets[t] for t in team_order]},
@@ -1290,7 +1319,7 @@ class AdminSupportRequestsAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
+                doc = _load_latest_report_meta_for_admin(db, admin_email, str(request.user.id))
                 report_id = None
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
@@ -1302,17 +1331,18 @@ class AdminSupportRequestsAPIView(APIView):
                 if report_id:
                     base_query["report_id"] = str(report_id)
 
-                # Count pending support requests
-                pending_count = support_coll.count_documents({
-                    **base_query,
-                    "status": {"$ne": "closed"}
-                })
-
-                # Count closed support requests
-                closed_count = support_coll.count_documents({
-                    **base_query,
-                    "status": "closed"
-                })
+                status_counts = list(support_coll.aggregate([
+                    {"$match": base_query},
+                    {
+                        "$group": {
+                            "_id": {"$cond": [{"$eq": ["$status", "closed"]}, "closed", "pending"]},
+                            "count": {"$sum": 1},
+                        }
+                    },
+                ]))
+                counts_map = {str(row.get("_id")): int(row.get("count") or 0) for row in status_counts}
+                pending_count = counts_map.get("pending", 0)
+                closed_count = counts_map.get("closed", 0)
 
                 total = pending_count + closed_count
 

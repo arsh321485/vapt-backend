@@ -64,6 +64,15 @@ def _load_latest_report(db, admin_id, admin_email):
         doc = coll.find_one({"admin_email": admin_email}, sort=[("uploaded_at", -1)])
     return doc
 
+def _load_latest_report_meta(db, admin_id, admin_email):
+    """Load only report metadata used by lightweight dashboard endpoints."""
+    coll = db[NESSUS_COLLECTION]
+    projection = {"report_id": 1}
+    doc = coll.find_one({"admin_id": str(admin_id)}, projection, sort=[("uploaded_at", -1)])
+    if not doc and admin_email:
+        doc = coll.find_one({"admin_email": admin_email}, projection, sort=[("uploaded_at", -1)])
+    return doc
+
 
 def _build_plugin_risk_map(nessus_doc):
     """
@@ -641,7 +650,7 @@ class UserSupportRequestsAPIView(APIView):
             teams_lower = _normalize_teams(active_teams)
 
             with MongoContext() as db:
-                nessus_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+                nessus_doc = _load_latest_report_meta(db, admin_user.id, admin_user.email)
                 if not nessus_doc:
                     return Response({"total": 0, "pending": 0, "closed": 0})
 
@@ -665,8 +674,18 @@ class UserSupportRequestsAPIView(APIView):
                     "vul_name": {"$in": list(team_plugins)}
                 }
 
-                pending = support_coll.count_documents({**base_q, "status": {"$ne": "closed"}})
-                closed  = support_coll.count_documents({**base_q, "status": "closed"})
+                status_counts = list(support_coll.aggregate([
+                    {"$match": base_q},
+                    {
+                        "$group": {
+                            "_id": {"$cond": [{"$eq": ["$status", "closed"]}, "closed", "pending"]},
+                            "count": {"$sum": 1},
+                        }
+                    },
+                ]))
+                counts_map = {str(row.get("_id")): int(row.get("count") or 0) for row in status_counts}
+                pending = counts_map.get("pending", 0)
+                closed = counts_map.get("closed", 0)
 
                 result = {
                     "report_id": report_id,
@@ -852,6 +871,32 @@ class UserInProcessRemediationTimelineAPIView(APIView):
                     if cpname and chost:
                         closed_keys.add((cpname, chost))
 
+                all_fix_ids = [
+                    str(fix_doc.get("_id", "")).strip()
+                    for fix_doc in fix_docs
+                    if str(fix_doc.get("_id", "")).strip()
+                ]
+                completed_steps_map = {}
+                if all_fix_ids:
+                    grouped_counts = steps_coll.aggregate([
+                        {
+                            "$match": {
+                                "fix_vulnerability_id": {"$in": all_fix_ids},
+                                "status": "completed",
+                            }
+                        },
+                        {
+                            "$group": {
+                                "_id": "$fix_vulnerability_id",
+                                "count": {"$sum": 1},
+                            }
+                        },
+                    ])
+                    completed_steps_map = {
+                        str(row.get("_id") or ""): int(row.get("count") or 0)
+                        for row in grouped_counts
+                    }
+
                 dedup_items = {}
                 for fix_doc in fix_docs:
                     fix_id = str(fix_doc.get("_id", ""))
@@ -873,10 +918,7 @@ class UserInProcessRemediationTimelineAPIView(APIView):
                     mitigation_table = card.get("mitigation_table") or fix_doc.get("steps_to_fix") or []
                     total_steps = _extract_total_steps(mitigation_table) or 6
 
-                    completed_steps = steps_coll.count_documents({
-                        "fix_vulnerability_id": fix_id,
-                        "status": "completed",
-                    })
+                    completed_steps = completed_steps_map.get(fix_id, 0)
 
                     if completed_steps <= 0 or completed_steps >= total_steps:
                         continue
@@ -952,46 +994,35 @@ class UserMitigationTimelineExtensionAPIView(APIView):
 
                 buckets = {t: {"team": t, "critical": 0, "high": 0, "medium": 0, "low": 0} for t in active_teams}
 
-                # Build plugin_name -> normalized severity map from latest report.
-                plugin_risk = {}
-                for host in report_doc.get("vulnerabilities_by_host", []):
-                    for vuln in host.get("vulnerabilities", []):
-                        pname = (
-                            vuln.get("plugin_name")
-                            or vuln.get("pluginname")
-                            or vuln.get("name")
-                            or ""
-                        ).strip()
-                        if not pname or pname in plugin_risk:
-                            continue
-                        raw = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
-                        if raw.startswith("crit"):
-                            plugin_risk[pname] = "critical"
-                        elif raw.startswith("high"):
-                            plugin_risk[pname] = "high"
-                        elif raw.startswith("med"):
-                            plugin_risk[pname] = "medium"
-                        elif raw.startswith("low"):
-                            plugin_risk[pname] = "low"
-
-                # Count all vulnerabilities assigned to user's teams from vulnerability_cards.
+                # Count only APPROVED timeline extension requests (extension time).
+                coll = db[TIMELINE_EXTENSION_COLLECTION]
+                current_user_id = str(request.user.id)
                 seen = set()
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
-                    vuln_name = (card.get("vulnerability_name") or "").strip()
-                    host_name = (card.get("host_name") or "").strip()
-                    raw_team = (card.get("assigned_team") or "").strip()
-                    team = team_lookup.get(raw_team.lower())
-                    if not vuln_name or not team:
+                for doc in coll.find(
+                    {
+                        "admin_id": str(admin_user.id),
+                        "report_id": report_id,
+                        "status": "approved",
+                        "requested_by_user_id": current_user_id,
+                    }
+                ):
+                    severity_key = _normalize_severity_key(doc.get("severity"))
+                    if not severity_key:
                         continue
 
-                    key = (vuln_name, host_name)
-                    if key in seen:
+                    team_name = (doc.get("team_name") or "").strip()
+                    team = team_lookup.get(team_name.lower()) if team_name else None
+                    if not team:
                         continue
-                    seen.add(key)
 
-                    risk = plugin_risk.get(vuln_name)
-                    if risk in ("critical", "high", "medium", "low"):
-                        buckets[team][risk] += 1
+                    asset = (doc.get("asset") or "").strip().lower()
+                    vuln_name = (doc.get("vulnerability_name") or "").strip().lower()
+                    dedup_key = (team_name.lower(), severity_key, asset, vuln_name)
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+
+                    buckets[team][severity_key] += 1
 
                 return Response({"report_id": report_id, "teams": [buckets[t] for t in active_teams]})
 

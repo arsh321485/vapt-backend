@@ -64,13 +64,13 @@ def _get_team_plugin_names(db, report_id, teams_lower):
     plugin_team_map = {}
     for card in db[VULN_CARD_COLLECTION].find(
         {"report_id": str(report_id)},
-        {"vulnerability_name": 1, "assigned_team": 1}
+        {"vulnerability_name": 1, "plugin_name": 1, "assigned_team": 1}
     ):
-        pname    = (card.get("vulnerability_name") or "").strip()
+        pname    = (card.get("vulnerability_name") or card.get("plugin_name") or "").strip()
         raw_team = (card.get("assigned_team") or "").strip()
         matched  = teams_lower.get(raw_team.lower())
         if pname and matched:
-            team_plugins.add(pname)
+            team_plugins.add(pname.lower())
             plugin_team_map[pname] = matched
     return team_plugins, plugin_team_map
 
@@ -92,10 +92,11 @@ def _validate_team_access(db, report_id, host_name, teams_lower):
     team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
 
     # Find host entry
+    target_host = (host_name or "").strip().rstrip("/").lower()
     host_entry = None
     for h in (doc.get("vulnerabilities_by_host") or []):
-        hn = (h.get("host_name") or h.get("host") or "").strip()
-        if hn == host_name:
+        hn = (h.get("host_name") or h.get("host") or "").strip().rstrip("/")
+        if hn.lower() == target_host:
             host_entry = h
             break
 
@@ -107,7 +108,7 @@ def _validate_team_access(db, report_id, host_name, teams_lower):
 
     # Check if any vulnerability belongs to user's team
     has_team_vuln = any(
-        (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+        (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
         for v in host_entry.get("vulnerabilities", [])
     )
 
@@ -154,7 +155,7 @@ def _compute_total_assets(db, report_id, team_plugins=None):
     count = 0
     for host in doc.get("vulnerabilities_by_host", []):
         has_team_vuln = any(
-            (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+            (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
             for v in host.get("vulnerabilities", [])
         )
         if has_team_vuln:
@@ -231,7 +232,7 @@ class UserAssetsAPIView(APIView):
 
                     team_vulns = [
                         v for v in host.get("vulnerabilities", [])
-                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
                     ]
                     if not team_vulns:
                         continue
@@ -340,7 +341,7 @@ class UserHoldAssetsAPIView(APIView):
                     # Only show held assets with team-assigned vulns
                     team_vulns = [
                         v for v in vulns
-                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
                     ]
                     if not team_vulns:
                         continue
@@ -417,7 +418,7 @@ class UserReportAssetsAPIView(APIView):
 
                     team_vulns = [
                         v for v in host.get("vulnerabilities", [])
-                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
                     ]
                     if not team_vulns:
                         continue
@@ -508,7 +509,7 @@ class UserHoldAssetsByReportAPIView(APIView):
                     vulns      = host_entry.get("vulnerabilities", [])
                     team_vulns = [
                         v for v in vulns
-                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
                     ]
                     if not team_vulns:
                         continue
@@ -952,7 +953,7 @@ class UserAssetHoldAPIView(APIView):
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
                 team_vulns = [
                     v for v in found.get("vulnerabilities", [])
-                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
                 ]
 
                 asset_data = {
@@ -1036,7 +1037,7 @@ class UserAssetUnholdAPIView(APIView):
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
                 team_vulns = [
                     v for v in host_entry.get("vulnerabilities", [])
-                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
                 ]
                 if not team_vulns:
                     return Response(
@@ -1095,7 +1096,8 @@ class UserAssetDeleteAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def delete(self, request, report_id, host_name):
-        host_name = unquote(host_name)
+        host_name = unquote(host_name).strip().rstrip("/")
+        target_host = host_name.lower()
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
@@ -1117,7 +1119,7 @@ class UserAssetDeleteAPIView(APIView):
                 asset_entry = None
                 for h in (doc.get("vulnerabilities_by_host") or []):
                     hn = (h.get("host_name") or h.get("host") or "").strip()
-                    if hn == host_name:
+                    if hn.lower() == target_host:
                         asset_entry = h
                         break
 
@@ -1130,7 +1132,7 @@ class UserAssetDeleteAPIView(APIView):
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
                 team_vulns = [
                     v for v in asset_entry.get("vulnerabilities", [])
-                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in team_plugins
+                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
                 ]
 
                 # Store in deleted_assets history
