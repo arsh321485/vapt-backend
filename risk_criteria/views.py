@@ -57,6 +57,18 @@ def parse_days(value):
 
     return total_days
 
+def _normalize_severity(value: str):
+    sev = (value or "").strip().lower()
+    if sev.startswith("crit"):
+        return "critical"
+    if sev.startswith("high"):
+        return "high"
+    if sev.startswith("med"):
+        return "medium"
+    if sev.startswith("low"):
+        return "low"
+    return None
+
 
 class RiskCriteriaCreateView(generics.CreateAPIView):
     serializer_class = RiskCriteriaCreateSerializer
@@ -284,10 +296,13 @@ class RiskCriteriaCalendarView(APIView):
             if report_id:
                 ext_query["report_id"] = report_id
 
+            seen = set()
             for req in db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1):
-                severity = (req.get("severity") or "").strip().lower()
+                severity = _normalize_severity(req.get("severity"))
                 team_name = (req.get("team_name") or "").strip()
-                if severity_filter and severity != severity_filter:
+                if not severity:
+                    continue
+                if severity_filter and _normalize_severity(severity_filter) != severity:
                     continue
                 if team_filter and team_name.lower() != team_filter:
                     continue
@@ -304,9 +319,18 @@ class RiskCriteriaCalendarView(APIView):
                     continue
 
                 ext_days = int(req.get("requested_extension_days") or 0)
-                effective_days = base_days + ext_days
+                effective_days = int(req.get("effective_deadline_days") or (base_days + ext_days))
                 event_date = (base_datetime + timedelta(days=effective_days)).date()
                 event_date_str = str(event_date)
+                dedup_key = (
+                    severity,
+                    team_name.lower(),
+                    (req.get("asset") or "").strip().lower(),
+                    (req.get("vulnerability_name") or "").strip().lower(),
+                )
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
 
                 event = {
                     "request_id": str(req.get("_id")),
@@ -429,10 +453,13 @@ class RiskCriteriaCalendarWeekView(APIView):
             report_id = (request.query_params.get("report_id") or "").strip()
             if report_id:
                 ext_query["report_id"] = report_id
+            seen = set()
             for req in db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1):
-                severity = (req.get("severity") or "").strip().lower()
+                severity = _normalize_severity(req.get("severity"))
                 team_name = (req.get("team_name") or "").strip()
-                if severity_filter and severity != severity_filter:
+                if not severity:
+                    continue
+                if severity_filter and _normalize_severity(severity_filter) != severity:
                     continue
                 if team_filter and team_name.lower() != team_filter:
                     continue
@@ -447,8 +474,18 @@ class RiskCriteriaCalendarWeekView(APIView):
                 else:
                     continue
                 ext_days = int(req.get("requested_extension_days") or 0)
-                event_date = (base_datetime + timedelta(days=base_days + ext_days)).date()
+                effective_days = int(req.get("effective_deadline_days") or (base_days + ext_days))
+                event_date = (base_datetime + timedelta(days=effective_days)).date()
                 event_date_str = str(event_date)
+                dedup_key = (
+                    severity,
+                    team_name.lower(),
+                    (req.get("asset") or "").strip().lower(),
+                    (req.get("vulnerability_name") or "").strip().lower(),
+                )
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
                 event = {
                     "request_id": str(req.get("_id")),
                     "severity": severity,
