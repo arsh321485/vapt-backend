@@ -7,7 +7,7 @@ from bson import ObjectId
 import logging
 import calendar
 import re
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 from vaptfix.mongo_client import MongoContext
 
 from risk_criteria.models import RiskCriteria
@@ -58,6 +58,27 @@ def _normalize_severity(value: str):
     if sev.startswith("low"):
         return "low"
     return None
+
+def _remaining_from_base(base_datetime, configured_days, now_utc):
+    """
+    Real-time countdown by elapsed 24h blocks from base_datetime.
+    """
+    elapsed_seconds = (now_utc - base_datetime).total_seconds()
+    elapsed_days = int(max(0, elapsed_seconds // 86400))
+    remaining_days = configured_days - elapsed_days
+
+    if remaining_days < 0:
+        overdue_days = abs(remaining_days)
+        return {"remaining_days": overdue_days, "remaining_label": "Overdue", "status": "overdue"}
+
+    weeks, days = divmod(remaining_days, 7)
+    if weeks > 0 and days > 0:
+        label = f"{weeks} week{'s' if weeks > 1 else ''} {days} day{'s' if days > 1 else ''}"
+    elif weeks > 0:
+        label = f"{weeks} week{'s' if weeks > 1 else ''}"
+    else:
+        label = f"{days} day{'s' if days != 1 else ''}"
+    return {"remaining_days": remaining_days, "remaining_label": label, "status": "active"}
 
 
 class UserRiskCriteriaListView(generics.ListAPIView):
@@ -227,32 +248,21 @@ class UserRiskCriteriaCalendarView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        base_date = (risk.updated_at or risk.created_at).date()
-        today = date.today()
-
-        def _remaining(deadline_date):
-            delta = (deadline_date - today).days
-            if delta < 0:
-                return {"days": abs(delta), "status": "overdue"}
-            weeks, days = divmod(delta, 7)
-            if weeks > 0 and days > 0:
-                label = f"{weeks} week{'s' if weeks > 1 else ''} {days} day{'s' if days > 1 else ''}"
-            elif weeks > 0:
-                label = f"{weeks} week{'s' if weeks > 1 else ''}"
-            else:
-                label = f"{days} day{'s' if days > 1 else ''}"
-            return {"days": delta, "label": label, "status": "active"}
+        base_datetime = risk.updated_at or risk.created_at
+        if base_datetime.tzinfo is None:
+            base_datetime = base_datetime.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
 
         deadlines = {}
         for severity, n_days in [("critical", critical_days), ("high", high_days),
                                   ("medium", medium_days), ("low", low_days)]:
-            deadline_date = base_date + timedelta(days=n_days)
-            remaining = _remaining(deadline_date)
+            deadline_date = (base_datetime + timedelta(days=n_days)).date()
+            remaining = _remaining_from_base(base_datetime, n_days, now)
             deadlines[severity] = {
                 "days":            n_days,
                 "deadline_date":   str(deadline_date),
-                "remaining_days":  remaining["days"],
-                "remaining_label": remaining.get("label", "Overdue"),
+                "remaining_days":  remaining["remaining_days"],
+                "remaining_label": remaining["remaining_label"],
                 "status":          remaining["status"],
             }
 
@@ -313,7 +323,7 @@ class UserRiskCriteriaCalendarView(APIView):
 
                 ext_days = int(req.get("requested_extension_days") or 0)
                 effective_days = int(req.get("effective_deadline_days") or (base_days + ext_days))
-                event_date = base_date + timedelta(days=effective_days)
+                event_date = (base_datetime + timedelta(days=effective_days)).date()
                 event_date_str = str(event_date)
                 dedup_key = (
                     severity,
@@ -364,7 +374,7 @@ class UserRiskCriteriaCalendarView(APIView):
             {
                 "message": "Calendar data retrieved successfully",
                 "risk_criteria_id": str(risk._id),
-                "base_date": str(base_date),
+                "base_date": str(base_datetime.date()),
                 "deadlines": deadlines,
                 "extension_events": extension_events,
                 "calendar": {
@@ -415,23 +425,20 @@ class UserRiskCriteriaCalendarWeekView(APIView):
         except (ValueError, TypeError) as e:
             return Response({"message": f"Risk criteria day values are invalid: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        base_date = (risk.updated_at or risk.created_at).date()
-        today = date.today()
-
-        def _remaining(deadline_date):
-            delta = (deadline_date - today).days
-            if delta < 0:
-                return {"days": abs(delta), "status": "overdue"}
-            return {"days": delta, "status": "active"}
+        base_datetime = risk.updated_at or risk.created_at
+        if base_datetime.tzinfo is None:
+            base_datetime = base_datetime.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
 
         deadlines = {}
         for severity, n_days in [("critical", critical_days), ("high", high_days), ("medium", medium_days), ("low", low_days)]:
-            deadline_date = base_date + timedelta(days=n_days)
-            remaining = _remaining(deadline_date)
+            deadline_date = (base_datetime + timedelta(days=n_days)).date()
+            remaining = _remaining_from_base(base_datetime, n_days, now)
             deadlines[severity] = {
                 "days": n_days,
                 "deadline_date": str(deadline_date),
-                "remaining_days": remaining["days"],
+                "remaining_days": remaining["remaining_days"],
+                "remaining_label": remaining["remaining_label"],
                 "status": remaining["status"],
             }
 
@@ -474,7 +481,7 @@ class UserRiskCriteriaCalendarWeekView(APIView):
 
                 ext_days = int(req.get("requested_extension_days") or 0)
                 effective_days = int(req.get("effective_deadline_days") or (base_days + ext_days))
-                event_date = base_date + timedelta(days=effective_days)
+                event_date = (base_datetime + timedelta(days=effective_days)).date()
                 event_date_str = str(event_date)
                 dedup_key = (
                     severity,
@@ -523,7 +530,7 @@ class UserRiskCriteriaCalendarWeekView(APIView):
         return Response({
             "message": "Week calendar data retrieved successfully",
             "risk_criteria_id": str(risk._id),
-            "base_date": str(base_date),
+            "base_date": str(base_datetime.date()),
             "deadlines": deadlines,
             "week": {
                 "start_date": str(week_start),

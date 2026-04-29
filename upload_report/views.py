@@ -997,6 +997,21 @@ def _where_to_run_label(where_to_run: str) -> str:
     }
     return labels.get(where_to_run, "Terminal")
 
+def _ensure_execution_guidance_fields(row: dict) -> dict:
+    commands = (row.get("commands_for_action") or "").strip()
+    if not row.get("expected_output"):
+        if commands:
+            row["expected_output"] = "Command completes successfully without errors."
+        else:
+            row["expected_output"] = "Action is completed successfully in the selected run context."
+    if not row.get("verification_check"):
+        row["verification_check"] = "Verify no error is shown and expected service/state is updated."
+    if not row.get("on_success_next_step"):
+        row["on_success_next_step"] = "Proceed to the next remediation sub-task."
+    if not row.get("on_failure_what_to_do"):
+        row["on_failure_what_to_do"] = "Check command/path/permissions, then retry. Escalate to admin if issue persists."
+    return row
+
 
 def _infer_where_to_run(commands_for_action: str, system_file_path: str = "", operating_system: str = "") -> str:
     cmd = (commands_for_action or "").strip().lower()
@@ -1040,6 +1055,7 @@ def _ensure_where_to_run_fields(mitigation_table, operating_system_hint: str = "
             new_row["where_to_run"] = where
         if not new_row.get("where_to_run_label"):
             new_row["where_to_run_label"] = _where_to_run_label(where)
+        new_row = _ensure_execution_guidance_fields(new_row)
         enriched.append(new_row)
     return enriched
 

@@ -228,6 +228,7 @@ def _parse_markdown_table(table_str: str) -> list:
         )
         row["where_to_run"] = where_to_run
         row["where_to_run_label"] = _where_to_run_label(where_to_run)
+        row = _ensure_execution_guidance_fields(row)
         # Convert artifacts_tools_used from comma-separated string to array
         raw_tools = row.get("artifacts_tools_used", "")
         if isinstance(raw_tools, str):
@@ -443,6 +444,21 @@ def _where_to_run_label(where_to_run: str) -> str:
         "not_applicable": "Not Applicable",
     }
     return labels.get(where_to_run, "Terminal")
+
+def _ensure_execution_guidance_fields(row: dict) -> dict:
+    commands = (row.get("commands_for_action") or "").strip()
+    if not row.get("expected_output"):
+        if commands:
+            row["expected_output"] = "Command completes successfully without errors."
+        else:
+            row["expected_output"] = "Action is completed successfully in the selected run context."
+    if not row.get("verification_check"):
+        row["verification_check"] = "Verify no error is shown and expected service/state is updated."
+    if not row.get("on_success_next_step"):
+        row["on_success_next_step"] = "Proceed to the next remediation sub-task."
+    if not row.get("on_failure_what_to_do"):
+        row["on_failure_what_to_do"] = "Check command/path/permissions, then retry. Escalate to admin if issue persists."
+    return row
 
 
 def _parse_raw_response_sections(raw_text: str) -> list:

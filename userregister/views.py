@@ -793,6 +793,21 @@ class UserFixVulnerabilityStepsAPIView(APIView):
         }
         return labels.get(where_to_run, "Terminal")
 
+    def _ensure_execution_guidance_fields(self, os_data: dict) -> dict:
+        commands = (os_data.get("commands_for_action") or "").strip()
+        if not os_data.get("expected_output"):
+            if commands:
+                os_data["expected_output"] = "Command completes successfully without errors."
+            else:
+                os_data["expected_output"] = "Action is completed successfully in the selected run context."
+        if not os_data.get("verification_check"):
+            os_data["verification_check"] = "Verify no error is shown and expected service/state is updated."
+        if not os_data.get("on_success_next_step"):
+            os_data["on_success_next_step"] = "Proceed to the next remediation sub-task."
+        if not os_data.get("on_failure_what_to_do"):
+            os_data["on_failure_what_to_do"] = "Check command/path/permissions, then retry. Escalate to admin if issue persists."
+        return os_data
+
     def _parse_mitigation_steps(self, mitigation_table):
         META_KEYS = {"step_no", "step_name", "criticality", "effort_estimate", "operating_system"}
         steps_dict = {}
@@ -816,6 +831,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
             )
             os_data["where_to_run"] = where_to_run
             os_data["where_to_run_label"] = os_data.get("where_to_run_label") or self._where_to_run_label(where_to_run)
+            os_data = self._ensure_execution_guidance_fields(os_data)
 
             if step_num not in steps_dict:
                 steps_dict[step_num] = {
@@ -1047,8 +1063,14 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                             "step_name": self.DEFAULT_STEP_DESCRIPTIONS[n],
                             "criticality": "",
                             "effort_estimate": "",
-                            "windows": {},
-                            "linux": {},
+                            "windows": self._ensure_execution_guidance_fields({
+                                "where_to_run": "terminal",
+                                "where_to_run_label": self._where_to_run_label("terminal"),
+                            }),
+                            "linux": self._ensure_execution_guidance_fields({
+                                "where_to_run": "terminal",
+                                "where_to_run_label": self._where_to_run_label("terminal"),
+                            }),
                         }
                         for n in step_order
                     }
@@ -1082,6 +1104,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     })
 
                     _os_key = "linux" if operating_system and operating_system.lower() in ("linux", "unix") else "windows"
+                    os_payload = self._ensure_execution_guidance_fields(dict(step_meta.get(_os_key) or {}))
                     step_data = {
                         "_id": str(saved["_id"]) if saved else "",
                         "step_number": display_idx,
@@ -1089,7 +1112,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         "criticality": step_meta["criticality"],
                         "effort_estimate": step_meta["effort_estimate"],
                         "sub_tasks": step_meta.get("sub_tasks", []),
-                        _os_key: step_meta[_os_key],
+                        _os_key: os_payload,
                         "assigned_team": assigned_team,
                         "assigned_team_members": [
                             {"user_id": m.get("user_id"), "name": m.get("name"), "email": m.get("email")}
