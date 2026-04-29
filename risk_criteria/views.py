@@ -15,7 +15,6 @@ import logging
 import calendar
 import re
 from datetime import date, timedelta, datetime, timezone
-import math
 from vaptfix.mongo_client import MongoContext
 
 logger = logging.getLogger(__name__)
@@ -68,6 +67,29 @@ def _normalize_severity(value: str):
     if sev.startswith("low"):
         return "low"
     return None
+
+def _remaining_from_base(base_datetime, configured_days, now_utc):
+    """
+    Real-time countdown by elapsed 24h blocks from base_datetime.
+    - 0 to <24h elapsed: remaining stays as configured_days
+    - at 24h elapsed: remaining decrements by 1
+    """
+    elapsed_seconds = (now_utc - base_datetime).total_seconds()
+    elapsed_days = int(max(0, elapsed_seconds // 86400))
+    remaining_days = configured_days - elapsed_days
+
+    if remaining_days < 0:
+        overdue_days = abs(remaining_days)
+        return {"remaining_days": overdue_days, "remaining_label": "Overdue", "status": "overdue"}
+
+    weeks, days = divmod(remaining_days, 7)
+    if weeks > 0 and days > 0:
+        label = f"{weeks} week{'s' if weeks > 1 else ''} {days} day{'s' if days > 1 else ''}"
+    elif weeks > 0:
+        label = f"{weeks} week{'s' if weeks > 1 else ''}"
+    else:
+        label = f"{days} day{'s' if days != 1 else ''}"
+    return {"remaining_days": remaining_days, "remaining_label": label, "status": "active"}
 
 
 class RiskCriteriaCreateView(generics.CreateAPIView):
@@ -235,34 +257,17 @@ class RiskCriteriaCalendarView(APIView):
             base_datetime = base_datetime.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
 
-        def _remaining(n_days):
-            deadline_dt = base_datetime + timedelta(days=n_days)
-            delta = deadline_dt - now
-            total_seconds = delta.total_seconds()
-            if total_seconds <= 0:
-                overdue_days = math.ceil(abs(total_seconds) / 86400)
-                return {"days": overdue_days, "status": "overdue"}
-            remaining_days = math.ceil(total_seconds / 86400)
-            weeks, days = divmod(remaining_days, 7)
-            if weeks > 0 and days > 0:
-                label = f"{weeks} week{'s' if weeks > 1 else ''} {days} day{'s' if days > 1 else ''}"
-            elif weeks > 0:
-                label = f"{weeks} week{'s' if weeks > 1 else ''}"
-            else:
-                label = f"{days} day{'s' if days > 1 else ''}"
-            return {"days": remaining_days, "label": label, "status": "active"}
-
         # Calculate deadline dates with remaining days
         deadlines = {}
         for severity, n_days in [("critical", critical_days), ("high", high_days),
                                   ("medium", medium_days), ("low", low_days)]:
             deadline_date = (base_datetime + timedelta(days=n_days)).date()
-            remaining = _remaining(n_days)
+            remaining = _remaining_from_base(base_datetime, n_days, now)
             deadlines[severity] = {
                 "days":           n_days,
                 "deadline_date":  str(deadline_date),
-                "remaining_days": remaining["days"],
-                "remaining_label": remaining.get("label", "Overdue"),
+                "remaining_days": remaining["remaining_days"],
+                "remaining_label": remaining["remaining_label"],
                 "status":         remaining["status"],
             }
 
@@ -422,22 +427,15 @@ class RiskCriteriaCalendarWeekView(APIView):
             base_datetime = base_datetime.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
 
-        def _remaining(n_days):
-            deadline_dt = base_datetime + timedelta(days=n_days)
-            delta = deadline_dt - now
-            total_seconds = delta.total_seconds()
-            if total_seconds <= 0:
-                return {"days": math.ceil(abs(total_seconds) / 86400), "status": "overdue"}
-            return {"days": math.ceil(total_seconds / 86400), "status": "active"}
-
         deadlines = {}
         for severity, n_days in [("critical", critical_days), ("high", high_days), ("medium", medium_days), ("low", low_days)]:
             deadline_date = (base_datetime + timedelta(days=n_days)).date()
-            remaining = _remaining(n_days)
+            remaining = _remaining_from_base(base_datetime, n_days, now)
             deadlines[severity] = {
                 "days": n_days,
                 "deadline_date": str(deadline_date),
-                "remaining_days": remaining["days"],
+                "remaining_days": remaining["remaining_days"],
+                "remaining_label": remaining["remaining_label"],
                 "status": remaining["status"],
             }
 
