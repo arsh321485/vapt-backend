@@ -110,8 +110,8 @@ def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
     Avoids BeautifulSoup full DOM build to prevent hangs on huge inputs.
     """
     host_regex = re.compile(
-        r'font-size:\s*22px[^"]*font-weight:\s*700[^"]*">\s*([^<\n\r]+)\s*</div>',
-        re.IGNORECASE,
+        r'<div[^>]*style="[^"]*font-size\s*:\s*22px[^"]*"[^>]*>(.*?)</div>',
+        re.IGNORECASE | re.DOTALL,
     )
     toggle_block_regex = re.compile(
         r'<div[^>]*onclick="[^"]*toggleSection\([^"]*\)[^"]*"[^>]*>(.*?)</div>',
@@ -121,121 +121,101 @@ def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
         r'(\d{3,7})\s*[-:]\s*([A-Za-z][^<\n\r]{3,200})',
         re.IGNORECASE,
     )
+    risk_regex = re.compile(r"risk\s*factor.*?(critical|high|medium|low)", re.IGNORECASE | re.DOTALL)
 
     vulnerabilities_by_host: List[Dict[str, Any]] = []
     current_host: Optional[Dict[str, Any]] = None
+    host_map: Dict[str, Dict[str, Any]] = {}
     total_vulns = 0
+    host_markers = []
 
-    for raw_line in content.splitlines():
-        host_match = host_regex.search(raw_line)
-        if host_match:
-            host_name = _strip_tags_quick(host_match.group(1))
-            if host_name:
-                if len(vulnerabilities_by_host) >= HTML_PARSE_MAX_HOSTS:
-                    break
-                current_host = {
-                    "host_name": host_name,
-                    "host_information": {},
-                    "vulnerabilities": [],
-                }
-                vulnerabilities_by_host.append(current_host)
+    # Build host markers with byte/char position for better vuln->host mapping.
+    for hm in host_regex.finditer(content):
+        raw_host = _strip_tags_quick(hm.group(1))
+        if not raw_host:
             continue
-
-        if not current_host:
+        if len(raw_host) > 300:
             continue
+        host_markers.append((hm.start(), raw_host))
 
-        if "toggleSection(" not in raw_line:
-            continue
+    # Do not use line-by-line vulnerability extraction for huge reports:
+    # it is inaccurate for host/risk mapping and can produce poor counts.
 
+    # Robust block-level scan across full HTML.
+    # Works for large files and preserves host + risk_factor when available.
+    for m in toggle_block_regex.finditer(content):
         if total_vulns >= HTML_PARSE_MAX_VULNS_TOTAL:
             break
-        if len(current_host["vulnerabilities"]) >= HTML_PARSE_MAX_VULNS_PER_HOST:
+
+        raw_title = _strip_tags_quick(m.group(1))
+        if not raw_title:
             continue
 
-        # Title usually appears as: "51192 - SSL Certificate Cannot Be Trusted"
-        title_text = _strip_tags_quick(raw_line)
-
         plugin_id = None
-        plugin_name = title_text.rstrip(" -").strip()
-        m = re.match(r"^\s*(\d+)\s*[-:]\s*(.+)$", plugin_name)
-        if m:
-            plugin_id = m.group(1).strip()
-            plugin_name = m.group(2).strip().rstrip(" -").strip()
+        plugin_name = raw_title.rstrip(" -").strip()
+        m2 = re.match(r"^\s*(\d+)\s*[-:]\s*(.+)$", plugin_name)
+        if m2:
+            plugin_id = m2.group(1).strip()
+            plugin_name = m2.group(2).strip().rstrip(" -").strip()
+        else:
+            fb = plugin_title_fallback_regex.search(raw_title)
+            if fb:
+                plugin_id = fb.group(1).strip()
+                plugin_name = fb.group(2).strip()
+
         if not plugin_name:
             continue
 
-        # Keep a minimal record so upload succeeds and downstream pipeline can run.
-        vuln = {
-            "plugin_id": plugin_id,
-            "plugin_name": plugin_name,
-            "synopsis": "",
-            "description": plugin_name,
-            "description_points": [plugin_name],
-            "solution": "",
-            "see_also": [],
-            "risk_factor": "",
-            "cvss_v3_base_score": "",
-            "plugin_information": "",
-            "plugin_output": "",
-            "plugin_output_url": None,
-        }
-        current_host["vulnerabilities"].append(vuln)
-        total_vulns += 1
-
-    # If line-based extraction failed, do a robust block-level scan across full HTML.
-    if total_vulns == 0:
-        if not vulnerabilities_by_host:
-            vulnerabilities_by_host.append(
-                {
-                    "host_name": "unknown-host",
-                    "host_information": {},
-                    "vulnerabilities": [],
-                }
-            )
-        current_host = vulnerabilities_by_host[0]
-
-        for m in toggle_block_regex.finditer(content):
-            if total_vulns >= HTML_PARSE_MAX_VULNS_TOTAL:
-                break
-            if len(current_host["vulnerabilities"]) >= HTML_PARSE_MAX_VULNS_PER_HOST:
-                break
-
-            raw_title = _strip_tags_quick(m.group(1))
-            if not raw_title:
-                continue
-
-            plugin_id = None
-            plugin_name = raw_title.rstrip(" -").strip()
-            m2 = re.match(r"^\s*(\d+)\s*[-:]\s*(.+)$", plugin_name)
-            if m2:
-                plugin_id = m2.group(1).strip()
-                plugin_name = m2.group(2).strip().rstrip(" -").strip()
+        # Resolve host by nearest previous host marker.
+        vuln_pos = m.start()
+        matched_host = "unknown-host"
+        for pos, hname in host_markers:
+            if pos <= vuln_pos:
+                matched_host = hname
             else:
-                fb = plugin_title_fallback_regex.search(raw_title)
-                if fb:
-                    plugin_id = fb.group(1).strip()
-                    plugin_name = fb.group(2).strip()
+                break
 
-            if not plugin_name:
-                continue
+        host_entry = host_map.get(matched_host)
+        if not host_entry:
+            if len(host_map) >= HTML_PARSE_MAX_HOSTS:
+                break
+            host_entry = {
+                "host_name": matched_host,
+                "host_information": {},
+                "vulnerabilities": [],
+            }
+            host_map[matched_host] = host_entry
+            vulnerabilities_by_host.append(host_entry)
 
-            current_host["vulnerabilities"].append(
-                {
-                    "plugin_id": plugin_id,
-                    "plugin_name": plugin_name,
-                    "synopsis": "",
-                    "description": plugin_name,
-                    "description_points": [plugin_name],
-                    "solution": "",
-                    "see_also": [],
-                    "risk_factor": "",
-                    "cvss_v3_base_score": "",
-                    "plugin_information": "",
-                    "plugin_output": "",
-                    "plugin_output_url": None,
-                }
-            )
-            total_vulns += 1
+        if len(host_entry["vulnerabilities"]) >= HTML_PARSE_MAX_VULNS_PER_HOST:
+            continue
+
+        # Try extracting risk factor from nearby section after this toggle block.
+        tail = content[m.end(): m.end() + 8000]
+        risk_m = re.search(
+            r"Risk\s*Factor.*?</div>\s*</div>\s*<div[^>]*>\s*(Critical|High|Medium|Low)\s*<",
+            tail,
+            re.IGNORECASE | re.DOTALL,
+        ) or risk_regex.search(tail)
+        risk_value = risk_m.group(1).title() if risk_m else ""
+
+        host_entry["vulnerabilities"].append(
+            {
+                "plugin_id": plugin_id,
+                "plugin_name": plugin_name,
+                "synopsis": "",
+                "description": plugin_name,
+                "description_points": [plugin_name],
+                "solution": "",
+                "see_also": [],
+                "risk_factor": risk_value,
+                "cvss_v3_base_score": "",
+                "plugin_information": "",
+                "plugin_output": "",
+                "plugin_output_url": None,
+            }
+        )
+        total_vulns += 1
 
     total_hosts = len(vulnerabilities_by_host)
     return {
