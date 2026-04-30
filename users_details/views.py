@@ -380,7 +380,7 @@ class UserDetailCreateView(generics.CreateAPIView):
 
     def _logo_html(self, logo_b64):
         if logo_b64:
-            return f'<img src="data:image/png;base64,{logo_b64}" alt="VaptFix Pro" style="height:48px;" />'
+            return '<img src="cid:vaptfix_logo" alt="VaptFix Pro" style="height:48px;" />'
         return '<span style="color:#ffffff; font-size:20px; font-weight:bold; letter-spacing:1px;">VaptFix Pro</span>'
 
     def _attach_logo(self, message, logo_b64):

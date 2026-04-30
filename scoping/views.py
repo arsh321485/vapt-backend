@@ -149,6 +149,16 @@ class UploadStatusView(APIView):
             if not file_uploaded:
                 return Response({"file_uploaded": False}, status=status.HTTP_200_OK)
 
+            # Redirect should track latest relevant upload attempt, not stale old rows.
+            # Prefer latest successful parse; fallback to latest report.
+            successful_reports = [
+                r for r in reports
+                if (getattr(r, "status", "") or "").strip().lower() == "successfully processed"
+            ]
+            if successful_reports:
+                reports = [successful_reports[-1]]
+            else:
+                reports = [reports[-1]]
             processing_started_at = reports[0].uploaded_at
 
             # File exists — now check if all vulnerability cards are generated

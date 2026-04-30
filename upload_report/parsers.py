@@ -7,6 +7,7 @@ import os
 import re
 import html
 import json
+import time
 import defusedxml.ElementTree as ET
 from typing import Dict, Any, List, Optional
 import pandas as pd
@@ -19,6 +20,14 @@ try:
 except ImportError:
     BS4_AVAILABLE = False
     BeautifulSoup = None
+
+
+# Guardrails for very large Nessus HTML exports to avoid pathological runtimes.
+HTML_PARSE_MAX_SECONDS = 900  # 15 minutes hard ceiling
+HTML_PARSE_MAX_HOSTS = 500
+HTML_PARSE_MAX_VULNS_TOTAL = 30000
+HTML_PARSE_MAX_VULNS_PER_HOST = 300
+HTML_LARGE_FILE_THRESHOLD_BYTES = 25 * 1024 * 1024
 
 
 # ==================== HELPER FUNCTIONS ==================== #
@@ -87,6 +96,162 @@ def _split_text_to_points(text: str) -> List[str]:
         if value:
             cleaned.append(value)
     return cleaned
+
+
+def _strip_tags_quick(value: str) -> str:
+    if not value:
+        return ""
+    return re.sub(r"<[^>]+>", "", value).replace("&nbsp;", " ").strip()
+
+
+def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
+    """
+    Fast fallback parser for very large Nessus HTML files.
+    Avoids BeautifulSoup full DOM build to prevent hangs on huge inputs.
+    """
+    host_regex = re.compile(
+        r'font-size:\s*22px[^"]*font-weight:\s*700[^"]*">\s*([^<\n\r]+)\s*</div>',
+        re.IGNORECASE,
+    )
+    toggle_block_regex = re.compile(
+        r'<div[^>]*onclick="[^"]*toggleSection\([^"]*\)[^"]*"[^>]*>(.*?)</div>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    plugin_title_fallback_regex = re.compile(
+        r'(\d{3,7})\s*[-:]\s*([A-Za-z][^<\n\r]{3,200})',
+        re.IGNORECASE,
+    )
+
+    vulnerabilities_by_host: List[Dict[str, Any]] = []
+    current_host: Optional[Dict[str, Any]] = None
+    total_vulns = 0
+
+    for raw_line in content.splitlines():
+        host_match = host_regex.search(raw_line)
+        if host_match:
+            host_name = _strip_tags_quick(host_match.group(1))
+            if host_name:
+                if len(vulnerabilities_by_host) >= HTML_PARSE_MAX_HOSTS:
+                    break
+                current_host = {
+                    "host_name": host_name,
+                    "host_information": {},
+                    "vulnerabilities": [],
+                }
+                vulnerabilities_by_host.append(current_host)
+            continue
+
+        if not current_host:
+            continue
+
+        if "toggleSection(" not in raw_line:
+            continue
+
+        if total_vulns >= HTML_PARSE_MAX_VULNS_TOTAL:
+            break
+        if len(current_host["vulnerabilities"]) >= HTML_PARSE_MAX_VULNS_PER_HOST:
+            continue
+
+        # Title usually appears as: "51192 - SSL Certificate Cannot Be Trusted"
+        title_text = _strip_tags_quick(raw_line)
+
+        plugin_id = None
+        plugin_name = title_text.rstrip(" -").strip()
+        m = re.match(r"^\s*(\d+)\s*[-:]\s*(.+)$", plugin_name)
+        if m:
+            plugin_id = m.group(1).strip()
+            plugin_name = m.group(2).strip().rstrip(" -").strip()
+        if not plugin_name:
+            continue
+
+        # Keep a minimal record so upload succeeds and downstream pipeline can run.
+        vuln = {
+            "plugin_id": plugin_id,
+            "plugin_name": plugin_name,
+            "synopsis": "",
+            "description": plugin_name,
+            "description_points": [plugin_name],
+            "solution": "",
+            "see_also": [],
+            "risk_factor": "",
+            "cvss_v3_base_score": "",
+            "plugin_information": "",
+            "plugin_output": "",
+            "plugin_output_url": None,
+        }
+        current_host["vulnerabilities"].append(vuln)
+        total_vulns += 1
+
+    # If line-based extraction failed, do a robust block-level scan across full HTML.
+    if total_vulns == 0:
+        if not vulnerabilities_by_host:
+            vulnerabilities_by_host.append(
+                {
+                    "host_name": "unknown-host",
+                    "host_information": {},
+                    "vulnerabilities": [],
+                }
+            )
+        current_host = vulnerabilities_by_host[0]
+
+        for m in toggle_block_regex.finditer(content):
+            if total_vulns >= HTML_PARSE_MAX_VULNS_TOTAL:
+                break
+            if len(current_host["vulnerabilities"]) >= HTML_PARSE_MAX_VULNS_PER_HOST:
+                break
+
+            raw_title = _strip_tags_quick(m.group(1))
+            if not raw_title:
+                continue
+
+            plugin_id = None
+            plugin_name = raw_title.rstrip(" -").strip()
+            m2 = re.match(r"^\s*(\d+)\s*[-:]\s*(.+)$", plugin_name)
+            if m2:
+                plugin_id = m2.group(1).strip()
+                plugin_name = m2.group(2).strip().rstrip(" -").strip()
+            else:
+                fb = plugin_title_fallback_regex.search(raw_title)
+                if fb:
+                    plugin_id = fb.group(1).strip()
+                    plugin_name = fb.group(2).strip()
+
+            if not plugin_name:
+                continue
+
+            current_host["vulnerabilities"].append(
+                {
+                    "plugin_id": plugin_id,
+                    "plugin_name": plugin_name,
+                    "synopsis": "",
+                    "description": plugin_name,
+                    "description_points": [plugin_name],
+                    "solution": "",
+                    "see_also": [],
+                    "risk_factor": "",
+                    "cvss_v3_base_score": "",
+                    "plugin_information": "",
+                    "plugin_output": "",
+                    "plugin_output_url": None,
+                }
+            )
+            total_vulns += 1
+
+    total_hosts = len(vulnerabilities_by_host)
+    return {
+        "type": "nessus_html",
+        "scan_info": {
+            "parse_mode": "lightweight",
+            "note": "Large HTML parsed with lightweight fallback mode.",
+        },
+        "total_hosts": total_hosts,
+        "total_vulnerabilities": total_vulns,
+        "vulnerabilities_by_host": vulnerabilities_by_host,
+        "parse_warning": (
+            "Large HTML parsed in lightweight mode for stability. "
+            "Use .nessus/.xml for complete structured details."
+        ),
+    }
 
 
 # ==================== PDF PARSER ==================== #
@@ -403,19 +568,27 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
     except Exception as exc:
         return {"error": f"Could not open HTML file: {exc}"}
 
+    # Hard fallback for very large files: prioritize completion and non-hanging behavior.
+    if len(content.encode("utf-8", errors="ignore")) >= HTML_LARGE_FILE_THRESHOLD_BYTES:
+        return _parse_nessus_html_lightweight(content)
+
+    # Parse once with BS4. For very large files, avoid full-document get_text()
+    # because it is extremely expensive and can stall processing.
     soup = BeautifulSoup(content, "html.parser")
-    text_lower = soup.get_text(" ", strip=True).lower()
+    quick_probe = content[:2_000_000].lower()
 
     # Verify this is a Nessus report - check for multiple indicators
     is_nessus = (
-        "tenable" in text_lower or 
-        "nessus" in text_lower or 
-        "report generated by" in text_lower or
-        "vulnerabilities by host" in text_lower
+        "tenable" in quick_probe or
+        "nessus" in quick_probe or
+        "report generated by" in quick_probe or
+        "vulnerabilities by host" in quick_probe
     )
     
     if not is_nessus:
         return parse_html(file_path)  # Fallback to generic HTML parser
+
+    parse_started_at = time.perf_counter()
 
     # Extract scan information
     scan_info = {}
@@ -456,7 +629,17 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
             if host_text and (re.match(r"^(\d{1,3}\.){3}\d{1,3}$", host_text) or len(host_text) < 300):
                 host_headers.append((div, host_text))
     
+    total_vulns_seen = 0
+    truncated_due_to_limits = False
+
     for idx, (host_header, host_name) in enumerate(host_headers):
+        # Safety guard for very large HTML reports.
+        if time.perf_counter() - parse_started_at > HTML_PARSE_MAX_SECONDS:
+            truncated_due_to_limits = True
+            break
+        if len(vulnerabilities_by_host) >= HTML_PARSE_MAX_HOSTS:
+            truncated_due_to_limits = True
+            break
         if not host_name:
             continue
         
@@ -475,6 +658,9 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
         current = host_header.next_sibling
         
         while current:
+            if time.perf_counter() - parse_started_at > HTML_PARSE_MAX_SECONDS:
+                truncated_due_to_limits = True
+                break
             # Stop at next host
             if current == next_host_header:
                 break
@@ -500,6 +686,12 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                 # Check for vulnerability toggle divs (containing plugin ID and name)
                 onclick = current.get("onclick", "")
                 if "toggleSection" in onclick:
+                    if total_vulns_seen >= HTML_PARSE_MAX_VULNS_TOTAL:
+                        truncated_due_to_limits = True
+                        break
+                    if len(host_entry["vulnerabilities"]) >= HTML_PARSE_MAX_VULNS_PER_HOST:
+                        truncated_due_to_limits = True
+                        break
                     vuln_title = _clean_text(current)
                     
                     # Parse plugin ID and name from title (format: "51192 - SSL Certificate Cannot Be Trusted")
@@ -532,6 +724,9 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                         field_headers = vuln_container.find_all("div", class_="details-header")
                         
                         for field_header in field_headers:
+                            if time.perf_counter() - parse_started_at > HTML_PARSE_MAX_SECONDS:
+                                truncated_due_to_limits = True
+                                break
                             field_name = _clean_text(field_header).strip()
                             field_name_lower = field_name.lower()
                             
@@ -540,17 +735,8 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                             
                             # Handle "See Also" - it might be in a table
                             if "see also" in field_name_lower:
-                                # Look for table with links
-                                see_also_table = field_header.find_next("div", class_="table-wrapper")
                                 links = []
-                                if see_also_table:
-                                    table = see_also_table.find("table")
-                                    if table:
-                                        for link_tag in table.find_all("a", href=True):
-                                            href = link_tag.get("href", "")
-                                            if href:
-                                                links.append(href)
-                                elif content_div:
+                                if content_div:
                                     # Fallback: extract links from text
                                     text = _clean_text(content_div)
                                     links = [l.strip() for l in re.split(r'[\n,;]+', text) if l.strip() and l.strip().startswith(('http://', 'https://'))]
@@ -559,26 +745,13 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                             
                             # Handle "Plugin Output" - it contains h2 tags with port info and monospace divs
                             elif "plugin output" in field_name_lower:
-                                # Find all h2 tags (port/service identifiers) and their associated content
-                                h2_tags = field_header.find_all_next("h2", limit=50)
-                                output_parts = []
-                                
-                                for h2 in h2_tags:
-                                    if h2.find_parent("div", class_="section-wrapper") != vuln_container:
-                                        break
-                                    
-                                    port_service = _clean_text(h2)
-                                    if port_service:
-                                        output_parts.append(port_service)
-                                    
-                                    # Find monospace-styled div after h2
-                                    monospace_div = h2.find_next_sibling("div")
-                                    if monospace_div:
-                                        style = monospace_div.get("style", "")
-                                        if "monospace" in style.lower() or "font-family: monospace" in style.lower():
-                                            output_parts.append(_clean_text(monospace_div))
-                                
-                                vuln_data["plugin_output"] = "\n".join(output_parts).strip()[:20000]
+                                # Keep this extraction scoped and cheap. The previous
+                                # find_all_next approach becomes O(n^2) on huge reports.
+                                if content_div:
+                                    po_text = content_div.get_text("\n", strip=True)
+                                else:
+                                    po_text = ""
+                                vuln_data["plugin_output"] = po_text[:12000]
                             
                             # Handle other fields - extract text content from following div
                             elif content_div:
@@ -615,6 +788,9 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                                 vuln_data["plugin_output_url"] = url_match.group(1).rstrip('.,;)')
 
                         host_entry["vulnerabilities"].append(vuln_data)
+                        total_vulns_seen += 1
+                        if truncated_due_to_limits:
+                            break
             
             # Move to next sibling
             try:
@@ -625,6 +801,8 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
         # Only add host if it has vulnerabilities or host information
         if host_entry["vulnerabilities"] or host_entry["host_information"]:
             vulnerabilities_by_host.append(host_entry)
+        if truncated_due_to_limits:
+            break
     
     def _filter_hosts_by_severity(hosts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         allowed = {"critical", "high", "medium", "low"}
@@ -653,13 +831,19 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
     if total_vulnerabilities == 0 and total_hosts == 0:
         return parse_html(file_path)
     
-    return {
+    result = {
         "type": "nessus_html",
         "scan_info": scan_info,
         "total_hosts": total_hosts,
         "total_vulnerabilities": total_vulnerabilities,
         "vulnerabilities_by_host": filtered_hosts
     }
+    if truncated_due_to_limits:
+        result["parse_warning"] = (
+            "Large HTML report parsed with safety limits; output may be partial. "
+            "Prefer .nessus/.xml export for complete data."
+        )
+    return result
 
 
 # ==================== GENERIC HTML PARSER ==================== #

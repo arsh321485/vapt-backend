@@ -11,6 +11,7 @@ import threading
 import logging
 import time
 import pymongo
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 def check_admin_scoping_complete(admin_user):
@@ -93,7 +94,7 @@ class UploadReportAdminForm(forms.ModelForm):
 class UploadReportAdmin(admin.ModelAdmin):
     form = UploadReportAdminForm
 
-    list_display = ('_id', 'file', 'get_admin_id', 'get_admin_email', 'uploaded_at')
+    list_display = ('_id', 'file', 'status', 'parsed_count', 'get_admin_id', 'get_admin_email', 'uploaded_at')
     search_fields = ('file',)
     list_filter = ('uploaded_at',)
     readonly_fields = ()
@@ -262,6 +263,106 @@ class UploadReportAdmin(admin.ModelAdmin):
         extra_context['show_save_and_continue'] = False
         return super().changeform_view(request, object_id, form_url, extra_context)
 
+    def _parse_and_store_report_bg(self, report_pk, admin_email, admin_id, original_filename, upload_estimate_seconds):
+        """Parse report in background to avoid admin request hangs."""
+        started = time.perf_counter()
+        print(f"[AdminUploadBG] Worker started for report_pk={report_pk}", flush=True)
+        try:
+            from .parsers import dispatch_parse
+            from .models import UploadReport as _UploadReport
+
+            report_obj = None
+            # Small retry window in case thread runs before DB visibility is stable.
+            for _ in range(10):
+                report_obj = _UploadReport.objects.filter(pk=report_pk).first()
+                if report_obj:
+                    break
+                time.sleep(0.5)
+            if not report_obj:
+                logger.error(f"[AdminUploadBG] Report not found for report_pk={report_pk}")
+                print(f"[AdminUploadBG] Report not found for report_pk={report_pk}", flush=True)
+                return
+
+            report_obj.status = "Processing"
+            report_obj.save()
+
+            report_id = str(report_obj._id)
+            file_path = os.path.join(settings.MEDIA_ROOT, report_obj.file.name)
+            parsed_data = dispatch_parse(file_path, original_filename)
+            if not parsed_data or "error" in parsed_data:
+                error_msg = (parsed_data or {}).get("error", "Unknown parsing error")
+                report_obj.status = "Parse Error"
+                report_obj.save()
+                logger.error(f"[AdminUploadBG] Parse failed report_id={report_id}: {error_msg}")
+                print(f"[AdminUploadBG] Parse failed report_id={report_id}: {error_msg}", flush=True)
+                return
+
+            parsed_count = 1
+            if parsed_data.get("type") in ("nessus", "nessus_html"):
+                parsed_count = parsed_data.get("total_vulnerabilities", 1) or 1
+            elif "rows" in parsed_data:
+                parsed_count = parsed_data.get("rows", 1)
+
+            report_obj.parsed_count = parsed_count
+            report_obj.status = "Successfully Processed"
+            report_obj.save()
+            print(
+                f"[AdminUploadBG] Parsed report_id={report_id} type={parsed_data.get('type')} parsed_count={parsed_count}",
+                flush=True
+            )
+
+            mongodb_stored = self._store_in_mongodb(
+                parsed_data=parsed_data,
+                report_id=str(report_obj._id),
+                admin_email=admin_email,
+                original_filename=original_filename,
+                member_type=report_obj.member_type or "external",
+            )
+            if not mongodb_stored:
+                report_obj.status = "MongoDB Storage Failed"
+                report_obj.save()
+                logger.warning(f"[AdminUploadBG] MongoDB store failed report_id={report_id}")
+                print(f"[AdminUploadBG] MongoDB store failed report_id={report_id}", flush=True)
+                return
+
+            upload_actual_seconds = time.perf_counter() - started
+            if parsed_data.get("type") in ("nessus", "nessus_html"):
+                try:
+                    mongo_uri = self._get_mongo_uri()
+                    with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as _client:
+                        _db = self._get_mongo_db(_client)
+                        _db["nessus_reports"].update_one(
+                            {"report_id": str(report_obj._id)},
+                            {"$set": {"upload_processing_seconds": int(round(upload_actual_seconds))}}
+                        )
+                except Exception as _upe:
+                    logger.warning(f"[AdminUploadBG] Could not store upload_processing_seconds: {_upe}")
+
+            # Auto-generate vulnerability cards in background (only for nessus reports)
+            if parsed_data.get("type") in ("nessus", "nessus_html"):
+                from .views import _auto_generate_cards_bg
+                t = threading.Thread(
+                    target=_auto_generate_cards_bg,
+                    args=(str(report_obj._id), admin_email, admin_id),
+                    daemon=True
+                )
+                t.start()
+                logger.info(f"[AdminUploadBG] Auto card generation started report_id={report_id}")
+                print(f"[AdminUploadBG] Auto card generation started report_id={report_id}", flush=True)
+
+            logger.info(
+                "[AdminUploadBG] Completed report_id=%s parsed_count=%s upload_actual=%ss estimated=%ss",
+                report_id, parsed_count, int(round(upload_actual_seconds)), upload_estimate_seconds
+            )
+            print(
+                f"[AdminUploadBG] Completed report_id={report_id} parsed_count={parsed_count} "
+                f"upload_actual={int(round(upload_actual_seconds))}s",
+                flush=True
+            )
+        except Exception as e:
+            logger.error(f"[AdminUploadBG] Unexpected error report_pk={report_pk}: {e}", exc_info=True)
+            print(f"[AdminUploadBG] Unexpected error report_pk={report_pk}: {e}", flush=True)
+
     def save_model(self, request, obj, form, change):
         """Save model and parse/store file data in MongoDB."""
         op_started = time.perf_counter()
@@ -300,6 +401,44 @@ class UploadReportAdmin(admin.ModelAdmin):
 
         # Parse and store data in MongoDB for new files
         if is_new_file:
+            ext = os.path.splitext((uploaded_file.name or ""))[1].lower()
+            file_size = int(getattr(uploaded_file, "size", 0) or 0)
+            # For large HTML uploads, offload parse/store to background to prevent admin hangs.
+            if ext in (".html", ".htm") and file_size >= 20 * 1024 * 1024:
+                obj.status = "Queued for Processing"
+                obj.save()
+                print(
+                    f"[AdminUploadBG] Queued large HTML report pk={obj.pk} file_size={file_size}",
+                    flush=True
+                )
+                def _launch_bg_worker():
+                    try:
+                        t = threading.Thread(
+                            target=self._parse_and_store_report_bg,
+                            args=(
+                                obj.pk,
+                                admin_user.email,
+                                str(admin_user.id),
+                                uploaded_file.name,
+                                upload_estimate_seconds,
+                            ),
+                            daemon=True
+                        )
+                        t.start()
+                        print(f"[AdminUploadBG] Worker thread launched for pk={obj.pk}", flush=True)
+                    except Exception as launch_exc:
+                        logger.error(f"[AdminUploadBG] Failed to launch worker for pk={obj.pk}: {launch_exc}", exc_info=True)
+                        print(f"[AdminUploadBG] Failed to launch worker for pk={obj.pk}: {launch_exc}", flush=True)
+
+                transaction.on_commit(_launch_bg_worker)
+                messages.info(
+                    request,
+                    (
+                        "Large HTML report queued for background processing. "
+                        "You can safely leave this page and check the report status later."
+                    )
+                )
+                return
             try:
                 from .parsers import dispatch_parse
 
