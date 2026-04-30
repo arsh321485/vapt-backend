@@ -704,7 +704,31 @@ class UserSetPasswordView(APIView):
             data=request.data,
             context={"uid": uid, "token": token}
         )
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except serializers.ValidationError as exc:
+            errors = exc.detail
+            detail_message = "Unable to set password."
+
+            if isinstance(errors, dict):
+                first_error = next(iter(errors.values()), None)
+                if isinstance(first_error, list) and first_error:
+                    detail_message = str(first_error[0])
+                elif first_error is not None:
+                    detail_message = str(first_error)
+            elif isinstance(errors, list) and errors:
+                detail_message = str(errors[0])
+            elif errors:
+                detail_message = str(errors)
+
+            return Response(
+                {
+                    "msg": "Failed to set password",
+                    "detail": detail_message,
+                    "errors": errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Send post-password welcome email
         try:
