@@ -967,6 +967,17 @@ class UserAssetHoldAPIView(APIView):
                 # Count only team-filtered assets
                 total_assets = _compute_total_assets(db, report_id, team_plugins)
 
+                try:
+                    from notifications.utils import create_notification
+                    _n_meta = {"asset": host_name, "report_id": str(report_id)}
+                    _n_title = f"Asset On Hold: {host_name}"
+                    _n_msg = (f"Asset On Hold: {host_name} has been placed on hold and "
+                              "excluded from active remediation workflows.")
+                    create_notification(admin_user, 'user', 'asset_held', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                    create_notification(admin_user, 'admin', 'asset_held', _n_title, _n_msg, _n_meta)
+                except Exception:
+                    pass
+
                 return Response({
                     "detail": "Asset held (removed from report)",
                     "total_assets": total_assets,
@@ -1070,6 +1081,19 @@ class UserAssetUnholdAPIView(APIView):
                     "severity_counts": _severity_counts(team_vulns),
                 }
 
+                try:
+                    from notifications.utils import create_notification
+                    _n_title = f"Asset Restored: {host_name}"
+                    _n_msg = (
+                        f"Asset Restored: {host_name} has been removed from hold and restored "
+                        f"to the report. Vulnerability remediation can resume."
+                    )
+                    _n_meta = {"asset": host_name, "report_id": str(report_id), "severity_counts": asset_response["severity_counts"]}
+                    create_notification(admin_user, 'admin', 'asset_unhold', _n_title, _n_msg, _n_meta)
+                    create_notification(admin_user, 'user', 'asset_unhold', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                except Exception:
+                    pass
+
                 return Response({
                     "detail": "Asset unhold (restored to report)",
                     "total_assets": total_assets,
@@ -1164,6 +1188,17 @@ class UserAssetDeleteAPIView(APIView):
                         {"detail": "Failed to remove asset"},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR
                     )
+
+                try:
+                    from notifications.utils import create_notification
+                    _n_meta = {"asset": host_name, "report_id": str(report_id)}
+                    _n_title = f"Asset Removed: {host_name}"
+                    _n_msg = (f"Asset Removed: {host_name} has been removed from the platform. "
+                              "Dashboard metrics have been updated.")
+                    create_notification(admin_user, 'user', 'asset_deleted', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                    create_notification(admin_user, 'admin', 'asset_deleted', _n_title, _n_msg, _n_meta)
+                except Exception:
+                    pass
 
                 return Response(
                     {"detail": "Asset removed from report"},
