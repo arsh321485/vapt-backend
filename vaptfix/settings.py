@@ -77,6 +77,7 @@ INSTALLED_APPS = [
     "userasset",
     "usermitigationstrategy",
     "userrisk_criteria",
+    "notifications",
 ]
 
 MIDDLEWARE = [
@@ -118,12 +119,12 @@ DATABASES = {
         'CLIENT': {
             # Use resolved env with fallback (MONGO_DB_URL -> MONGO_URI)
             'host': MONGO_DB_URL,
-            'maxPoolSize': 200,
-            'minPoolSize': 10,
-            'maxIdleTimeMS': 60000,
-            'serverSelectionTimeoutMS': 10000,
-            'connectTimeoutMS': 10000,
-            'socketTimeoutMS': 15000,
+            'maxPoolSize': 50,
+            'minPoolSize': 2,
+            'maxIdleTimeMS': 30000,
+            'serverSelectionTimeoutMS': 30000,
+            'connectTimeoutMS': 20000,
+            'socketTimeoutMS': 45000,
             'retryWrites': True,
         }
     }

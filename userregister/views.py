@@ -1325,6 +1325,29 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         }},
                     )
 
+                    try:
+                        from notifications.utils import create_notification
+                        _vuln_name  = fix_doc.get("plugin_name", "")
+                        _asset      = fix_doc.get("host_name", "")
+                        _team       = fix_doc.get("assigned_team", "")
+                        _admin_id   = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
+                        if _admin_id:
+                            _n_title = f"Vulnerability Fixed: {_vuln_name[:80]}"
+                            _n_msg = (
+                                f"Vulnerability Closed: {_vuln_name} on {_asset} has been "
+                                f"successfully remediated and closed. Team: {_team}."
+                            )
+                            _n_meta = {
+                                "vulnerability_name":  _vuln_name,
+                                "asset":               _asset,
+                                "assigned_team":       _team,
+                                "fix_vulnerability_id": fix_vuln_id,
+                            }
+                            create_notification(_admin_id, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
+                            create_notification(_admin_id, 'user', 'vuln_closed', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                    except Exception:
+                        pass
+
                     return Response(
                         {
                             "message": "All steps completed. Fix vulnerability closed.",
@@ -2306,6 +2329,38 @@ class UserRaiseSupportRequestAPIView(APIView):
             result = support_coll.insert_one(support_doc)
             support_doc["_id"] = str(result.inserted_id)
             support_doc["requested_at"] = _normalize_iso(support_doc["requested_at"])
+
+            try:
+                import logging as _log
+                from notifications.utils import create_notification
+                _n_meta = {
+                    "support_request_id": support_doc["_id"],
+                    "vulnerability_id":   fix_vuln_id,
+                    "vul_name":           support_doc.get("vul_name"),
+                    "host_name":          support_doc.get("host_name"),
+                    "assigned_team":      assigned_team,
+                    "step_number":        step_number,
+                }
+                if admin_user:
+                    _admin_title = f"New Support Request: {support_doc.get('vul_name', '')}"
+                    _admin_msg   = (
+                        f"A support request has been raised for vulnerability "
+                        f"'{support_doc.get('vul_name')}' on {support_doc.get('host_name')} "
+                        f"by {request.user.email}. Team: {assigned_team}."
+                    )
+                    create_notification(admin_user, 'admin', 'support_request_created', _admin_title, _admin_msg, _n_meta)
+
+                    _user_title = f"Support Request Submitted: {support_doc.get('vul_name', '')}"
+                    _user_msg   = (
+                        f"Your support request for '{support_doc.get('vul_name')}' on "
+                        f"{support_doc.get('host_name')} (Step {step_number}) has been submitted successfully."
+                    )
+                    create_notification(admin_user, 'user', 'support_request_received', _user_title, _user_msg, _n_meta, recipient_email=request.user.email)
+                else:
+                    _log.getLogger(__name__).warning("support_request notification skipped: admin_user is None for user %s", request.user.email)
+            except Exception as _e:
+                import logging as _log
+                _log.getLogger(__name__).error("support_request notification failed: %s", _e, exc_info=True)
 
             return Response(
                 {

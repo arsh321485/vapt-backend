@@ -1217,6 +1217,28 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                 }
                 result = coll.insert_one(payload)
 
+                try:
+                    from notifications.utils import create_notification
+                    _n_title = f"Extension Requested: {vulnerability_name[:80]}"
+                    _n_msg = (
+                        f"Timeline Extension Requested: {request.user.email} has requested a "
+                        f"deadline extension for {vulnerability_name} on {asset}. "
+                        f"Requested: {requested_extension_days} day(s). Reason: {reason}"
+                    )
+                    _n_meta = {
+                        "vulnerability_name": vulnerability_name,
+                        "asset":              asset,
+                        "severity":           severity,
+                        "requested_by":       request.user.email,
+                        "requested_days":     requested_extension_days,
+                        "reason":             reason,
+                        "report_id":          report_id,
+                        "request_id":         str(result.inserted_id),
+                    }
+                    create_notification(admin_user, 'admin', 'extension_requested', _n_title, _n_msg, _n_meta)
+                except Exception:
+                    pass
+
                 return Response({
                     "message": "Extension request submitted",
                     "request_id": str(result.inserted_id),

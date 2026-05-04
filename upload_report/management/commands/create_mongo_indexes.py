@@ -20,24 +20,52 @@ INDEXES = {
     "fix_vulnerabilities": [
         [("report_id", pymongo.ASCENDING)],
         [("created_by", pymongo.ASCENDING)],
+        [("admin_id", pymongo.ASCENDING)],
         [("report_id", pymongo.ASCENDING), ("created_by", pymongo.ASCENDING)],
+        [("report_id", pymongo.ASCENDING), ("admin_id", pymongo.ASCENDING)],
+        [("host_name", pymongo.ASCENDING)],
     ],
     "fix_vulnerabilities_closed": [
         [("report_id", pymongo.ASCENDING)],
         [("created_by", pymongo.ASCENDING)],
+        [("admin_id", pymongo.ASCENDING)],
         [("report_id", pymongo.ASCENDING), ("created_by", pymongo.ASCENDING)],
+        [("report_id", pymongo.ASCENDING), ("admin_id", pymongo.ASCENDING)],
     ],
     "vulnerability_cards": [
         [("report_id", pymongo.ASCENDING)],
+        [("report_id", pymongo.ASCENDING), ("host_name", pymongo.ASCENDING)],
         [("report_id", pymongo.ASCENDING), ("vulnerability_name", pymongo.ASCENDING)],
     ],
     "support_requests": [
         [("admin_id", pymongo.ASCENDING)],
         [("report_id", pymongo.ASCENDING)],
+        [("host_name", pymongo.ASCENDING)],
+        [("admin_id", pymongo.ASCENDING), ("report_id", pymongo.ASCENDING)],
     ],
     "fix_vulnerability_steps": [
         [("fix_vuln_id", pymongo.ASCENDING)],
+        [("fix_vulnerability_id", pymongo.ASCENDING)],
         [("report_id", pymongo.ASCENDING)],
+        [("fix_vulnerability_id", pymongo.ASCENDING), ("status", pymongo.ASCENDING)],
+    ],
+    "timeline_extension_requests": [
+        [("admin_id", pymongo.ASCENDING)],
+        [("report_id", pymongo.ASCENDING)],
+        [("admin_id", pymongo.ASCENDING), ("report_id", pymongo.ASCENDING)],
+        [("admin_id", pymongo.ASCENDING), ("report_id", pymongo.ASCENDING), ("status", pymongo.ASCENDING)],
+    ],
+    "notifications_notification": [
+        [("admin_id", pymongo.ASCENDING), ("recipient_type", pymongo.ASCENDING), ("is_read", pymongo.ASCENDING)],
+        [("admin_id", pymongo.ASCENDING), ("recipient_type", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
+    ],
+    "hold_assets": [
+        [("report_id", pymongo.ASCENDING)],
+        [("report_id", pymongo.ASCENDING), ("host_name", pymongo.ASCENDING)],
+    ],
+    "deleted_assets": [
+        [("report_id", pymongo.ASCENDING)],
+        [("admin_id", pymongo.ASCENDING)],
     ],
     "tickets": [
         [("admin_id", pymongo.ASCENDING)],
@@ -49,6 +77,14 @@ INDEXES = {
     "users_details_userdetail": [
         [("admin_id", pymongo.ASCENDING)],
         [("email", pymongo.ASCENDING)],
+    ],
+    "users_user": [
+        [("email", pymongo.ASCENDING)],
+        [("is_active", pymongo.ASCENDING)],
+    ],
+    "signup_otp_sessions": [
+        [("email", pymongo.ASCENDING)],
+        [("created_at", pymongo.ASCENDING)],
     ],
 }
 

@@ -185,6 +185,29 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         risk_criteria = serializer.save()
+
+        try:
+            from notifications.utils import create_notification
+            _rc_meta = {
+                "updated_criteria": {
+                    "critical": risk_criteria.critical,
+                    "high":     risk_criteria.high,
+                    "medium":   risk_criteria.medium,
+                    "low":      risk_criteria.low,
+                }
+            }
+            _title = "Deadline Updated: Risk Criteria Revised"
+            _msg   = (
+                "[Deadline Updated] The deadline configuration for your vulnerability risk criteria "
+                "has been revised. Deadlines for all active vulnerabilities may be affected. "
+                f"Critical: {risk_criteria.critical}, High: {risk_criteria.high}, "
+                f"Medium: {risk_criteria.medium}, Low: {risk_criteria.low}."
+            )
+            create_notification(request.user, 'admin', 'deadline_updated', _title, _msg, _rc_meta)
+            create_notification(request.user, 'user',  'deadline_updated', _title, _msg, _rc_meta, recipient_email='')
+        except Exception:
+            pass
+
         data = RiskCriteriaSerializer(risk_criteria).data
         return Response(
             {"message": "Risk Criteria updated successfully", "risk_criteria": data},

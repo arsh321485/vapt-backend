@@ -43,7 +43,7 @@ except Exception:
 
 def _load_report(db, report_id):
     coll = db[NESSUS_COLLECTION]
-    return coll.find_one({"report_id": str(report_id)})
+    return coll.find_one({"report_id": str(report_id)}, {"admin_email": 1, "admin_id": 1})
 
 def _get_latest_riskcriteria_for_admin_email(email):
     if not RiskCriteria or not User:
@@ -406,20 +406,23 @@ class ReportMeanTimeRemediateAPIView(APIView):
 # These views fetch data from the MOST RECENTLY uploaded report for the admin
 # ============================================================================
 
-def _load_latest_report_for_admin(db, admin_email, admin_id=None):
+def _load_latest_report_for_admin(db, admin_email, admin_id=None, projection=None):
     """Load the most recently uploaded report for a specific admin.
     Tries admin_id first (more reliable for newer reports), falls back to admin_email.
+    Pass projection to limit fields returned and speed up the query.
     """
     coll = db[NESSUS_COLLECTION]
     if admin_id:
         doc = coll.find_one(
             {"admin_id": str(admin_id)},
+            projection,
             sort=[("uploaded_at", -1)]
         )
         if doc:
             return doc
     return coll.find_one(
         {"admin_email": admin_email},
+        projection,
         sort=[("uploaded_at", -1)]
     )
 
@@ -501,7 +504,7 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                report_doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+                report_doc = _load_latest_report_meta_for_admin(db, admin_email, admin_id)
                 if not report_doc:
                     return Response({"report_id": None, "total": 0, "items": []}, status=status.HTTP_200_OK)
 
@@ -652,7 +655,7 @@ class AdminMitigationTimelineExtensionAPIView(APIView):
             team_order = TEAM_NAMES
 
             with MongoContext() as db:
-                report_doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+                report_doc = _load_latest_report_meta_for_admin(db, admin_email, admin_id)
                 if not report_doc:
                     return Response({
                         "report_id": None,
@@ -724,7 +727,7 @@ class AdminMitigationTimelineExtensionReportAPIView(APIView):
                 coll = db[TIMELINE_EXTENSION_COLLECTION]
                 report_id = explicit_report_id
                 if not report_id:
-                    latest = _load_latest_report_for_admin(db, admin_email, admin_id)
+                    latest = _load_latest_report_meta_for_admin(db, admin_email, admin_id)
                     report_id = str(latest.get("report_id") or latest.get("_id", "")) if latest else None
 
                 query = {"admin_id": admin_id}
@@ -828,6 +831,47 @@ class AdminMitigationTimelineExtensionStatusAPIView(APIView):
                 coll.update_one({"_id": obj_id}, {"$set": update_payload})
                 updated = coll.find_one({"_id": obj_id})
 
+                try:
+                    from notifications.utils import create_notification
+                    _requested_by_email = doc.get("requested_by_email", "")
+                    _vuln_name  = doc.get("vulnerability_name", "")
+                    _asset      = doc.get("asset", "")
+                    _severity   = doc.get("severity", "")
+                    _ext_days   = int(doc.get("requested_extension_days") or 0)
+                    _n_meta = {
+                        "request_id":   str(obj_id),
+                        "severity":     _severity,
+                        "asset":        _asset,
+                        "vulnerability_name": _vuln_name,
+                        "extension_days": _ext_days,
+                        "admin_comment": admin_comment,
+                        "status":       new_status,
+                    }
+                    if new_status == "approved":
+                        _notif_type = 'extension_approved'
+                        _n_title = f"Extension Approved: {_vuln_name[:80]}"
+                        _n_msg   = (
+                            f"Your deadline extension request of {_ext_days} days for "
+                            f"'{_vuln_name}' on {_asset} has been approved."
+                            f"{(' Comment: ' + admin_comment) if admin_comment else ''}"
+                        )
+                    else:
+                        _notif_type = 'extension_rejected'
+                        _n_title = f"Extension Rejected: {_vuln_name[:80]}"
+                        _n_msg   = (
+                            f"Your deadline extension request of {_ext_days} days for "
+                            f"'{_vuln_name}' on {_asset} has been rejected."
+                            f"{(' Reason: ' + admin_comment) if admin_comment else ''}"
+                        )
+                    if _requested_by_email:
+                        create_notification(
+                            request.user, 'user', _notif_type,
+                            _n_title, _n_msg, _n_meta,
+                            recipient_email=_requested_by_email
+                        )
+                except Exception:
+                    pass
+
                 return Response({
                     "message": "Request status updated",
                     "request_id": str(updated.get("_id")),
@@ -853,7 +897,9 @@ class AdminTotalAssetsAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id),
+                    projection={"vulnerabilities_by_host.host_name": 1,
+                                "vulnerabilities_by_host.host": 1, "report_id": 1})
 
                 if not doc:
                     return Response({"total_assets": 0, "report_id": None}, status=status.HTTP_200_OK)
@@ -903,7 +949,14 @@ class AdminAssetsByTeamAPIView(APIView):
             admin_id    = str(request.user.id)
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email, admin_id)
+                doc = _load_latest_report_for_admin(db, admin_email, admin_id,
+                    projection={"vulnerabilities_by_host.host_name": 1,
+                                "vulnerabilities_by_host.host": 1,
+                                "vulnerabilities_by_host.host_information": 1,
+                                "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
+                                "vulnerabilities_by_host.vulnerabilities.pluginname": 1,
+                                "vulnerabilities_by_host.vulnerabilities.name": 1,
+                                "total_hosts": 1, "report_id": 1})
                 if not doc:
                     return Response({"total_assets": 0, "by_team": []}, status=status.HTTP_200_OK)
 
@@ -980,7 +1033,10 @@ class AdminAvgScoreAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id),
+                    projection={"vulnerabilities_by_host.vulnerabilities.cvss_v3_base_score": 1,
+                                "vulnerabilities_by_host.vulnerabilities.cvss": 1,
+                                "vulnerabilities_by_host.vulnerabilities.cvss_score": 1, "report_id": 1})
 
                 if not doc:
                     return Response({"avg_score": None, "report_id": None}, status=status.HTTP_200_OK)
@@ -1018,7 +1074,11 @@ class AdminVulnerabilitiesAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
-                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
+                doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id),
+                    projection={"vulnerabilities_by_host.host_name": 1,
+                                "vulnerabilities_by_host.vulnerabilities.risk_factor": 1,
+                                "vulnerabilities_by_host.vulnerabilities.severity": 1,
+                                "vulnerabilities_by_host.vulnerabilities.plugin_name": 1, "report_id": 1})
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                 report_id = None

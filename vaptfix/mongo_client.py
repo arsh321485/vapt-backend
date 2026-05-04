@@ -54,9 +54,9 @@ def get_shared_client() -> pymongo.MongoClient:
                     )
                 _client = pymongo.MongoClient(
                     uri,
-                    serverSelectionTimeoutMS=5000,
-                    connectTimeoutMS=5000,
-                    socketTimeoutMS=10000,
+                    serverSelectionTimeoutMS=30000,
+                    connectTimeoutMS=20000,
+                    socketTimeoutMS=45000,
                     maxPoolSize=100,
                     minPoolSize=5,
                     retryWrites=True,
