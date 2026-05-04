@@ -14,6 +14,7 @@ from .serializers import (
 )
 from .utils import MongoContext, safe_float_from
 from .utils import MongoContext, parse_timeline_to_hours, humanize_hours
+from vaptfix.mongo_client import ensure_performance_indexes
 
 NESSUS_COLLECTION = "nessus_reports"
 SUPPORT_REQUEST_COLLECTION = "support_requests"
@@ -504,6 +505,7 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
             admin_email = request.user.email
 
             with MongoContext() as db:
+                ensure_performance_indexes(db)
                 report_doc = _load_latest_report_meta_for_admin(db, admin_email, admin_id)
                 if not report_doc:
                     return Response({"report_id": None, "total": 0, "items": []}, status=status.HTTP_200_OK)
@@ -512,7 +514,16 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
 
                 card_by_host = {}
                 card_by_name = {}
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": report_id},
+                    {
+                        "vulnerability_name": 1,
+                        "host_name": 1,
+                        "mitigation_table": 1,
+                        "risk_factor": 1,
+                        "assigned_team": 1,
+                    },
+                ):
                     vuln_name = (card.get("vulnerability_name") or "").strip()
                     host_name = (card.get("host_name") or "").strip()
                     if not vuln_name:
@@ -525,20 +536,43 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                 # Include both:
                 # 1) admin-created records (created_by = admin_id)
                 # 2) user-created records under this admin (admin_id = admin_id)
-                fix_docs = list(db[FIX_VULN_COLLECTION].find({
-                    "report_id": report_id,
-                    "$or": [
-                        {"created_by": admin_id},
-                        {"admin_id": admin_id},
-                    ],
-                }))
-                closed_docs = list(db[FIX_VULN_CLOSED_COLLECTION].find({
-                    "report_id": report_id,
-                    "$or": [
-                        {"created_by": admin_id},
-                        {"admin_id": admin_id},
-                    ],
-                }))
+                fix_docs = list(
+                    db[FIX_VULN_COLLECTION].find(
+                        {
+                            "report_id": report_id,
+                            "$or": [
+                                {"created_by": admin_id},
+                                {"admin_id": admin_id},
+                            ],
+                        },
+                        {
+                            "_id": 1,
+                            "plugin_name": 1,
+                            "host_name": 1,
+                            "steps_to_fix": 1,
+                            "risk_factor": 1,
+                            "severity": 1,
+                            "assigned_team": 1,
+                            "created_at": 1,
+                        },
+                    )
+                )
+                closed_docs = list(
+                    db[FIX_VULN_CLOSED_COLLECTION].find(
+                        {
+                            "report_id": report_id,
+                            "$or": [
+                                {"created_by": admin_id},
+                                {"admin_id": admin_id},
+                            ],
+                        },
+                        {
+                            "fix_vulnerability_id": 1,
+                            "plugin_name": 1,
+                            "host_name": 1,
+                        },
+                    )
+                )
 
                 steps_coll = db[FIX_VULN_STEPS_COLLECTION]
                 closed_fix_ids = set()

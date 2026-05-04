@@ -16,6 +16,8 @@ import logging
 logger = logging.getLogger(__name__)
 _client: Optional[pymongo.MongoClient] = None
 _lock = threading.Lock()
+_indexes_ensured = False
+_indexes_lock = threading.Lock()
 
 
 def _get_mongo_uri() -> Optional[str]:
@@ -79,3 +81,46 @@ class MongoContext:
 
     def __exit__(self, exc_type, exc, tb):
         pass  # Connection is pooled — never close it here
+
+
+def ensure_performance_indexes(db) -> None:
+    """
+    Ensure frequently-used read path indexes exist.
+    Safe to call repeatedly; actual index creation runs once per process.
+    """
+    global _indexes_ensured
+    if _indexes_ensured:
+        return
+    with _indexes_lock:
+        if _indexes_ensured:
+            return
+        try:
+            db["nessus_reports"].create_index([("admin_id", 1), ("uploaded_at", -1)], name="idx_nessus_admin_uploaded")
+            db["nessus_reports"].create_index([("admin_email", 1), ("uploaded_at", -1)], name="idx_nessus_email_uploaded")
+
+            db["vulnerability_cards"].create_index([("report_id", 1)], name="idx_cards_report")
+            db["vulnerability_cards"].create_index(
+                [("report_id", 1), ("vulnerability_name", 1), ("host_name", 1)],
+                name="idx_cards_report_vuln_host",
+            )
+
+            db["fix_vulnerabilities"].create_index([("report_id", 1), ("created_by", 1)], name="idx_fix_report_createdby")
+            db["fix_vulnerabilities"].create_index([("report_id", 1), ("admin_id", 1)], name="idx_fix_report_admin")
+
+            db["fix_vulnerabilities_closed"].create_index(
+                [("report_id", 1), ("created_by", 1)],
+                name="idx_fix_closed_report_createdby",
+            )
+            db["fix_vulnerabilities_closed"].create_index(
+                [("report_id", 1), ("admin_id", 1)],
+                name="idx_fix_closed_report_admin",
+            )
+            db["fix_vulnerability_steps"].create_index(
+                [("fix_vulnerability_id", 1), ("status", 1)],
+                name="idx_fix_steps_fixid_status",
+            )
+        except Exception as e:
+            # Keep request path resilient even if index creation is blocked.
+            logger.warning("Index ensure skipped due to error: %s", e)
+        finally:
+            _indexes_ensured = True

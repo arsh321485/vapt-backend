@@ -999,13 +999,22 @@ def _where_to_run_label(where_to_run: str) -> str:
 
 def _ensure_execution_guidance_fields(row: dict) -> dict:
     commands = (row.get("commands_for_action") or "").strip()
+    verification_steps = (row.get("verification_steps") or "").strip()
+    step_name = (row.get("step_name") or "").strip()
+
     if not row.get("expected_output"):
-        if commands:
-            row["expected_output"] = "Command completes successfully without errors."
+        if commands and commands.lower() not in ("n/a", "na", ""):
+            label = f'the "{step_name}" step' if step_name else "the command"
+            row["expected_output"] = f"Command executes without errors and {label} is applied successfully."
         else:
             row["expected_output"] = "Action is completed successfully in the selected run context."
+
     if not row.get("verification_check"):
-        row["verification_check"] = "Verify no error is shown and expected service/state is updated."
+        if verification_steps and verification_steps.lower() not in ("n/a", "na", ""):
+            row["verification_check"] = verification_steps
+        else:
+            row["verification_check"] = "Confirm the change is in effect and no errors or warnings are present."
+
     if not row.get("on_success_next_step"):
         row["on_success_next_step"] = "Proceed to the next remediation sub-task."
     if not row.get("on_failure_what_to_do"):
@@ -1040,6 +1049,7 @@ def _infer_where_to_run(commands_for_action: str, system_file_path: str = "", op
 
 
 def _ensure_where_to_run_fields(mitigation_table, operating_system_hint: str = ""):
+    from .mitigation_tool import _parse_action_sub_tasks
     enriched = []
     for row in (mitigation_table or []):
         if not isinstance(row, dict):
@@ -1055,6 +1065,8 @@ def _ensure_where_to_run_fields(mitigation_table, operating_system_hint: str = "
             new_row["where_to_run"] = where
         if not new_row.get("where_to_run_label"):
             new_row["where_to_run_label"] = _where_to_run_label(where)
+        if not new_row.get("sub_tasks"):
+            new_row["sub_tasks"] = _parse_action_sub_tasks(new_row.get("action", ""))
         new_row = _ensure_execution_guidance_fields(new_row)
         enriched.append(new_row)
     return enriched
@@ -1120,6 +1132,9 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             operating_system = (
                 host_info.get("operating-system")
                 or host_info.get("os")
+                or host_info.get("OS")
+                or host_info.get("operating_system")
+                or host_info.get("system-type")
                 or ""
             ).strip()
 
@@ -1202,9 +1217,13 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 cached += 1
                 continue
 
-            # ── Step 2: Check if any card for this plugin_name + OS category exists in DB ──
+            # ── Step 2: Check if any card for this plugin_name + description + OS exists in DB ──
             cached_card = db[VULN_CARD_COLLECTION].find_one(
-                {"vulnerability_name": vuln_plugin_name, "os_category": vuln_os_category},
+                {
+                    "vulnerability_name": vuln_plugin_name,
+                    "description": vuln.get("description", ""),
+                    "os_category": vuln_os_category,
+                },
                 sort=[("created_at", -1)],
             )
 
@@ -1433,6 +1452,9 @@ class GenerateVulnerabilityCardView(APIView):
                     host_os = (
                         host_info.get("operating-system")
                         or host_info.get("os")
+                        or host_info.get("OS")
+                        or host_info.get("operating_system")
+                        or host_info.get("system-type")
                         or ""
                     ).strip()
                     for vuln in host.get("vulnerabilities", []):

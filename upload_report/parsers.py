@@ -439,7 +439,9 @@ def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
                     "solution": _safe_text(elem, "solution"),
                     "see_also": [],
                     "cvss_v3_base_score": (_safe_text(elem, "cvss3_base_score") or _safe_text(elem, "cvss_base_score") or "").strip(),
-                    "plugin_information": _safe_text(elem, "plugin_publication_date") or _safe_text(elem, "plugin_publication") or "",
+                    "plugin_information": (_safe_text(elem, "plugin_publication_date")
+                                          or _safe_text(elem, "plugin_modification_date")
+                                          or _safe_text(elem, "plugin_publication") or ""),
                     # plugin_output may be large; keep limited
                     "plugin_output": (_safe_text(elem, "plugin_output") or "")[:20000],
                     "plugin_output_url": None,  # extracted URL from plugin_output (if present)
@@ -656,12 +658,25 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                     header_text = _clean_text(current).lower()
                     
                     if "host information" in header_text:
-                        # Extract host properties table
+                        # Extract host properties table — try table-wrapper div first, then direct table sibling
+                        table = None
                         table_wrapper = current.find_next_sibling("div", class_="table-wrapper")
                         if table_wrapper:
                             table = table_wrapper.find("table")
-                            if table:
-                                host_entry["host_information"] = _html_table_to_map(table)
+                        if not table:
+                            table = current.find_next_sibling("table")
+                        if not table:
+                            # Last resort: find any next sibling with a table inside it
+                            for sib in current.next_siblings:
+                                if hasattr(sib, "find"):
+                                    table = sib.find("table")
+                                    if table:
+                                        break
+                                    if getattr(sib, "name", None) in ("div",) and \
+                                       "host" not in (getattr(sib, "get", lambda k, d=None: d)("class") or []):
+                                        break
+                        if table:
+                            host_entry["host_information"] = _html_table_to_map(table)
                 
                 # Check for vulnerability toggle divs (containing plugin ID and name)
                 onclick = current.get("onclick", "")
@@ -696,67 +711,66 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                             "risk_factor": "",
                             "cvss_v3_base_score": "",
                             "plugin_information": "",
+                            "port": "",
                             "plugin_output": "",
                             "plugin_output_url": None,
                         }
                         
-                        # Parse all field sections within the vulnerability container
+                        # Parse all field sections within the vulnerability container.
+                        # Collect siblings between each details-header and the next one —
+                        # this works regardless of whether content is in a div, p, pre, h2, etc.
                         field_headers = vuln_container.find_all("div", class_="details-header")
-                        
+
                         for field_header in field_headers:
                             if time.perf_counter() - parse_started_at > HTML_PARSE_MAX_SECONDS:
                                 truncated_due_to_limits = True
                                 break
                             field_name = _clean_text(field_header).strip()
                             field_name_lower = field_name.lower()
-                            
-                            # Get the content div after this header
-                            content_div = field_header.find_next_sibling("div")
-                            
-                            # Handle "See Also" - it might be in a table
+
+                            # Collect all content between this details-header and the next one
+                            field_parts = []
+                            for sib in field_header.next_siblings:
+                                if not hasattr(sib, "name"):
+                                    txt = str(sib).strip()
+                                    if txt:
+                                        field_parts.append(txt)
+                                    continue
+                                if sib.name == "div" and "details-header" in (sib.get("class") or []):
+                                    break
+                                sib_text = sib.get_text("\n", strip=True)
+                                if sib_text:
+                                    field_parts.append(sib_text)
+                            field_content = "\n".join(field_parts).strip()
+
                             if "see also" in field_name_lower:
-                                links = []
-                                if content_div:
-                                    # Fallback: extract links from text
-                                    text = _clean_text(content_div)
-                                    links = [l.strip() for l in re.split(r'[\n,;]+', text) if l.strip() and l.strip().startswith(('http://', 'https://'))]
-                                
+                                links = [
+                                    l.strip() for l in re.split(r'[\n,;]+', field_content)
+                                    if l.strip() and l.strip().startswith(('http://', 'https://'))
+                                ]
                                 vuln_data["see_also"] = links[:50]
-                            
-                            # Handle "Plugin Output" - it contains h2 tags with port info and monospace divs
+
                             elif "plugin output" in field_name_lower:
-                                # Keep this extraction scoped and cheap. The previous
-                                # find_all_next approach becomes O(n^2) on huge reports.
-                                if content_div:
-                                    po_text = content_div.get_text("\n", strip=True)
-                                else:
-                                    po_text = ""
-                                vuln_data["plugin_output"] = po_text[:12000]
-                            
-                            # Handle other fields - extract text content from following div
-                            elif content_div:
-                                content_text = _clean_text(content_div)
-                                
+                                vuln_data["plugin_output"] = field_content[:12000]
+
+                            elif field_content:
                                 if "synopsis" in field_name_lower:
-                                    synopsis_text = content_div.get_text("\n", strip=True)
-                                    vuln_data["synopsis"] = synopsis_text[:20000]
+                                    vuln_data["synopsis"] = field_content[:20000]
                                 elif "description" in field_name_lower:
-                                    desc_text = content_div.get_text("\n", strip=True)
-                                    vuln_data["description"] = desc_text[:20000]
-                                    vuln_data["description_points"] = _split_text_to_points(desc_text)
+                                    vuln_data["description"] = field_content[:20000]
+                                    vuln_data["description_points"] = _split_text_to_points(field_content)
                                 elif "solution" in field_name_lower:
-                                    vuln_data["solution"] = content_text[:20000]
+                                    vuln_data["solution"] = field_content[:20000]
                                 elif "risk factor" in field_name_lower:
-                                    vuln_data["risk_factor"] = content_text.strip()
+                                    vuln_data["risk_factor"] = field_content.strip()
                                 elif "cvss" in field_name_lower and "v3" in field_name_lower:
-                                    # Extract just the score number from text like "6.5 (CVSS:3.0/AV:N/...)"
-                                    score_match = re.search(r"([\d.]+)", content_text)
+                                    score_match = re.search(r"([\d.]+)", field_content)
                                     if score_match:
                                         vuln_data["cvss_v3_base_score"] = score_match.group(1)
                                     else:
-                                        vuln_data["cvss_v3_base_score"] = content_text.strip()[:50]
+                                        vuln_data["cvss_v3_base_score"] = field_content.strip()[:50]
                                 elif "plugin information" in field_name_lower:
-                                    vuln_data["plugin_information"] = content_text[:20000]
+                                    vuln_data["plugin_information"] = field_content[:20000]
                         
                         # Extract URL from plugin_output if present
                         po_text = vuln_data.get("plugin_output") or ""
@@ -766,6 +780,13 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                                 url_match = re.search(r'(https?://[^\s\n\r]+)', po_text)
                             if url_match:
                                 vuln_data["plugin_output_url"] = url_match.group(1).rstrip('.,;)')
+
+                        # Extract port from first line of plugin_output (e.g. "tcp/3269/ldap")
+                        if po_text and not vuln_data.get("port"):
+                            first_line = po_text.strip().split("\n")[0].strip()
+                            port_match = re.match(r"^((?:tcp|udp)/\d+(?:/\S+)?)$", first_line, re.IGNORECASE)
+                            if port_match:
+                                vuln_data["port"] = port_match.group(1)
 
                         host_entry["vulnerabilities"].append(vuln_data)
                         total_vulns_seen += 1

@@ -179,9 +179,9 @@ class UploadReportAdmin(admin.ModelAdmin):
                     continue
 
                 po_entry = {
-                    "port": vuln.get("port") or None,
-                    "plugin_output": vuln.get("plugin_output") or None,
-                    "plugin_output_url": vuln.get("plugin_output_url") or None,
+                    "port": vuln.get("port") or "",
+                    "plugin_output": vuln.get("plugin_output") or "",
+                    "plugin_output_url": vuln.get("plugin_output_url") or "",
                 }
 
                 if plugin_name not in grouped:
