@@ -29,6 +29,7 @@ TEAM_NAMES = [
 
 # ── Shared MongoDB connection pool ──────────────────────────────────────────
 from vaptfix.mongo_client import MongoContext
+from vaptfix.mongo_client import ensure_performance_indexes
 
 
 def _normalize_iso(dt):
@@ -62,6 +63,7 @@ class MitigationStrategyByTeamAPIView(APIView):
             current_admin_email = getattr(request.user, "email", None)
 
             with MongoContext() as db:
+                ensure_performance_indexes(db)
                 nessus_coll     = db[NESSUS_COLLECTION]
                 closed_coll     = db[FIX_VULN_CLOSED_COLLECTION]
                 vuln_card_coll  = db[VULN_CARD_COLLECTION]
@@ -73,6 +75,22 @@ class MitigationStrategyByTeamAPIView(APIView):
 
                 latest_doc = nessus_coll.find_one(
                     {"$or": query_conditions},
+                    {
+                        "report_id": 1,
+                        "admin_id": 1,
+                        "uploaded_at": 1,
+                        "vulnerabilities_by_host.host_name": 1,
+                        "vulnerabilities_by_host.host": 1,
+                        "vulnerabilities_by_host.host_information": 1,
+                        "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
+                        "vulnerabilities_by_host.vulnerabilities.pluginname": 1,
+                        "vulnerabilities_by_host.vulnerabilities.name": 1,
+                        "vulnerabilities_by_host.vulnerabilities.port": 1,
+                        "vulnerabilities_by_host.vulnerabilities.protocol": 1,
+                        "vulnerabilities_by_host.vulnerabilities.risk_factor": 1,
+                        "vulnerabilities_by_host.vulnerabilities.severity": 1,
+                        "vulnerabilities_by_host.vulnerabilities.risk": 1,
+                    },
                     sort=[("uploaded_at", pymongo.DESCENDING)],
                 )
 
@@ -99,7 +117,8 @@ class MitigationStrategyByTeamAPIView(APIView):
                 # Build closed vulnerability keys set
                 closed_vulns = set()
                 for doc in closed_coll.find(
-                    {"report_id": report_id, "created_by": admin_id}
+                    {"report_id": report_id, "created_by": admin_id},
+                    {"plugin_name": 1, "host_name": 1, "port": 1},
                 ):
                     closed_vulns.add((
                         doc.get("plugin_name", ""),
@@ -109,7 +128,10 @@ class MitigationStrategyByTeamAPIView(APIView):
 
                 # Bulk-fetch all vulnerability_cards for this report
                 vuln_cards = {}
-                for card in vuln_card_coll.find({"report_id": report_id}):
+                for card in vuln_card_coll.find(
+                    {"report_id": report_id},
+                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1},
+                ):
                     key = (
                         card.get("vulnerability_name", ""),
                         card.get("host_name", ""),
@@ -253,6 +275,7 @@ class VulnerabilityAssetCountAPIView(APIView):
             current_admin_email = getattr(request.user, "email", None)
 
             with MongoContext() as db:
+                ensure_performance_indexes(db)
                 nessus_coll    = db[NESSUS_COLLECTION]
                 vuln_card_coll = db[VULN_CARD_COLLECTION]
 
@@ -262,6 +285,14 @@ class VulnerabilityAssetCountAPIView(APIView):
 
                 latest_doc = nessus_coll.find_one(
                     {"$or": query_conditions},
+                    {
+                        "report_id": 1,
+                        "vulnerabilities_by_host.host_name": 1,
+                        "vulnerabilities_by_host.host": 1,
+                        "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
+                        "vulnerabilities_by_host.vulnerabilities.pluginname": 1,
+                        "vulnerabilities_by_host.vulnerabilities.name": 1,
+                    },
                     sort=[("uploaded_at", pymongo.DESCENDING)],
                 )
 

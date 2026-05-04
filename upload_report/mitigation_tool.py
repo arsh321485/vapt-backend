@@ -27,9 +27,16 @@ def _get_openai_client():
 
 
 def _detect_os(operating_system: str) -> str:
-    """Return 'linux' if OS string indicates Linux, else 'windows'."""
-    if operating_system and "linux" in operating_system.lower():
+    """Return OS category based on the OS string: linux, windows, macos, android, ios."""
+    os_lower = (operating_system or "").lower()
+    if any(k in os_lower for k in ("linux", "ubuntu", "debian", "centos", "rhel", "fedora", "kali", "red hat")):
         return "linux"
+    if any(k in os_lower for k in ("mac", "macos", "osx", "darwin")):
+        return "macos"
+    if "android" in os_lower:
+        return "android"
+    if any(k in os_lower for k in ("ios", "iphone", "ipad", "ipados")):
+        return "ios"
     return "windows"
 
 
@@ -44,7 +51,8 @@ def _build_prompt(
 
     host_line = f"\n- **Affected Host (use as resource_id):** {host_name.strip()}" if host_name and host_name.strip() else ""
     os_label = _detect_os(operating_system)
-    os_display = "Linux" if os_label == "linux" else "Windows"
+    _os_display_map = {"linux": "Linux", "windows": "Windows", "macos": "macOS", "android": "Android", "ios": "iOS"}
+    os_display = _os_display_map.get(os_label, "Windows")
     os_line = f"\n- **Operating System:** {operating_system.strip()}" if operating_system and operating_system.strip() else f"\n- **Operating System:** Windows (default)"
 
     plugin_output_section = ""
@@ -447,13 +455,22 @@ def _where_to_run_label(where_to_run: str) -> str:
 
 def _ensure_execution_guidance_fields(row: dict) -> dict:
     commands = (row.get("commands_for_action") or "").strip()
+    verification_steps = (row.get("verification_steps") or "").strip()
+    step_name = (row.get("step_name") or "").strip()
+
     if not row.get("expected_output"):
-        if commands:
-            row["expected_output"] = "Command completes successfully without errors."
+        if commands and commands.lower() not in ("n/a", "na", ""):
+            label = f'the "{step_name}" step' if step_name else "the command"
+            row["expected_output"] = f"Command executes without errors and {label} is applied successfully."
         else:
             row["expected_output"] = "Action is completed successfully in the selected run context."
+
     if not row.get("verification_check"):
-        row["verification_check"] = "Verify no error is shown and expected service/state is updated."
+        if verification_steps and verification_steps.lower() not in ("n/a", "na", ""):
+            row["verification_check"] = verification_steps
+        else:
+            row["verification_check"] = "Confirm the change is in effect and no errors or warnings are present."
+
     if not row.get("on_success_next_step"):
         row["on_success_next_step"] = "Proceed to the next remediation sub-task."
     if not row.get("on_failure_what_to_do"):
