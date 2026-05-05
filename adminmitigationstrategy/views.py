@@ -4,6 +4,7 @@ from django.shortcuts import render
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
+from django.core.cache import cache
 from django.conf import settings
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
@@ -58,6 +59,10 @@ class MitigationStrategyByTeamAPIView(APIView):
     parser_classes = [JSONParser]
 
     def get(self, request):
+        cache_key = f"mitigation_by_team_{request.user.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             current_admin_id    = str(request.user.id)
             current_admin_email = getattr(request.user, "email", None)
@@ -234,17 +239,16 @@ class MitigationStrategyByTeamAPIView(APIView):
                     for team_name, vulns in teams.items()
                 }
 
-                return Response(
-                    {
-                        "report_id":     report_id,
-                        "report_status": report_status,
-                        "admin_id":      current_admin_id,
-                        "admin_email":   current_admin_email,
-                        "uploaded_at":   _normalize_iso(latest_doc.get("uploaded_at")),
-                        "teams":         teams_response,
-                    },
-                    status=status.HTTP_200_OK,
-                )
+                data = {
+                    "report_id":     report_id,
+                    "report_status": report_status,
+                    "admin_id":      current_admin_id,
+                    "admin_email":   current_admin_email,
+                    "uploaded_at":   _normalize_iso(latest_doc.get("uploaded_at")),
+                    "teams":         teams_response,
+                }
+                cache.set(cache_key, data, 300)
+                return Response(data, status=status.HTTP_200_OK)
 
         except pymongo.errors.ServerSelectionTimeoutError as e:
             return Response(
