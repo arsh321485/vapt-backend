@@ -56,9 +56,9 @@ def get_shared_client() -> pymongo.MongoClient:
                     )
                 _client = pymongo.MongoClient(
                     uri,
-                    serverSelectionTimeoutMS=30000,
-                    connectTimeoutMS=20000,
-                    socketTimeoutMS=45000,
+                    serverSelectionTimeoutMS=60000,
+                    connectTimeoutMS=30000,
+                    socketTimeoutMS=120000,
                     maxPoolSize=100,
                     minPoolSize=5,
                     retryWrites=True,
@@ -106,6 +106,7 @@ def ensure_performance_indexes(db) -> None:
 
             db["fix_vulnerabilities"].create_index([("report_id", 1), ("created_by", 1)], name="idx_fix_report_createdby")
             db["fix_vulnerabilities"].create_index([("report_id", 1), ("admin_id", 1)], name="idx_fix_report_admin")
+            db["fix_vulnerabilities"].create_index([("admin_id", 1), ("report_id", 1)], name="idx_fix_adminid_report")
 
             db["fix_vulnerabilities_closed"].create_index(
                 [("report_id", 1), ("created_by", 1)],
@@ -115,9 +116,21 @@ def ensure_performance_indexes(db) -> None:
                 [("report_id", 1), ("admin_id", 1)],
                 name="idx_fix_closed_report_admin",
             )
+            db["fix_vulnerabilities_closed"].create_index(
+                [("admin_id", 1), ("report_id", 1)],
+                name="idx_fix_closed_adminid_report",
+            )
             db["fix_vulnerability_steps"].create_index(
                 [("fix_vulnerability_id", 1), ("status", 1)],
                 name="idx_fix_steps_fixid_status",
+            )
+            db["timeline_extension_requests"].create_index(
+                [("admin_id", 1), ("status", 1)],
+                name="idx_timeline_ext_admin_status",
+            )
+            db["support_requests"].create_index(
+                [("admin_id", 1), ("report_id", 1)],
+                name="idx_support_admin_report",
             )
         except Exception as e:
             # Keep request path resilient even if index creation is blocked.

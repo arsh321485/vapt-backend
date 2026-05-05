@@ -7,7 +7,8 @@ from .views import (
     AdminTotalAssetsAPIView, AdminAvgScoreAPIView,
     AdminVulnerabilitiesAPIView, AdminMitigationTimelineAPIView,
     AdminMeanTimeRemediateAPIView, AdminVulnerabilitiesFixedAPIView,
-    AdminSupportRequestsAPIView, 
+    AdminSupportRequestsAPIView,
+    AdminDashboardSummaryAPIView,
     AdminReportStatusAPIView, AdminDistributionByTeamAPIView,
     AdminDistributionByTeamDetailAPIView, AdminDetailedVulnerabilitiesAPIView,
     AdminAssetsByTeamAPIView,
@@ -27,7 +28,7 @@ urlpatterns = [
 
     # Admin-level endpoints (aggregate data for logged-in admin)
     path("dashboard/report-status/", AdminReportStatusAPIView.as_view(), name="admin-report-status"),
-    # path("dashboard/summary/", AdminDashboardSummaryAPIView.as_view(), name="admin-dashboard-summary"),
+    path("dashboard/summary/", AdminDashboardSummaryAPIView.as_view(), name="admin-dashboard-summary"),
     path("dashboard/total-assets/", AdminTotalAssetsAPIView.as_view(), name="admin-total-assets"),
     path("dashboard/avg-score/", AdminAvgScoreAPIView.as_view(), name="admin-avg-score"),
     path("dashboard/vulnerabilities/", AdminVulnerabilitiesAPIView.as_view(), name="admin-vulnerabilities"),

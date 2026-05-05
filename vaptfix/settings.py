@@ -31,7 +31,7 @@ vaptfix.ai
 """.split(",")]
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
-FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 2621440   # 2.5MB — files larger than this go to disk temp file, not RAM
 
 
 GOOGLE_OAUTH2_CLIENT_ID = os.getenv("GOOGLE_OAUTH2_CLIENT_ID", "")
@@ -121,10 +121,10 @@ DATABASES = {
             'host': MONGO_DB_URL,
             'maxPoolSize': 50,
             'minPoolSize': 2,
-            'maxIdleTimeMS': 30000,
-            'serverSelectionTimeoutMS': 30000,
-            'connectTimeoutMS': 20000,
-            'socketTimeoutMS': 45000,
+            'maxIdleTimeMS': 60000,
+            'serverSelectionTimeoutMS': 60000,
+            'connectTimeoutMS': 30000,
+            'socketTimeoutMS': 120000,
             'retryWrites': True,
         }
     }
@@ -351,8 +351,9 @@ LOGGING = {
 
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "vaptfix-cache",
+        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+        "LOCATION": os.path.join(BASE_DIR, "django_cache"),
         "TIMEOUT": 300,
+        "OPTIONS": {"MAX_ENTRIES": 1000},
     }
 }

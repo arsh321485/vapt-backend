@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from django.core.cache import cache
 from datetime import date, timedelta, datetime, timezone
 import re
 import math
@@ -500,6 +501,10 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        cache_key = f"admin_inprocess_timeline_{request.user.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             admin_id = str(request.user.id)
             admin_email = request.user.email
@@ -665,7 +670,9 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
 
                 items = [v["item"] for v in dedup_items.values()]
                 items.sort(key=lambda x: (-x["progress_percent"], x["vulnerability_name"], x["asset"]))
-                return Response({"report_id": report_id, "total": len(items), "items": items}, status=status.HTTP_200_OK)
+                data = {"report_id": report_id, "total": len(items), "items": items}
+                cache.set(cache_key, data, 300)
+                return Response(data, status=status.HTTP_200_OK)
 
         except Exception as e:
             import traceback
@@ -927,6 +934,10 @@ class AdminTotalAssetsAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        cache_key = f"admin_total_assets_{request.user.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             admin_email = request.user.email
 
@@ -947,7 +958,9 @@ class AdminTotalAssetsAPIView(APIView):
                 total_assets = len(hosts)
                 report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
-                return Response({"total_assets": total_assets, "report_id": report_id}, status=status.HTTP_200_OK)
+                data = {"total_assets": total_assets, "report_id": report_id}
+                cache.set(cache_key, data, 300)
+                return Response(data, status=status.HTTP_200_OK)
 
         except Exception as e:
             import traceback
@@ -1063,6 +1076,10 @@ class AdminAvgScoreAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        cache_key = f"admin_avg_score_{request.user.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             admin_email = request.user.email
 
@@ -1086,7 +1103,9 @@ class AdminAvgScoreAPIView(APIView):
                 avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else None
                 report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
-                return Response({"avg_score": avg, "report_id": report_id}, status=status.HTTP_200_OK)
+                data = {"avg_score": avg, "report_id": report_id}
+                cache.set(cache_key, data, 300)
+                return Response(data, status=status.HTTP_200_OK)
 
         except Exception as e:
             import traceback
@@ -1104,6 +1123,10 @@ class AdminVulnerabilitiesAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        cache_key = f"admin_vulnerabilities_{request.user.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             admin_email = request.user.email
 
@@ -1151,6 +1174,7 @@ class AdminVulnerabilitiesAPIView(APIView):
                                 counts["low"] += 1
 
                 counts["report_id"] = report_id
+                cache.set(cache_key, counts, 300)
                 return Response(counts, status=status.HTTP_200_OK)
 
         except Exception as e:
@@ -1173,10 +1197,12 @@ class AdminMitigationTimelineAPIView(APIView):
             admin_email = request.user.email
             report_id = None
 
+            report_uploaded_at = None
             with MongoContext() as db:
                 doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
                 if doc:
                     report_id = doc.get("report_id") or str(doc.get("_id", ""))
+                    report_uploaded_at = doc.get("uploaded_at")
 
             rc = _get_latest_riskcriteria_for_user(request.user)
 
@@ -1191,8 +1217,8 @@ class AdminMitigationTimelineAPIView(APIView):
             total_days = critical_days + high_days + medium_days + low_days
             total_hours = days_to_hours(total_days)
 
-            # Remaining days calculation — full datetime used for real-time countdown
-            base_datetime = rc.updated_at or rc.created_at
+            # Countdown starts from report upload time (not from when criteria was saved)
+            base_datetime = report_uploaded_at or rc.updated_at or rc.created_at
             if base_datetime.tzinfo is None:
                 base_datetime = base_datetime.replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
@@ -1202,9 +1228,13 @@ class AdminMitigationTimelineAPIView(APIView):
                 delta = deadline_dt - now
                 total_seconds = delta.total_seconds()
                 if total_seconds <= 0:
-                    overdue_days = math.ceil(abs(total_seconds) / 86400)
+                    overdue_days = math.floor(abs(total_seconds) / 86400)
                     return {"remaining_days": overdue_days, "remaining_label": "Overdue", "status": "overdue"}
-                remaining_days = math.ceil(total_seconds / 86400)
+                remaining_days = math.floor(total_seconds / 86400)
+                if remaining_days == 0:
+                    remaining_hours = math.ceil(total_seconds / 3600)
+                    label = f"{remaining_hours} hour{'s' if remaining_hours != 1 else ''}"
+                    return {"remaining_days": 0, "remaining_label": label, "status": "active"}
                 weeks, days_left = divmod(remaining_days, 7)
                 if weeks > 0 and days_left > 0:
                     label = f"{weeks} week{'s' if weeks > 1 else ''} {days_left} day{'s' if days_left > 1 else ''}"
@@ -2004,3 +2034,41 @@ class AdminReportStatusAPIView(APIView):
                 {"detail": "error occurred", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class AdminDashboardSummaryAPIView(APIView):
+    """
+    Single API that returns all 7 admin dashboard metrics in one response.
+    GET /api/admin/dashboard/summary/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from concurrent.futures import ThreadPoolExecutor
+
+        cache_key = f"admin_dashboard_summary_{request.user.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
+        views_map = {
+            "total_assets":          AdminTotalAssetsAPIView,
+            "avg_score":             AdminAvgScoreAPIView,
+            "vulnerabilities":       AdminVulnerabilitiesAPIView,
+            "mitigation_timeline":   AdminMitigationTimelineAPIView,
+            "mean_time_remediate":   AdminMeanTimeRemediateAPIView,
+            "vulnerabilities_fixed": AdminVulnerabilitiesFixedAPIView,
+            "support_requests":      AdminSupportRequestsAPIView,
+        }
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=7) as executor:
+            futures = {key: executor.submit(cls().get, request) for key, cls in views_map.items()}
+            for key, future in futures.items():
+                try:
+                    results[key] = future.result().data
+                except Exception as exc:
+                    results[key] = {"error": str(exc)}
+
+        cache.set(cache_key, results, 300)
+        return Response(results, status=status.HTTP_200_OK)

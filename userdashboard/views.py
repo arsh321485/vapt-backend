@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from django.core.cache import cache
 import re
 import math
 from datetime import timedelta, datetime, timezone
@@ -67,7 +68,7 @@ def _load_latest_report(db, admin_id, admin_email):
 def _load_latest_report_meta(db, admin_id, admin_email):
     """Load only report metadata used by lightweight dashboard endpoints."""
     coll = db[NESSUS_COLLECTION]
-    projection = {"report_id": 1}
+    projection = {"report_id": 1, "uploaded_at": 1}
     doc = coll.find_one({"admin_id": str(admin_id)}, projection, sort=[("uploaded_at", -1)])
     if not doc and admin_email:
         doc = coll.find_one({"admin_email": admin_email}, projection, sort=[("uploaded_at", -1)])
@@ -403,12 +404,16 @@ class UserVulnerabilitiesAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        selected_team = request.query_params.get("team", "").strip()
+        cache_key = f"user_vulns_{request.user.id}_{selected_team}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
                 return Response({"critical": 0, "high": 0, "medium": 0, "low": 0})
 
-            selected_team = request.query_params.get("team", "").strip()
             active_teams = [selected_team] if selected_team and selected_team in teams else teams
             teams_lower = _normalize_teams(active_teams)
 
@@ -422,7 +427,10 @@ class UserVulnerabilitiesAPIView(APIView):
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": str(report_id)}):
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": str(report_id)},
+                    {"vulnerability_name": 1, "assigned_team": 1, "_id": 0},
+                ):
                     raw_team = (card.get("assigned_team") or "").strip()
                     if not teams_lower.get(raw_team.lower()):
                         continue
@@ -431,7 +439,9 @@ class UserVulnerabilitiesAPIView(APIView):
                     if risk in counts:
                         counts[risk] += 1
 
-                return Response({"report_id": report_id, **counts})
+                data = {"report_id": report_id, **counts}
+                cache.set(cache_key, data, 300)
+                return Response(data)
 
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -451,12 +461,16 @@ class UserVulnerabilitiesFixedAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        selected_team = request.query_params.get("team", "").strip()
+        cache_key = f"user_vulns_fixed_{request.user.id}_{selected_team}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
                 return Response({"total_fixed": 0, "critical_fixed": 0, "high_fixed": 0, "medium_fixed": 0, "low_fixed": 0})
 
-            selected_team = request.query_params.get("team", "").strip()
             active_teams = [selected_team] if selected_team and selected_team in teams else teams
             teams_lower = _normalize_teams(active_teams)
 
@@ -471,7 +485,10 @@ class UserVulnerabilitiesFixedAPIView(APIView):
 
                 # Get plugin_names that belong to user's teams
                 team_plugins = set()
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": str(report_id)}):
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": str(report_id)},
+                    {"vulnerability_name": 1, "assigned_team": 1, "_id": 0},
+                ):
                     raw_team = (card.get("assigned_team") or "").strip()
                     if teams_lower.get(raw_team.lower()):
                         pname = (card.get("vulnerability_name") or "").strip()
@@ -479,11 +496,10 @@ class UserVulnerabilitiesFixedAPIView(APIView):
                             team_plugins.add(pname)
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-                for vuln in db[FIX_VULN_CLOSED_COLLECTION].find({
-                    "created_by": current_user_id,
-                    "status": "closed",
-                    "report_id": str(report_id)
-                }):
+                for vuln in db[FIX_VULN_CLOSED_COLLECTION].find(
+                    {"created_by": current_user_id, "status": "closed", "report_id": str(report_id)},
+                    {"plugin_name": 1, "risk_factor": 1, "severity": 1, "_id": 0},
+                ):
                     pname = (vuln.get("plugin_name") or "").strip()
                     if pname not in team_plugins:
                         continue
@@ -506,6 +522,7 @@ class UserVulnerabilitiesFixedAPIView(APIView):
                     "medium_fixed": counts["medium"],
                     "low_fixed": counts["low"]
                 }
+                cache.set(cache_key, result, 300)
                 return Response(result)
 
         except Exception as e:
@@ -537,8 +554,14 @@ class UserMitigationTimelineAPIView(APIView):
             l = _parse_timeline_to_days(rc.low)
             t = c + h + m + l
 
-            # Real-time countdown using full datetime (not just date)
-            base_datetime = rc.updated_at or rc.created_at
+            # Countdown starts from report upload time (not from when criteria was saved)
+            report_uploaded_at = None
+            with MongoContext() as db:
+                report_doc = _load_latest_report_meta(db, admin_user.id, admin_user.email)
+                if report_doc:
+                    report_uploaded_at = report_doc.get("uploaded_at")
+
+            base_datetime = report_uploaded_at or rc.updated_at or rc.created_at
             if base_datetime.tzinfo is None:
                 base_datetime = base_datetime.replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
@@ -548,9 +571,13 @@ class UserMitigationTimelineAPIView(APIView):
                 delta = deadline_dt - now
                 total_seconds = delta.total_seconds()
                 if total_seconds <= 0:
-                    overdue_days = math.ceil(abs(total_seconds) / 86400)
+                    overdue_days = math.floor(abs(total_seconds) / 86400)
                     return {"remaining_days": overdue_days, "remaining_label": "Overdue", "status": "overdue"}
-                remaining_days = math.ceil(total_seconds / 86400)
+                remaining_days = math.floor(total_seconds / 86400)
+                if remaining_days == 0:
+                    remaining_hours = math.ceil(total_seconds / 3600)
+                    label = f"{remaining_hours} hour{'s' if remaining_hours != 1 else ''}"
+                    return {"remaining_days": 0, "remaining_label": label, "status": "active"}
                 weeks, days_left = divmod(remaining_days, 7)
                 if weeks > 0 and days_left > 0:
                     label = f"{weeks} week{'s' if weeks > 1 else ''} {days_left} day{'s' if days_left > 1 else ''}"
@@ -640,12 +667,16 @@ class UserSupportRequestsAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        selected_team = request.query_params.get("team", "").strip()
+        cache_key = f"user_support_requests_{request.user.id}_{selected_team}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
                 return Response({"total": 0, "pending": 0, "closed": 0})
 
-            selected_team = request.query_params.get("team", "").strip()
             active_teams = [selected_team] if selected_team and selected_team in teams else teams
             teams_lower = _normalize_teams(active_teams)
 
@@ -659,7 +690,10 @@ class UserSupportRequestsAPIView(APIView):
 
                 # Get plugin_names belonging to user's teams
                 team_plugins = set()
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": str(report_id)}):
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": str(report_id)},
+                    {"vulnerability_name": 1, "assigned_team": 1, "_id": 0},
+                ):
                     raw_team = (card.get("assigned_team") or "").strip()
                     if teams_lower.get(raw_team.lower()):
                         pname = (card.get("vulnerability_name") or "").strip()
@@ -693,6 +727,7 @@ class UserSupportRequestsAPIView(APIView):
                     "pending": pending,
                     "closed": closed
                 }
+                cache.set(cache_key, result, 300)
                 return Response(result)
 
         except Exception as e:
@@ -813,12 +848,16 @@ class UserInProcessRemediationTimelineAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        selected_team = request.query_params.get("team", "").strip()
+        cache_key = f"user_remediation_inprocess_{request.user.id}_{selected_team}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
                 return Response({"report_id": None, "teams": [], "total": 0, "items": []})
 
-            selected_team = request.query_params.get("team", "").strip()
             active_teams = [selected_team] if selected_team and selected_team in teams else teams
             teams_lower = _normalize_teams(active_teams)
 
@@ -952,12 +991,14 @@ class UserInProcessRemediationTimelineAPIView(APIView):
 
                 items = [v["item"] for v in dedup_items.values()]
                 items.sort(key=lambda x: (-x["progress_percent"], x["vulnerability_name"], x["asset"]))
-                return Response({
+                data = {
                     "report_id": report_id,
                     "teams": active_teams,
                     "total": len(items),
                     "items": items,
-                })
+                }
+                cache.set(cache_key, data, 300)
+                return Response(data)
 
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -1067,27 +1108,64 @@ class UserMitigationTimelineExtensionOptionsAPIView(APIView):
                     return Response({"report_id": None, "assets": [], "vulnerabilities": []})
 
                 report_id = str(report_doc.get("report_id") or report_doc.get("_id", ""))
-                plugin_severity = _build_plugin_severity_map(report_doc)
                 rc = _get_admin_riskcriteria(admin_user)
+                admin_id_str = str(admin_user.id)
 
+                # Step 1: build severity map from nessus report (most reliable source).
+                plugin_severity = _build_plugin_severity_map(report_doc)
+                plugin_severity_lower = {k.lower(): v for k, v in plugin_severity.items()}
+
+                # Step 2: collect {vuln_lower: vuln_original} for this team+severity.
+                # Severity is determined from nessus report, not from vulnerability_cards fields.
+                team_sev_vulns = {}  # lower -> original name
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": report_id},
+                    {"vulnerability_name": 1, "assigned_team": 1, "risk_factor": 1, "severity": 1, "_id": 0},
+                ):
+                    ct = (card.get("assigned_team") or "").strip()
+                    if ct.lower() != selected_team.lower():
+                        continue
+                    vn = (card.get("vulnerability_name") or "").strip()
+                    if not vn:
+                        continue
+                    sev = (
+                        plugin_severity_lower.get(vn.lower())
+                        or _normalize_severity_key(card.get("risk_factor") or card.get("severity") or "")
+                    )
+                    # Include when severity matches OR is unknown (can't drop valid vulns).
+                    if sev is not None and sev != severity_filter:
+                        continue
+                    team_sev_vulns[vn.lower()] = vn
+
+                # Step 3: scan nessus report vulnerabilities_by_host.
+                # The nessus report is the ground truth for which vulns exist on which host.
                 assets = set()
                 vulnerabilities = set()
+                _d_hosts_scanned = 0
+                _d_matched = 0
 
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
-                    team = (card.get("assigned_team") or "").strip()
-                    if team.lower() != selected_team.lower():
+                for host in (report_doc.get("vulnerabilities_by_host") or []):
+                    host_info = host.get("host_information") or {}
+                    h_name = (
+                        host.get("host_name") or host.get("host")
+                        or host_info.get("host-ip") or host_info.get("host-fqdn") or ""
+                    ).strip()
+
+                    if asset_filter and h_name != asset_filter:
                         continue
+                    _d_hosts_scanned += 1
 
-                    vuln_name = (card.get("vulnerability_name") or "").strip()
-                    host_name = (card.get("host_name") or "").strip()
-                    sev = plugin_severity.get(vuln_name)
-                    if sev != severity_filter:
-                        continue
-
-                    if host_name:
-                        assets.add(host_name)
-                    if (not asset_filter or host_name == asset_filter) and vuln_name:
-                        vulnerabilities.add(vuln_name)
+                    for v in (host.get("vulnerabilities") or []):
+                        pname = (
+                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        ).strip()
+                        original_name = team_sev_vulns.get(pname.lower())
+                        if not original_name:
+                            continue
+                        _d_matched += 1
+                        if h_name:
+                            assets.add(h_name)
+                        vulnerabilities.add(original_name)
 
                 original_deadline_days = None
                 if rc and severity_filter:
@@ -1104,8 +1182,104 @@ class UserMitigationTimelineExtensionOptionsAPIView(APIView):
                     "report_id": report_id,
                     "team": selected_team,
                     "severity": severity_filter,
+                    "selected_asset": asset_filter or None,
                     "assets": sorted(assets),
                     "vulnerabilities": sorted(vulnerabilities),
+                    "original_deadline_days": original_deadline_days,
+                    "_debug": {
+                        "team_sev_vulns_count": len(team_sev_vulns),
+                        "nessus_hosts_scanned": _d_hosts_scanned,
+                        "matched_vulns": _d_matched,
+                        "asset_filter_used": asset_filter or None,
+                    },
+                })
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(e)}, status=500)
+
+
+class UserMitigationTimelineExtensionOptionsByFixAPIView(APIView):
+    """
+    Extension options pre-populated from a fix-vulnerability record.
+    Asset and vulnerability_name come from the fix-vulnerability API response.
+    Team and severity are auto-detected from the vulnerability card.
+
+    GET /api/user/dashboard/mitigation-timeline-extension/options-by-fix/
+        ?report_id=69f37...&asset=172.16.70.2&vul_name=Microsoft SQL Server...
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response({"detail": "User is not linked to any team"}, status=status.HTTP_403_FORBIDDEN)
+
+            report_id   = (request.query_params.get("report_id") or "").strip()
+            asset       = (request.query_params.get("asset") or "").strip()
+            vul_name    = (request.query_params.get("vul_name") or "").strip()
+
+            if not report_id or not asset or not vul_name:
+                return Response(
+                    {"detail": "report_id, asset, and vul_name are required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            team_lookup = _normalize_teams(teams)
+
+            with MongoContext() as db:
+                # Auto-detect team and severity from vulnerability card
+                card = db[VULN_CARD_COLLECTION].find_one(
+                    {"report_id": report_id, "host_name": asset, "vulnerability_name": vul_name},
+                    {"assigned_team": 1, "vulnerability_name": 1, "host_name": 1, "_id": 0},
+                )
+
+                if not card:
+                    return Response(
+                        {"detail": "Vulnerability card not found for this asset and vulnerability"},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                assigned_team = (card.get("assigned_team") or "").strip()
+                selected_team = team_lookup.get(assigned_team.lower())
+                if not selected_team:
+                    return Response(
+                        {"detail": "This vulnerability is not assigned to your team"},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+                # Load report to build severity map
+                report_doc = _load_latest_report(db, admin_user.id, admin_user.email)
+                if not report_doc:
+                    return Response({"detail": "No report found"}, status=status.HTTP_404_NOT_FOUND)
+
+                plugin_severity = _build_plugin_severity_map(report_doc)
+                severity_filter = plugin_severity.get(vul_name)
+                if not severity_filter:
+                    severity_filter = _normalize_severity_key(
+                        card.get("risk_factor") or card.get("severity") or ""
+                    )
+
+                rc = _get_admin_riskcriteria(admin_user)
+                original_deadline_days = None
+                if rc and severity_filter:
+                    if severity_filter == "critical":
+                        original_deadline_days = _parse_timeline_to_days(rc.critical)
+                    elif severity_filter == "high":
+                        original_deadline_days = _parse_timeline_to_days(rc.high)
+                    elif severity_filter == "medium":
+                        original_deadline_days = _parse_timeline_to_days(rc.medium)
+                    else:
+                        original_deadline_days = _parse_timeline_to_days(rc.low)
+
+                return Response({
+                    "report_id": report_id,
+                    "team": selected_team,
+                    "severity": severity_filter,
+                    "selected_asset": asset,
+                    "assets": [asset],
+                    "vulnerabilities": [vul_name],
                     "original_deadline_days": original_deadline_days,
                 })
 
@@ -1507,3 +1681,42 @@ class UserMitigationTimelineExtensionReportAPIView(APIView):
 #         except Exception as e:
 #             import traceback; traceback.print_exc()
 #             return Response({"detail": str(e)}, status=500)
+
+
+class UserDashboardSummaryAPIView(APIView):
+    """
+    Single API that returns all 7 user dashboard metrics in one response.
+    GET /api/user/dashboard/summary/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from concurrent.futures import ThreadPoolExecutor
+
+        selected_team = request.query_params.get("team", "").strip()
+        cache_key = f"user_dashboard_summary_{request.user.id}_{selected_team}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
+        views_map = {
+            "total_assets":          UserTotalAssetsAPIView,
+            "avg_score":             UserAvgScoreAPIView,
+            "vulnerabilities":       UserVulnerabilitiesAPIView,
+            "vulnerabilities_fixed": UserVulnerabilitiesFixedAPIView,
+            "mitigation_timeline":   UserMitigationTimelineAPIView,
+            "mean_time_remediate":   UserMeanTimeRemediateAPIView,
+            "support_requests":      UserSupportRequestsAPIView,
+        }
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=7) as executor:
+            futures = {key: executor.submit(cls().get, request) for key, cls in views_map.items()}
+            for key, future in futures.items():
+                try:
+                    results[key] = future.result().data
+                except Exception as exc:
+                    results[key] = {"error": str(exc)}
+
+        cache.set(cache_key, results, 300)
+        return Response(results, status=status.HTTP_200_OK)
