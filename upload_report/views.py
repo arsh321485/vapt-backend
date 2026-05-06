@@ -19,6 +19,17 @@ from rest_framework.permissions import IsAuthenticated
 
 import pymongo
 from pymongo import MongoClient
+from pymongo.errors import OperationFailure
+
+
+def _safe_create_index(collection, keys, **kwargs):
+    try:
+        collection.create_index(keys, **kwargs)
+    except OperationFailure as e:
+        if e.code == 85:  # IndexOptionsConflict — index exists with different name, skip
+            pass
+        else:
+            raise
 
 from location.models import Location
 from users.models import User
@@ -1177,9 +1188,9 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         print(f"[AutoGenCards] {len(vulns_to_process)} total vulnerabilities to process for report_id={report_id}", flush=True)
 
         # Ensure indexes — unique per (report_id, vulnerability_name, host_name)
-        db[VULN_CARD_COLLECTION].create_index("card_id", unique=True)
-        db[VULN_CARD_COLLECTION].create_index("report_id")
-        db[VULN_CARD_COLLECTION].create_index("admin_email")
+        _safe_create_index(db[VULN_CARD_COLLECTION], "card_id", unique=True)
+        _safe_create_index(db[VULN_CARD_COLLECTION], "report_id")
+        _safe_create_index(db[VULN_CARD_COLLECTION], "admin_email")
         # Drop old (report_id, vulnerability_name) unique index if it exists
         try:
             db[VULN_CARD_COLLECTION].drop_index("report_id_1_vulnerability_name_1")
@@ -1190,11 +1201,12 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             db[VULN_CARD_COLLECTION].drop_index("report_id_1_vulnerability_name_1_host_name_1")
         except Exception as e:
             logger.warning("Suppressed error: %s", e)
-        db[VULN_CARD_COLLECTION].create_index(
+        _safe_create_index(
+            db[VULN_CARD_COLLECTION],
             [("report_id", 1), ("vulnerability_name", 1), ("host_name", 1)],
             unique=True,
         )
-        db[VULN_CARD_COLLECTION].create_index("created_at")
+        _safe_create_index(db[VULN_CARD_COLLECTION], "created_at")
 
         tool = MitigationGenerationTool()
         generated = 0
@@ -1482,13 +1494,14 @@ class GenerateVulnerabilityCardView(APIView):
                 )
 
             # Ensure indexes exist
-            db[VULN_CARD_COLLECTION].create_index("card_id", unique=True)
-            db[VULN_CARD_COLLECTION].create_index("report_id")
-            db[VULN_CARD_COLLECTION].create_index("admin_email")
-            db[VULN_CARD_COLLECTION].create_index(
-                [("report_id", 1), ("vulnerability_name", 1)]
+            _safe_create_index(db[VULN_CARD_COLLECTION], "card_id", unique=True)
+            _safe_create_index(db[VULN_CARD_COLLECTION], "report_id")
+            _safe_create_index(db[VULN_CARD_COLLECTION], "admin_email")
+            _safe_create_index(
+                db[VULN_CARD_COLLECTION],
+                [("report_id", 1), ("vulnerability_name", 1)],
             )
-            db[VULN_CARD_COLLECTION].create_index("created_at")
+            _safe_create_index(db[VULN_CARD_COLLECTION], "created_at")
 
             tool = MitigationGenerationTool()
             cards_generated = []
