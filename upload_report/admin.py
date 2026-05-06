@@ -12,6 +12,7 @@ import logging
 import time
 import pymongo
 from django.db import transaction
+from django.db.utils import DatabaseError
 
 logger = logging.getLogger(__name__)
 def check_admin_scoping_complete(admin_user):
@@ -526,6 +527,18 @@ class UploadReportAdmin(admin.ModelAdmin):
                 messages.error(request, "Parser module not found. File saved but not parsed.")
             except Exception as e:
                 messages.error(request, f"Error parsing file: {str(e)}")
+
+    def log_addition(self, request, object, message):
+        try:
+            return super().log_addition(request, object, message)
+        except DatabaseError as e:
+            logger.warning("[UploadReportAdmin] Admin log write failed (djongo counter issue): %s", e)
+
+    def log_change(self, request, object, message):
+        try:
+            return super().log_change(request, object, message)
+        except DatabaseError as e:
+            logger.warning("[UploadReportAdmin] Admin log write failed (djongo counter issue): %s", e)
 
     # Restrict all permissions to Super Admin only
     def has_module_permission(self, request):
