@@ -2,12 +2,25 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from django.conf import settings
+from django.core.cache import cache
 from urllib.parse import unquote
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 from django.utils import timezone
 import pymongo
 import re
+
+
+def _clear_dashboard_cache(user_id):
+    """Bust all admin dashboard cache keys for this user after an asset mutation."""
+    for key in (
+        f"admin_total_assets_{user_id}",
+        f"admin_avg_score_{user_id}",
+        f"admin_vulnerabilities_{user_id}",
+        f"admin_inprocess_timeline_{user_id}",
+        f"admin_dashboard_summary_{user_id}",
+    ):
+        cache.delete(key)
 
 from .serializers import AdminAssetSerializer,AssetHostVulnSerializer,HoldAssetSerializer,HoldAssetListSerializer
 # Import User for organisation_name lookup
@@ -273,6 +286,7 @@ class AssetDeleteAPIView(APIView):
                 except Exception as _e:
                     import logging; logging.getLogger(__name__).error("asset_deleted notification failed: %s", _e, exc_info=True)
 
+                _clear_dashboard_cache(request.user.id)
                 return Response({"detail": "Asset removed from report"}, status=status.HTTP_200_OK)
 
         except Exception as exc:
@@ -483,6 +497,7 @@ class AssetHoldAPIView(APIView):
                 except Exception as _e:
                     import logging; logging.getLogger(__name__).error("asset_held notification failed: %s", _e, exc_info=True)
 
+                _clear_dashboard_cache(request.user.id)
                 return Response(
                     {
                         "detail": "Asset hold (removed from report)",
@@ -597,6 +612,7 @@ class AssetUnholdAPIView(APIView):
                 except Exception as _e:
                     import logging; logging.getLogger(__name__).error("asset_unhold notification failed: %s", _e, exc_info=True)
 
+                _clear_dashboard_cache(request.user.id)
                 # 6️⃣ Final response
                 return Response(
                     {

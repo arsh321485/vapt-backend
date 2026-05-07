@@ -1,10 +1,38 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
+from django.core.cache import cache
 from urllib.parse import unquote
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 from django.utils import timezone
+
+
+def _clear_admin_dashboard_cache(admin_user_id):
+    """Bust all admin dashboard cache keys for the owning admin after a user asset mutation."""
+    for key in (
+        f"admin_total_assets_{admin_user_id}",
+        f"admin_avg_score_{admin_user_id}",
+        f"admin_vulnerabilities_{admin_user_id}",
+        f"admin_inprocess_timeline_{admin_user_id}",
+        f"admin_dashboard_summary_{admin_user_id}",
+    ):
+        cache.delete(key)
+
+
+def _clear_user_dashboard_cache(user_id, teams):
+    """Bust user dashboard cache keys for all teams the user belongs to."""
+    prefixes = [
+        "user_vulns",
+        "user_vulns_fixed",
+        "user_support_requests",
+        "user_remediation_inprocess",
+        "user_dashboard_summary",
+    ]
+    # Clear for each team variant plus the no-filter ("") variant
+    for team in list(teams) + [""]:
+        for prefix in prefixes:
+            cache.delete(f"{prefix}_{user_id}_{team}")
 
 from .serializers import UserAssetSerializer, UserAssetVulnSerializer
 from vaptfix.mongo_client import MongoContext
@@ -978,6 +1006,8 @@ class UserAssetHoldAPIView(APIView):
                 except Exception:
                     pass
 
+                _clear_admin_dashboard_cache(admin_user.id)
+                _clear_user_dashboard_cache(request.user.id, teams)
                 return Response({
                     "detail": "Asset held (removed from report)",
                     "total_assets": total_assets,
@@ -1094,6 +1124,8 @@ class UserAssetUnholdAPIView(APIView):
                 except Exception:
                     pass
 
+                _clear_admin_dashboard_cache(admin_user.id)
+                _clear_user_dashboard_cache(request.user.id, teams)
                 return Response({
                     "detail": "Asset unhold (restored to report)",
                     "total_assets": total_assets,
@@ -1200,6 +1232,8 @@ class UserAssetDeleteAPIView(APIView):
                 except Exception:
                     pass
 
+                _clear_admin_dashboard_cache(admin_user.id)
+                _clear_user_dashboard_cache(request.user.id, teams)
                 return Response(
                     {"detail": "Asset removed from report"},
                     status=status.HTTP_200_OK
