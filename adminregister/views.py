@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from django.conf import settings
+from django.core.cache import cache
 from datetime import datetime, date, timedelta
 from django.utils.timezone import is_naive, make_aware
 import pymongo
@@ -24,6 +25,18 @@ FIX_FINAL_FEEDBACK_COLLECTION = "fix_vulnerability_final_feedback"
 
 
 from vaptfix.mongo_client import MongoContext
+
+
+def _clear_admin_dashboard_cache(admin_user_id):
+    for key in (
+        f"admin_total_assets_{admin_user_id}",
+        f"admin_avg_score_{admin_user_id}",
+        f"admin_vulnerabilities_{admin_user_id}",
+        f"admin_inprocess_timeline_{admin_user_id}",
+        f"admin_dashboard_summary_{admin_user_id}",
+    ):
+        cache.delete(key)
+
 
 def _normalize_iso(dt):
     """Return ISO string for datetime-like or string; else None."""
@@ -936,6 +949,7 @@ class FixVulnerabilityCreateAPIView(APIView):
 
             result = fix_coll.insert_one(doc)
             doc["_id"] = str(result.inserted_id)
+            _clear_admin_dashboard_cache(admin_id)
 
             # Get admin email
             admin_email = getattr(request.user, 'email', '')
@@ -1378,19 +1392,73 @@ class FixVulnerabilityStepsAPIView(APIView):
         }
         return labels.get(where_to_run, "Terminal")
 
+    def _how_to_run_instruction(self, where_to_run: str) -> str:
+        instructions = {
+            "powershell":     "Right-click the Start button → select 'Windows PowerShell (Admin)' → paste the command below and press Enter:",
+            "cmd":            "Press Win+R on your keyboard → type 'cmd' → press Enter to open Command Prompt → paste the command below:",
+            "bash":           "Open the Terminal application on your computer → paste the command below and press Enter:",
+            "terminal":       "Open Command Prompt (Windows) or Terminal (Mac/Linux) → paste the command below and press Enter:",
+            "sql_console":    "Open your database management tool (e.g. SQL Server Management Studio or MySQL Workbench) → paste the query below and click Run:",
+            "browser":        "Open any web browser (Chrome, Firefox, Edge) → go to the URL shown below:",
+            "application_ui": "Follow the manual steps described in the action above using your application's settings panel.",
+            "not_applicable": "No command needed — follow the manual steps described in the action above.",
+        }
+        return instructions.get(where_to_run, "Open Command Prompt or Terminal → paste the command below and press Enter:")
+
+    def _infer_assigned_team(self, vulnerability_name: str) -> str:
+        name = (vulnerability_name or "").lower()
+        if any(k in name for k in (
+            "ssl", "tls", "certificate", "port", "firewall", "network", "dns",
+            "http", "ftp", "smtp", "redis", "memcached", "open port", "unencrypted",
+            "cleartext", "cipher", "protocol", "snmp", "telnet", "ssh",
+        )):
+            return "Network Security"
+        if any(k in name for k in (
+            "patch", "update", "version", "outdated", "cve-", "upgrade",
+            "end-of-life", "unsupported", "obsolete",
+        )):
+            return "Patch Management"
+        if any(k in name for k in (
+            "injection", "xss", "csrf", "cross-site", "sql injection",
+            "authentication", "authorization", "session", "cookie", "oauth",
+            "architectural", "design flaw", "logic flaw",
+        )):
+            return "Architectural Flaws"
+        return "Configuration Management"
+
     def _ensure_execution_guidance_fields(self, os_data: dict) -> dict:
         commands = (os_data.get("commands_for_action") or "").strip()
+        where_to_run = os_data.get("where_to_run", "terminal")
+
+        if not os_data.get("how_to_run"):
+            os_data["how_to_run"] = self._how_to_run_instruction(where_to_run)
+
+        if not os_data.get("command_to_run"):
+            os_data["command_to_run"] = commands or ""
+
         if not os_data.get("expected_output"):
-            if commands:
-                os_data["expected_output"] = "Command completes successfully without errors."
+            if commands and commands.lower() not in ("n/a", "na", ""):
+                os_data["expected_output"] = (
+                    "If you see no red error messages after running the command, it worked. "
+                    "You are done with this step."
+                )
             else:
-                os_data["expected_output"] = "Action is completed successfully in the selected run context."
+                os_data["expected_output"] = (
+                    "Once you finish the steps described above, this task is complete. "
+                    "Move on to the next step."
+                )
+
         if not os_data.get("verification_check"):
-            os_data["verification_check"] = "Verify no error is shown and expected service/state is updated."
+            os_data["verification_check"] = (
+                "Check that the change is in place and there are no error messages or warnings."
+            )
         if not os_data.get("on_success_next_step"):
-            os_data["on_success_next_step"] = "Proceed to the next remediation sub-task."
+            os_data["on_success_next_step"] = "Great job! Move on to the next step."
         if not os_data.get("on_failure_what_to_do"):
-            os_data["on_failure_what_to_do"] = "Check command/path/permissions, then retry. Escalate to admin if issue persists."
+            os_data["on_failure_what_to_do"] = (
+                "Double-check the command, file path, and your permissions, then try again. "
+                "If it still doesn't work, contact your IT admin for help."
+            )
         return os_data
 
     def _parse_mitigation_steps(self, mitigation_table):
@@ -1582,6 +1650,8 @@ class FixVulnerabilityStepsAPIView(APIView):
             )
 
             assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
+            if not assigned_team:
+                assigned_team = self._infer_assigned_team(plugin_name)
             assigned_team_members = fix_doc.get("assigned_team_members", [])
             mitigation_table = vuln_card.get("mitigation_table", [])
             artifacts_tools = vuln_card.get("artifacts_tools")

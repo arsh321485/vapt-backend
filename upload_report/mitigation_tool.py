@@ -96,6 +96,8 @@ Provide a highly detailed, step-by-step mitigation table with the following rule
 - For code vulnerabilities: provide exact code snippets, before/after examples, regex patterns.
 - For config vulnerabilities: provide complete config file content, backup/rollback commands.
 - For network/SSL: provide exact cipher suite configs, certificate generation commands.
+- "Verification Steps" column: write in plain, simple English that a non-technical customer can understand (e.g. "Open your browser and check if the site loads without a certificate warning."). Do NOT use technical jargon.
+- "Expected Output" is not a column in the table but is described in the Verification Steps. Write what the user will literally see on screen in simple terms (e.g. "You will see the certificate details. If no errors appear, this step is done.").
 
 | Step No | Step Name | Action | Operating System | System File/Path | Responsible Party | Artifacts/Tools Used | Commands for Action | Criticality | Precautions | Verification Steps | Effort Estimate | Patch Available | Fallback Remediation | Reference Links | Applicable Platforms | Remediation Timeline |
 |---------|-----------|--------|-----------------|------------------|-------------------|----------------------|---------------------|-------------|-------------|-------------------|-----------------|-----------------|-----------------------|----------------|---------------------|---------------------|
@@ -460,21 +462,31 @@ def _ensure_execution_guidance_fields(row: dict) -> dict:
 
     if not row.get("expected_output"):
         if commands and commands.lower() not in ("n/a", "na", ""):
-            label = f'the "{step_name}" step' if step_name else "the command"
-            row["expected_output"] = f"Command executes without errors and {label} is applied successfully."
+            row["expected_output"] = (
+                "If you see no red error messages after running the command, it worked. "
+                "You are done with this step."
+            )
         else:
-            row["expected_output"] = "Action is completed successfully in the selected run context."
+            row["expected_output"] = (
+                "Once you finish the steps described above, this task is complete. "
+                "Move on to the next step."
+            )
 
     if not row.get("verification_check"):
         if verification_steps and verification_steps.lower() not in ("n/a", "na", ""):
             row["verification_check"] = verification_steps
         else:
-            row["verification_check"] = "Confirm the change is in effect and no errors or warnings are present."
+            row["verification_check"] = (
+                "Check that the change is in place and there are no error messages or warnings."
+            )
 
     if not row.get("on_success_next_step"):
-        row["on_success_next_step"] = "Proceed to the next remediation sub-task."
+        row["on_success_next_step"] = "Great job! Move on to the next step."
     if not row.get("on_failure_what_to_do"):
-        row["on_failure_what_to_do"] = "Check command/path/permissions, then retry. Escalate to admin if issue persists."
+        row["on_failure_what_to_do"] = (
+            "Double-check the command, file path, and your permissions, then try again. "
+            "If it still doesn't work, contact your IT admin for help."
+        )
     return row
 
 
