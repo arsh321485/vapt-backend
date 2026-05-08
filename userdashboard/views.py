@@ -405,10 +405,6 @@ class UserVulnerabilitiesAPIView(APIView):
 
     def get(self, request):
         selected_team = request.query_params.get("team", "").strip()
-        cache_key = f"user_vulns_{request.user.id}_{selected_team}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
@@ -440,7 +436,6 @@ class UserVulnerabilitiesAPIView(APIView):
                         counts[risk] += 1
 
                 data = {"report_id": report_id, **counts}
-                cache.set(cache_key, data, 300)
                 return Response(data)
 
         except Exception as e:
@@ -462,10 +457,6 @@ class UserVulnerabilitiesFixedAPIView(APIView):
 
     def get(self, request):
         selected_team = request.query_params.get("team", "").strip()
-        cache_key = f"user_vulns_fixed_{request.user.id}_{selected_team}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
@@ -522,7 +513,6 @@ class UserVulnerabilitiesFixedAPIView(APIView):
                     "medium_fixed": counts["medium"],
                     "low_fixed": counts["low"]
                 }
-                cache.set(cache_key, result, 300)
                 return Response(result)
 
         except Exception as e:
@@ -668,10 +658,6 @@ class UserSupportRequestsAPIView(APIView):
 
     def get(self, request):
         selected_team = request.query_params.get("team", "").strip()
-        cache_key = f"user_support_requests_{request.user.id}_{selected_team}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
@@ -727,7 +713,6 @@ class UserSupportRequestsAPIView(APIView):
                     "pending": pending,
                     "closed": closed
                 }
-                cache.set(cache_key, result, 300)
                 return Response(result)
 
         except Exception as e:
@@ -849,10 +834,6 @@ class UserInProcessRemediationTimelineAPIView(APIView):
 
     def get(self, request):
         selected_team = request.query_params.get("team", "").strip()
-        cache_key = f"user_remediation_inprocess_{request.user.id}_{selected_team}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
         try:
             teams, admin_user = _get_user_context(request.user.email)
             if not teams or not admin_user:
@@ -997,7 +978,6 @@ class UserInProcessRemediationTimelineAPIView(APIView):
                     "total": len(items),
                     "items": items,
                 }
-                cache.set(cache_key, data, 300)
                 return Response(data)
 
         except Exception as e:
@@ -1694,10 +1674,6 @@ class UserDashboardSummaryAPIView(APIView):
         from concurrent.futures import ThreadPoolExecutor
 
         selected_team = request.query_params.get("team", "").strip()
-        cache_key = f"user_dashboard_summary_{request.user.id}_{selected_team}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
 
         views_map = {
             "total_assets":          UserTotalAssetsAPIView,
@@ -1718,5 +1694,4 @@ class UserDashboardSummaryAPIView(APIView):
                 except Exception as exc:
                     results[key] = {"error": str(exc)}
 
-        cache.set(cache_key, results, 300)
         return Response(results, status=status.HTTP_200_OK)
