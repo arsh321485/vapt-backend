@@ -557,15 +557,17 @@ class UserMitigationTimelineAPIView(APIView):
             now = datetime.now(timezone.utc)
 
             def _remaining(n_days):
-                deadline_dt = base_datetime + timedelta(days=n_days)
-                delta = deadline_dt - now
-                total_seconds = delta.total_seconds()
-                if total_seconds <= 0:
-                    overdue_days = math.floor(abs(total_seconds) / 86400)
+                deadline_date = (base_datetime + timedelta(days=n_days)).date()
+                now_date = now.date()
+                diff = (deadline_date - now_date).days
+                if diff < 0:
+                    overdue_days = abs(diff)
                     return {"remaining_days": overdue_days, "remaining_label": "Overdue", "status": "overdue"}
-                remaining_days = math.floor(total_seconds / 86400)
+                remaining_days = diff
                 if remaining_days == 0:
-                    remaining_hours = math.ceil(total_seconds / 3600)
+                    deadline_dt = base_datetime + timedelta(days=n_days)
+                    total_seconds = (deadline_dt - now).total_seconds()
+                    remaining_hours = max(1, math.ceil(total_seconds / 3600)) if total_seconds > 0 else 0
                     label = f"{remaining_hours} hour{'s' if remaining_hours != 1 else ''}"
                     return {"remaining_days": 0, "remaining_label": label, "status": "active"}
                 weeks, days_left = divmod(remaining_days, 7)

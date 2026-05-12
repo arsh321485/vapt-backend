@@ -70,12 +70,10 @@ def _normalize_severity(value: str):
 
 def _remaining_from_base(base_datetime, configured_days, now_utc):
     """
-    Real-time countdown by elapsed 24h blocks from base_datetime.
-    - 0 to <24h elapsed: remaining stays as configured_days
-    - at 24h elapsed: remaining decrements by 1
+    Real-time countdown using calendar days.
+    Decrements at midnight each day (not every 24h from creation time).
     """
-    elapsed_seconds = (now_utc - base_datetime).total_seconds()
-    elapsed_days = int(max(0, elapsed_seconds // 86400))
+    elapsed_days = max(0, (now_utc.date() - base_datetime.date()).days)
     remaining_days = configured_days - elapsed_days
 
     if remaining_days < 0:

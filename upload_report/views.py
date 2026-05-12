@@ -997,39 +997,48 @@ _running_card_jobs_lock = threading.Lock()
 
 def _where_to_run_label(where_to_run: str) -> str:
     labels = {
-        "powershell": "PowerShell",
-        "cmd": "Command Prompt (CMD)",
-        "bash": "Bash Shell",
-        "terminal": "Terminal",
-        "sql_console": "SQL Console",
-        "browser": "Web Browser",
-        "application_ui": "Application UI",
-        "not_applicable": "Not Applicable",
+        "powershell": "PowerShell (Windows — press Win+X, then click PowerShell)",
+        "cmd": "Command Prompt (Windows — press Win+R, type cmd, press Enter)",
+        "bash": "Terminal / Bash (Linux or Mac — open Terminal app)",
+        "terminal": "Terminal / Command Prompt (open the terminal on your system)",
+        "sql_console": "SQL Console (open your database client, e.g. MySQL Workbench or phpMyAdmin)",
+        "browser": "Web Browser (open Chrome, Firefox, or Edge)",
+        "application_ui": "Application Settings (open the application and go to Settings)",
+        "not_applicable": "No command needed — follow the steps in the Action column",
     }
-    return labels.get(where_to_run, "Terminal")
+    return labels.get(where_to_run, "Terminal / Command Prompt (open the terminal on your system)")
 
 def _ensure_execution_guidance_fields(row: dict) -> dict:
     commands = (row.get("commands_for_action") or "").strip()
     verification_steps = (row.get("verification_steps") or "").strip()
-    step_name = (row.get("step_name") or "").strip()
+    step_name = (row.get("step_name") or row.get("task_name") or "").strip()
 
     if not row.get("expected_output"):
         if commands and commands.lower() not in ("n/a", "na", ""):
             label = f'the "{step_name}" step' if step_name else "the command"
-            row["expected_output"] = f"Command executes without errors and {label} is applied successfully."
+            row["expected_output"] = (
+                f"Run the command above. If you see no red error messages and {label} completes without issues, this step is done."
+            )
         else:
-            row["expected_output"] = "Action is completed successfully in the selected run context."
+            row["expected_output"] = (
+                "Once you finish all the sub-steps described in the Action column, this task is complete. Move on to the next step."
+            )
 
     if not row.get("verification_check"):
         if verification_steps and verification_steps.lower() not in ("n/a", "na", ""):
             row["verification_check"] = verification_steps
         else:
-            row["verification_check"] = "Confirm the change is in effect and no errors or warnings are present."
+            row["verification_check"] = (
+                "Check that the change is in place and there are no error messages or warnings."
+            )
 
     if not row.get("on_success_next_step"):
-        row["on_success_next_step"] = "Proceed to the next remediation sub-task."
+        row["on_success_next_step"] = "Great job! Proceed to the next remediation step."
     if not row.get("on_failure_what_to_do"):
-        row["on_failure_what_to_do"] = "Check command/path/permissions, then retry. Escalate to admin if issue persists."
+        row["on_failure_what_to_do"] = (
+            "Double-check the command, file path, and your permissions, then try again. "
+            "If it still does not work, contact your IT admin for help."
+        )
     return row
 
 

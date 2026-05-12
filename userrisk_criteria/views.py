@@ -61,10 +61,10 @@ def _normalize_severity(value: str):
 
 def _remaining_from_base(base_datetime, configured_days, now_utc):
     """
-    Real-time countdown by elapsed 24h blocks from base_datetime.
+    Real-time countdown using calendar days.
+    Decrements at midnight each day (not every 24h from creation time).
     """
-    elapsed_seconds = (now_utc - base_datetime).total_seconds()
-    elapsed_days = int(max(0, elapsed_seconds // 86400))
+    elapsed_days = max(0, (now_utc.date() - base_datetime.date()).days)
     remaining_days = configured_days - elapsed_days
 
     if remaining_days < 0:
@@ -81,6 +81,40 @@ def _remaining_from_base(base_datetime, configured_days, now_utc):
     return {"remaining_days": remaining_days, "remaining_label": label, "status": "active"}
 
 
+def _compute_realtime_remaining(risk_criteria):
+    """Returns real-time remaining countdown for all 4 severities."""
+    base_datetime = risk_criteria.updated_at or risk_criteria.created_at
+    if base_datetime and base_datetime.tzinfo is None:
+        base_datetime = base_datetime.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+
+    result = {}
+    for severity, raw_value in [
+        ("critical", risk_criteria.critical),
+        ("high",     risk_criteria.high),
+        ("medium",   risk_criteria.medium),
+        ("low",      risk_criteria.low),
+    ]:
+        try:
+            days = parse_days(raw_value)
+        except (ValueError, TypeError):
+            days = 0
+        if days > 0 and base_datetime:
+            info = _remaining_from_base(base_datetime, days, now)
+            deadline_date = str((base_datetime + timedelta(days=days)).date())
+        else:
+            info = {"remaining_days": None, "remaining_label": None, "status": None}
+            deadline_date = None
+        result[severity] = {
+            "configured_days": days,
+            "deadline_date":   deadline_date,
+            "remaining_days":  info["remaining_days"],
+            "remaining_label": info["remaining_label"],
+            "status":          info["status"],
+        }
+    return result
+
+
 class UserRiskCriteriaListView(generics.ListAPIView):
     serializer_class = RiskCriteriaSerializer
     permission_classes = [IsAuthenticated]
@@ -94,11 +128,17 @@ class UserRiskCriteriaListView(generics.ListAPIView):
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
+        items_with_remaining = []
+        for obj, data in zip(queryset, serializer.data):
+            items_with_remaining.append({
+                **data,
+                "remaining": _compute_realtime_remaining(obj),
+            })
         return Response(
             {
                 "message": "Risk Criteria retrieved successfully",
-                "count": len(serializer.data),
-                "risk_criteria": serializer.data,
+                "count": len(items_with_remaining),
+                "risk_criteria": items_with_remaining,
             },
             status=status.HTTP_200_OK,
         )
@@ -137,7 +177,11 @@ class UserRiskCriteriaDetailView(generics.RetrieveAPIView):
         instance = self.get_object()
         serializer = self.get_serializer(instance)
         return Response(
-            {"message": "Risk Criteria retrieved successfully", "risk_criteria": serializer.data},
+            {
+                "message": "Risk Criteria retrieved successfully",
+                "risk_criteria": serializer.data,
+                "remaining": _compute_realtime_remaining(instance),
+            },
             status=status.HTTP_200_OK,
         )
 
