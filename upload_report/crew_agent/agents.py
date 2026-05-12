@@ -33,6 +33,7 @@ def build_agents(llm) -> dict:
         llm=llm,
         verbose=False,
         allow_delegation=False,
+        max_iter=3,
     )
 
     os_profiler = Agent(
@@ -52,6 +53,7 @@ def build_agents(llm) -> dict:
         llm=llm,
         verbose=False,
         allow_delegation=False,
+        max_iter=2,
     )
 
     remediation_engineer = Agent(
@@ -75,6 +77,7 @@ def build_agents(llm) -> dict:
         llm=llm,
         verbose=False,
         allow_delegation=False,
+        max_iter=3,
     )
 
     card_formatter = Agent(
@@ -96,6 +99,7 @@ def build_agents(llm) -> dict:
         llm=llm,
         verbose=False,
         allow_delegation=False,
+        max_iter=2,
     )
 
     return {

@@ -1,7 +1,14 @@
+import os
 import re
 import json
 import logging
 import datetime
+
+# Suppress CrewAI's interactive "Would you like to view your execution traces?" prompt
+# CREWAI_TESTING=true makes _is_test_environment() return True, which bypasses the 20s blocking prompt
+os.environ.setdefault("CREWAI_TESTING", "true")
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 
 from django.conf import settings
 
@@ -289,17 +296,23 @@ def _where_to_run_label(where_to_run: str) -> str:
 def _ensure_execution_guidance_fields(row: dict) -> dict:
     commands = (row.get("commands_for_action") or "").strip()
     verification_steps = (row.get("verification_steps") or "").strip()
+    step_name = (row.get("step_name") or "").strip()
+    step_no = (row.get("step_no") or "").strip()
+    fallback_remediation = (row.get("fallback_remediation") or "").strip()
 
     if not row.get("expected_output"):
-        if commands and commands.lower() not in ("n/a", "na", ""):
+        if verification_steps and verification_steps.lower() not in ("n/a", "na", ""):
             row["expected_output"] = (
-                "If you see no red error messages after running the command, it worked. "
-                "You are done with this step."
+                f"After completing this step: {verification_steps}"
+            )
+        elif commands and commands.lower() not in ("n/a", "na", ""):
+            row["expected_output"] = (
+                "The command completes without error messages. "
+                f"Confirm the change is applied as described in '{step_name or 'this step'}'."
             )
         else:
             row["expected_output"] = (
-                "Once you finish the steps described above, this task is complete. "
-                "Move on to the next step."
+                f"The changes described in step {step_no or 'this'} are visible and in effect."
             )
 
     if not row.get("verification_check"):
@@ -311,12 +324,28 @@ def _ensure_execution_guidance_fields(row: dict) -> dict:
             )
 
     if not row.get("on_success_next_step"):
-        row["on_success_next_step"] = "Great job! Move on to the next step."
+        next_step = int(step_no) + 1 if step_no and step_no.isdigit() else None
+        if next_step:
+            row["on_success_next_step"] = f"Step {step_no} complete. Proceed to Step {next_step}."
+        else:
+            row["on_success_next_step"] = f"'{step_name}' complete. Move on to the next step."
+
     if not row.get("on_failure_what_to_do"):
-        row["on_failure_what_to_do"] = (
-            "Double-check the command, file path, and your permissions, then try again. "
-            "If it still doesn't work, contact your IT admin for help."
-        )
+        if fallback_remediation and fallback_remediation.lower() not in ("n/a", "na", ""):
+            row["on_failure_what_to_do"] = (
+                f"Fallback: {fallback_remediation}. "
+                "Also check file paths, permissions, and that required services are running."
+            )
+        elif commands and commands.lower() not in ("n/a", "na", ""):
+            row["on_failure_what_to_do"] = (
+                f"Verify the command syntax and that you have the required permissions to run it. "
+                f"Check system logs for error details, then retry step {step_no or 'this step'}."
+            )
+        else:
+            row["on_failure_what_to_do"] = (
+                f"Review the action instructions for '{step_name or 'this step'}', "
+                "check permissions, and consult system logs before retrying."
+            )
     return row
 
 
