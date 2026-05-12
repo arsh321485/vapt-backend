@@ -193,10 +193,10 @@ VULNERABILITY CONTEXT:
 SECTION 1 — MITIGATION TABLE (start here, no preamble)
 ═══════════════════════════════════════════════════════════════
 
-Output a markdown table with EXACTLY these 17 column headers in this exact order:
+Output a markdown table with EXACTLY these 20 column headers in this exact order:
 
-| Step No | Step Name | Action | Operating System | System File/Path | Responsible Party | Artifacts/Tools Used | Commands for Action | Criticality | Precautions | Verification Steps | Effort Estimate | Patch Available | Fallback Remediation | Reference Links | Applicable Platforms | Remediation Timeline |
-|---------|-----------|--------|-----------------|------------------|-------------------|----------------------|---------------------|-------------|-------------|-------------------|-----------------|-----------------|-----------------------|----------------|---------------------|---------------------|
+| Step No | Step Name | Action | Operating System | System File/Path | Responsible Party | Artifacts/Tools Used | Commands for Action | Criticality | Precautions | Verification Steps | Effort Estimate | Patch Available | Fallback Remediation | Reference Links | Applicable Platforms | Remediation Timeline | Expected Output | On Success Next Step | On Failure What To Do |
+|---------|-----------|--------|-----------------|------------------|-------------------|----------------------|---------------------|-------------|-------------|-------------------|-----------------|-----------------|-----------------------|----------------|---------------------|---------------------|-----------------|---------------------|----------------------|
 
 COLUMN RULES (follow strictly):
 - "Step No": sequential integer (1, 2, 3...)
@@ -218,6 +218,17 @@ COLUMN RULES (follow strictly):
 - "Reference Links": CVE link, NVD link, or vendor doc URL — or N/A
 - "Applicable Platforms": platforms this step applies to, e.g. "Linux", "Windows", "All"
 - "Remediation Timeline": e.g. "Immediate", "Within 24 hours", "Within 7 days"
+- "Expected Output": STEP-SPECIFIC — what the user should actually see on screen if THIS step worked correctly.
+  Examples: "Command outputs 'TLSv1 disabled' with no errors", "Service shows 'active (running)' status",
+  "File /etc/ssl/openssl.cnf now contains MinProtocol = TLSv1.2"
+  Never write a generic response — always describe the exact observable result for this specific step.
+- "On Success Next Step": brief instruction naming the NEXT step specifically.
+  Example: "Proceed to Step 3 — Open the configuration file" or "All steps complete — run the final verification scan"
+- "On Failure What To Do": STEP-SPECIFIC troubleshooting for THIS step only.
+  Examples: "Check file permissions with 'ls -la /etc/ssl/' and verify you have sudo/root access",
+  "Service may be locked — run 'systemctl status nginx' to see the error, then check /var/log/nginx/error.log",
+  "Restore from backup at /backup/openssl.cnf.bak and retry with correct syntax"
+  Never write a generic response — always describe what to check specifically for this step.
 
 Include ALL steps from the remediation plan. No blank cells — use N/A if truly not applicable.
 
@@ -272,7 +283,7 @@ Immediately after the JSON block, write these 6 numbered sections (no extra head
 """,
         expected_output="""
 Three sections in exact order:
-1. Markdown table with 17 columns containing all remediation steps (no preamble)
+1. Markdown table with 20 columns containing all remediation steps (no preamble)
 2. JSON block in ```json fence with all vulnerability card fields
 3. Six numbered contextual analysis sections
 """,

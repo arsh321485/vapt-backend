@@ -1,0 +1,217 @@
+UploadReportAdminForm] Loaded 6 admins
+[12/May/2026 13:49:24] "GET /admin/upload_report/uploadreport/add/ HTTP/1.1" 200 10428
+[12/May/2026 13:49:24] "GET /static/admin/js/prepopulate_init.js HTTP/1.1" 304 0
+[12/May/2026 13:49:25] "GET /static/admin/css/forms.css HTTP/1.1" 304 0
+[12/May/2026 13:49:25] "GET /static/admin/js/change_form.js HTTP/1.1" 304 0
+[12/May/2026 13:49:25] "GET /static/admin/css/widgets.css HTTP/1.1" 304 0
+[12/May/2026 13:49:27] "GET /admin/jsi18n/ HTTP/1.1" 200 3325
+[UploadReportAdminForm] Loaded 6 admins
+Suppressed error: No default database name defined or provided.
+Suppressed error: No default database name defined or provided.
+[AutoGenCards] Background thread started from admin panel for report_id=6a02e2aced69e682921e7598
+[AutoGenCards] Background thread started from admin panel for report_id=6a02e2aced69e682921e7598
+[AutoGenCards] Starting background card generation for report_id=6a02e2aced69e682921e7598
+[UploadReportAdmin] Admin log write failed (djongo counter issue): 
+[12/May/2026 13:50:54] "POST /admin/upload_report/uploadreport/add/ HTTP/1.1" 302 0
+[AutoGenCards] MongoDB connected for report_id=6a02e2aced69e682921e7598
+[12/May/2026 13:50:58] "GET /admin/upload_report/uploadreport/ HTTP/1.1" 200 14902
+[AutoGenCards] 65 total vulnerabilities to process for report_id=6a02e2aced69e682921e7598
+Suppressed error: index not found with name [report_id_1_vulnerability_name_1], full error: {'ok': 0.0, 'errmsg': 'index not found with name [report_id_1_vulnerability_name_1]', 'code': 27, 'codeName': 'IndexNotFound', '$clusterTime': {'clusterTime': Timestamp(1778574058, 2), 'signature': {'hash': b'\x9e\x0co\x18\x0e\xe5\xe4\x1cmK\xf5d\xde\xd4LW\xb2\\\xf8\x85', 'keyId': 7636630522927513606}}, 'operationTime': Timestamp(1778574058, 2)}
+[AutoGenCards] No cache for 'SSL Certificate Cannot Be Trusted', calling GPT-4o
+[12/May/2026 13:51:01] "GET /admin/jsi18n/ HTTP/1.1" 200 3325
+[12/May/2026 13:51:01] "GET /static/admin/img/icon-yes.svg HTTP/1.1" 304 0
+HTTP Request: GET https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json "HTTP/1.1 200 OK"
+[MitigationCrew] Starting 4-agent crew for: SSL Certificate Cannot Be Trusted
+13:51:25 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTPSConnectionPool(host='telemetry.crewai.com', port=4319): Max retries exceeded with url: /v1/traces (Caused by NameResolutionError("<urllib3.connection.HTTPSConnection object at 0x000001AAF2BABA10>: Failed to resolve 'telemetry.crewai.com' ([Errno 11002] getaddrinfo failed)"))
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:51:30 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:51:30 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:51:34 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:51:34 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:51:39 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:51:39 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:51:41 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:51:41 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:51:45 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:51:45 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:51:52 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:51:52 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:52:26 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:52:26 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:53:01 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+
+
+╭──────────────────────────────────────────────────────────────────────── Execution Traces ─────────────────────────────────────────────────────────────────────────╮│                                                                                                                                                                   ││  🔍 Detailed execution traces are available!                                                                                                                      ││                                                                                                                                                                   ││  View insights including:                                                                                                                                         ││    • Agent decision-making process                                                                                                                                ││    • Task execution flow and timing                                                                                                                               ││    • Tool usage details                                                                                                                                           ││                                                                                                                                                                   │╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯Would you like to view your execution traces? [y/N] (20s timeout): [MitigationCrew] Done — table rows: 11, card fields: 14
+[AutoGenCards] No cache for 'ICMP Timestamp Request Remote Date Disclosure', calling GPT-4o
+[MitigationCrew] Starting 4-agent crew for: ICMP Timestamp Request Remote Date Disclosure
+13:53:23 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:53:27 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:53:27 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:53:31 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:53:31 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:53:36 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:53:36 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:53:38 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:53:38 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:53:41 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:53:41 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:53:43 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:53:44 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:54:00 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:54:00 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:54:25 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+
+
+╭──────────────────────────────────────────────────────────────────────── Execution Traces ─────────────────────────────────────────────────────────────────────────╮│                                                                                                                                                                   ││  🔍 Detailed execution traces are available!                                                                                                                      ││                                                                                                                                                                   ││  View insights including:                                                                                                                                         ││    • Agent decision-making process                                                                                                                                ││    • Task execution flow and timing                                                                                                                               ││    • Tool usage details                                                                                                                                           ││                                                                                                                                                                   │╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯Would you like to view your execution traces? [y/N] (20s timeout): [MitigationCrew] Done — table rows: 8, card fields: 14
+[AutoGenCards] No cache for 'SSL Certificate Chain Contains RSA Keys Less Than 2048 bits', calling GPT-4o
+[MitigationCrew] Starting 4-agent crew for: SSL Certificate Chain Contains RSA Keys Less Than 2048 bits
+13:54:46 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:54:51 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:54:51 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:54:54 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:54:54 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:55:00 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:55:00 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:55:01 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:55:01 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:55:06 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:55:06 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:55:10 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:55:10 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:55:35 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+13:55:35 - LiteLLM:INFO: utils.py:3258 - 
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+
+LiteLLM completion() model= gpt-4o-mini; provider = openai
+HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+13:56:08 - LiteLLM:INFO: utils.py:1260 - Wrapper: Completed Call, calling success_handler
+Wrapper: Completed Call, calling success_handler
+
+
+╭──────────────────────────────────────────────────────────────────────── Execution Traces ─────────────────────────────────────────────────────────────────────────╮│                                                                                                                                                                   ││  🔍 Detailed execution traces are available!                                                                                                                      ││                                                                                                                                                                   ││  View insights including:                                                                                                                                         ││    • Agent decision-making process                                                                                                                                ││    • Task execution flow and timing                                                                                                                               ││    • Tool usage details                                                                                                                                           ││                                                                                                                                                                   │╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯Would you like to view your execution traces? [y/N] (20s timeout): n
+(venv) PS D:\secureitlab\vaptfix project\vaptfix project\vaptfix> 
+
+
+expected_output :If you see no red error messages after running the command, it worked. You are done with this step.
+
+on_success_next_step:Great job! Move on to the next step.
+
+on_failure_what_to_do:Double-check the command, file path, and your permissions, then try again. If it still doesn't work, contact your IT admin for help.
+
+al step me or all vuln me  same hi aa rha hai o check kro ek bar check kro na jo 3 field ka diya hai o 
+or jhyada time bhi me rha hai
