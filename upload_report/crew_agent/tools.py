@@ -38,6 +38,7 @@ class KnowledgeInput(BaseModel):
     ip: str = Field(default="{ip}", description="Target IP address")
     port: str = Field(default="{port}", description="Target port")
     os_name: str = Field(default="{os}", description="Target OS")
+    os_category: str = Field(default="linux", description="OS category: windows / linux / macos")
     assigned_to: str = Field(default="Security Engineer", description="Engineer assigned to this task")
 
 class RiskInput(BaseModel):
@@ -184,22 +185,63 @@ class OSProfilerTool(BaseTool):
 
     def _run(self, os_name: str, port: str = "") -> str:
         os_lower = os_name.lower()
-        profile = None
-        for key, data in _OS_PROFILES.items():
+        os_key = None
+        for key in _OS_PROFILES:
             if key in os_lower:
-                profile = data
+                os_key = key
                 break
-        if not profile:
-            profile = _OS_PROFILES["ubuntu"]
+        if not os_key:
+            os_key = "ubuntu"
+        profile = _OS_PROFILES[os_key]
 
         port_clean = re.sub(r"[^0-9]", "", port.split("/")[0]) if port else ""
         service_hint = _PORT_SERVICES.get(port_clean, "Unknown service")
 
-        lines = [f"OS Profile for: {os_name}"]
+        lines = [f"OS Profile for: {os_name}  (detected: {os_key.upper()})"]
         lines.append(f"Port {port} → likely service: {service_hint}")
         lines.append("")
         for k, v in profile.items():
             lines.append(f"  {k:<30}: {v}")
+
+        # Strict OS isolation — explicitly forbid wrong-OS commands
+        lines.append("")
+        if os_key == "windows":
+            lines.append("═" * 60)
+            lines.append("CRITICAL OS ISOLATION — TARGET IS WINDOWS")
+            lines.append("Use ONLY the paths and commands listed above.")
+            lines.append("FORBIDDEN (Linux/Mac — DO NOT USE THESE):")
+            lines.append("  ✗ sudo, apt, yum, dnf, systemctl, service")
+            lines.append("  ✗ nano, vim, vi  (use: notepad or notepad++)")
+            lines.append("  ✗ /etc/, /var/, /tmp/, /usr/, /home/")
+            lines.append("  ✗ cp, chmod, chown, grep, tail, cat")
+            lines.append("  ✗ bash, sh, systemd, journalctl")
+            lines.append("REQUIRED (Windows — ALWAYS use these):")
+            lines.append("  ✓ notepad, copy, del, type, dir")
+            lines.append("  ✓ net stop / net start / sc query")
+            lines.append("  ✓ PowerShell: Get-Service, Set-Content, Get-Content")
+            lines.append("  ✓ Paths starting with C:\\ (backslash, NOT forward slash)")
+            lines.append("  ✓ %TEMP% instead of /tmp/")
+            lines.append("  ✓ netsh advfirewall instead of ufw/iptables")
+            lines.append("═" * 60)
+        elif os_key in ("ubuntu", "debian", "rhel", "centos"):
+            lines.append("═" * 60)
+            lines.append("CRITICAL OS ISOLATION — TARGET IS LINUX")
+            lines.append("Use ONLY the paths and commands listed above.")
+            lines.append("FORBIDDEN (Windows — DO NOT USE THESE):")
+            lines.append("  ✗ notepad, net stop, net start, sc query")
+            lines.append("  ✗ C:\\ paths, %TEMP%, netsh, choco, winget")
+            lines.append("  ✗ PowerShell Get- cmdlets")
+            lines.append("REQUIRED (Linux — ALWAYS use these):")
+            lines.append("  ✓ sudo nano / sudo vim")
+            lines.append("  ✓ sudo systemctl restart/stop/start/status")
+            lines.append("  ✓ sudo cp, sudo chmod, sudo chown")
+            lines.append(f"  ✓ Paths from profile above (/etc/, /var/log/, /tmp/)")
+            if os_key in ("ubuntu", "debian"):
+                lines.append("  ✓ sudo apt-get for package management")
+            else:
+                lines.append("  ✓ sudo yum for package management")
+            lines.append("═" * 60)
+
         return "\n".join(lines)
 
 
@@ -209,34 +251,89 @@ class OSProfilerTool(BaseTool):
 
 _COMMAND_PATTERNS = {
     "backup": {
-        "ubuntu": "cp {file} {file}.bak_$(date +%Y%m%d)",
-        "rhel": "cp {file} {file}.bak_$(date +%Y%m%d)",
-        "windows": "copy {file} {file}.bak_%date:~-4,4%%date:~-10,2%%date:~-7,2%",
+        "ubuntu": "sudo cp {file} {file}.bak_$(date +%Y%m%d)",
+        "rhel":   "sudo cp {file} {file}.bak_$(date +%Y%m%d)",
+        "windows": r'copy "{file}" "{file}.bak_%date:~-4,4%%date:~-10,2%%date:~-7,2%"',
+    },
+    "open file": {
+        "ubuntu": "sudo nano {file}",
+        "rhel":   "sudo nano {file}",
+        "windows": r'notepad "{file}"',
+    },
+    "edit config": {
+        "ubuntu": "sudo nano {file}",
+        "rhel":   "sudo nano {file}",
+        "windows": r'notepad "C:\Apache24\conf\extra\httpd-ssl.conf"',
     },
     "restart apache": {
         "ubuntu": "sudo systemctl restart apache2",
-        "rhel": "sudo systemctl restart httpd",
+        "rhel":   "sudo systemctl restart httpd",
         "windows": "net stop Apache2.4 && net start Apache2.4",
     },
     "restart nginx": {
         "ubuntu": "sudo systemctl restart nginx",
-        "rhel": "sudo systemctl restart nginx",
+        "rhel":   "sudo systemctl restart nginx",
         "windows": "nginx -s reload",
     },
+    "check service": {
+        "ubuntu": "sudo systemctl status {service}",
+        "rhel":   "sudo systemctl status {service}",
+        "windows": "sc query {service}",
+    },
+    "disable service": {
+        "ubuntu": "sudo systemctl stop {service} && sudo systemctl disable {service}",
+        "rhel":   "sudo systemctl stop {service} && sudo systemctl disable {service}",
+        "windows": "net stop {service} && sc config {service} start= disabled",
+    },
     "block port": {
-        "ubuntu": "sudo ufw deny in {port}/tcp",
-        "rhel": "sudo firewall-cmd --permanent --remove-port={port}/tcp && sudo firewall-cmd --reload",
-        "windows": "netsh advfirewall firewall add rule name='Block {port}' dir=in action=block protocol=TCP localport={port}",
+        "ubuntu": "sudo ufw deny in {port}/tcp && sudo ufw status",
+        "rhel":   "sudo firewall-cmd --permanent --remove-port={port}/tcp && sudo firewall-cmd --reload",
+        "windows": "netsh advfirewall firewall add rule name=\"Block_{port}\" dir=in action=block protocol=TCP localport={port}",
+    },
+    "validate config apache": {
+        "ubuntu": "apachectl configtest",
+        "rhel":   "apachectl configtest",
+        "windows": "httpd -t",
+    },
+    "validate config nginx": {
+        "ubuntu": "nginx -t",
+        "rhel":   "nginx -t",
+        "windows": "nginx -t",
     },
     "update package": {
         "ubuntu": "sudo apt-get update && sudo apt-get install --only-upgrade {pkg}",
-        "rhel": "sudo yum update {pkg}",
-        "windows": "Install-Module PSWindowsUpdate -Force; Get-WindowsUpdate -Install -AcceptAll",
+        "rhel":   "sudo yum update {pkg}",
+        "windows": "choco upgrade {pkg}",
+    },
+    "check logs": {
+        "ubuntu": r"tail -f /var/log/apache2/error.log | grep -iE 'ssl|error'",
+        "rhel":   r"tail -f /var/log/httpd/error_log | grep -iE 'ssl|error'",
+        "windows": r'Get-Content C:\Apache24\logs\error.log -Wait | Select-String -Pattern "ssl|error"',
     },
     "verify ssl": {
         "ubuntu": "nmap --script ssl-enum-ciphers -p {port} {ip}",
-        "rhel": "nmap --script ssl-enum-ciphers -p {port} {ip}",
+        "rhel":   "nmap --script ssl-enum-ciphers -p {port} {ip}",
         "windows": "nmap --script ssl-enum-ciphers -p {port} {ip}",
+    },
+    "check open ports": {
+        "ubuntu": "ss -tlnp | grep {port}",
+        "rhel":   "ss -tlnp | grep {port}",
+        "windows": "netstat -ano | findstr {port}",
+    },
+    "generate dhparam": {
+        "ubuntu": "openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048",
+        "rhel":   "openssl dhparam -out /etc/pki/tls/certs/dhparam.pem 2048",
+        "windows": r'"C:\Program Files\OpenSSL-Win64\bin\openssl.exe" dhparam -out C:\ProgramData\ssl\dhparam.pem 2048',
+    },
+    "change password": {
+        "ubuntu": "sudo passwd {user}",
+        "rhel":   "sudo passwd {user}",
+        "windows": "net user {user} NewStr0ngP@ss!",
+    },
+    "disable user": {
+        "ubuntu": "sudo usermod -L {user}",
+        "rhel":   "sudo usermod -L {user}",
+        "windows": "net user {user} /active:no",
     },
 }
 
@@ -251,7 +348,7 @@ class CommandBuilderTool(BaseTool):
 
     def _run(self, action: str, os_name: str, service: str = "") -> str:
         os_key = "ubuntu"
-        for key in ["ubuntu", "debian", "rhel", "centos", "windows"]:
+        for key in ["windows", "ubuntu", "debian", "rhel", "centos"]:
             if key in os_name.lower():
                 os_key = key
                 break
@@ -259,13 +356,19 @@ class CommandBuilderTool(BaseTool):
         action_lower = action.lower()
         results = []
         for pattern, os_cmds in _COMMAND_PATTERNS.items():
-            if any(word in action_lower for word in pattern.split()):
+            # Match if ALL words in the pattern key appear in the action
+            pattern_words = pattern.split()
+            if all(word in action_lower for word in pattern_words):
                 cmd = os_cmds.get(os_key, os_cmds.get("ubuntu", "N/A"))
-                results.append(f"Action '{pattern}':\n  {cmd}")
+                results.append(f"Action '{pattern}' on {os_key.upper()}:\n  {cmd}")
 
         if results:
             return "\n".join(results)
-        return f"No specific command template found for '{action}' on {os_name}. Provide a general best-practice command."
+        return (
+            f"No specific template for '{action}' on {os_name}. "
+            f"Generate a {'Windows CMD/PowerShell' if os_key == 'windows' else 'Linux bash'} "
+            f"command appropriate for this action on {os_name}."
+        )
 
 
 # =========================================================================== #
@@ -288,13 +391,15 @@ class MitigationKnowledgeTool(BaseTool):
         ip: str = "{ip}",
         port: str = "{port}",
         os_name: str = "{os}",
+        os_category: str = "linux",
         assigned_to: str = "Security Engineer",
     ) -> str:
         template = find_template(vuln_name, description)
         if not template:
             return (
                 f"No template found for '{vuln_name}'. "
-                f"Generate custom steps based on security best practices. "
+                f"Generate custom steps based on security best practices for {os_name} ({os_category}). "
+                f"IMPORTANT: All commands and paths MUST be specific to {os_name}. "
                 f"Ensure each step covers: LOCATE, REMOVE (❌ bad example), REPLACE WITH (✅ good example), "
                 f"file path, runnable command, tools used, and important consideration."
             )
@@ -303,6 +408,7 @@ class MitigationKnowledgeTool(BaseTool):
             "ip": ip,
             "port": port.split("/")[0].strip(),
             "os": os_name,
+            "os_category": os_category,
             "assigned_to": assigned_to,
         }
         steps = render_steps(template, context)
