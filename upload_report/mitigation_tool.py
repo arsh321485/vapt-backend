@@ -490,9 +490,13 @@ class MitigationGenerationTool:
 
             llm = _get_crewai_llm()
 
+            os_str = operating_system.strip() if operating_system else "Windows"
+            os_category = _detect_os(os_str)  # "windows" / "linux" / "macos" / "android" / "ios"
+
             finding = {
                 "ip": host_name.strip() if host_name else "unknown",
-                "os": operating_system.strip() if operating_system else "Windows",
+                "os": os_str,
+                "os_category": os_category,
                 "port": "unknown",
                 "vuln_name": plugin_name,
                 "description": description,

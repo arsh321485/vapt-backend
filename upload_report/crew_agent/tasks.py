@@ -14,11 +14,77 @@ def build_tasks(agents: dict, finding: dict) -> list:
 
     ip          = finding.get("ip", "unknown")
     os_name     = finding.get("os", "unknown")
+    os_category = finding.get("os_category", "windows")
     port        = finding.get("port", "unknown")
     vuln_name   = finding.get("vuln_name", "unknown")
     description = finding.get("description", "")
     plugin_out  = finding.get("plugin_output", "")
     assigned_to = finding.get("assigned_to", "Security Engineer")
+
+    # Build OS-specific command reference block injected into remediation task
+    if os_category == "windows":
+        os_command_block = f"""
+CRITICAL — TARGET OS IS WINDOWS: "{os_name}"
+You MUST use ONLY Windows-compatible commands. Linux/Mac commands are FORBIDDEN.
+
+WINDOWS COMMAND REFERENCE (use these exact patterns):
+  Open file in editor   : notepad C:\\path\\to\\file.conf  OR  notepad++ C:\\path\\to\\file.conf
+  Copy/backup file      : copy "C:\\path\\file.conf" "C:\\path\\file.conf.bak"
+  Delete line in file   : Use notepad to manually edit, OR PowerShell: (Get-Content file) | Where-Object {{$_ -notmatch 'pattern'}} | Set-Content file
+  Restart service       : net stop ServiceName && net start ServiceName  OR  Restart-Service -Name ServiceName
+  Check service status  : sc query ServiceName  OR  Get-Service -Name ServiceName
+  Install package       : choco install packagename  OR  winget install packagename
+  Firewall rule         : netsh advfirewall firewall add rule name="Rule" dir=in action=block protocol=TCP localport={port}
+  View logs             : Get-EventViewer  OR  type C:\\path\\to\\logfile.log
+  Run as admin          : Run PowerShell or CMD as Administrator (right-click → Run as administrator)
+  Registry edit         : reg add "HKLM\\..." /v ValueName /t REG_SZ /d "value" /f
+  OpenSSL (if installed): "C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe" command
+  Nmap scan             : nmap --script ssl-enum-ciphers -p {port} {ip}
+
+WINDOWS PATHS (NOT Linux paths):
+  Web server config     : C:\\Apache24\\conf\\extra\\httpd-ssl.conf  OR  C:\\nginx\\conf\\nginx.conf
+  SSH config            : C:\\ProgramData\\ssh\\sshd_config
+  SSL certificates      : C:\\ProgramData\\ssl\\  OR  C:\\Apache24\\conf\\ssl\\
+  Logs                  : C:\\Apache24\\logs\\  OR  C:\\nginx\\logs\\
+  Temp files            : C:\\Windows\\Temp\\  OR  %TEMP%\\
+
+DO NOT USE: sudo, apt, yum, systemctl, /etc/, /var/, /tmp/, nano, chmod, chown, bash, sh
+"""
+    elif os_category == "macos":
+        os_command_block = f"""
+CRITICAL — TARGET OS IS macOS: "{os_name}"
+You MUST use ONLY macOS-compatible commands.
+
+macOS COMMAND REFERENCE:
+  Open file             : nano /path/to/file  OR  open -e /path/to/file
+  Copy/backup file      : cp /path/file /path/file.bak
+  Restart service       : sudo launchctl stop com.service.name && sudo launchctl start com.service.name
+  Install package       : brew install packagename
+  Firewall              : sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setblockall on
+  Check service         : launchctl list | grep servicename
+  SSL/TLS               : /usr/local/etc/openssl/openssl.cnf  OR  /etc/ssl/openssl.cnf
+  Web server config     : /usr/local/etc/httpd/extra/httpd-ssl.conf  (Homebrew Apache)
+  Nmap scan             : nmap --script ssl-enum-ciphers -p {port} {ip}
+"""
+    else:
+        # linux (default)
+        os_command_block = f"""
+CRITICAL — TARGET OS IS LINUX: "{os_name}"
+You MUST use ONLY Linux-compatible commands.
+
+LINUX COMMAND REFERENCE:
+  Open file             : sudo nano /etc/path/file.conf  OR  sudo vim /etc/path/file.conf
+  Copy/backup file      : sudo cp /etc/file /etc/file.bak_$(date +%Y%m%d)
+  Restart service       : sudo systemctl restart servicename
+  Check service         : sudo systemctl status servicename
+  Install package       : sudo apt-get install packagename  (Debian/Ubuntu)  OR  sudo yum install packagename  (RHEL/CentOS)
+  Firewall              : sudo ufw deny {port}/tcp  (UFW)  OR  sudo firewall-cmd --permanent --remove-port={port}/tcp  (firewalld)
+  Web server config     : /etc/apache2/sites-enabled/default-ssl.conf  (Apache/Ubuntu)  OR  /etc/nginx/sites-enabled/default  (Nginx)
+  SSH config            : /etc/ssh/sshd_config
+  SSL dir               : /etc/ssl/certs/
+  Logs                  : /var/log/apache2/  OR  /var/log/nginx/
+  Nmap scan             : nmap --script ssl-enum-ciphers -p {port} {ip}
+"""
 
     # ------------------------------------------------------------------ #
     # Task 1 — Vulnerability Analysis                                     #
@@ -125,6 +191,8 @@ CONTEXT:
   Description     : {description or 'Not provided'}
   Plugin Output   : {plugin_out or 'Not provided'}
 
+{os_command_block}
+
 MANDATORY — Use the mitigation_knowledge tool first with:
   vuln_name="{vuln_name}", description="{description}", ip="{ip}", port="{port}", os_name="{os_name}", assigned_to="{assigned_to}"
 
@@ -188,6 +256,10 @@ VULNERABILITY CONTEXT:
   Port            : {port}
   Vulnerability   : {vuln_name}
   Assigned To     : {assigned_to}
+
+⚠ OS ENFORCEMENT: Every command in the "Commands for Action" column MUST be valid for "{os_name}".
+{"Windows commands only — NO sudo/systemctl/apt/nano//etc/ paths. Use PowerShell/CMD/net stop/notepad." if os_category == "windows" else "macOS commands only — use brew/launchctl/nano." if os_category == "macos" else "Linux commands only — use systemctl/apt/yum/sudo/nano."}
+Copy ALL commands exactly from the Remediation Engineer's plan without converting them to a different OS.
 
 ═══════════════════════════════════════════════════════════════
 SECTION 1 — MITIGATION TABLE (start here, no preamble)
