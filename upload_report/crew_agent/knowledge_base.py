@@ -989,14 +989,163 @@ def find_template(vuln_name: str, description: str = "") -> Optional[MitigationT
     return None
 
 
+# Ordered substitution list — Linux path/command → Windows equivalent.
+# Order matters: more specific patterns must come before shorter overlapping ones.
+_LINUX_TO_WINDOWS = [
+    # --- Paths ---
+    ("/etc/apache2/sites-enabled/default-ssl.conf", r"C:\Apache24\conf\extra\httpd-ssl.conf"),
+    ("/etc/apache2/mods-enabled/ssl.conf",          r"C:\Apache24\conf\extra\httpd-ssl.conf"),
+    ("/etc/apache2/sites-enabled/",                 r"C:\Apache24\conf\extra\ "),
+    ("/etc/apache2/conf-enabled/security.conf",     r"C:\Apache24\conf\extra\httpd-ssl.conf"),
+    ("/etc/apache2/",                               r"C:\Apache24\conf\ "),
+    ("/etc/nginx/sites-enabled/default",            r"C:\nginx\conf\nginx.conf"),
+    ("/etc/nginx/conf.d/ssl.conf",                  r"C:\nginx\conf\nginx.conf"),
+    ("/etc/nginx/sites-enabled/",                   r"C:\nginx\conf\ "),
+    ("/etc/nginx/nginx.conf",                       r"C:\nginx\conf\nginx.conf"),
+    ("/etc/nginx/",                                 r"C:\nginx\conf\ "),
+    ("/etc/ssh/sshd_config",                        r"C:\ProgramData\ssh\sshd_config"),
+    ("/etc/ssl/certs/dhparam.pem",                  r"C:\ProgramData\ssl\dhparam.pem"),
+    ("/etc/ssl/certs/",                             r"C:\ProgramData\ssl\ "),
+    ("/etc/ssl/",                                   r"C:\ProgramData\ssl\ "),
+    ("/etc/pki/tls/certs/",                         r"C:\ProgramData\ssl\ "),
+    ("/etc/pam.d/common-password",                  "Group Policy > Account Policies > Password Policy"),
+    ("/etc/security/pwquality.conf",                "Group Policy > Password Policy settings"),
+    ("/etc/passwd",                                 r"C:\Windows\System32\config\SAM  (use: net user)"),
+    ("/etc/shadow",                                 r"C:\Windows\System32\config\SAM  (use: net user)"),
+    ("/etc/",                                       r"C:\Windows\System32\ "),
+    ("/var/log/apache2/error.log",                  r"C:\Apache24\logs\error.log"),
+    ("/var/log/apache2/",                           r"C:\Apache24\logs\ "),
+    ("/var/log/nginx/error.log",                    r"C:\nginx\logs\error.log"),
+    ("/var/log/nginx/",                             r"C:\nginx\logs\ "),
+    ("/var/log/security/remediations/",             r"C:\Security\Remediations\ "),
+    ("/var/log/",                                   r"C:\Windows\Logs\ "),
+    ("/tmp/cipher_scan_before.txt",                 r"%TEMP%\cipher_scan_before.txt"),
+    ("/tmp/cipher_scan_after.txt",                  r"%TEMP%\cipher_scan_after.txt"),
+    ("/tmp/svc_config_",                            r"%TEMP%\svc_config_"),
+    ("/tmp/",                                       r"%TEMP%\ "),
+    # --- Service management ---
+    ("sudo systemctl restart apache2",              "net stop Apache2.4 && net start Apache2.4"),
+    ("sudo systemctl restart httpd",                "net stop Apache2.4 && net start Apache2.4"),
+    ("sudo systemctl restart nginx",                "nginx -s reload"),
+    ("sudo systemctl stop vsftpd",                  "net stop ftpsvc"),
+    ("sudo systemctl disable vsftpd",               "sc config ftpsvc start= disabled"),
+    ("sudo systemctl stop telnet.socket",           "net stop TlntSvr"),
+    ("sudo systemctl disable telnet.socket",        "sc config TlntSvr start= disabled"),
+    ("sudo systemctl stop ",                        "net stop "),
+    ("sudo systemctl start ",                       "net start "),
+    ("sudo systemctl status apache2",               "sc query Apache2.4"),
+    ("sudo systemctl status nginx",                 "sc query nginx"),
+    ("sudo systemctl status ",                      "sc query "),
+    ("sudo systemctl enable ssh",                   "sc config sshd start= auto && net start sshd"),
+    ("sudo systemctl",                              "sc"),
+    ("systemctl list-units --type=service",         'Get-Service | Where-Object {$_.Status -eq "Running"}'),
+    # --- File editing ---
+    ("sudo nano /etc/apache2/",                     r"notepad C:\Apache24\conf\ "),
+    ("sudo nano /etc/nginx/",                       r"notepad C:\nginx\conf\ "),
+    ("sudo nano /etc/ssh/sshd_config",              r"notepad C:\ProgramData\ssh\sshd_config"),
+    ("sudo nano ",                                  "notepad "),
+    ("sudo vim ",                                   "notepad "),
+    ("sudo vi ",                                    "notepad "),
+    # --- File operations ---
+    ("cp /etc/apache2/sites-enabled/default-ssl.conf ",
+     r'copy "C:\Apache24\conf\extra\httpd-ssl.conf" '),
+    (".bak_$(date +%Y%m%d)",                        ".bak_%date:~-4,4%%date:~-10,2%%date:~-7,2%"),
+    ("$(date +%Y%m%d)",                             "%date:~-4,4%%date:~-10,2%%date:~-7,2%"),
+    ("tar -czf ",                                   "Compress-Archive -Path "),
+    ("sudo cp ",                                    "copy "),
+    ("cp ",                                         "copy "),
+    # --- Process / service listing ---
+    ("ps aux | grep -E 'apache|nginx|httpd'",       'sc query Apache2.4 | findstr "STATE" && sc query nginx | findstr "STATE"'),
+    ("ps aux | grep",                               "Get-Process |"),
+    ("ss -tlnp | grep",                             "netstat -ano | findstr"),
+    ("ss -tlnp",                                    "netstat -ano"),
+    # --- Log tailing ---
+    ("tail -f /var/log/apache2/error.log | grep -iE",
+     r'Get-Content C:\Apache24\logs\error.log -Wait | Select-String -Pattern'),
+    ("tail -f /var/log/nginx/error.log | grep -iE",
+     r'Get-Content C:\nginx\logs\error.log -Wait | Select-String -Pattern'),
+    ("tail -f ",                                    "Get-Content -Wait "),
+    ("tail -50 ",                                   "Get-Content -Tail 50 "),
+    ("tail -",                                      "Get-Content -Tail "),
+    # --- Grep / text search ---
+    ("grep -iE",                                    "Select-String -Pattern"),
+    ("grep -E",                                     "Select-String -Pattern"),
+    ("grep -v nologin",                             'Where-Object {$_.Enabled -eq $true}'),
+    ("grep -v",                                     "Where-Object"),
+    ("grep",                                        "Select-String"),
+    # --- Package management ---
+    ("sudo apt-get update && sudo apt-get install --only-upgrade ",
+     "choco upgrade "),
+    ("sudo apt-get install --only-upgrade ",        "choco upgrade "),
+    ("sudo apt-get install openssh-server",
+     "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"),
+    ("sudo apt-get install ",                       "choco install "),
+    ("sudo apt-get update",                         "choco upgrade all"),
+    ("sudo yum update ",                            "choco upgrade "),
+    ("sudo yum install ",                           "choco install "),
+    ("apt list --upgradable",                       "choco outdated"),
+    ("yum check-update",                            "choco outdated"),
+    ("dpkg -l | grep",                              "Get-Package | Where-Object {$_.Name -like"),
+    ("dpkg -l",                                     "Get-Package"),
+    ("rpm -q ",                                     "Get-Package -Name "),
+    # --- Firewall ---
+    ("sudo ufw deny in ",                           "netsh advfirewall firewall add rule name='Block Port' dir=in action=block protocol=TCP localport="),
+    ("sudo ufw deny ",                              "netsh advfirewall firewall add rule name='Block' dir=in action=block protocol=TCP localport="),
+    ("sudo ufw status",                             "netsh advfirewall show allprofiles"),
+    ("sudo ufw",                                    "netsh advfirewall"),
+    ("sudo iptables -A INPUT",                      "netsh advfirewall firewall add rule name='Block' dir=in action=block protocol=TCP"),
+    ("sudo iptables",                               "netsh advfirewall firewall"),
+    ("sudo firewall-cmd",                           "netsh advfirewall firewall"),
+    # --- Apache modules ---
+    ("sudo a2enmod headers",
+     r"# Enable headers: edit C:\Apache24\conf\httpd.conf — uncomment: LoadModule headers_module modules/mod_headers.so"),
+    ("sudo a2enmod ",
+     r"# Enable Apache module: edit C:\Apache24\conf\httpd.conf — uncomment the LoadModule line"),
+    # --- User management ---
+    ("sudo usermod -L ",                            "net user /active:no "),
+    ("sudo userdel -r ",                            "net user /delete "),
+    ("sudo passwd ",                                "net user <username> <newpassword>  # Windows: "),
+    ("cat /etc/passwd | grep",                      "net user"),
+    ("cat /etc/shadow | awk",                       "net user"),
+    ("cat /etc/passwd",                             "net user"),
+    # --- OpenSSL ---
+    ("openssl dhparam -out /etc/ssl/certs/dhparam.pem",
+     r'"C:\Program Files\OpenSSL-Win64\bin\openssl.exe" dhparam -out C:\ProgramData\ssl\dhparam.pem'),
+    ("openssl dhparam",
+     r'"C:\Program Files\OpenSSL-Win64\bin\openssl.exe" dhparam'),
+    ("openssl ",
+     r'"C:\Program Files\OpenSSL-Win64\bin\openssl.exe" '),
+    # --- Journald ---
+    ("journalctl -xe | tail -50",                   "Get-EventLog -LogName Application -Newest 50"),
+    ("journalctl -xe",                              "Get-EventLog -LogName Application -Newest 50"),
+    # --- sudo catch-all (last) ---
+    ("sudo ",                                       ""),  # strip remaining sudo
+]
+
+
+def _apply_windows_substitution(text: str) -> str:
+    """Replace Linux-specific paths and commands with Windows equivalents."""
+    for linux_pattern, windows_replacement in _LINUX_TO_WINDOWS:
+        text = text.replace(linux_pattern, windows_replacement)
+    return text
+
+
 def render_steps(template: MitigationTemplate, context: dict) -> List[MitigationStep]:
-    """Return a copy of the template steps with context variables filled in."""
+    """Return a copy of the template steps with context variables filled in.
+    When os_category in context is 'windows', Linux commands/paths are replaced
+    with Windows equivalents before returning.
+    """
+    os_category = context.get("os_category", "linux")
+
     filled = []
     for s in template.steps:
         def fill(text: str) -> str:
             for k, v in context.items():
                 text = text.replace("{" + k + "}", str(v))
+            if os_category == "windows":
+                text = _apply_windows_substitution(text)
             return text
+
         filled.append(MitigationStep(
             step_no=s.step_no,
             assigned_to=fill(s.assigned_to),

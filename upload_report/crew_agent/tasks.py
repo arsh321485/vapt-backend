@@ -194,7 +194,7 @@ CONTEXT:
 {os_command_block}
 
 MANDATORY — Use the mitigation_knowledge tool first with:
-  vuln_name="{vuln_name}", description="{description}", ip="{ip}", port="{port}", os_name="{os_name}", assigned_to="{assigned_to}"
+  vuln_name="{vuln_name}", description="{description}", ip="{ip}", port="{port}", os_name="{os_name}", os_category="{os_category}", assigned_to="{assigned_to}"
 
 Then use command_builder to generate OS-specific commands for each step.
 
