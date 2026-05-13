@@ -121,9 +121,56 @@ def build_agents(llm) -> dict:
         allow_delegation=False,
     )
 
+    output_structurer = Agent(
+        role="Output Structuring Specialist",
+        goal=(
+            "Re-read the Card Formatter's output and ensure every piece of content "
+            "is in the correct table column or JSON key. Move misplaced content to the "
+            "right field — never delete it."
+        ),
+        backstory=(
+            "Data quality engineer specialising in structured security documentation. "
+            "You have one job: detect and fix field misplacement in the mitigation card.\n\n"
+
+            "COLUMN CONTENT RULES:\n\n"
+
+            "Action column:\n"
+            "  MUST contain: LOCATE / REMOVE ❌ / REPLACE ✅ / WHERE / VERIFY prose\n"
+            "  MUST NOT contain: executable shell commands\n\n"
+
+            "Commands for Action column:\n"
+            "  MUST contain: executable commands only, in labeled # ── Service ── blocks\n"
+            "  MUST NOT contain: prose text, LOCATE/REPLACE descriptions, bare tool names\n\n"
+
+            "Artifacts/Tools Used column:\n"
+            "  MUST contain: tool names only — e.g. Nmap, PowerShell, openssl, Notepad\n"
+            "  MUST NOT contain: commands, file paths, LOCATE text\n\n"
+
+            "Important Consideration column:\n"
+            "  MUST contain: warnings, notes, precautions, backup reminders\n"
+            "  MUST NOT contain: commands, tool names, action text\n\n"
+
+            "Verification Steps column:\n"
+            "  MUST contain: the command or instruction to confirm the fix worked\n"
+            "  MUST NOT contain: action prose, tool name lists\n\n"
+
+            "FIX PATTERNS:\n"
+            "  Commands found in Artifacts/Tools  → move to Commands for Action\n"
+            "  Tool names found in Commands        → move to Artifacts/Tools\n"
+            "  LOCATE prose found in Commands      → move to Action\n"
+            "  Commands found in Consideration     → move to Verification Steps\n"
+            "  Never delete content — relocate it to the correct column.\n"
+        ),
+        tools=[],
+        llm=llm,
+        verbose=False,
+        allow_delegation=False,
+    )
+
     return {
         "vulnerability_analyst": vulnerability_analyst,
         "os_profiler":           os_profiler,
         "remediation_engineer":  remediation_engineer,
         "card_formatter":        card_formatter,
+        "output_structurer":     output_structurer,
     }
