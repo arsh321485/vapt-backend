@@ -69,14 +69,24 @@ def _terminology_table(os_name: str) -> str:
 def _command_coverage_rule() -> str:
     return (
         "\nCOMMAND BLOCK COVERAGE RULE:\n"
-        "  If the Action text mentions multiple web server paths (e.g., 'Apache OR Nginx',\n"
-        "  or 'IIS, Apache, and Nginx'), the Command to Run field MUST contain a labeled\n"
-        "  block for EACH path, formatted as:\n\n"
-        "    # ── <Path Label> ─────────────────────────────────────\n"
+        "  Every command that targets a specific file path or service MUST be placed\n"
+        "  inside its own labeled block using this exact format:\n\n"
+        "    # ── <Service or File Label> ─────────────────────────────────────\n"
         "    <command 1>\n"
-        "    <command 2>\n\n"
-        "  Each block ends with a verification command.\n"
-        "  NEVER write only one block when the action describes multiple paths.\n"
+        "    <command 2>\n"
+        "    <verification command>\n\n"
+        "  LABELING RULES — derive the label from the service or path:\n"
+        "    Command targets C:\\Apache24\\... or /etc/apache2/...  →  # ── Apache ──────────\n"
+        "    Command targets C:\\nginx\\... or /etc/nginx/...       →  # ── Nginx ───────────\n"
+        "    Command uses iisreset / W3SVC / Get-WebConfiguration  →  # ── IIS ─────────────\n"
+        "    Command targets HKLM:\\...\\SCHANNEL\\...              →  # ── Windows Registry (Schannel) ──\n"
+        "    Command targets /etc/ssh/ or sshd_config              →  # ── SSH ─────────────\n\n"
+        "  ABSOLUTE REQUIREMENTS:\n"
+        "  - If commands target multiple services/paths, EVERY command must be in\n"
+        "    its own labeled block. NEVER mix Apache and Nginx in one block.\n"
+        "  - NEVER write only one unlabeled block when multiple services are involved.\n"
+        "  - Each block MUST end with a verification command.\n"
+        "  - Apply this rule in BOTH the Action field and the Commands for Action field.\n"
     )
 
 
@@ -285,4 +295,81 @@ Output a numbered contextual analysis with these sections:
         context=[task_analyse, task_profile, task_remediate],
     )
 
-    return [task_analyse, task_profile, task_remediate, task_format]
+    # ── Task 5: Output Structuring ──────────────────────────────────────────────
+    task_structure = Task(
+        description=f"""
+Re-read the Card Formatter's output and produce a corrected version with every field
+in the correct column.
+
+TARGET OS: {profile.display_name}
+
+YOUR ONLY JOB: Fix fields that are in the wrong table cell. The data content is correct
+but content may have been placed in the wrong column. Relocate — never delete.
+
+COLUMN RULES:
+
+  Action
+    ✅ LOCATE / REMOVE ❌ / REPLACE ✅ / WHERE / VERIFY prose
+    ❌ NOT executable shell commands
+
+  Commands for Action
+    ✅ Executable commands only, in labeled blocks:
+         # ── <Service> ─────────────────────────────
+         <command>
+    ❌ NOT prose text, NOT LOCATE descriptions, NOT bare tool names
+
+  Artifacts/Tools Used
+    ✅ Tool names only — comma-separated (e.g., Nmap, PowerShell, openssl, Notepad)
+    ❌ NOT commands, NOT file paths
+
+  Important Consideration
+    ✅ Warnings, notes, precautions, backup reminders
+    ❌ NOT commands, NOT action text
+
+  Verification Steps
+    ✅ The command or instruction to confirm the fix worked
+    ❌ NOT action prose, NOT tool name lists
+
+COMMON FIX EXAMPLES:
+  Artifacts/Tools shows "Get-TlsCipherSuite | Select-Object Name"
+    → That is a command. Move it to Commands for Action.
+    → Artifacts/Tools should be: "PowerShell, Get-TlsCipherSuite cmdlet"
+
+  Commands shows "PowerShell, Notepad"
+    → Those are tool names. Move them to Artifacts/Tools.
+    → Commands should contain the actual executable commands.
+
+  Important Consideration shows "Get-Service W3SVC"
+    → That is a command. Move it to Verification Steps.
+    → Consideration should contain only the warning or note.
+
+OUTPUT — reproduce all THREE sections with corrections applied:
+
+═══════════════════════════════════════════════════════════════
+SECTION 1 — MARKDOWN TABLE
+═══════════════════════════════════════════════════════════════
+| Step No | Assigned To | Task Name | Action | System File Path | Commands for Action | Artifacts/Tools Used | Important Consideration | Verification Steps |
+|---|---|---|---|---|---|---|---|---|
+
+═══════════════════════════════════════════════════════════════
+SECTION 2 — JSON VULNERABILITY CARD
+═══════════════════════════════════════════════════════════════
+Keep ALL JSON fields exactly as received from the Card Formatter. Do not change any value.
+
+═══════════════════════════════════════════════════════════════
+SECTION 3 — CONTEXTUAL ANALYSIS
+═══════════════════════════════════════════════════════════════
+Keep the numbered contextual analysis exactly as received. Do not change any content.
+""",
+        expected_output=(
+            "Three corrected sections: (1) markdown pipe table where each cell contains "
+            "only the correct type of content for that column, "
+            "(2) JSON vulnerability card block unchanged from Card Formatter output, "
+            "(3) contextual analysis unchanged. "
+            f"All terminology correct for {profile.display_name}."
+        ),
+        agent=agents["output_structurer"],
+        context=[task_format],
+    )
+
+    return [task_analyse, task_profile, task_remediate, task_format, task_structure]

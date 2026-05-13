@@ -366,6 +366,88 @@ def _where_to_run_label(where_to_run: str) -> str:
     return labels.get(where_to_run, "Terminal / Command Prompt (open the terminal on your system)")
 
 
+def _detect_service_label(command_line: str) -> str:
+    """
+    Detect which service/file path a single command line targets.
+    Returns a label string, or empty string if no match.
+    """
+    line = command_line  # keep original case for regex matching
+
+    if re.search(r'(?i)apache24|apache2\.4|\\apache\\|\\apache24\\|\\Apache24\\|httpd-ssl|mod_ssl', line):
+        return 'Apache'
+    if re.search(r'(?i)/etc/apache2/|apache2\.conf|httpd\.conf|apachectl', line):
+        return 'Apache'
+    if re.search(r'(?i)\\nginx\\|/etc/nginx/|nginx\.conf', line):
+        return 'Nginx'
+    if re.search(r'(?i)\bnginx\b(?!\s+-t)', line):   # 'nginx' as a path/service, not 'nginx -t' (that's verify)
+        return 'Nginx'
+    if re.search(r'(?i)iisreset|W3SVC|Get-WebConfiguration|system\.webServer|inetpub|applicationHost', line):
+        return 'IIS'
+    if re.search(r'(?i)SCHANNEL|SecurityProviders.*SCHANNEL|TLS\s+1\.[012].*\\\\Server|HKLM.*Protocols', line):
+        return 'Windows Registry (Schannel)'
+    if re.search(r'(?i)HKLM[:\\/].*(?:TLS|SSL|Cipher|Schannel)', line):
+        return 'Windows Registry (Schannel)'
+    if re.search(r'(?i)/etc/ssh/|sshd_config', line):
+        return 'SSH'
+    if re.search(r'(?i)letsencrypt|certbot|/etc/ssl/certs', line):
+        return 'SSL Certificate'
+    if re.search(r'(?i)\bufw\b|firewall-cmd|New-NetFirewallRule', line):
+        return 'Firewall'
+
+    return ''
+
+
+def _smart_split_commands(commands_str: str) -> list:
+    """
+    When no labeled # ── blocks exist, detect service/path labels per command
+    line and group consecutive commands with the same label.
+    Returns list of (label, commands_block) tuples, or [] if only one label found.
+    """
+    lines = commands_str.splitlines()
+
+    # Label each line: (original_line, detected_label or None)
+    line_labels = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('```'):
+            line_labels.append((line, None))
+            continue
+        if stripped.startswith('#'):
+            line_labels.append((line, None))  # comment — no label
+            continue
+        label = _detect_service_label(stripped)
+        line_labels.append((line, label or None))
+
+    # Check if multiple distinct labels are present
+    detected = [lbl for _, lbl in line_labels if lbl]
+    distinct = list(dict.fromkeys(detected))  # ordered, deduplicated
+    if len(distinct) <= 1:
+        return []  # nothing to split
+
+    # Group consecutive lines with the same label;
+    # unlabeled lines attach to the current group
+    groups = []
+    current_label = None
+    current_lines = []
+
+    for line, label in line_labels:
+        if label and label != current_label:
+            # New service label — save current group and start a new one
+            if current_lines:
+                groups.append((current_label or '', '\n'.join(current_lines)))
+            current_label = label
+            current_lines = [line]
+        else:
+            if line.strip():  # skip pure blank lines between groups
+                current_lines.append(line)
+
+    if current_lines:
+        groups.append((current_label or '', '\n'.join(current_lines)))
+
+    # Filter out empty groups
+    return [(lbl, cmds) for lbl, cmds in groups if cmds.strip()]
+
+
 def _extract_verification_command(commands: str) -> str:
     """Extract the most likely verification command from a command block."""
     verify_patterns = [
@@ -465,18 +547,27 @@ def _parse_command_blocks(
 
     headers = list(header_re.finditer(commands_str))
 
-    if not headers:
-        return [_build_command_block("", commands_str.strip(), system_file_path, step_no, step_name)]
+    if headers:
+        # Path 1: explicit # ── Label ── headers from LLM
+        blocks = []
+        for i, match in enumerate(headers):
+            label = match.group(1).strip()
+            start = match.end()
+            end = headers[i + 1].start() if i + 1 < len(headers) else len(commands_str)
+            block_commands = commands_str[start:end].strip()
+            blocks.append(_build_command_block(label, block_commands, system_file_path, step_no, step_name))
+        return blocks
 
-    blocks = []
-    for i, match in enumerate(headers):
-        label = match.group(1).strip()
-        start = match.end()
-        end = headers[i + 1].start() if i + 1 < len(headers) else len(commands_str)
-        block_commands = commands_str[start:end].strip()
-        blocks.append(_build_command_block(label, block_commands, system_file_path, step_no, step_name))
+    # Path 2: no headers — try smart service/path detection
+    smart_groups = _smart_split_commands(commands_str)
+    if smart_groups:
+        return [
+            _build_command_block(lbl, cmds, system_file_path, step_no, step_name)
+            for lbl, cmds in smart_groups
+        ]
 
-    return blocks
+    # Path 3: single unlabeled block
+    return [_build_command_block("", commands_str.strip(), system_file_path, step_no, step_name)]
 
 
 def _ensure_execution_guidance_fields(row: dict) -> dict:
@@ -637,11 +728,12 @@ def _parse_response(raw_text: str) -> dict:
 
 class MitigationGenerationTool:
     """
-    Generates detailed vulnerability mitigation plans using a 4-agent CrewAI crew:
+    Generates detailed vulnerability mitigation plans using a 5-agent CrewAI crew:
       Agent 1 — Vulnerability Analyst
       Agent 2 — OS & Service Profiler
       Agent 3 — Remediation Engineer
-      Agent 4 — Mitigation Card Formatter
+      Agent 4 — Mitigation Card Formatter & QA
+      Agent 5 — Output Structuring Specialist
     """
 
     def _run(
@@ -654,7 +746,7 @@ class MitigationGenerationTool:
         operating_system: str = "",
     ) -> dict:
         """
-        Execute the 4-agent mitigation crew and return structured results.
+        Execute the 5-agent mitigation crew and return structured results.
 
         Returns a dict with keys:
             success, vulnerability_name, description, plugin_output, report_id,
@@ -700,7 +792,7 @@ class MitigationGenerationTool:
                 verbose=False,
             )
 
-            logger.info(f"[MitigationCrew] Starting 4-agent crew for: {plugin_name}")
+            logger.info(f"[MitigationCrew] Starting 5-agent crew for: {plugin_name}")
             crew_result = crew.kickoff()
             raw_text = str(crew_result)
 
