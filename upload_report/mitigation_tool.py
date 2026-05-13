@@ -46,6 +46,60 @@ def _detect_os(operating_system: str) -> str:
     return "windows"
 
 
+_VALID_TEAMS = {
+    "network-security",
+    "patch-management",
+    "architectural-flaws",
+    "configuration-management",
+}
+
+_TEAM_KEYWORDS = {
+    # Check patch-management FIRST — unpatched/CVE takes priority over technology keywords
+    "patch-management": [
+        "missing patch", "missing patches", "unpatched", "outdated",
+        "end of life", "eol", "kernel", "cve-", "upgrade", "obsolete",
+        "out of date", "security update", "hotfix", "service pack",
+        "out-of-date", "needs update", "vulnerable version", "patches",
+    ],
+    "architectural-flaws": [
+        "default credential", "default credentials", "credential",
+        "default password", "weak password", "weak credential",
+        "authentication bypass", "privilege escalation", "broken auth",
+        "insecure design", "access control", "authorization", "default login",
+        "hardcoded", "no authentication", "improper authentication",
+    ],
+    "network-security": [
+        "ssl/tls", "weak cipher", "rc4", "3des", "tls 1.0", "tls 1.1",
+        "open port", "telnet", "ftp ", "snmp", "firewall", "port scan",
+        "smb", "rdp", "exposed service", "unnecessary service",
+        "cipher suite", "ssl cipher", "tls cipher",
+    ],
+    "configuration-management": [
+        "misconfigur", "missing header", "security header",
+        "hsts", "csp", "x-frame", "cors", "default setting",
+        "permission", "directory listing", "information disclosure",
+        "banner", "version disclosure", "debug mode",
+    ],
+}
+
+
+def _resolve_assigned_team(vuln_name: str, vuln_card: dict) -> str:
+    """
+    Ensure assigned_team is one of the 4 valid teams.
+    If LLM returned an invalid value, infer from vulnerability name.
+    """
+    raw = (vuln_card.get("assigned_team") or "").strip().lower().replace(" ", "-")
+    if raw in _VALID_TEAMS:
+        return raw
+
+    combined = (vuln_name + " " + (vuln_card.get("vulnerability_type") or "")).lower()
+    for team, keywords in _TEAM_KEYWORDS.items():
+        if any(kw in combined for kw in keywords):
+            return team
+
+    return "configuration-management"  # safe default
+
+
 def _extract_json_fallback(json_str: str) -> dict:
     """Last-resort field extraction when json.loads fails."""
     fields = [
@@ -520,16 +574,21 @@ class MitigationGenerationTool:
 
             parsed = _parse_response(raw_text)
 
+            # Enforce valid assigned_team — must be one of the 4 known teams
+            vuln_card = parsed["vulnerability_card"]
+            vuln_card["assigned_team"] = _resolve_assigned_team(plugin_name, vuln_card)
+
             logger.info(
                 f"[MitigationCrew] Done — table rows: {len(parsed['mitigation_table'])}, "
-                f"card fields: {len(parsed['vulnerability_card'])}"
+                f"card fields: {len(vuln_card)}, "
+                f"assigned_team: {vuln_card.get('assigned_team')}"
             )
 
             return {
                 **base,
                 "success": True,
                 "mitigation_table": parsed["mitigation_table"],
-                "vulnerability_card": parsed["vulnerability_card"],
+                "vulnerability_card": vuln_card,
                 "contextual_analysis": parsed["contextual_analysis"],
                 "raw_response_sections": parsed["raw_response_sections"],
                 "error": None,

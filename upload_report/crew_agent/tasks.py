@@ -234,6 +234,16 @@ SECTION 2 — JSON VULNERABILITY CARD
 ═══════════════════════════════════════════════════════════════
 Output a JSON block (```json ... ```) with these exact fields:
 
+TEAM ASSIGNMENT RULES — assigned_team MUST be exactly one of these 4 values:
+  "network-security"       → SSL/TLS issues, weak ciphers, open ports, Telnet/FTP exposure,
+                             firewall gaps, SNMP, DNS, any network-layer vulnerability
+  "patch-management"       → Missing OS/software patches, outdated packages, EOL software,
+                             unpatched CVEs, kernel vulnerabilities, outdated libraries
+  "architectural-flaws"    → Authentication bypass, default/weak credentials, privilege
+                             escalation, insecure design, missing access controls, broken auth
+  "configuration-management" → Misconfigured services, wrong permissions, insecure headers,
+                             SSL config errors, default settings left enabled, config drift
+
 ```json
 {{
   "resource_id": "{ip}",
@@ -243,7 +253,7 @@ Output a JSON block (```json ... ```) with these exact fields:
   "reference_url": "<reference URL if available, else null>",
   "vulnerability_type": "<category from vulnerability analysis>",
   "affected_port_ranges": "{port}",
-  "assigned_team": "<team name based on vuln type>",
+  "assigned_team": "<MUST be one of: network-security | patch-management | architectural-flaws | configuration-management>",
   "vendor_fix_available": "<yes/no/unknown>",
   "steps_to_fix_description": "<one-sentence summary of the fix>",
   "deadline": "<recommended deadline based on severity>",
