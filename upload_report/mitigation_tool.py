@@ -85,7 +85,7 @@ _TEAM_KEYWORDS = {
 
 def _resolve_assigned_team(vuln_name: str, vuln_card: dict) -> str:
     """
-    Ensure assigned_team is one of the 4 valid teams.
+    Ensure assigned_team is one of the 4 valid slugs.
     If LLM returned an invalid value, infer from vulnerability name.
     """
     raw = (vuln_card.get("assigned_team") or "").strip().lower().replace(" ", "-")
@@ -98,6 +98,19 @@ def _resolve_assigned_team(vuln_name: str, vuln_card: dict) -> str:
             return team
 
     return "configuration-management"  # safe default
+
+
+_TEAM_DISPLAY_NAMES = {
+    "network-security":         "Network Security",
+    "patch-management":         "Patch Management",
+    "architectural-flaws":      "Architectural Flaws",
+    "configuration-management": "Configuration Management",
+}
+
+
+def _team_display_name(slug: str) -> str:
+    """Convert team slug to Title Case display name."""
+    return _TEAM_DISPLAY_NAMES.get(slug, slug.replace("-", " ").title())
 
 
 def _extract_json_fallback(json_str: str) -> dict:
@@ -180,6 +193,12 @@ def _parse_markdown_table(table_str: str) -> list:
         row["where_to_run"] = where_to_run
         row["where_to_run_label"] = _where_to_run_label(where_to_run)
         row = _ensure_execution_guidance_fields(row)
+        row["command_blocks"] = _parse_command_blocks(
+            row.get("commands_for_action", ""),
+            row.get("system_file_path", ""),
+            row.get("step_no", ""),
+            row.get("task_name", ""),
+        )
         raw_tools = row.get("artifacts_tools_used", "")
         if isinstance(raw_tools, str):
             row["artifacts_tools_used"] = [t.strip() for t in raw_tools.split(",") if t.strip()]
@@ -345,6 +364,119 @@ def _where_to_run_label(where_to_run: str) -> str:
         "not_applicable": "No command needed — follow the steps in the Action column",
     }
     return labels.get(where_to_run, "Terminal / Command Prompt (open the terminal on your system)")
+
+
+def _extract_verification_command(commands: str) -> str:
+    """Extract the most likely verification command from a command block."""
+    verify_patterns = [
+        r'systemctl\s+status\s+\S+',
+        r'openssl\s+s_client\s+.+',
+        r'curl\s+-[vsIk].+',
+        r'Test-NetConnection\s+.+',
+        r'Get-Service\s+.+',
+        r'nmap\s+.+',
+        r'netstat\s+.+',
+        r'\bss\s+-\w+',
+        r'apachectl\s+(?:configtest|-t)',
+        r'nginx\s+-t',
+        r'sslscan\s+.+',
+        r'testssl\.sh\s+.+',
+    ]
+    for line in commands.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        for pattern in verify_patterns:
+            if re.search(pattern, stripped, re.IGNORECASE):
+                return stripped
+    return ""
+
+
+def _build_on_failure(label: str, where_to_run: str, file_path: str = "") -> str:
+    """Generate on-failure guidance based on execution context."""
+    if where_to_run == "bash":
+        base = "Check logs: journalctl -xe  or  tail -50 /var/log/syslog"
+    elif where_to_run == "powershell":
+        base = ("Check Windows Event Viewer or run: "
+                "Get-EventLog -LogName System -Newest 20 | Where-Object {$_.EntryType -eq 'Error'}")
+    elif where_to_run == "cmd":
+        base = "Open Event Viewer (eventvwr.msc) and check the System log for errors."
+    else:
+        base = "Check system logs for error details and verify you have sufficient permissions."
+
+    if file_path:
+        base += f"  Verify target file exists: {file_path}"
+
+    prefix = f"[{label}] " if label else ""
+    return f"{prefix}{base}  Correct any errors shown and retry."
+
+
+def _build_command_block(
+    label: str,
+    commands: str,
+    system_file_path: str = "",
+    step_no: str = "",
+    step_name: str = "",
+) -> dict:
+    """Build a single command block dict with all execution guidance fields."""
+    where = _infer_where_to_run(commands, system_file_path)
+    verification_check = _extract_verification_command(commands)
+
+    if label:
+        expected_output = f"All '{label}' commands complete without errors."
+    else:
+        expected_output = f"Command completes without errors for step {step_no or step_name or 'this step'}."
+
+    if verification_check:
+        expected_output += " Verification command confirms the change is applied."
+
+    return {
+        "label": label,
+        "commands": commands,
+        "where_to_run": where,
+        "where_to_run_label": _where_to_run_label(where),
+        "expected_output": expected_output,
+        "verification_check": verification_check or "Confirm the change is in place and no error messages appear.",
+        "on_failure_what_to_do": _build_on_failure(label, where, system_file_path),
+    }
+
+
+def _parse_command_blocks(
+    commands_str: str,
+    system_file_path: str = "",
+    step_no: str = "",
+    step_name: str = "",
+) -> list:
+    """
+    Split commands_for_action into labeled blocks (# ── Label ──).
+    Each block gets its own where_to_run, expected_output,
+    verification_check, and on_failure_what_to_do.
+    """
+    if not commands_str:
+        return []
+
+    commands_str = re.sub(r'<br\s*/?>', '\n', commands_str, flags=re.IGNORECASE)
+
+    # Match: # ── Label ─────────────────────────  (box-drawing or hyphens)
+    header_re = re.compile(
+        r'^#\s*[─━—\-]{2,}\s*(.+?)\s*[─━—\-]*\s*$',
+        re.MULTILINE,
+    )
+
+    headers = list(header_re.finditer(commands_str))
+
+    if not headers:
+        return [_build_command_block("", commands_str.strip(), system_file_path, step_no, step_name)]
+
+    blocks = []
+    for i, match in enumerate(headers):
+        label = match.group(1).strip()
+        start = match.end()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(commands_str)
+        block_commands = commands_str[start:end].strip()
+        blocks.append(_build_command_block(label, block_commands, system_file_path, step_no, step_name))
+
+    return blocks
 
 
 def _ensure_execution_guidance_fields(row: dict) -> dict:
@@ -574,14 +706,20 @@ class MitigationGenerationTool:
 
             parsed = _parse_response(raw_text)
 
-            # Enforce valid assigned_team — must be one of the 4 known teams
+            # Enforce valid assigned_team and convert to Title Case display name
             vuln_card = parsed["vulnerability_card"]
-            vuln_card["assigned_team"] = _resolve_assigned_team(plugin_name, vuln_card)
+            team_slug = _resolve_assigned_team(plugin_name, vuln_card)
+            team_display = _team_display_name(team_slug)
+            vuln_card["assigned_team"] = team_display
+
+            # Sync assigned_to in every mitigation table row to the team display name
+            for row in parsed["mitigation_table"]:
+                row["assigned_to"] = team_display
 
             logger.info(
                 f"[MitigationCrew] Done — table rows: {len(parsed['mitigation_table'])}, "
                 f"card fields: {len(vuln_card)}, "
-                f"assigned_team: {vuln_card.get('assigned_team')}"
+                f"assigned_team: {team_display}"
             )
 
             return {
