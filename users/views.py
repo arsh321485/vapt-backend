@@ -5562,15 +5562,16 @@ class SlackEventsView(APIView):
     authentication_classes = []
 
     def post(self, request):
-        if not self._verify_signature(request):
-            return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
-
         payload = request.data
         event_type = payload.get("type")
 
-        # URL verification challenge
+        # URL verification must be handled BEFORE signature check —
+        # Slack sends this during setup to confirm the endpoint is reachable.
         if event_type == "url_verification":
             return Response({"challenge": payload.get("challenge")})
+
+        if not self._verify_signature(request):
+            return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
 
         # Handle event callbacks — run in background so Slack gets 200 immediately
         if event_type == "event_callback":
@@ -5648,6 +5649,87 @@ class SlackEventsView(APIView):
 
         elif etype == "member_left_channel":
             logger.info(f"Slack member {event.get('user')} left {event.get('channel')}")
+
+        elif etype == "app_home_opened":
+            slack_user_id = event.get("user")
+            admin = User.objects.filter(slack_team_id=team_id).first()
+            if admin and admin.slack_bot_token:
+                self._publish_app_home(admin.slack_bot_token, slack_user_id)
+
+        elif etype == "app_mention":
+            channel = event.get("channel")
+            thread_ts = event.get("ts")
+            slack_user_id = event.get("user")
+            admin = User.objects.filter(slack_team_id=team_id).first()
+            if admin and admin.slack_bot_token:
+                self._reply_to_mention(admin.slack_bot_token, channel, thread_ts, slack_user_id)
+
+    def _publish_app_home(self, bot_token, slack_user_id):
+        """Publish a welcome App Home tab view when user opens VaptFix in Slack sidebar."""
+        frontend_url = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai")
+        view = {
+            "type": "home",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": "Welcome to VaptFix", "emoji": True},
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*VaptFix* is an AI-powered vulnerability management platform.\nTrack, prioritize, and fix security vulnerabilities — all from Slack.",
+                    },
+                },
+                {"type": "divider"},
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": ":bar_chart: *What you can do:*\n• View your vulnerability reports\n• Get notified of new critical findings\n• Assign fixes to your team",
+                    },
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Open VaptFix Dashboard", "emoji": True},
+                            "url": frontend_url,
+                            "action_id": "open_dashboard",
+                            "style": "primary",
+                        }
+                    ],
+                },
+            ],
+        }
+        try:
+            _http_post(
+                "https://slack.com/api/views.publish",
+                json={"user_id": slack_user_id, "view": view},
+                headers={"Authorization": f"Bearer {bot_token}"},
+                timeout=10,
+            )
+        except Exception:
+            logger.exception(f"[SlackEvent] Failed to publish App Home for user={slack_user_id}")
+
+    def _reply_to_mention(self, bot_token, channel, thread_ts, slack_user_id):
+        """Reply in thread when someone mentions @VaptFix in a Slack channel."""
+        frontend_url = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai")
+        text = (
+            f"Hi <@{slack_user_id}>! :wave:\n"
+            f"I'm VaptFix — your AI-powered vulnerability management assistant.\n"
+            f"Open your dashboard here: {frontend_url}"
+        )
+        try:
+            _http_post(
+                "https://slack.com/api/chat.postMessage",
+                json={"channel": channel, "thread_ts": thread_ts, "text": text},
+                headers={"Authorization": f"Bearer {bot_token}"},
+                timeout=10,
+            )
+        except Exception:
+            logger.exception(f"[SlackEvent] Failed to reply to app_mention in channel={channel}")
 
     def _save_slack_member_to_user_detail(self, slack_user_id, team_id):
         """
@@ -5766,6 +5848,42 @@ class SlackEventsView(APIView):
 
         except Exception:
             logger.exception(f"[SlackEvent] _save_slack_member_to_user_detail failed for user={slack_user_id}")
+
+
+class SlackInstallView(APIView):
+    """
+    GET /api/users/slack/install/
+    'Add to Slack' marketplace entry point. Redirects any user directly to the Slack
+    OAuth authorization screen — no VaptFix login required. Used as the 'Add to Slack'
+    button URL in the Slack App Directory listing.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        state_data = {"nonce": str(uuid.uuid4()), "source": "marketplace"}
+        state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+
+        redirect_uri = getattr(settings, "SLACK_REDIRECT_URI", "")
+        if not redirect_uri:
+            redirect_uri = request.build_absolute_uri("/").rstrip("/") + "/api/admin/users/slack/callback/"
+
+        scopes = ",".join(getattr(settings, "SLACK_SCOPES", [
+            "chat:write", "channels:manage", "channels:join",
+            "mpim:write", "groups:write", "im:write",
+            "users:read", "users:read.email",
+        ]))
+        user_scopes = "identity.basic,identity.email,identity.avatar,identity.team"
+
+        auth_url = (
+            f"https://slack.com/oauth/v2/authorize"
+            f"?client_id={settings.SLACK_CLIENT_ID}"
+            f"&scope={scopes}"
+            f"&user_scope={user_scopes}"
+            f"&redirect_uri={redirect_uri}"
+            f"&state={state}"
+        )
+        return redirect(auth_url)
 
 
 class CreateTeamsSubscriptionView(APIView):
