@@ -49,3 +49,6 @@ langchain-openai>=0.2.0
 
 # Image processing (Teams icon upload)
 Pillow>=10.0.0
+
+# Slack official SDK (marketplace requirement)
+slack-sdk>=3.27.0

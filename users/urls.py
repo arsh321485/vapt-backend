@@ -53,6 +53,7 @@ from .views import (
     SlackUserListView,
     SlackInviteUserView,
     SlackEventsView,
+    SlackInstallView,
     JiraOAuthUrlView,
     JiraOAuthCallbackView,
     JiraOAuthView,
@@ -150,6 +151,7 @@ urlpatterns = [
     path("slack/users/list/", SlackUserListView.as_view(), name="slack-users-list"),
     path("slack/channel/invite/", SlackInviteUserView.as_view(), name="slack-invite-user"),
     path("slack/events/", SlackEventsView.as_view(), name="slack-events"),
+    path("slack/install/", SlackInstallView.as_view(), name="slack-install"),
 
     # MS Teams Webhook
     path("teams/webhook/", TeamsWebhookView.as_view(), name="teams-webhook"),
