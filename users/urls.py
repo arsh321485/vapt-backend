@@ -54,6 +54,9 @@ from .views import (
     SlackInviteUserView,
     SlackEventsView,
     SlackInstallView,
+    SlackMemberLoginView,
+    TeamsMemberLoginView,
+    UserLoginPlatformView,
     JiraOAuthUrlView,
     JiraOAuthCallbackView,
     JiraOAuthView,
@@ -86,6 +89,11 @@ from .views import (
 app_name = 'users'
 
 urlpatterns = [
+    # PLATFORM-BASED LOGIN
+    path('user-login-platform/', UserLoginPlatformView.as_view(), name='user-login-platform'),
+    path('slack/member-login/', SlackMemberLoginView.as_view(), name='slack-member-login'),
+    path('teams/member-login/', TeamsMemberLoginView.as_view(), name='teams-member-login'),
+
     # ADMIN AUTHENTICATION
     path('signup/', UserRegistrationView.as_view(), name='signup'),
     path("signup/send-otp/", AdminSignupSendOTPView.as_view(),name="admin-signup-send-otp"),
