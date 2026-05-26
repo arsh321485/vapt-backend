@@ -17,6 +17,17 @@ class UserDetail(models.Model):
     team_id = models.CharField(max_length=255, blank=True, null=True)
     team_name = models.CharField(max_length=255, blank=True, null=True)
     slack_channel_ids = models.JSONField(default=list, blank=True)
+
+    # Platform-based login fields
+    platform = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        choices=[('email', 'Email'), ('slack', 'Slack'), ('microsoft_teams', 'Microsoft Teams')],
+    )
+    slack_member_id = models.CharField(max_length=100, blank=True, null=True)
+    ms_teams_member_id = models.CharField(max_length=255, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

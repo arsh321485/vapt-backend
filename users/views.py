@@ -1465,6 +1465,20 @@ class MicrosoftTeamsCallbackView(APIView):
                 created = False
 
             if user:
+                # Platform enforcement: block email-only admins (email accounts stay email-only)
+                if admin_id_from_state and user.login_provider == "email":
+                    return JsonResponse({
+                        "error": "Email accounts cannot connect to Microsoft Teams. Please create a new account using Teams login.",
+                        "platform_conflict": True,
+                    }, status=400)
+
+                # Platform enforcement: block if admin already connected Slack
+                if user.login_provider == "slack" and user.slack_bot_token:
+                    return JsonResponse({
+                        "error": "This account is already connected to Slack. Please disconnect Slack first before connecting Microsoft Teams.",
+                        "platform_conflict": True,
+                    }, status=400)
+
                 user.login_provider = 'microsoft_teams'
                 user.ms_access_token = access_token
                 user.ms_refresh_token = token_data.get('refresh_token', '')
@@ -3178,6 +3192,65 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
     return channel_ids
 
 
+class UserLoginPlatformView(APIView):
+    """
+    GET /api/users/user-login-platform/?email=user@company.com
+    Returns which platform the user's admin is on (slack / microsoft_teams / email).
+    Frontend uses this to decide: show Slack button, Teams button, or password field.
+
+    Response:
+    {
+        "platform": "slack",          -- or "microsoft_teams" or "email"
+        "admin_id": "uuid-of-admin",
+        "found": true
+    }
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        email = request.GET.get("email", "").strip().lower()
+        if not email:
+            return Response({"error": "email is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from users_details.models import UserDetail
+
+        # Check if this email belongs to an admin (User table)
+        admin_user = User.objects.filter(email=email).first()
+        if admin_user:
+            platform = admin_user.login_provider or "email"
+            if platform not in ("slack", "microsoft_teams"):
+                platform = "email"
+            return Response({
+                "platform": platform,
+                "admin_id": str(admin_user.id),
+                "found": True,
+                "role": "admin",
+            })
+
+        # Check if this email belongs to a team member (UserDetail table)
+        user_detail = UserDetail.objects.filter(email=email).first()
+        if user_detail:
+            platform = user_detail.platform or "email"
+            if platform not in ("slack", "microsoft_teams"):
+                # Inherit from admin
+                admin = user_detail.admin
+                platform = admin.login_provider or "email"
+                if platform not in ("slack", "microsoft_teams"):
+                    platform = "email"
+            return Response({
+                "platform": platform,
+                "admin_id": str(user_detail.admin.id),
+                "found": True,
+                "role": "member",
+            })
+
+        return Response({
+            "platform": "email",
+            "found": False,
+        })
+
+
 class SlackOAuthUrlView(APIView):
     """
     Dynamically generates Slack OAuth authorization URL
@@ -3337,6 +3410,20 @@ class SlackOAuthCallbackView(APIView):
                 user, _ = User.objects.get_or_create(
                     email=email,
                     defaults={"login_provider": "slack", "password": ""},
+                )
+
+            # Platform enforcement: block email-only admins (email accounts stay email-only)
+            if admin_id_from_state and user.login_provider == "email":
+                return self._html_response(
+                    success=False,
+                    error="Email accounts cannot connect to Slack. Please create a new account using Slack login.",
+                )
+
+            # Platform enforcement: block if admin already connected Teams
+            if user.login_provider == "microsoft_teams" and user.ms_access_token:
+                return self._html_response(
+                    success=False,
+                    error="This account is already connected to Microsoft Teams. Please disconnect Teams first before connecting Slack.",
                 )
 
             user.login_provider = "slack"
@@ -5792,10 +5879,22 @@ class SlackEventsView(APIView):
                     "last_name": last_name,
                     "user_type": "external",
                     "Member_role": ["Viewer"],
+                    "platform": "slack",
+                    "slack_member_id": slack_user_id,
                 }
             )
 
             if not created:
+                # Update platform fields even if record already existed
+                updated = False
+                if not user_detail.slack_member_id:
+                    user_detail.slack_member_id = slack_user_id
+                    updated = True
+                if not user_detail.platform:
+                    user_detail.platform = "slack"
+                    updated = True
+                if updated:
+                    user_detail.save(update_fields=["slack_member_id", "platform"])
                 logger.info(f"[SlackEvent] UserDetail already exists for {email} — skipping email")
                 return
 
@@ -5884,6 +5983,160 @@ class SlackInstallView(APIView):
             f"&state={state}"
         )
         return redirect(auth_url)
+
+
+class SlackMemberLoginView(APIView):
+    """
+    POST /api/users/slack/member-login/
+    Allows a team member (non-admin) to login via Slack OAuth.
+    Flow: member clicks "Login with Slack" → Slack OAuth → callback → this view
+          matches slack_user_id in UserDetail → returns JWT.
+
+    Body: { "slack_user_id": "U12345", "slack_team_id": "T12345", "bot_token": "xoxb-..." }
+    Response: { "access_token": "...", "refresh_token": "...", "user": {...} }
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        slack_user_id = request.data.get("slack_user_id")
+        slack_team_id = request.data.get("slack_team_id")
+        bot_token = request.data.get("bot_token")
+
+        if not slack_user_id or not slack_team_id:
+            return Response({"error": "slack_user_id and slack_team_id are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from users_details.models import UserDetail
+
+        # Find admin for this workspace
+        admin = User.objects.filter(slack_team_id=slack_team_id).first()
+        if not admin:
+            return Response({"error": "No VaptFix account found for this Slack workspace"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Find member by slack_member_id
+        user_detail = UserDetail.objects.filter(admin=admin, slack_member_id=slack_user_id).first()
+
+        if not user_detail:
+            # Fallback: fetch email from Slack API and match by email
+            if not bot_token:
+                bot_token = admin.slack_bot_token
+            if bot_token:
+                try:
+                    info = _http_get(
+                        "https://slack.com/api/users.info",
+                        params={"user": slack_user_id},
+                        headers={"Authorization": f"Bearer {bot_token}"},
+                        timeout=10,
+                    ).json()
+                    if info.get("ok"):
+                        email = info.get("user", {}).get("profile", {}).get("email")
+                        if email:
+                            user_detail = UserDetail.objects.filter(admin=admin, email=email).first()
+                            if user_detail and not user_detail.slack_member_id:
+                                user_detail.slack_member_id = slack_user_id
+                                user_detail.platform = "slack"
+                                user_detail.save(update_fields=["slack_member_id", "platform"])
+                except Exception:
+                    logger.exception("[SlackMemberLogin] Failed to fetch user info from Slack")
+
+        if not user_detail:
+            return Response({"error": "Member not found in VaptFix. Please ask your admin to add you first."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get or create Django User for this member
+        member_user, _ = User.objects.get_or_create(
+            email=user_detail.email,
+            defaults={"is_active": True, "login_provider": "slack"},
+        )
+        member_user.login_provider = "slack"
+        member_user.slack_user_id = slack_user_id
+        member_user.slack_team_id = slack_team_id
+        member_user.save(update_fields=["login_provider", "slack_user_id", "slack_team_id"])
+
+        refresh = RefreshToken.for_user(member_user)
+        return Response({
+            "success": True,
+            "access_token": str(refresh.access_token),
+            "refresh_token": str(refresh),
+            "user": {
+                "id": str(member_user.id),
+                "email": member_user.email,
+                "first_name": user_detail.first_name,
+                "last_name": user_detail.last_name,
+                "platform": "slack",
+                "role": "member",
+                "admin_id": str(admin.id),
+            },
+        })
+
+
+class TeamsMemberLoginView(APIView):
+    """
+    POST /api/users/teams/member-login/
+    Allows a team member (non-admin) to login via Microsoft Teams OAuth.
+    Flow: member clicks "Login with Teams" → Teams OAuth → callback → this view
+          matches ms_teams_member_id in UserDetail → returns JWT.
+
+    Body: { "ms_user_id": "aad-object-id", "email": "user@company.com", "access_token": "..." }
+    Response: { "access_token": "...", "refresh_token": "...", "user": {...} }
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        ms_user_id = request.data.get("ms_user_id", "")
+        email = request.data.get("email", "").strip().lower()
+        ms_access_token = request.data.get("access_token", "")
+
+        if not email:
+            return Response({"error": "email is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from users_details.models import UserDetail
+
+        # Find member by ms_teams_member_id OR email
+        user_detail = None
+        if ms_user_id:
+            user_detail = UserDetail.objects.filter(ms_teams_member_id=ms_user_id).first()
+        if not user_detail and email:
+            user_detail = UserDetail.objects.filter(email=email).first()
+
+        if not user_detail:
+            return Response({"error": "Member not found in VaptFix. Please ask your admin to add you first."}, status=status.HTTP_404_NOT_FOUND)
+
+        admin = user_detail.admin
+        if admin.login_provider != "microsoft_teams":
+            return Response({"error": "Your admin is not using Microsoft Teams platform."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update ms_teams_member_id if missing
+        if ms_user_id and not user_detail.ms_teams_member_id:
+            user_detail.ms_teams_member_id = ms_user_id
+            user_detail.platform = "microsoft_teams"
+            user_detail.save(update_fields=["ms_teams_member_id", "platform"])
+
+        # Get or create Django User for this member
+        member_user, _ = User.objects.get_or_create(
+            email=user_detail.email,
+            defaults={"is_active": True, "login_provider": "microsoft_teams"},
+        )
+        member_user.login_provider = "microsoft_teams"
+        if ms_access_token:
+            member_user.ms_access_token = ms_access_token
+        member_user.save(update_fields=["login_provider", "ms_access_token"])
+
+        refresh = RefreshToken.for_user(member_user)
+        return Response({
+            "success": True,
+            "access_token": str(refresh.access_token),
+            "refresh_token": str(refresh),
+            "user": {
+                "id": str(member_user.id),
+                "email": member_user.email,
+                "first_name": user_detail.first_name,
+                "last_name": user_detail.last_name,
+                "platform": "microsoft_teams",
+                "role": "member",
+                "admin_id": str(admin.id),
+            },
+        })
 
 
 class CreateTeamsSubscriptionView(APIView):
@@ -6047,10 +6300,22 @@ class TeamsWebhookView(APIView):
                     "user_type": "external",
                     "Member_role": ["Viewer"],
                     "team_id": team_id,
+                    "platform": "microsoft_teams",
+                    "ms_teams_member_id": member_id,
                 }
             )
 
             if not created:
+                # Update platform fields even if record already existed
+                updated = False
+                if not user_detail.ms_teams_member_id:
+                    user_detail.ms_teams_member_id = member_id
+                    updated = True
+                if not user_detail.platform:
+                    user_detail.platform = "microsoft_teams"
+                    updated = True
+                if updated:
+                    user_detail.save(update_fields=["ms_teams_member_id", "platform"])
                 logger.info(f"[TeamsWebhook] UserDetail already exists for {email} — skipping")
                 return
 
