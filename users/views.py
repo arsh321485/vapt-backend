@@ -1468,14 +1468,14 @@ class MicrosoftTeamsCallbackView(APIView):
                 # Platform enforcement: block email-only admins (email accounts stay email-only)
                 if admin_id_from_state and user.login_provider == "email":
                     return JsonResponse({
-                        "error": "Email accounts cannot connect to Microsoft Teams. Please create a new account using Teams login.",
+                        "error": "Your account uses email login. Please sign in with your email and password.",
                         "platform_conflict": True,
                     }, status=400)
 
                 # Platform enforcement: block if admin already connected Slack
                 if user.login_provider == "slack" and user.slack_bot_token:
                     return JsonResponse({
-                        "error": "This account is already connected to Slack. Please disconnect Slack first before connecting Microsoft Teams.",
+                        "error": "Your account is connected to Slack. Please sign in using Slack.",
                         "platform_conflict": True,
                     }, status=400)
 
@@ -3416,14 +3416,14 @@ class SlackOAuthCallbackView(APIView):
             if admin_id_from_state and user.login_provider == "email":
                 return self._html_response(
                     success=False,
-                    error="Email accounts cannot connect to Slack. Please create a new account using Slack login.",
+                    error="Your account uses email login. Please sign in with your email and password.",
                 )
 
             # Platform enforcement: block if admin already connected Teams
             if user.login_provider == "microsoft_teams" and user.ms_access_token:
                 return self._html_response(
                     success=False,
-                    error="This account is already connected to Microsoft Teams. Please disconnect Teams first before connecting Slack.",
+                    error="Your account is connected to Microsoft Teams. Please sign in using Microsoft Teams.",
                 )
 
             user.login_provider = "slack"
@@ -6042,6 +6042,13 @@ class SlackMemberLoginView(APIView):
         if not user_detail:
             return Response({"error": "Member not found in VaptFix. Please ask your admin to add you first."}, status=status.HTTP_404_NOT_FOUND)
 
+        # Platform conflict check for member
+        member_platform = user_detail.platform or ""
+        if member_platform == "microsoft_teams":
+            return Response({"error": "Your account is set up for Microsoft Teams login. Please sign in using Microsoft Teams.", "platform_conflict": True}, status=status.HTTP_400_BAD_REQUEST)
+        if member_platform == "email":
+            return Response({"error": "Your account uses email login. Please sign in with your email and password.", "platform_conflict": True}, status=status.HTTP_400_BAD_REQUEST)
+
         # Get or create Django User for this member
         member_user, _ = User.objects.get_or_create(
             email=user_detail.email,
@@ -6101,6 +6108,13 @@ class TeamsMemberLoginView(APIView):
 
         if not user_detail:
             return Response({"error": "Member not found in VaptFix. Please ask your admin to add you first."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Platform conflict check for member
+        member_platform = user_detail.platform or ""
+        if member_platform == "slack":
+            return Response({"error": "Your account is set up for Slack login. Please sign in using Slack.", "platform_conflict": True}, status=status.HTTP_400_BAD_REQUEST)
+        if member_platform == "email":
+            return Response({"error": "Your account uses email login. Please sign in with your email and password.", "platform_conflict": True}, status=status.HTTP_400_BAD_REQUEST)
 
         admin = user_detail.admin
         if admin.login_provider != "microsoft_teams":
