@@ -1458,6 +1458,9 @@ class MicrosoftTeamsCallbackView(APIView):
                     email=email,
                     defaults={
                         "password": make_password(None),
+                        "is_active": True,
+                        "is_staff": True,
+                        "is_superuser": False,
                         "login_provider": "microsoft_teams",
                     },
                 )
@@ -1479,10 +1482,11 @@ class MicrosoftTeamsCallbackView(APIView):
                         "platform_conflict": True,
                     }, status=400)
 
+                user.is_staff = True
                 user.login_provider = 'microsoft_teams'
                 user.ms_access_token = access_token
                 user.ms_refresh_token = token_data.get('refresh_token', '')
-                user.save(update_fields=['login_provider', 'ms_access_token', 'ms_refresh_token'])
+                user.save(update_fields=['is_staff', 'login_provider', 'ms_access_token', 'ms_refresh_token'])
 
                 # Generate Django JWT so frontend can call IsAuthenticated APIs
                 refresh = RefreshToken.for_user(user)
@@ -3597,7 +3601,7 @@ class SlackLoginView(APIView):
                 defaults={
                     "is_active": True,
                     "is_staff": True,
-                    "is_superuser": True,
+                    "is_superuser": False,
                     "password": "",
                     "last_login": timezone.now(),
                     "login_provider": "slack",
@@ -3609,6 +3613,7 @@ class SlackLoginView(APIView):
             # 3. Update existing users
             if not created:
                 user.last_login = timezone.now()
+                user.is_staff = True
                 user.login_provider = "slack"
                 user.slack_user_id = slack_user_id
                 user.slack_team_id = slack_team.get("id")
