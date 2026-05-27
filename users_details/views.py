@@ -266,9 +266,10 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
     Network Security, Architectural Flaws).
 
     For private/shared channels, members are added individually.
+    Returns: (results, ms_user_id) — ms_user_id is the Azure AD object ID or None.
     """
     if not access_token or not team_id:
-        return []
+        return [], None
 
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -276,6 +277,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
     }
 
     results = []
+    user_id = None
 
     try:
         logger.info(
@@ -290,7 +292,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
             logger.warning(
                 f"[TeamsSync] Graph users lookup failed status={user_resp.status_code} user_email={user_email} body={user_resp.text}"
             )
-            return [{"error": f"Could not find user {user_email} in Azure AD", "detail": user_resp.text}]
+            return [{"error": f"Could not find user {user_email} in Azure AD", "detail": user_resp.text}], None
 
         user_id = user_resp.json().get('id')
         logger.info(f"[TeamsSync] Found Azure user_id={user_id} for email={user_email}")
@@ -364,7 +366,7 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
         logger.exception(f"[TeamsSync] Exception during sync: {str(e)}")
         results.append({"error": str(e)})
 
-    return results
+    return results, user_id
 User = get_user_model()
 class UserDetailCreateView(generics.CreateAPIView):
     serializer_class = UserDetailCreateSerializer
@@ -856,6 +858,12 @@ class UserDetailCreateView(generics.CreateAPIView):
             # not from request.user (the authenticated user).
             admin_user = user_detail.admin
 
+            # Auto-set platform from admin's login_provider if not already set
+            admin_provider = getattr(admin_user, "login_provider", "") or ""
+            if not user_detail.platform and admin_provider in ("slack", "microsoft_teams"):
+                user_detail.platform = admin_provider
+                user_detail.save(update_fields=["platform"])
+
             # Extract data to send email
             email = user_detail.email
             first_name = user_detail.first_name or ""
@@ -923,15 +931,23 @@ class UserDetailCreateView(generics.CreateAPIView):
                 f"team_id_used={team_id} roles={roles}"
             )
             if ms_access_token and team_id and roles:
-                teams_sync_result = sync_member_to_teams_channels(
+                teams_sync_result, ms_user_id = sync_member_to_teams_channels(
                     access_token=ms_access_token,
                     team_id=team_id,
                     user_email=email,
                     member_roles=roles,
                 )
+                # Save team_id, ms_teams_member_id, and platform
+                teams_update_fields = ["team_id"]
                 user_detail.team_id = team_id
-                user_detail.save(update_fields=["team_id"])
-                logger.info(f"[UserDetailCreate] MS Teams sync done for {email}: {teams_sync_result}")
+                if ms_user_id and not user_detail.ms_teams_member_id:
+                    user_detail.ms_teams_member_id = ms_user_id
+                    teams_update_fields.append("ms_teams_member_id")
+                if not user_detail.platform:
+                    user_detail.platform = "microsoft_teams"
+                    teams_update_fields.append("platform")
+                user_detail.save(update_fields=teams_update_fields)
+                logger.info(f"[UserDetailCreate] MS Teams sync done for {email}: ms_user_id={ms_user_id} result={teams_sync_result}")
             else:
                 if not ms_access_token:
                     logger.warning(f"[UserDetailCreate] Teams sync skipped: missing ms_access_token for admin_id={admin_user.id}")
@@ -963,9 +979,19 @@ class UserDetailCreateView(generics.CreateAPIView):
                         "user_lookup": {"email": email, "slack_user_id": slack_user_id},
                         "channels": slack_results,
                     }
+                    # Save slack_member_id and platform after successful sync
+                    update_fields = []
+                    if not user_detail.slack_member_id:
+                        user_detail.slack_member_id = slack_user_id
+                        update_fields.append("slack_member_id")
+                    if not user_detail.platform:
+                        user_detail.platform = "slack"
+                        update_fields.append("platform")
                     if channel_ids:
                         user_detail.slack_channel_ids = list(set(channel_ids))
-                        user_detail.save(update_fields=["slack_channel_ids"])
+                        update_fields.append("slack_channel_ids")
+                    if update_fields:
+                        user_detail.save(update_fields=update_fields)
                     logger.info(f"[UserDetailCreate] Slack sync done for {email}: {slack_sync_result}")
 
                     # Send Slack platform email — channels where user was successfully added
@@ -1449,12 +1475,18 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
         ms_access_token = request.data.get("access_token")
         team_id = instance.team_id or request.data.get("team_id")
         if ms_access_token and team_id and normalized_new:
-            teams_sync_result = sync_member_to_teams_channels(
+            teams_sync_result, ms_user_id_upd = sync_member_to_teams_channels(
                 access_token=ms_access_token,
                 team_id=team_id,
                 user_email=instance.email,
                 member_roles=normalized_new
             )
+            # Save ms_teams_member_id if not already set
+            if ms_user_id_upd and not instance.ms_teams_member_id:
+                instance.ms_teams_member_id = ms_user_id_upd
+                if not instance.platform:
+                    instance.platform = "microsoft_teams"
+                instance.save(update_fields=["ms_teams_member_id", "platform"])
 
         # Sync new roles with Slack channels if slack_bot_token and slack_user_id provided
         slack_sync_result = []
