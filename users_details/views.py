@@ -591,7 +591,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             </table>
             <!-- Buttons -->
             <div style="margin:0 0 28px 0;">
-              <a href="https://vaptfix.ai/auth?mode=signin"
+              <a href="https://vaptfix.ai/home?signin=user&tab=signIn"
                  style="background-color:#1e1b4b;color:#ffffff;padding:12px 24px;
                         text-decoration:none;border-radius:30px;font-size:14px;
                         font-weight:bold;display:inline-block;">
@@ -697,7 +697,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             </div>
             <!-- Go to Dashboard -->
             <div style="text-align:center;margin:0 0 8px 0;">
-              <a href="https://vaptfix.ai/auth?mode=signin"
+              <a href="https://vaptfix.ai/home?signin=user&tab=signIn"
                  style="background-color:#1e1b4b;color:#ffffff;padding:13px 34px;
                         text-decoration:none;border-radius:30px;font-size:15px;
                         font-weight:bold;display:inline-block;">
@@ -889,7 +889,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = PasswordResetTokenGenerator().make_token(user)
             # set_password_url = f"https://vaptfix.ai/auth?mode=set-password&uid={uid}&token={token}"
-            set_password_url = f"https://vaptfix.ai/home?action=set-password&uid={uid}&token={token}"
+            set_password_url = f"https://vaptfix.ai/home?action=user-set-password&uid={uid}&token={token}"
 
             # Send emails in background so the API response is not blocked
             admin_email = getattr(admin_user, "email", "")
@@ -930,12 +930,13 @@ class UserDetailCreateView(generics.CreateAPIView):
                 f"ms_access_token_set={bool(ms_access_token)} ms_team_id={getattr(admin_user, 'ms_team_id', None)} "
                 f"team_id_used={team_id} roles={roles}"
             )
-            if ms_access_token and team_id and roles:
+            # Teams sync — runs even with empty roles (still adds user to team + saves ms_teams_member_id)
+            if ms_access_token and team_id:
                 teams_sync_result, ms_user_id = sync_member_to_teams_channels(
                     access_token=ms_access_token,
                     team_id=team_id,
                     user_email=email,
-                    member_roles=roles,
+                    member_roles=roles or [],
                 )
                 # Save team_id, ms_teams_member_id, and platform
                 teams_update_fields = ["team_id"]
@@ -953,8 +954,6 @@ class UserDetailCreateView(generics.CreateAPIView):
                     logger.warning(f"[UserDetailCreate] Teams sync skipped: missing ms_access_token for admin_id={admin_user.id}")
                 elif not team_id:
                     logger.warning(f"[UserDetailCreate] Teams sync skipped: missing team_id/ms_team_id for admin_id={admin_user.id}")
-                elif not roles:
-                    logger.warning(f"[UserDetailCreate] Teams sync skipped: missing roles for {email}")
 
             # Sync to Slack — use token from request body first, else fall back to admin's stored token
             slack_sync_result = {}
@@ -963,38 +962,46 @@ class UserDetailCreateView(generics.CreateAPIView):
                 f"[UserDetailCreate] Slack sync check: admin_id={getattr(admin_user, 'id', None)} "
                 f"slack_bot_token_set={bool(slack_bot_token)} roles={roles} target_email={email}"
             )
-            if slack_bot_token and roles:
-                # Try to get slack_user_id from the member's own User record first (already stored at OAuth time)
+            # Slack sync — runs even with empty roles (still saves slack_member_id)
+            if slack_bot_token:
+                # Try to get slack_user_id from member's Django User record first, else lookup by email
                 member_user = User.objects.filter(email=email).first()
                 slack_user_id = getattr(member_user, "slack_user_id", None) or lookup_slack_user_by_email(slack_bot_token, email)
                 if slack_user_id:
-                    slack_results, channel_ids = sync_member_to_slack_channels(
-                        bot_token=slack_bot_token,
-                        slack_user_id=slack_user_id,
-                        member_roles=roles,
-                    )
+                    slack_update_fields = []
+                    # Always save slack_member_id and platform
+                    if not user_detail.slack_member_id:
+                        user_detail.slack_member_id = slack_user_id
+                        slack_update_fields.append("slack_member_id")
+                    if not user_detail.platform:
+                        user_detail.platform = "slack"
+                        slack_update_fields.append("platform")
+
+                    slack_results = []
+                    channel_ids = []
+                    if roles:
+                        # Sync to channels only if roles exist
+                        slack_results, channel_ids = sync_member_to_slack_channels(
+                            bot_token=slack_bot_token,
+                            slack_user_id=slack_user_id,
+                            member_roles=roles,
+                        )
+                        if channel_ids:
+                            user_detail.slack_channel_ids = list(set(channel_ids))
+                            slack_update_fields.append("slack_channel_ids")
+
+                    if slack_update_fields:
+                        user_detail.save(update_fields=slack_update_fields)
+
                     slack_sync_result = {
                         "status": "success",
                         "workspace": {"invited": False, "already_member": True},
                         "user_lookup": {"email": email, "slack_user_id": slack_user_id},
                         "channels": slack_results,
                     }
-                    # Save slack_member_id and platform after successful sync
-                    update_fields = []
-                    if not user_detail.slack_member_id:
-                        user_detail.slack_member_id = slack_user_id
-                        update_fields.append("slack_member_id")
-                    if not user_detail.platform:
-                        user_detail.platform = "slack"
-                        update_fields.append("platform")
-                    if channel_ids:
-                        user_detail.slack_channel_ids = list(set(channel_ids))
-                        update_fields.append("slack_channel_ids")
-                    if update_fields:
-                        user_detail.save(update_fields=update_fields)
-                    logger.info(f"[UserDetailCreate] Slack sync done for {email}: {slack_sync_result}")
+                    logger.info(f"[UserDetailCreate] Slack sync done for {email}: slack_user_id={slack_user_id} channels={channel_ids}")
 
-                    # Send Slack platform email — channels where user was successfully added
+                    # Send Slack platform email for channels user was successfully added to
                     synced_channels = [
                         ROLE_TO_SLACK_CHANNEL.get(r["role"], r["role"])
                         for r in slack_results
@@ -1020,6 +1027,7 @@ class UserDetailCreateView(generics.CreateAPIView):
 
                         threading.Thread(target=_send_slack_platform_email, daemon=True).start()
                 else:
+                    # User not found in Slack workspace — try to invite them
                     invite_result = invite_user_to_slack_workspace(slack_bot_token, email)
                     if invite_result.get("status") in {"invited", "already_member"}:
                         slack_sync_result = {
@@ -1030,26 +1038,19 @@ class UserDetailCreateView(generics.CreateAPIView):
                                 "invite_email": email,
                             },
                             "channels": [],
-                            "note": "User invited to Slack workspace. Channel mapping will apply after Slack account becomes discoverable.",
+                            "note": "User invited to Slack workspace. Channel mapping will apply after they join.",
                         }
                     else:
                         slack_sync_result = {
                             "status": "failed",
                             "workspace": {"invited": False, "already_member": False},
                             "channels": [],
-                            "error": invite_result.get("error") or "User not found in Slack workspace for this email",
+                            "error": invite_result.get("error") or "User not found in Slack workspace",
                         }
-                    logger.warning(
-                        f"[UserDetailCreate] Slack sync failed: lookupByEmail returned None for target_email={email} "
-                        f"admin_id={admin_user.id}"
-                    )
+                    logger.warning(f"[UserDetailCreate] Slack lookup failed for {email}")
             else:
-                if not slack_bot_token:
-                    logger.warning(f"[UserDetailCreate] Slack sync skipped: missing slack_bot_token for admin_id={admin_user.id}")
-                    slack_sync_result = {"status": "skipped", "error": "missing_slack_bot_token"}
-                elif not roles:
-                    logger.warning(f"[UserDetailCreate] Slack sync skipped: missing roles for {email}")
-                    slack_sync_result = {"status": "skipped", "error": "missing_roles"}
+                logger.warning(f"[UserDetailCreate] Slack sync skipped: missing slack_bot_token for admin_id={admin_user.id}")
+                slack_sync_result = {"status": "skipped", "error": "missing_slack_bot_token"}
 
             response_data = {
                 "message": "User detail created successfully",
