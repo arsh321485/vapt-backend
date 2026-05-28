@@ -2557,6 +2557,11 @@ class AddUserToChannelView(generics.GenericAPIView):
                             "error": "Admin not found for provided admin_id"
                         }, status=status.HTTP_404_NOT_FOUND)
                     admin = target_admin
+                elif getattr(request.user, "ms_team_id", None) != team_id:
+                    # If caller is not the same Teams admin, resolve owner by team_id.
+                    team_owner = User.objects.filter(ms_team_id=team_id).first()
+                    if team_owner:
+                        admin = team_owner
                 name_part = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').split()
                 first_name = name_part[0].capitalize() if name_part else "Teams"
                 last_name = " ".join(p.capitalize() for p in name_part[1:]) if len(name_part) > 1 else "User"
@@ -2661,9 +2666,18 @@ class AddUserToChannelView(generics.GenericAPIView):
                     }, status=status.HTTP_400_BAD_REQUEST)
                 
                 # Persist Teams member linkage for DB login mapping.
+                team_updates = []
                 if not user_detail.ms_teams_member_id:
                     user_detail.ms_teams_member_id = user_id
-                    user_detail.save()
+                    team_updates.append("ms_teams_member_id")
+                if not user_detail.platform:
+                    user_detail.platform = "microsoft_teams"
+                    team_updates.append("platform")
+                if not user_detail.team_id:
+                    user_detail.team_id = team_id
+                    team_updates.append("team_id")
+                if team_updates:
+                    user_detail.save(update_fields=team_updates)
 
                 return Response({
                     "message": "User added to channel successfully",
@@ -4417,6 +4431,37 @@ class AddUserToSlackChannelView(APIView):
         user_id = serializer.validated_data["user_id"]
         user_email = serializer.validated_data.get("user_email")
         user_name = serializer.validated_data.get("user_name")
+
+        # Resolve the real target Slack member from email when available.
+        # This avoids saving/inviting admin/self ID accidentally from frontend payload.
+        if user_email:
+            try:
+                lookup_resp = _http_get(
+                    "https://slack.com/api/users.lookupByEmail",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={"email": user_email},
+                    timeout=10,
+                )
+                lookup_data = lookup_resp.json() if lookup_resp is not None else {}
+                looked_up_user_id = lookup_data.get("user", {}).get("id") if lookup_data.get("ok") else None
+                if looked_up_user_id:
+                    user_id = looked_up_user_id
+                    logger.info(f"[AddUserToSlack] Using user_id={user_id} from lookupByEmail for {user_email}")
+            except Exception:
+                logger.warning("[AddUserToSlack] lookupByEmail failed; using provided user_id", exc_info=True)
+
+        # Hard-guard: never save/invite admin self when email points to someone else.
+        if (
+            user_email
+            and request.user
+            and getattr(request.user, "slack_user_id", None)
+            and user_id == getattr(request.user, "slack_user_id", None)
+            and user_email.strip().lower() != (getattr(request.user, "email", "") or "").strip().lower()
+        ):
+            return Response({
+                "success": False,
+                "message": "Provided user_id belongs to admin account; please select the target Slack member."
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # Resolve role from channel name
         resolved_role = "Viewer"
