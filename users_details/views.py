@@ -894,29 +894,51 @@ class UserDetailCreateView(generics.CreateAPIView):
             # Send emails in background so the API response is not blocked
             admin_email = getattr(admin_user, "email", "")
             _view = self
+            _email = email
+            _first = first_name
+            _last = last_name
+            _roles = list(roles) if roles else []
+            _set_password_url = set_password_url
+            _admin_email = admin_email
 
             def _send_emails():
-                _view.send_platform_access_email(
-                    email=email,
-                    first_name=first_name,
-                    last_name=last_name,
-                    platform_name="VAPTFIX Platform",
-                    channel_names=roles,
-                )
-                _view.send_welcome_email(
-                    email=email,
-                    first_name=first_name,
-                    last_name=last_name,
-                    roles=roles,
-                    set_password_url=set_password_url,
-                )
-                _view.send_team_welcome_emails(
-                    email=email,
-                    first_name=first_name,
-                    last_name=last_name,
-                    roles=roles,
-                    admin_email=admin_email,
-                )
+                try:
+                    # Set-password email is most critical — send first
+                    ok, err = _view.send_welcome_email(
+                        email=_email,
+                        first_name=_first,
+                        last_name=_last,
+                        roles=_roles,
+                        set_password_url=_set_password_url,
+                    )
+                    if ok:
+                        logger.info(f"[Email] Set-password email sent to {_email}")
+                    else:
+                        logger.error(f"[Email] Set-password email FAILED for {_email}: {err}")
+                except Exception:
+                    logger.exception(f"[Email] Set-password email raised exception for {_email}")
+
+                try:
+                    _view.send_platform_access_email(
+                        email=_email,
+                        first_name=_first,
+                        last_name=_last,
+                        platform_name="VAPTFIX Platform",
+                        channel_names=_roles,
+                    )
+                except Exception:
+                    logger.exception(f"[Email] Platform access email raised exception for {_email}")
+
+                try:
+                    _view.send_team_welcome_emails(
+                        email=_email,
+                        first_name=_first,
+                        last_name=_last,
+                        roles=_roles,
+                        admin_email=_admin_email,
+                    )
+                except Exception:
+                    logger.exception(f"[Email] Team welcome emails raised exception for {_email}")
 
             threading.Thread(target=_send_emails, daemon=True).start()
             email_sent, error = True, None  # optimistic — logged inside send methods
