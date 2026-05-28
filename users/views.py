@@ -2527,6 +2527,7 @@ class AddUserToChannelView(generics.GenericAPIView):
                 team_id = serializer.validated_data['team_id']
                 channel_id = serializer.validated_data['channel_id']
                 channel_name = serializer.validated_data.get('channel_name', '')
+                admin_id = (serializer.validated_data.get('admin_id') or "").strip()
                 user_email = serializer.validated_data['user_email']
                 user_role = serializer.validated_data['user_role']
 
@@ -2549,6 +2550,13 @@ class AddUserToChannelView(generics.GenericAPIView):
                 from users_details.views import UserDetailCreateView
 
                 admin = request.user
+                if admin_id:
+                    target_admin = User.objects.filter(id=admin_id).first()
+                    if not target_admin:
+                        return Response({
+                            "error": "Admin not found for provided admin_id"
+                        }, status=status.HTTP_404_NOT_FOUND)
+                    admin = target_admin
                 name_part = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').split()
                 first_name = name_part[0].capitalize() if name_part else "Teams"
                 last_name = " ".join(p.capitalize() for p in name_part[1:]) if len(name_part) > 1 else "User"
@@ -2561,6 +2569,8 @@ class AddUserToChannelView(generics.GenericAPIView):
                         "last_name": last_name,
                         "user_type": "external",
                         "Member_role": member_role,
+                        "platform": "microsoft_teams",
+                        "team_id": team_id,
                     }
                 )
                 if ud_created:
@@ -2570,6 +2580,15 @@ class AddUserToChannelView(generics.GenericAPIView):
                     # Use stored name for emails
                     first_name = user_detail.first_name or first_name
                     last_name = user_detail.last_name or last_name
+                    updates = {}
+                    if not user_detail.platform:
+                        updates["platform"] = "microsoft_teams"
+                    if not user_detail.team_id:
+                        updates["team_id"] = team_id
+                    if updates:
+                        for field_name, field_value in updates.items():
+                            setattr(user_detail, field_name, field_value)
+                        user_detail.save()
 
                 # Send emails in background — do not block the MS Teams API flow
                 _admin_email = getattr(request.user, "email", "")
@@ -2641,6 +2660,11 @@ class AddUserToChannelView(generics.GenericAPIView):
                         "note": "User was added to team but failed to add to channel"
                     }, status=status.HTTP_400_BAD_REQUEST)
                 
+                # Persist Teams member linkage for DB login mapping.
+                if not user_detail.ms_teams_member_id:
+                    user_detail.ms_teams_member_id = user_id
+                    user_detail.save()
+
                 return Response({
                     "message": "User added to channel successfully",
                     "user": {
@@ -2648,8 +2672,7 @@ class AddUserToChannelView(generics.GenericAPIView):
                         "email": user_email,
                         "name": f"{user_detail.first_name} {user_detail.last_name}",
                         "role": user_role,
-                        "user_type": user_detail.user_type,
-                        "location": user_detail.select_location
+                        "user_type": user_detail.user_type
                     },
                     "team_id": team_id,
                     "channel_id": channel_id

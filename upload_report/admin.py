@@ -57,10 +57,22 @@ class UploadReportAdminForm(forms.ModelForm):
                 except Exception:
                     _db = _client[settings.DATABASES['default'].get('NAME', 'vaptfix')]
                 admin_docs = list(_db["users_user"].find(
-                    {"is_staff": True, "is_active": True, "is_superuser": {"$ne": True}},
-                    {"id": 1, "email": 1, "_id": 0}
+                    {
+                        "is_active": True,
+                        "is_superuser": {"$ne": True},
+                        "$or": [
+                            {"is_staff": True},
+                            {"login_provider": {"$in": ["slack", "microsoft_teams"]}},
+                        ],
+                    },
+                    {"id": 1, "_id": 1, "email": 1}
                 ))
-            choices += [(str(doc["id"]), doc["email"]) for doc in admin_docs if doc.get("email")]
+            # Some records may store identifier as `_id` in Mongo, so support both.
+            for doc in admin_docs:
+                admin_id = doc.get("id") or doc.get("_id")
+                admin_email = doc.get("email")
+                if admin_id and admin_email:
+                    choices.append((str(admin_id), admin_email))
             logger.info(f"[UploadReportAdminForm] Loaded {len(admin_docs)} admins")
         except Exception as e:
             logger.error(f"[UploadReportAdminForm] Failed to load admin list: {e}")

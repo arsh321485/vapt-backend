@@ -1014,6 +1014,49 @@ class UserDetailCreateView(generics.CreateAPIView):
                     if not user_detail.platform:
                         slack_fields["platform"] = "slack"
 
+                    # If frontend accidentally sent admin email, prefer actual Slack profile email.
+                    try:
+                        if email.strip().lower() == (getattr(admin_user, "email", "") or "").strip().lower():
+                            profile_resp = _http_get(
+                                "https://slack.com/api/users.info",
+                                params={"user": slack_user_id},
+                                headers={"Authorization": f"Bearer {slack_bot_token}"},
+                                timeout=10,
+                            )
+                            profile_data = profile_resp.json() if profile_resp is not None else {}
+                            profile_email = (
+                                profile_data.get("user", {})
+                                .get("profile", {})
+                                .get("email")
+                            )
+                            if profile_email and profile_email.strip().lower() != email.strip().lower():
+                                if not UserDetail.objects.filter(admin=admin_user, email=profile_email).exists():
+                                    slack_fields["email"] = profile_email.strip().lower()
+                                    email = profile_email.strip().lower()
+                                    logger.info(f"[UserDetailCreate] Corrected UserDetail email from admin email to member email: {email}")
+                    except Exception:
+                        logger.warning("[UserDetailCreate] Slack profile email correction failed", exc_info=True)
+
+                    # Save current workspace channel memberships for this Slack member.
+                    try:
+                        conv_resp = _http_get(
+                            "https://slack.com/api/users.conversations",
+                            params={"user": slack_user_id, "types": "public_channel,private_channel", "limit": 1000},
+                            headers={"Authorization": f"Bearer {slack_bot_token}"},
+                            timeout=15,
+                        )
+                        conv_data = conv_resp.json() if conv_resp is not None else {}
+                        if conv_data.get("ok"):
+                            existing_channel_ids = list(user_detail.slack_channel_ids or [])
+                            discovered_ids = [c.get("id") for c in conv_data.get("channels", []) if c.get("id")]
+                            merged_channel_ids = list(set(existing_channel_ids + discovered_ids))
+                            if merged_channel_ids:
+                                slack_fields["slack_channel_ids"] = merged_channel_ids
+                        else:
+                            logger.warning(f"[UserDetailCreate] users.conversations failed: {conv_data.get('error')}")
+                    except Exception:
+                        logger.warning("[UserDetailCreate] Could not fetch Slack channel memberships", exc_info=True)
+
                     slack_results = []
                     channel_ids = []
                     if roles:
@@ -1024,7 +1067,8 @@ class UserDetailCreateView(generics.CreateAPIView):
                             member_roles=roles,
                         )
                         if channel_ids:
-                            slack_fields["slack_channel_ids"] = list(set(channel_ids))
+                            existing_channel_ids = list(slack_fields.get("slack_channel_ids", user_detail.slack_channel_ids or []))
+                            slack_fields["slack_channel_ids"] = list(set(existing_channel_ids + channel_ids))
 
                     if slack_fields:
                         _ud_set(user_detail, **slack_fields)
