@@ -105,10 +105,12 @@ class UserDetailSerializer(serializers.ModelSerializer):
 class UserDetailCreateSerializer(serializers.ModelSerializer):
     admin_id = serializers.CharField(write_only=True)
 
-    # allow list input
+    # allow list input; allow_empty=True so users can be added without a role assignment
     Member_role = serializers.ListField(
         child=serializers.CharField(),
-        allow_empty=False
+        allow_empty=True,
+        required=False,
+        default=list,
     )
 
     class Meta:
