@@ -733,10 +733,13 @@ class MicrosoftTeamsOAuthSerializer(serializers.Serializer):
                 email=email,
                 firstname=microsoft_user_data.get('given_name', ''),
                 lastname=microsoft_user_data.get('family_name', ''),
-                password=None
+                password=None,
+                is_active=True,
+                is_staff=True,
+                login_provider='microsoft_teams',
             )
             user.set_unusable_password()
-            user.save()
+            user.save(update_fields=['password', 'is_active', 'is_staff', 'login_provider'])
             
             logger.info(f"New user created via Microsoft OAuth: {email}")
             return user
@@ -831,6 +834,7 @@ class AddUserToChannelSerializer(serializers.Serializer):
     team_id = serializers.CharField(required=True)
     channel_id = serializers.CharField(required=True)
     channel_name = serializers.CharField(required=False, allow_blank=True, default="")
+    admin_id = serializers.CharField(required=False, allow_blank=True, default="")
     user_email = serializers.EmailField(required=True)
     user_role = serializers.ChoiceField(choices=['owner', 'member'], default='member')
     
@@ -978,10 +982,13 @@ class SlackOAuthCodeSerializer(serializers.Serializer):
                 email=email,
                 firstname=slack_user_data.get("firstname", ""),
                 lastname=slack_user_data.get("lastname", ""),
-                password=None
+                password=None,
+                is_active=True,
+                is_staff=True,
+                login_provider='slack',
             )
             user.set_unusable_password()
-            user.save()
+            user.save(update_fields=['password', 'is_active', 'is_staff', 'login_provider'])
             logger.info(f"New user created via Slack OAuth: {email}")
             return user, True
 class SlackTokenValidationSerializer(serializers.Serializer):
