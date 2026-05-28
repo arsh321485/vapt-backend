@@ -2591,9 +2591,8 @@ class AddUserToChannelView(generics.GenericAPIView):
                     if not user_detail.team_id:
                         updates["team_id"] = team_id
                     if updates:
-                        for field_name, field_value in updates.items():
-                            setattr(user_detail, field_name, field_value)
-                        user_detail.save()
+                        from users_details.views import _ud_set as _ud_set_teams
+                        _ud_set_teams(user_detail, **updates)
 
                 # Send emails in background — do not block the MS Teams API flow
                 _admin_email = getattr(request.user, "email", "")
@@ -2666,18 +2665,16 @@ class AddUserToChannelView(generics.GenericAPIView):
                     }, status=status.HTTP_400_BAD_REQUEST)
                 
                 # Persist Teams member linkage for DB login mapping.
-                team_updates = []
+                linkage_fields = {}
                 if not user_detail.ms_teams_member_id:
-                    user_detail.ms_teams_member_id = user_id
-                    team_updates.append("ms_teams_member_id")
+                    linkage_fields["ms_teams_member_id"] = user_id
                 if not user_detail.platform:
-                    user_detail.platform = "microsoft_teams"
-                    team_updates.append("platform")
+                    linkage_fields["platform"] = "microsoft_teams"
                 if not user_detail.team_id:
-                    user_detail.team_id = team_id
-                    team_updates.append("team_id")
-                if team_updates:
-                    user_detail.save(update_fields=team_updates)
+                    linkage_fields["team_id"] = team_id
+                if linkage_fields:
+                    from users_details.views import _ud_set as _ud_set_linkage
+                    _ud_set_linkage(user_detail, **linkage_fields)
 
                 return Response({
                     "message": "User added to channel successfully",
@@ -6485,6 +6482,81 @@ class TeamsWebhookView(APIView):
             logger.exception(f"[TeamsWebhook] Exception refreshing token for admin={getattr(admin, 'email', '')}")
             return None
 
+    def _resolve_graph_member_email(self, headers, member_obj):
+        """Resolve best email for a Graph team member object."""
+        email = member_obj.get("email")
+        aad_user_id = (
+            member_obj.get("userId")
+            or member_obj.get("user_id")
+            or member_obj.get("id")
+        )
+        display_name = member_obj.get("displayName") or "Teams User"
+        if (not email or "@" not in str(email)) and aad_user_id:
+            user_resp = _http_get(
+                f"https://graph.microsoft.com/v1.0/users/{aad_user_id}?$select=mail,userPrincipalName,displayName",
+                headers=headers,
+                timeout=10,
+            )
+            if user_resp.status_code == 200:
+                user_data = user_resp.json()
+                email = user_data.get("mail") or user_data.get("userPrincipalName")
+                display_name = user_data.get("displayName") or display_name
+        return (str(email).strip().lower() if email else ""), display_name, aad_user_id
+
+    def _upsert_member_userdetail(self, admin, team_id, member_id, email, display_name):
+        from users_details.models import UserDetail
+        if not email or "@" not in email:
+            return
+        name_parts = (display_name or "Teams User").strip().split()
+        first_name = name_parts[0] if name_parts else "Teams"
+        last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "User"
+
+        user_detail, created = UserDetail.objects.get_or_create(
+            admin=admin,
+            email=email,
+            defaults={
+                "first_name": first_name,
+                "last_name": last_name,
+                "user_type": "external",
+                "Member_role": ["Viewer"],
+                "team_id": team_id,
+                "platform": "microsoft_teams",
+                "ms_teams_member_id": member_id,
+            }
+        )
+        if not created:
+            updated = False
+            if not user_detail.ms_teams_member_id:
+                user_detail.ms_teams_member_id = member_id
+                updated = True
+            if not user_detail.platform:
+                user_detail.platform = "microsoft_teams"
+                updated = True
+            if not user_detail.team_id:
+                user_detail.team_id = team_id
+                updated = True
+            if updated:
+                user_detail.save()
+
+    def _sync_all_team_members(self, admin, team_id, headers):
+        """Failsafe: sync whole team membership to DB."""
+        url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/members"
+        resp = _http_get(url, headers=headers, timeout=15)
+        if resp.status_code == 401:
+            new_token = self._refresh_admin_ms_token(admin)
+            if new_token:
+                headers["Authorization"] = f"Bearer {new_token}"
+                resp = _http_get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            logger.warning(f"[TeamsWebhook] Full team sync failed team_id={team_id} status={resp.status_code} body={resp.text}")
+            return
+        members = (resp.json() or {}).get("value", [])
+        for m in members:
+            email, display_name, aad_user_id = self._resolve_graph_member_email(headers, m or {})
+            member_id = str((m or {}).get("id") or aad_user_id or "")
+            if email and member_id:
+                self._upsert_member_userdetail(admin, team_id, member_id, email, display_name)
+
     def _handle_member_added(self, notification, client_state, resource):
         """
         resource format: teams/{team_id}/members/{member_id}
@@ -6533,6 +6605,9 @@ class TeamsWebhookView(APIView):
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
             }
+
+            # Failsafe sync: if webhook fired, ensure team members are mirrored in DB.
+            self._sync_all_team_members(admin, team_id, headers)
 
             # Fetch member details from MS Graph
             member_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/members/{member_id}"
