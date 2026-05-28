@@ -4440,21 +4440,17 @@ class AddUserToSlackChannelView(APIView):
             if response["success"]:
                 # Save to UserDetail + send welcome email
                 try:
-                    if user_email:
-                        # Email provided directly — no Slack API call needed
-                        slack_view = SlackInviteUserView()
-                        slack_view._save_and_email_with_known_email(
-                            email=user_email,
-                            name=user_name or user_email.split("@")[0],
-                            admin=request.user,
-                            role=resolved_role,
-                            channel_name=resolved_ch_name,
-                        )
-                    else:
-                        # Fallback: fetch email from Slack API (requires users:read.email scope)
-                        SlackInviteUserView()._save_and_email_invited_user(
-                            user_id, access_token, request.user, role=resolved_role
-                        )
+                    # Always resolve profile by Slack user ID so DB stores the real member identity,
+                    # not whatever email was typed/returned by frontend.
+                    SlackInviteUserView()._save_and_email_invited_user(
+                        slack_user_id=user_id,
+                        bot_token=access_token,
+                        admin=request.user,
+                        role=resolved_role,
+                        channel_id=channel,
+                        channel_name=resolved_ch_name,
+                        fallback_email=user_email,
+                    )
                 except Exception:
                     logger.exception(f"[AddUserToSlack] Failed to save/email user {user_id}")
 
@@ -4620,7 +4616,14 @@ class SlackInviteUserView(APIView):
         admin = request.user
         for slack_uid in slack_user_ids:
             try:
-                self._save_and_email_invited_user(slack_uid, access_token, admin, role=role)
+                self._save_and_email_invited_user(
+                    slack_user_id=slack_uid,
+                    bot_token=access_token,
+                    admin=admin,
+                    role=role,
+                    channel_id=channel,
+                    channel_name=channel_name,
+                )
             except Exception:
                 logger.exception(f"[SlackInvite] Failed to save/email user {slack_uid}")
 
@@ -4718,7 +4721,16 @@ class SlackInviteUserView(APIView):
 
         threading.Thread(target=_send_slack_known_emails, daemon=True).start()
 
-    def _save_and_email_invited_user(self, slack_user_id, bot_token, admin, role="Viewer"):
+    def _save_and_email_invited_user(
+        self,
+        slack_user_id,
+        bot_token,
+        admin,
+        role="Viewer",
+        channel_id=None,
+        channel_name=None,
+        fallback_email=None,
+    ):
         """Fetch Slack profile, save to UserDetail, send set-password welcome email."""
         user_info = _http_get(
             "https://slack.com/api/users.info",
@@ -4737,29 +4749,73 @@ class SlackInviteUserView(APIView):
 
         profile = user_data.get("profile", {})
         email = profile.get("email")
+        if not email and fallback_email:
+            email = fallback_email
         if not email:
             logger.warning(f"[SlackInvite] No email for {slack_user_id}")
             return
+        email = str(email).strip().lower()
 
         name = user_data.get("real_name") or profile.get("display_name") or "Slack User"
         parts = name.strip().split()
         first_name = parts[0] if parts else "Slack"
         last_name = " ".join(parts[1:]) if len(parts) > 1 else "User"
 
-        # Save to UserDetail — skip if already exists
+        # Save to UserDetail
         from users_details.models import UserDetail
         member_role = [role] if isinstance(role, str) else role
-
-        user_detail, created = UserDetail.objects.get_or_create(
-            admin=admin,
-            email=email,
-            defaults={
+        existing_by_member = UserDetail.objects.filter(admin=admin, slack_member_id=slack_user_id).first()
+        created = False
+        if existing_by_member:
+            user_detail = existing_by_member
+            # Correct stale admin-email rows to actual Slack member email.
+            if user_detail.email != email and not UserDetail.objects.filter(admin=admin, email=email).exclude(_id=user_detail._id).exists():
+                user_detail.email = email
+            if not user_detail.first_name:
+                user_detail.first_name = first_name
+            if not user_detail.last_name:
+                user_detail.last_name = last_name
+            if not user_detail.platform:
+                user_detail.platform = "slack"
+            if not user_detail.slack_member_id:
+                user_detail.slack_member_id = slack_user_id
+            if channel_id:
+                existing_channel_ids = list(user_detail.slack_channel_ids or [])
+                if channel_id not in existing_channel_ids:
+                    existing_channel_ids.append(channel_id)
+                    user_detail.slack_channel_ids = existing_channel_ids
+            user_detail.save()
+        else:
+            defaults = {
                 "first_name": first_name,
                 "last_name": last_name,
                 "user_type": "external",
                 "Member_role": member_role,
+                "platform": "slack",
+                "slack_member_id": slack_user_id,
+                "slack_channel_ids": [channel_id] if channel_id else [],
             }
-        )
+            user_detail, created = UserDetail.objects.get_or_create(
+                admin=admin,
+                email=email,
+                defaults=defaults,
+            )
+            if not created:
+                updated = False
+                if not user_detail.platform:
+                    user_detail.platform = "slack"
+                    updated = True
+                if not user_detail.slack_member_id:
+                    user_detail.slack_member_id = slack_user_id
+                    updated = True
+                if channel_id:
+                    existing_channel_ids = list(user_detail.slack_channel_ids or [])
+                    if channel_id not in existing_channel_ids:
+                        existing_channel_ids.append(channel_id)
+                        user_detail.slack_channel_ids = existing_channel_ids
+                        updated = True
+                if updated:
+                    user_detail.save()
 
         _email = email
         _first = first_name
@@ -4774,7 +4830,7 @@ class SlackInviteUserView(APIView):
             logger.info(f"[SlackInvite] Created UserDetail for {email} under admin {admin.email} with role {member_role}")
 
         # Use role names directly as channel display names in the Slack platform email
-        _channel_names = list(_roles) if _roles else []
+        _channel_names = [channel_name] if channel_name else (list(_roles) if _roles else [])
 
         def _send_slack_invited_emails():
             try:
