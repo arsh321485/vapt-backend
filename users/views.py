@@ -5928,9 +5928,10 @@ class SlackEventsView(APIView):
 
         elif etype == "member_joined_channel":
             slack_user_id = event.get("user")
+            channel_id = event.get("channel")
             tid = team_id or event.get("team", "")
             logger.info(f"Slack member {slack_user_id} joined {event.get('channel')} (team={tid})")
-            self._save_slack_member_to_user_detail(slack_user_id, tid)
+            self._save_slack_member_to_user_detail(slack_user_id, tid, channel_id=channel_id)
 
         elif etype == "member_left_channel":
             logger.info(f"Slack member {event.get('user')} left {event.get('channel')}")
@@ -6016,7 +6017,7 @@ class SlackEventsView(APIView):
         except Exception:
             logger.exception(f"[SlackEvent] Failed to reply to app_mention in channel={channel}")
 
-    def _save_slack_member_to_user_detail(self, slack_user_id, team_id):
+    def _save_slack_member_to_user_detail(self, slack_user_id, team_id, channel_id=None):
         """
         When a member joins a Slack channel:
         1. Find the admin who owns this workspace (by slack_team_id)
@@ -6079,20 +6080,30 @@ class SlackEventsView(APIView):
                     "Member_role": ["Viewer"],
                     "platform": "slack",
                     "slack_member_id": slack_user_id,
+                    "slack_channel_ids": [channel_id] if channel_id else [],
                 }
             )
 
             if not created:
                 # Update platform fields even if record already existed
                 updated = False
+                if user_detail.email != email and not UserDetail.objects.filter(admin=admin, email=email).exclude(_id=user_detail._id).exists():
+                    user_detail.email = email
+                    updated = True
                 if not user_detail.slack_member_id:
                     user_detail.slack_member_id = slack_user_id
                     updated = True
                 if not user_detail.platform:
                     user_detail.platform = "slack"
                     updated = True
+                if channel_id:
+                    existing_ids = list(user_detail.slack_channel_ids or [])
+                    if channel_id not in existing_ids:
+                        existing_ids.append(channel_id)
+                        user_detail.slack_channel_ids = existing_ids
+                        updated = True
                 if updated:
-                    user_detail.save(update_fields=["slack_member_id", "platform"])
+                    user_detail.save()
                 logger.info(f"[SlackEvent] UserDetail already exists for {email} — skipping email")
                 return
 
@@ -6452,21 +6463,38 @@ class TeamsWebhookView(APIView):
         clientState = admin's user ID (set when subscription was created)
         """
         try:
-            parts = resource.strip("/").split("/")
-            # Expected: ["teams", team_id, "members", member_id]
-            if len(parts) < 4:
-                logger.warning(f"[TeamsWebhook] Unexpected resource format: {resource}")
-                return
+            # Handle multiple Graph resource formats:
+            # - teams/{team_id}/members/{member_id}
+            # - teams('{team_id}')/members('{member_id}')
+            # - resourceData.teamId / resourceData.id
+            team_id = ""
+            member_id = ""
+            resource_data = notification.get("resourceData") or {}
 
-            team_id = parts[1]
-            member_id = parts[3]
+            if isinstance(resource_data, dict):
+                team_id = str(resource_data.get("teamId") or resource_data.get("team_id") or "").strip()
+                member_id = str(resource_data.get("id") or resource_data.get("memberId") or "").strip()
+
+            if not team_id or not member_id:
+                import re as _re
+                m = _re.search(r"teams(?:\('([^']+)'\)|/([^/]+))/members(?:\('([^']+)'\)|/([^/]+))", resource or "")
+                if m:
+                    team_id = (m.group(1) or m.group(2) or "").strip()
+                    member_id = (m.group(3) or m.group(4) or "").strip()
+
+            if not team_id or not member_id:
+                logger.warning(f"[TeamsWebhook] Unexpected resource format: {resource} resourceData={resource_data}")
+                return
 
             # Find admin by client_state (admin user ID)
             try:
                 admin = User.objects.get(id=client_state)
             except User.DoesNotExist:
-                logger.warning(f"[TeamsWebhook] No admin found for clientState={client_state}")
-                return
+                # Fallback: resolve owner by team_id
+                admin = User.objects.filter(ms_team_id=team_id).first()
+                if not admin:
+                    logger.warning(f"[TeamsWebhook] No admin found for clientState={client_state} team_id={team_id}")
+                    return
 
             access_token = admin.ms_access_token
             if not access_token:
@@ -6485,17 +6513,42 @@ class TeamsWebhookView(APIView):
                 timeout=10,
             )
 
-            if member_resp.status_code != 200:
-                logger.warning(f"[TeamsWebhook] Failed to fetch member {member_id}: {member_resp.text}")
-                return
+            email = None
+            display_name = "Teams User"
+            aad_user_id = None
+            member_data = {}
 
-            member_data = member_resp.json()
-            email = member_data.get("email") or member_data.get("displayName")
-            display_name = member_data.get("displayName") or "Teams User"
+            if member_resp.status_code == 200:
+                member_data = member_resp.json()
+                display_name = member_data.get("displayName") or "Teams User"
+                email = member_data.get("email")
+                aad_user_id = (
+                    member_data.get("userId")
+                    or member_data.get("user_id")
+                    or member_data.get("id")
+                )
+            else:
+                logger.warning(f"[TeamsWebhook] Failed to fetch team member by id={member_id}: {member_resp.text}")
+                # Fallback: sometimes member_id itself is AAD user object id
+                aad_user_id = member_id
+
+            # Graph team-member payload often misses email.
+            # Resolve from directory user object using AAD user id.
+            if (not email or "@" not in str(email)) and aad_user_id:
+                user_resp = _http_get(
+                    f"https://graph.microsoft.com/v1.0/users/{aad_user_id}?$select=mail,userPrincipalName,displayName",
+                    headers=headers,
+                    timeout=10,
+                )
+                if user_resp.status_code == 200:
+                    user_data = user_resp.json()
+                    email = user_data.get("mail") or user_data.get("userPrincipalName")
+                    display_name = user_data.get("displayName") or display_name
 
             if not email or "@" not in email:
                 logger.warning(f"[TeamsWebhook] No valid email for member {member_id}")
                 return
+            email = str(email).strip().lower()
 
             name_parts = display_name.strip().split()
             first_name = name_parts[0] if name_parts else "Teams"
@@ -6520,14 +6573,20 @@ class TeamsWebhookView(APIView):
             if not created:
                 # Update platform fields even if record already existed
                 updated = False
+                if user_detail.email != email and not UserDetail.objects.filter(admin=admin, email=email).exclude(_id=user_detail._id).exists():
+                    user_detail.email = email
+                    updated = True
                 if not user_detail.ms_teams_member_id:
                     user_detail.ms_teams_member_id = member_id
                     updated = True
                 if not user_detail.platform:
                     user_detail.platform = "microsoft_teams"
                     updated = True
+                if not user_detail.team_id:
+                    user_detail.team_id = team_id
+                    updated = True
                 if updated:
-                    user_detail.save(update_fields=["ms_teams_member_id", "platform"])
+                    user_detail.save()
                 logger.info(f"[TeamsWebhook] UserDetail already exists for {email} — skipping")
                 return
 
