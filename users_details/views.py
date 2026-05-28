@@ -42,6 +42,27 @@ def _http_patch(url, **kwargs):
 logger = logging.getLogger('users_details')
 
 
+def _ud_set(user_detail, **fields):
+    """
+    Directly update UserDetail fields in MongoDB — bypasses djongo's broken update_fields.
+    Also updates the in-memory instance so subsequent reads are consistent.
+    """
+    try:
+        mongo_uri = settings.DATABASES['default']['CLIENT']['host']
+        import pymongo as _pm
+        with _pm.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as _c:
+            _db = _c[settings.DATABASES['default'].get('NAME', 'vaptfix')]
+            _db['users_details_userdetail'].update_one(
+                {'_id': ObjectId(str(user_detail._id))},
+                {'$set': fields}
+            )
+        # Reflect on the in-memory instance
+        for k, v in fields.items():
+            setattr(user_detail, k, v)
+    except Exception as _e:
+        logger.error(f"[_ud_set] Failed for _id={user_detail._id}: {_e}", exc_info=True)
+
+
 ROLE_TO_SLACK_CHANNEL = {
     "Patch Management": "patch-management",
     "Configuration Management": "configuration-management",
@@ -861,8 +882,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             # Auto-set platform from admin's login_provider if not already set
             admin_provider = getattr(admin_user, "login_provider", "") or ""
             if not user_detail.platform and admin_provider in ("slack", "microsoft_teams"):
-                user_detail.platform = admin_provider
-                user_detail.save(update_fields=["platform"])
+                _ud_set(user_detail, platform=admin_provider)
 
             # Extract data to send email
             email = user_detail.email
@@ -889,7 +909,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = PasswordResetTokenGenerator().make_token(user)
             # set_password_url = f"https://vaptfix.ai/auth?mode=set-password&uid={uid}&token={token}"
-            set_password_url = f"https://vaptfix.ai/home?action=set-password&uid={uid}&token={token}"
+            set_password_url = f"https://vaptfix.ai/home?action=user-set-password&uid={uid}&token={token}"
 
             # Send emails in background so the API response is not blocked
             admin_email = getattr(admin_user, "email", "")
@@ -960,16 +980,13 @@ class UserDetailCreateView(generics.CreateAPIView):
                     user_email=email,
                     member_roles=roles or [],
                 )
-                # Save team_id, ms_teams_member_id, and platform
-                teams_update_fields = ["team_id"]
-                user_detail.team_id = team_id
+                # Save team_id, ms_teams_member_id, and platform via direct pymongo
+                teams_fields = {"team_id": team_id}
                 if ms_user_id and not user_detail.ms_teams_member_id:
-                    user_detail.ms_teams_member_id = ms_user_id
-                    teams_update_fields.append("ms_teams_member_id")
+                    teams_fields["ms_teams_member_id"] = ms_user_id
                 if not user_detail.platform:
-                    user_detail.platform = "microsoft_teams"
-                    teams_update_fields.append("platform")
-                user_detail.save(update_fields=teams_update_fields)
+                    teams_fields["platform"] = "microsoft_teams"
+                _ud_set(user_detail, **teams_fields)
                 logger.info(f"[UserDetailCreate] MS Teams sync done for {email}: ms_user_id={ms_user_id} result={teams_sync_result}")
             else:
                 if not ms_access_token:
@@ -990,14 +1007,12 @@ class UserDetailCreateView(generics.CreateAPIView):
                 member_user = User.objects.filter(email=email).first()
                 slack_user_id = getattr(member_user, "slack_user_id", None) or lookup_slack_user_by_email(slack_bot_token, email)
                 if slack_user_id:
-                    slack_update_fields = []
-                    # Always save slack_member_id and platform
+                    # Always save slack_member_id and platform via direct pymongo
+                    slack_fields = {}
                     if not user_detail.slack_member_id:
-                        user_detail.slack_member_id = slack_user_id
-                        slack_update_fields.append("slack_member_id")
+                        slack_fields["slack_member_id"] = slack_user_id
                     if not user_detail.platform:
-                        user_detail.platform = "slack"
-                        slack_update_fields.append("platform")
+                        slack_fields["platform"] = "slack"
 
                     slack_results = []
                     channel_ids = []
@@ -1009,11 +1024,10 @@ class UserDetailCreateView(generics.CreateAPIView):
                             member_roles=roles,
                         )
                         if channel_ids:
-                            user_detail.slack_channel_ids = list(set(channel_ids))
-                            slack_update_fields.append("slack_channel_ids")
+                            slack_fields["slack_channel_ids"] = list(set(channel_ids))
 
-                    if slack_update_fields:
-                        user_detail.save(update_fields=slack_update_fields)
+                    if slack_fields:
+                        _ud_set(user_detail, **slack_fields)
 
                     slack_sync_result = {
                         "status": "success",
@@ -1506,10 +1520,10 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
             )
             # Save ms_teams_member_id if not already set
             if ms_user_id_upd and not instance.ms_teams_member_id:
-                instance.ms_teams_member_id = ms_user_id_upd
+                upd_fields = {"ms_teams_member_id": ms_user_id_upd}
                 if not instance.platform:
-                    instance.platform = "microsoft_teams"
-                instance.save(update_fields=["ms_teams_member_id", "platform"])
+                    upd_fields["platform"] = "microsoft_teams"
+                _ud_set(instance, **upd_fields)
 
         # Sync new roles with Slack channels if slack_bot_token and slack_user_id provided
         slack_sync_result = []
@@ -1679,8 +1693,7 @@ class UserDetailSlackResyncView(generics.GenericAPIView):
             member_roles=roles,
         )
         if channel_ids:
-            user_detail.slack_channel_ids = list(set(channel_ids))
-            user_detail.save(update_fields=["slack_channel_ids"])
+            _ud_set(user_detail, slack_channel_ids=list(set(channel_ids)))
 
         return Response(
             {
