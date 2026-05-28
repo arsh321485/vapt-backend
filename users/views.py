@@ -6457,6 +6457,34 @@ class TeamsWebhookView(APIView):
 
         return Response({"ok": True})
 
+    def _refresh_admin_ms_token(self, admin):
+        """Refresh admin Teams token for webhook Graph calls."""
+        refresh_token = getattr(admin, "ms_refresh_token", None)
+        if not refresh_token:
+            return None
+        try:
+            token_payload = {
+                "grant_type": "refresh_token",
+                "client_id": settings.MICROSOFT_CLIENT_ID,
+                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+                "scope": "https://graph.microsoft.com/.default offline_access",
+            }
+            resp = _http_post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
+            data = resp.json() if resp is not None else {}
+            new_token = data.get("access_token")
+            if not new_token:
+                logger.warning(f"[TeamsWebhook] Token refresh failed for admin={getattr(admin, 'email', '')}: {data}")
+                return None
+            admin.ms_access_token = new_token
+            if data.get("refresh_token"):
+                admin.ms_refresh_token = data.get("refresh_token")
+            admin.save(update_fields=["ms_access_token", "ms_refresh_token"])
+            return new_token
+        except Exception:
+            logger.exception(f"[TeamsWebhook] Exception refreshing token for admin={getattr(admin, 'email', '')}")
+            return None
+
     def _handle_member_added(self, notification, client_state, resource):
         """
         resource format: teams/{team_id}/members/{member_id}
@@ -6507,11 +6535,13 @@ class TeamsWebhookView(APIView):
             }
 
             # Fetch member details from MS Graph
-            member_resp = _http_get(
-                f"https://graph.microsoft.com/v1.0/teams/{team_id}/members/{member_id}",
-                headers=headers,
-                timeout=10,
-            )
+            member_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/members/{member_id}"
+            member_resp = _http_get(member_url, headers=headers, timeout=10)
+            if member_resp.status_code == 401:
+                new_token = self._refresh_admin_ms_token(admin)
+                if new_token:
+                    headers["Authorization"] = f"Bearer {new_token}"
+                    member_resp = _http_get(member_url, headers=headers, timeout=10)
 
             email = None
             display_name = "Teams User"
@@ -6540,6 +6570,15 @@ class TeamsWebhookView(APIView):
                     headers=headers,
                     timeout=10,
                 )
+                if user_resp.status_code == 401:
+                    new_token = self._refresh_admin_ms_token(admin)
+                    if new_token:
+                        headers["Authorization"] = f"Bearer {new_token}"
+                        user_resp = _http_get(
+                            f"https://graph.microsoft.com/v1.0/users/{aad_user_id}?$select=mail,userPrincipalName,displayName",
+                            headers=headers,
+                            timeout=10,
+                        )
                 if user_resp.status_code == 200:
                     user_data = user_resp.json()
                     email = user_data.get("mail") or user_data.get("userPrincipalName")
