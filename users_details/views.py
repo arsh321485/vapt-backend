@@ -909,7 +909,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = PasswordResetTokenGenerator().make_token(user)
             # set_password_url = f"https://vaptfix.ai/auth?mode=set-password&uid={uid}&token={token}"
-            set_password_url = f"https://vaptfix.ai/home?action=user-set-password&uid={uid}&token={token}"
+            set_password_url = f"https://vaptfix.ai/home?signin=user&tab=setPassword&uid={uid}&token={token}"
 
             # Send emails in background so the API response is not blocked
             admin_email = getattr(admin_user, "email", "")

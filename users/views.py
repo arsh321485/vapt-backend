@@ -3292,7 +3292,7 @@ class SlackOAuthUrlView(APIView):
         slack_url = (
             f"https://slack.com/oauth/v2/authorize?"
             f"client_id={client_id}"
-            f"&scope=chat:write,channels:manage,channels:join,mpim:write,groups:write,im:write,users:read,users:read.email"
+            f"&scope=chat:write,channels:read,channels:manage,channels:join,groups:read,groups:write,mpim:write,im:write,users:read,users:read.email"
             f"&user_scope=identity.basic,identity.email,identity.avatar,identity.team"
             f"&redirect_uri={redirect_uri}"
             f"&state={state}"
@@ -3610,8 +3610,27 @@ class SlackLoginView(APIView):
                 }
             )
 
-            # 3. Update existing users
-            if not created:
+            # 3. Update existing users — use direct pymongo for is_staff (djongo boolean bug)
+            try:
+                _mongo_uri = settings.DATABASES['default']['CLIENT']['host']
+                import pymongo as _pm
+                with _pm.MongoClient(_mongo_uri, serverSelectionTimeoutMS=5000) as _uc:
+                    _udb = _uc[settings.DATABASES['default'].get('NAME', 'vaptfix')]
+                    _udb['users_user'].update_one(
+                        {'id': str(user.id)},
+                        {'$set': {
+                            'is_staff': True,
+                            'login_provider': 'slack',
+                            'slack_user_id': slack_user_id,
+                            'slack_team_id': slack_team.get('id'),
+                            'last_login': timezone.now(),
+                        }}
+                    )
+                user.is_staff = True
+                user.login_provider = 'slack'
+            except Exception:
+                logger.warning("User update via pymongo failed in Slack login", exc_info=True)
+                # Fallback to ORM save
                 user.last_login = timezone.now()
                 user.is_staff = True
                 user.login_provider = "slack"
@@ -3636,22 +3655,72 @@ class SlackLoginView(APIView):
                         "last_name": last_name,
                         "user_type": "internal",
                         "Member_role": [],
+                        "platform": "slack",
+                        "slack_member_id": slack_user_id,
                     },
                 )
                 user_detail_created = ud_created
                 if not ud_created:
-                    changed = False
+                    changed = {}
                     if not (ud.first_name or "").strip() and first_name:
-                        ud.first_name = first_name
-                        changed = True
+                        changed["first_name"] = first_name
                     if not (ud.last_name or "").strip() and last_name:
-                        ud.last_name = last_name
-                        changed = True
+                        changed["last_name"] = last_name
+                    if not ud.platform:
+                        changed["platform"] = "slack"
+                    if not ud.slack_member_id and slack_user_id:
+                        changed["slack_member_id"] = slack_user_id
                     if changed:
-                        ud.save(update_fields=["first_name", "last_name"])
-                        user_detail_updated = True
+                        # Direct pymongo update — djongo update_fields is unreliable
+                        try:
+                            from bson import ObjectId as _OID
+                            _mongo_uri = settings.DATABASES['default']['CLIENT']['host']
+                            import pymongo as _pm
+                            with _pm.MongoClient(_mongo_uri, serverSelectionTimeoutMS=5000) as _c:
+                                _db2 = _c[settings.DATABASES['default'].get('NAME', 'vaptfix')]
+                                _db2['users_details_userdetail'].update_one(
+                                    {'_id': _OID(str(ud._id))},
+                                    {'$set': changed}
+                                )
+                            for _k, _v in changed.items():
+                                setattr(ud, _k, _v)
+                            user_detail_updated = True
+                        except Exception:
+                            logger.warning("UserDetail update failed in Slack login", exc_info=True)
                 roles = ud.Member_role or []
                 needs_role_assignment = len(roles) == 0
+
+                # Fetch user's Slack channel memberships and save to slack_channel_ids
+                try:
+                    _ch_resp = _http_get(
+                        "https://slack.com/api/users.conversations",
+                        headers={"Authorization": f"Bearer {bot_token}"},
+                        params={
+                            "user": slack_user_id,
+                            "types": "public_channel,private_channel",
+                            "limit": 200,
+                            "exclude_archived": "true",
+                        },
+                        timeout=10,
+                    )
+                    _ch_data = _ch_resp.json() if _ch_resp.ok else {}
+                    if _ch_data.get("ok"):
+                        _ch_ids = [c["id"] for c in _ch_data.get("channels", []) if c.get("id")]
+                        if _ch_ids:
+                            from bson import ObjectId as _OIDC
+                            import pymongo as _pm3
+                            _mongo_uri2 = settings.DATABASES['default']['CLIENT']['host']
+                            with _pm3.MongoClient(_mongo_uri2, serverSelectionTimeoutMS=5000) as _c3:
+                                _db3 = _c3[settings.DATABASES['default'].get('NAME', 'vaptfix')]
+                                _db3['users_details_userdetail'].update_one(
+                                    {'_id': _OIDC(str(ud._id))},
+                                    {'$set': {'slack_channel_ids': _ch_ids}}
+                                )
+                            ud.slack_channel_ids = _ch_ids
+                            logger.info(f"[SlackLogin] Saved {len(_ch_ids)} channel IDs for {slack_email}")
+                except Exception:
+                    logger.warning("[SlackLogin] Could not fetch/save channel memberships", exc_info=True)
+
             except Exception:
                 logger.warning("UserDetail upsert failed in Slack login", exc_info=True)
 
