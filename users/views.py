@@ -6397,7 +6397,7 @@ class CreateTeamsSubscriptionView(APIView):
         request.user.save(update_fields=["ms_team_id"])
 
         # Webhook notification URL (must be HTTPS and publicly accessible)
-        notification_url = f"{settings.BACKEND_BASE_URL}/api/users/teams/webhook/"
+        notification_url = f"{settings.BACKEND_BASE_URL}/api/admin/users/teams/webhook/"
 
         payload = {
             "changeType": "created",
@@ -6540,18 +6540,16 @@ class TeamsWebhookView(APIView):
             }
         )
         if not created:
-            updated = False
+            _upd = {}
             if not user_detail.ms_teams_member_id:
-                user_detail.ms_teams_member_id = member_id
-                updated = True
+                _upd["ms_teams_member_id"] = member_id
             if not user_detail.platform:
-                user_detail.platform = "microsoft_teams"
-                updated = True
+                _upd["platform"] = "microsoft_teams"
             if not user_detail.team_id:
-                user_detail.team_id = team_id
-                updated = True
-            if updated:
-                user_detail.save()
+                _upd["team_id"] = team_id
+            if _upd:
+                from users_details.views import _ud_set as _ud_set_webhook
+                _ud_set_webhook(user_detail, **_upd)
 
     def _sync_all_team_members(self, admin, team_id, headers):
         """Failsafe: sync whole team membership to DB."""
