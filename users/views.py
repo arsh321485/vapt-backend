@@ -2513,8 +2513,14 @@ class AddUserToChannelView(generics.GenericAPIView):
                     error_data = response.json()
                 except Exception as e:
                     logger.warning("Suppressed error: %s", e)
-                return False, f"Failed to add user to channel: {error_data.get('error', {}).get('message', 'Unknown error')}"
-                
+                error_msg = error_data.get('error', {}).get('message', 'Unknown error')
+                # Standard channels don't support direct member add via Graph API.
+                # Team membership already grants access to all standard channels.
+                if 'not supported' in error_msg.lower():
+                    logger.info(f"[TeamsAddUser] Standard channel detected — skipping channel member add (team membership grants access)")
+                    return True, "Standard channel: access granted via team membership"
+                return False, f"Failed to add user to channel: {error_msg}"
+
         except Exception as e:
             return False, f"Error adding user to channel: {str(e)}"
 
