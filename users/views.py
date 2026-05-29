@@ -1,6 +1,7 @@
 from django.forms import ValidationError
 from .renderers import UserRenderer
 from rest_framework import status, generics, permissions
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -6436,6 +6437,18 @@ class CreateTeamsSubscriptionView(APIView):
         return expiry.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+class _PlainTextRenderer(BaseRenderer):
+    """Renderer that satisfies Accept: text/plain for MS Graph webhook validation."""
+    media_type = 'text/plain'
+    format = 'txt'
+    charset = 'utf-8'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        if isinstance(data, str):
+            return data.encode(self.charset)
+        return data
+
+
 class TeamsWebhookView(APIView):
     """
     GET  /api/users/teams/webhook/?validationToken=xxx  — MS Graph endpoint validation
@@ -6449,6 +6462,7 @@ class TeamsWebhookView(APIView):
     """
     permission_classes = [AllowAny]
     authentication_classes = []
+    renderer_classes = [_PlainTextRenderer, JSONRenderer]
 
     def get(self, request):
         """MS Graph sends validationToken — must return it as plain text."""
