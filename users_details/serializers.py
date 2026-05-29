@@ -16,7 +16,7 @@ def _extract_domain(email: str) -> str:
 
 def _enforce_user_type_email_domain(user_type: str, email: str, admin_email: str):
     """
-    Business rule:
+    Business rule (applies to all admins — email, Slack, MS Teams):
     - internal users must use same domain as admin
     - external users must use a different domain than admin
     """
