@@ -3477,23 +3477,6 @@ class SlackOAuthCallbackView(APIView):
             user.slack_bot_token = bot_token
             user.save()
 
-            # Step 4a: ensure UserDetail exists for Slack user under this admin.
-            # If callback is for admin itself, this creates a profile row for consistency.
-            try:
-                from users_details.models import UserDetail
-                UserDetail.objects.get_or_create(
-                    admin=user,
-                    email=email,
-                    defaults={
-                        "first_name": firstname or "Slack",
-                        "last_name": lastname or "User",
-                        "user_type": "internal",
-                        "Member_role": [],
-                    },
-                )
-            except Exception:
-                logger.warning("UserDetail upsert failed in Slack OAuth callback", exc_info=True)
-
             # ✅ Step 4b: Ensure vaptfix channels exist and invite user
             channels = {}
             try:
@@ -6099,24 +6082,21 @@ class SlackEventsView(APIView):
 
             if not created:
                 # Update platform fields even if record already existed
-                updated = False
+                _upd = {}
                 if user_detail.email != email and not UserDetail.objects.filter(admin=admin, email=email).exclude(_id=user_detail._id).exists():
-                    user_detail.email = email
-                    updated = True
+                    _upd["email"] = email
                 if not user_detail.slack_member_id:
-                    user_detail.slack_member_id = slack_user_id
-                    updated = True
+                    _upd["slack_member_id"] = slack_user_id
                 if not user_detail.platform:
-                    user_detail.platform = "slack"
-                    updated = True
+                    _upd["platform"] = "slack"
                 if channel_id:
                     existing_ids = list(user_detail.slack_channel_ids or [])
                     if channel_id not in existing_ids:
                         existing_ids.append(channel_id)
-                        user_detail.slack_channel_ids = existing_ids
-                        updated = True
-                if updated:
-                    user_detail.save()
+                        _upd["slack_channel_ids"] = existing_ids
+                if _upd:
+                    from users_details.views import _ud_set as _ud_set_event
+                    _ud_set_event(user_detail, **_upd)
                 logger.info(f"[SlackEvent] UserDetail already exists for {email} — skipping email")
                 return
 
@@ -6464,12 +6444,14 @@ class TeamsWebhookView(APIView):
     authentication_classes = []
     renderer_classes = [_PlainTextRenderer, JSONRenderer]
 
-    def get(self, request):
-        """MS Graph sends validationToken — must return it as plain text."""
-        validation_token = request.GET.get("validationToken")
-        if validation_token:
-            return Response(validation_token, status=status.HTTP_200_OK)
-        return Response({"error": "Missing validationToken"}, status=status.HTTP_400_BAD_REQUEST)
+    def dispatch(self, request, *args, **kwargs):
+        # MS Graph validation: bypass DRF entirely for GET with validationToken
+        if request.method == "GET":
+            token = request.GET.get("validationToken", "")
+            if token:
+                return HttpResponse(token, content_type="text/plain; charset=utf-8", status=200)
+            return HttpResponse("Missing validationToken", status=400)
+        return super().dispatch(request, *args, **kwargs)
 
     def post(self, request):
         notifications = request.data.get("value", [])
