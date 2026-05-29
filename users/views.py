@@ -6402,6 +6402,7 @@ class CreateTeamsSubscriptionView(APIView):
         payload = {
             "changeType": "created",
             "notificationUrl": notification_url,
+            "lifecycleNotificationUrl": notification_url,
             "resource": f"teams/{team_id}/members",
             "expirationDateTime": self._expiry_datetime(),
             "clientState": str(request.user.id),  # used to identify admin on webhook

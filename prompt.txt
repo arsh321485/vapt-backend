@@ -1,1 +1,0 @@
-frendend se esa kiya hai ki ms team button pr click krne pr ms team new tab me open hota hai to new tab se open kre to plotform se add ho jate hai lekin database me save nai ho rhe hai to uske liye kya krna pdega 
