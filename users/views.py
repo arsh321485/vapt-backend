@@ -6468,7 +6468,7 @@ class TeamsWebhookView(APIView):
         """MS Graph sends validationToken — must return it as plain text."""
         validation_token = request.GET.get("validationToken")
         if validation_token:
-            return HttpResponse(validation_token, content_type="text/plain", status=200)
+            return Response(validation_token, status=status.HTTP_200_OK)
         return Response({"error": "Missing validationToken"}, status=status.HTTP_400_BAD_REQUEST)
 
     def post(self, request):

@@ -1,0 +1,15 @@
+{
+    "error": "Failed to create Teams subscription.",
+    "detail": "{\"error\":{\"code\":\"ValidationError\",\"message\":\"Subscription validation request to notification URL did not return the expected validation token.\",\"innerError\":{\"date\":\"2026-05-29T08:47:16\",\"request-id\":\"7e69a725-270e-4660-b9c4-27f2e39ec2b7\",\"client-request-id\":\"7e69a725-270e-4660-b9c4-27f2e39ec2b7\"}}}"
+}
+
+https://vaptbackend.secureitlab.com/api/admin/users/teams/webhook/subscribe/
+
+
+
+ {
+    "team_id": "10de4370-7cc1-4a52-bc81-f2981aa63358"
+  }
+
+
+  deploy kiya uske bad esa aa rha hai 
