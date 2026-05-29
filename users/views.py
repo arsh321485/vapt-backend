@@ -4787,27 +4787,35 @@ class SlackInviteUserView(APIView):
             timeout=10,
         ).json()
 
+        email = None
+        first_name = "Slack"
+        last_name = "User"
+
         if not user_info.get("ok"):
             logger.warning(f"[SlackInvite] users.info failed for {slack_user_id}: {user_info.get('error')}")
-            return
-
-        user_data = user_info.get("user", {})
-        if user_data.get("is_bot") or user_data.get("deleted"):
-            return
-
-        profile = user_data.get("profile", {})
-        email = profile.get("email")
-        if not email and fallback_email:
-            email = fallback_email
-        if not email:
-            logger.warning(f"[SlackInvite] No email for {slack_user_id}")
-            return
-        email = str(email).strip().lower()
-
-        name = user_data.get("real_name") or profile.get("display_name") or "Slack User"
-        parts = name.strip().split()
-        first_name = parts[0] if parts else "Slack"
-        last_name = " ".join(parts[1:]) if len(parts) > 1 else "User"
+            if not fallback_email:
+                return
+            # Fallback: use provided email to still create/update UserDetail
+            email = str(fallback_email).strip().lower()
+            name_part = email.split('@')[0].replace('.', ' ').replace('_', ' ').split()
+            first_name = name_part[0].capitalize() if name_part else "Slack"
+            last_name = " ".join(p.capitalize() for p in name_part[1:]) if len(name_part) > 1 else "User"
+        else:
+            user_data = user_info.get("user", {})
+            if user_data.get("is_bot") or user_data.get("deleted"):
+                return
+            profile = user_data.get("profile", {})
+            email = profile.get("email")
+            if not email and fallback_email:
+                email = fallback_email
+            if not email:
+                logger.warning(f"[SlackInvite] No email for {slack_user_id}")
+                return
+            email = str(email).strip().lower()
+            name = user_data.get("real_name") or profile.get("display_name") or "Slack User"
+            parts = name.strip().split()
+            first_name = parts[0] if parts else "Slack"
+            last_name = " ".join(parts[1:]) if len(parts) > 1 else "User"
 
         # Save to UserDetail
         from users_details.models import UserDetail
@@ -4816,23 +4824,26 @@ class SlackInviteUserView(APIView):
         created = False
         if existing_by_member:
             user_detail = existing_by_member
+            _upd = {}
             # Correct stale admin-email rows to actual Slack member email.
             if user_detail.email != email and not UserDetail.objects.filter(admin=admin, email=email).exclude(_id=user_detail._id).exists():
-                user_detail.email = email
+                _upd["email"] = email
             if not user_detail.first_name:
-                user_detail.first_name = first_name
+                _upd["first_name"] = first_name
             if not user_detail.last_name:
-                user_detail.last_name = last_name
+                _upd["last_name"] = last_name
             if not user_detail.platform:
-                user_detail.platform = "slack"
+                _upd["platform"] = "slack"
             if not user_detail.slack_member_id:
-                user_detail.slack_member_id = slack_user_id
+                _upd["slack_member_id"] = slack_user_id
             if channel_id:
                 existing_channel_ids = list(user_detail.slack_channel_ids or [])
                 if channel_id not in existing_channel_ids:
                     existing_channel_ids.append(channel_id)
-                    user_detail.slack_channel_ids = existing_channel_ids
-            user_detail.save()
+                    _upd["slack_channel_ids"] = existing_channel_ids
+            if _upd:
+                from users_details.views import _ud_set as _ud_set_slack
+                _ud_set_slack(user_detail, **_upd)
         else:
             defaults = {
                 "first_name": first_name,
@@ -4849,21 +4860,19 @@ class SlackInviteUserView(APIView):
                 defaults=defaults,
             )
             if not created:
-                updated = False
+                _upd2 = {}
                 if not user_detail.platform:
-                    user_detail.platform = "slack"
-                    updated = True
+                    _upd2["platform"] = "slack"
                 if not user_detail.slack_member_id:
-                    user_detail.slack_member_id = slack_user_id
-                    updated = True
+                    _upd2["slack_member_id"] = slack_user_id
                 if channel_id:
                     existing_channel_ids = list(user_detail.slack_channel_ids or [])
                     if channel_id not in existing_channel_ids:
                         existing_channel_ids.append(channel_id)
-                        user_detail.slack_channel_ids = existing_channel_ids
-                        updated = True
-                if updated:
-                    user_detail.save()
+                        _upd2["slack_channel_ids"] = existing_channel_ids
+                if _upd2:
+                    from users_details.views import _ud_set as _ud_set_slack2
+                    _ud_set_slack2(user_detail, **_upd2)
 
         _email = email
         _first = first_name
