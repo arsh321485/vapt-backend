@@ -6445,9 +6445,15 @@ class TeamsWebhookView(APIView):
     renderer_classes = [_PlainTextRenderer, JSONRenderer]
 
     def dispatch(self, request, *args, **kwargs):
-        # MS Graph validation: bypass DRF entirely for GET with validationToken
+        # MS Graph validation: bypass DRF entirely for GET with validationToken.
+        # Use raw QUERY_STRING to avoid Django decoding + as space.
         if request.method == "GET":
-            token = request.GET.get("validationToken", "")
+            raw_qs = request.META.get("QUERY_STRING", "")
+            token = None
+            for part in raw_qs.split("&"):
+                if part.startswith("validationToken="):
+                    token = part[len("validationToken="):]
+                    break
             if token:
                 return HttpResponse(token, content_type="text/plain; charset=utf-8", status=200)
             return HttpResponse("Missing validationToken", status=400)
