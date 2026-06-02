@@ -14,14 +14,24 @@ def _extract_domain(email: str) -> str:
     return value.rsplit("@", 1)[1]
 
 
-def _normalize_domain(domain: str) -> str:
+def _domains_same_org(admin_domain: str, member_domain: str) -> bool:
     """
-    Strip Microsoft's .onmicrosoft.com suffix so that admin@company.onmicrosoft.com
-    and member@company.com are treated as the same organisation for internal/external checks.
+    Return True if both domains belong to the same organisation.
+    Handles Microsoft 365 tenant domains where:
+      company.onmicrosoft.com  ↔  company.com  (same org, different domain formats)
     """
-    if domain.endswith(".onmicrosoft.com"):
-        return domain[: -len(".onmicrosoft.com")]
-    return domain
+    if admin_domain == member_domain:
+        return True
+    # If admin uses Microsoft tenant domain, extract the company prefix and check
+    # whether the member domain starts with that same prefix.
+    # e.g. admin: vaptfix.onmicrosoft.com  →  tenant = "vaptfix"
+    #      member: vaptfix.com  →  starts with "vaptfix."  → same org
+    for a, b in [(admin_domain, member_domain), (member_domain, admin_domain)]:
+        if a.endswith(".onmicrosoft.com"):
+            tenant = a[: -len(".onmicrosoft.com")]
+            if b == tenant or b.startswith(tenant + "."):
+                return True
+    return False
 
 
 def _enforce_user_type_email_domain(user_type: str, email: str, admin_email: str):
@@ -43,12 +53,9 @@ def _enforce_user_type_email_domain(user_type: str, email: str, admin_email: str
             "email": "Invalid email format for admin or member."
         })
 
-    # Normalise Microsoft tenant domains (company.onmicrosoft.com → company)
-    # so MS-Teams admins can still add internal users with their primary company domain.
-    admin_base = _normalize_domain(admin_domain)
-    member_base = _normalize_domain(member_domain)
+    same_org = _domains_same_org(admin_domain, member_domain)
 
-    if normalized_type == "internal" and member_domain != admin_domain and member_base != admin_base:
+    if normalized_type == "internal" and not same_org:
         raise serializers.ValidationError({
             "email": (
                 f"Internal users must use the same domain as admin "
@@ -56,7 +63,7 @@ def _enforce_user_type_email_domain(user_type: str, email: str, admin_email: str
             )
         })
 
-    if normalized_type == "external" and (member_domain == admin_domain or member_base == admin_base):
+    if normalized_type == "external" and same_org:
         raise serializers.ValidationError({
             "email": (
                 f"External users cannot use admin domain (@{admin_domain}). "
