@@ -2564,11 +2564,21 @@ class AddUserToChannelView(generics.GenericAPIView):
                             "error": "Admin not found for provided admin_id"
                         }, status=status.HTTP_404_NOT_FOUND)
                     admin = target_admin
-                elif getattr(request.user, "ms_team_id", None) != team_id:
-                    # If caller is not the same Teams admin, resolve owner by team_id.
-                    team_owner = User.objects.filter(ms_team_id=team_id).first()
-                    if team_owner:
-                        admin = team_owner
+                else:
+                    # Resolve admin by team_id if request.user's ms_team_id doesn't match.
+                    # Also handles case where admin hasn't set ms_team_id yet.
+                    if getattr(request.user, "ms_team_id", None) != team_id:
+                        team_owner = User.objects.filter(ms_team_id=team_id).first()
+                        if team_owner:
+                            admin = team_owner
+                        else:
+                            # ms_team_id not set on any user yet — save under request.user
+                            # and stamp ms_team_id so future lookups work.
+                            try:
+                                request.user.ms_team_id = team_id
+                                request.user.save(update_fields=["ms_team_id"])
+                            except Exception:
+                                logger.warning("[TeamsAddUser] Could not stamp ms_team_id on request.user")
                 name_part = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').split()
                 first_name = name_part[0].capitalize() if name_part else "Teams"
                 last_name = " ".join(p.capitalize() for p in name_part[1:]) if len(name_part) > 1 else "User"
@@ -4615,6 +4625,7 @@ class SlackInviteUserView(APIView):
         access_token = serializer.validated_data["access_token"]
         channel = serializer.validated_data["channel"]
         slack_user_ids = serializer.validated_data["users"]  # list of Slack user IDs
+        user_emails = serializer.validated_data.get("user_emails") or {}  # optional slack_id -> email map
 
         url = "https://slack.com/api/conversations.invite"
         headers = {
@@ -4631,6 +4642,7 @@ class SlackInviteUserView(APIView):
 
         # Determine role from channel name using Slack conversations.info
         role = "Viewer"
+        channel_name = ""
         try:
             ch_info = _http_get(
                 "https://slack.com/api/conversations.info",
@@ -4655,6 +4667,7 @@ class SlackInviteUserView(APIView):
                     role=role,
                     channel_id=channel,
                     channel_name=channel_name,
+                    fallback_email=user_emails.get(slack_uid),
                 )
             except Exception:
                 logger.exception(f"[SlackInvite] Failed to save/email user {slack_uid}")
@@ -4776,8 +4789,9 @@ class SlackInviteUserView(APIView):
         last_name = "User"
 
         if not user_info.get("ok"):
-            logger.warning(f"[SlackInvite] users.info failed for {slack_user_id}: {user_info.get('error')}")
+            logger.warning(f"[SlackInvite] users.info failed for {slack_user_id}: {user_info.get('error')} — falling back to provided email")
             if not fallback_email:
+                logger.error(f"[SlackInvite] No fallback_email for {slack_user_id} — user will NOT be saved to DB. Pass user_email in the API request.")
                 return
             # Fallback: use provided email to still create/update UserDetail
             email = str(fallback_email).strip().lower()

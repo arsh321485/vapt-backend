@@ -1178,6 +1178,13 @@ class SlackInviteUserSerializer(serializers.Serializer):
         required=True,
         help_text="List of Slack User IDs (e.g., ['U12345', 'U67890'])"
     )
+    # Optional map of slack_user_id -> email; used as fallback when users.info scope is missing
+    user_emails = serializers.DictField(
+        child=serializers.EmailField(),
+        required=False,
+        default=dict,
+        help_text="Optional map of Slack user ID to email, e.g. {'U123': 'user@example.com'}"
+    )
     
 
 
