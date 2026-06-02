@@ -6761,3 +6761,20 @@ class TeamsWebhookView(APIView):
 
         except Exception:
             logger.exception(f"[TeamsWebhook] _handle_member_added failed for resource={resource}")
+
+
+@csrf_exempt
+def teams_webhook_handler(request):
+    """
+    Pure Django (no DRF) handler for MS Graph webhook.
+    GET  — echo validationToken for endpoint validation (parse_qs decodes URL encoding).
+    POST — delegate to TeamsWebhookView for notification processing.
+    """
+    if request.method == "GET":
+        raw_qs = request.META.get("QUERY_STRING", "")
+        parsed = parse_qs(raw_qs, keep_blank_values=True)
+        tokens = parsed.get("validationToken", [])
+        if tokens:
+            return HttpResponse(tokens[0], content_type="text/plain; charset=utf-8", status=200)
+        return HttpResponse("Missing validationToken", status=400)
+    return TeamsWebhookView.as_view()(request)

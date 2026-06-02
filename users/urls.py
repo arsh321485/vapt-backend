@@ -84,6 +84,7 @@ from .views import (
     JiraTransitionIssueView,
     TeamsWebhookView,
     CreateTeamsSubscriptionView,
+    teams_webhook_handler,
 )
 
 app_name = 'users'
@@ -162,7 +163,7 @@ urlpatterns = [
     path("slack/install/", SlackInstallView.as_view(), name="slack-install"),
 
     # MS Teams Webhook
-    path("teams/webhook/", TeamsWebhookView.as_view(), name="teams-webhook"),
+    path("teams/webhook/", teams_webhook_handler, name="teams-webhook"),
     path("teams/webhook/subscribe/", CreateTeamsSubscriptionView.as_view(), name="teams-webhook-subscribe"),
     
     
