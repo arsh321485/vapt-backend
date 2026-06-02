@@ -1,1 +1,4 @@
-server restart kiya or code bhi push kr diya to bhi nai ho rha hai to kya issue hai ye btao 
+abhi bhi nai ho rha hai to mujhe btao qki postman se production url se ho rha hai lekin slack or mc team ke plotform se nai ho rha hai 
+to q nai ho rha hai kuch slack or ms team ke plotform ki limitationhai kya ye btao mujhe to mujhe explain kro qki mujhe seniar developer ko btana hai 
+
+to mujhe btao ki kya issue hai esa 

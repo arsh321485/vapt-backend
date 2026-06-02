@@ -4481,6 +4481,7 @@ class AddUserToSlackChannelView(APIView):
 
             if response["success"]:
                 # Save to UserDetail + send welcome email
+                db_save_error = None
                 try:
                     # Always resolve profile by Slack user ID so DB stores the real member identity,
                     # not whatever email was typed/returned by frontend.
@@ -4493,14 +4494,19 @@ class AddUserToSlackChannelView(APIView):
                         channel_name=resolved_ch_name,
                         fallback_email=user_email,
                     )
-                except Exception:
-                    logger.exception(f"[AddUserToSlack] Failed to save/email user {user_id}")
+                except Exception as _db_exc:
+                    db_save_error = str(_db_exc)
+                    logger.exception(f"[AddUserToSlack] Failed to save/email user {user_id}: {_db_exc}")
 
-                return Response({
+                resp_body = {
                     "success": True,
                     "message": "User added to channel successfully",
-                    "data": response["data"]
-                }, status=status.HTTP_200_OK)
+                    "data": response["data"],
+                }
+                if db_save_error:
+                    resp_body["db_save_warning"] = f"User added to Slack but VAPTFIX DB save failed: {db_save_error}"
+                    logger.error(f"[AddUserToSlack] DB save FAILED for user_id={user_id} email={user_email}: {db_save_error}")
+                return Response(resp_body, status=status.HTTP_200_OK)
             else:
                 error_message = self._get_user_friendly_error(response["error"])
                 return Response({

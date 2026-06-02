@@ -266,10 +266,14 @@ https://login.microsoftonline.com,
 https://graph.microsoft.com,
 https://slack.com,
 https://api.slack.com,
+https://app.slack.com,
 https://auth.atlassian.com,
 https://api.atlassian.com,
 https://vaptbackend.secureitlab.com,
-https://vaptfix.ai
+https://vaptfix.ai,
+https://teams.microsoft.com,
+https://teams.live.com,
+https://res.cdn.office.net
 """.split(",")]
 
 CORS_ALLOW_CREDENTIALS = True
