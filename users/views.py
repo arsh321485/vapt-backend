@@ -4699,8 +4699,8 @@ class SlackInviteUserView(APIView):
                 existing = list(user_detail.slack_channel_ids or [])
                 if channel_name not in existing:
                     existing.append(channel_name)
-                    user_detail.slack_channel_ids = existing
-                    user_detail.save(update_fields=["slack_channel_ids"])
+                    from users_details.views import _ud_set as _ud_set_ch
+                    _ud_set_ch(user_detail, slack_channel_ids=existing)
             except Exception:
                 logger.warning(f"[SlackInvite] Could not update slack_channel_ids for {email}")
 
@@ -6507,7 +6507,11 @@ class TeamsWebhookView(APIView):
             admin.ms_access_token = new_token
             if data.get("refresh_token"):
                 admin.ms_refresh_token = data.get("refresh_token")
-            admin.save(update_fields=["ms_access_token", "ms_refresh_token"])
+            # Use filter().update() to reliably persist refreshed token — avoids djongo update_fields issues
+            update_kwargs = {"ms_access_token": new_token}
+            if data.get("refresh_token"):
+                update_kwargs["ms_refresh_token"] = data["refresh_token"]
+            User.objects.filter(pk=admin.pk).update(**update_kwargs)
             return new_token
         except Exception:
             logger.exception(f"[TeamsWebhook] Exception refreshing token for admin={getattr(admin, 'email', '')}")
