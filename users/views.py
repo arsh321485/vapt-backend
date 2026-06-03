@@ -1437,15 +1437,17 @@ class MicrosoftTeamsCallbackView(APIView):
             access_token = token_data["access_token"]
 
             # Get user info from Microsoft Graph
+            logger.info(f"[TeamsOAuth] Fetching user info from MS Graph...")
             user_info = _http_get(
                 "https://graph.microsoft.com/v1.0/me",
                 headers={"Authorization": f"Bearer {access_token}"}, timeout=15
             ).json()
-            print("👤 User info:", user_info)
+            logger.info(f"[TeamsOAuth] MS Graph /me response: mail={user_info.get('mail')} upn={user_info.get('userPrincipalName')} displayName={user_info.get('displayName')}")
 
             email = user_info.get("mail") or user_info.get("userPrincipalName")
             full_name = user_info.get("displayName", "")
             firstname, lastname = (full_name.split(" ", 1) + [""])[:2]
+            logger.info(f"[TeamsOAuth] Resolved: email={email} full_name={full_name} admin_id_from_state={admin_id_from_state}")
 
             # Save user tokens in DB for the correct admin.
             # If admin_id is provided in state, bind tokens to that user record.
@@ -1453,6 +1455,7 @@ class MicrosoftTeamsCallbackView(APIView):
             user = None
             if admin_id_from_state:
                 user = User.objects.filter(id=admin_id_from_state).first()
+                logger.info(f"[TeamsOAuth] Lookup by admin_id_from_state={admin_id_from_state}: found={bool(user)}")
 
             if not user and email:
                 user, created = User.objects.get_or_create(
@@ -1465,12 +1468,16 @@ class MicrosoftTeamsCallbackView(APIView):
                         "login_provider": "microsoft_teams",
                     },
                 )
+                logger.info(f"[TeamsOAuth] get_or_create by email={email}: created={created} user_id={user.id if user else None}")
             else:
                 created = False
 
             if user:
+                logger.info(f"[TeamsOAuth] Processing user: id={user.id} email={user.email} login_provider={user.login_provider}")
+
                 # Platform enforcement: block email-only admins (email accounts stay email-only)
                 if admin_id_from_state and user.login_provider == "email":
+                    logger.warning(f"[TeamsOAuth] Blocked — user {user.email} is email-only login")
                     return JsonResponse({
                         "error": "Your account uses email login. Please sign in with your email and password.",
                         "platform_conflict": True,
@@ -1478,6 +1485,7 @@ class MicrosoftTeamsCallbackView(APIView):
 
                 # Platform enforcement: block if admin already connected Slack
                 if user.login_provider == "slack" and user.slack_bot_token:
+                    logger.warning(f"[TeamsOAuth] Blocked — user {user.email} already connected to Slack")
                     return JsonResponse({
                         "error": "Your account is connected to Slack. Please sign in using Slack.",
                         "platform_conflict": True,
@@ -1488,13 +1496,13 @@ class MicrosoftTeamsCallbackView(APIView):
                 user.ms_access_token = access_token
                 user.ms_refresh_token = token_data.get('refresh_token', '')
                 # Use filter().update() to reliably persist — avoids djongo update_fields issues
-                User.objects.filter(pk=user.pk).update(
+                rows = User.objects.filter(pk=user.pk).update(
                     is_staff=True,
                     login_provider='microsoft_teams',
                     ms_access_token=access_token,
                     ms_refresh_token=token_data.get('refresh_token', ''),
                 )
-                logger.info(f"[TeamsOAuth] Admin User updated in DB: id={user.id} email={user.email} token_set={bool(access_token)}")
+                logger.info(f"[TeamsOAuth] ✅ Admin User saved to DB: id={user.id} email={user.email} rows_updated={rows} token_set={bool(access_token)}")
 
                 # Generate Django JWT so frontend can call IsAuthenticated APIs
                 refresh = RefreshToken.for_user(user)
@@ -2534,8 +2542,9 @@ class AddUserToChannelView(generics.GenericAPIView):
 
     def post(self, request, *args, **kwargs):
         try:
+            logger.info(f"[TeamsAddUser] POST received from user={getattr(request.user, 'email', 'anon')} data_keys={list(request.data.keys())}")
             serializer = self.get_serializer(data=request.data)
-            
+
             if serializer.is_valid(raise_exception=True):
                 access_token = serializer.validated_data['access_token']
                 team_id = serializer.validated_data['team_id']
@@ -2544,6 +2553,7 @@ class AddUserToChannelView(generics.GenericAPIView):
                 admin_id = (serializer.validated_data.get('admin_id') or "").strip()
                 user_email = serializer.validated_data['user_email']
                 user_role = serializer.validated_data['user_role']
+                logger.info(f"[TeamsAddUser] Validated: user_email={user_email} team_id={team_id} channel_name={channel_name} admin_id={admin_id or '(from request.user)'}")
 
                 # Map channel name to Member_role (same mapping as Slack)
                 TEAMS_CHANNEL_TO_ROLE = {
@@ -6500,19 +6510,100 @@ class CreateTeamsSubscriptionView(APIView):
         )
         logger.info(f"[TeamsSubscribe] Graph response: status={resp.status_code} body={resp.text[:500]}")
 
+        # --- Immediate member sync (Slack-style) ---
+        # Regardless of whether the subscription succeeds, sync all existing team
+        # members to DB right now so no one is missed even if webhooks never fire.
+        sync_result = self._sync_existing_members(request.user, team_id, access_token)
+        logger.info(f"[TeamsSubscribe] Immediate member sync: {sync_result}")
+
         if resp.status_code in (200, 201):
             logger.info(f"[TeamsSubscribe] ✅ Subscription created for team={team_id} admin={request.user.email}")
             return Response({
                 "message": "Teams webhook subscription created successfully.",
                 "subscription": resp.json(),
+                "members_synced": sync_result,
             }, status=status.HTTP_201_CREATED)
 
         logger.error(f"[TeamsSubscribe] ❌ Subscription FAILED: status={resp.status_code} body={resp.text}")
+        # Even if subscription fails, members were synced above — return partial success
         return Response({
-            "error": "Failed to create Teams subscription.",
-            "detail": resp.text,
+            "warning": "Webhook subscription failed but existing team members were synced to DB.",
+            "subscription_error": resp.text,
             "graph_status": resp.status_code,
-        }, status=status.HTTP_400_BAD_REQUEST)
+            "members_synced": sync_result,
+        }, status=status.HTTP_200_OK)
+
+    def _sync_existing_members(self, admin, team_id, access_token):
+        """
+        Slack-style immediate sync: fetch all current team members from MS Graph
+        and save them to UserDetail. Called on every subscribe attempt so DB stays
+        in sync even when webhook subscriptions fail.
+        """
+        from users_details.models import UserDetail
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        synced = []
+        try:
+            members_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/members"
+            resp = _http_get(members_url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                logger.warning(f"[TeamsSubscribe] Could not fetch members: status={resp.status_code} body={resp.text[:200]}")
+                return {"error": f"Graph status {resp.status_code}", "synced_count": 0}
+
+            members = resp.json().get("value", [])
+            logger.info(f"[TeamsSubscribe] Fetched {len(members)} team members for team={team_id}")
+
+            for member in members:
+                email = (member.get("email") or "").strip().lower()
+                display_name = member.get("displayName") or "Teams User"
+                ms_user_id = member.get("userId") or member.get("id") or ""
+
+                # Skip the admin themselves
+                if email and email == (getattr(admin, "email", "") or "").strip().lower():
+                    continue
+
+                if not email or "@" not in email:
+                    logger.warning(f"[TeamsSubscribe] Skipping member with no email: {member}")
+                    continue
+
+                name_parts = display_name.strip().split()
+                first_name = name_parts[0] if name_parts else "Teams"
+                last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "User"
+
+                user_detail, created = UserDetail.objects.get_or_create(
+                    admin=admin,
+                    email=email,
+                    defaults={
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "user_type": "external",
+                        "Member_role": ["Viewer"],
+                        "platform": "microsoft_teams",
+                        "team_id": team_id,
+                        "ms_teams_member_id": ms_user_id,
+                    }
+                )
+                if created:
+                    logger.info(f"[TeamsSubscribe] ✅ Synced new member: {email} under admin={admin.email}")
+                    synced.append({"email": email, "status": "created"})
+                else:
+                    # Update platform fields if missing
+                    from users_details.views import _ud_set as _ud_set_sub
+                    upd = {}
+                    if not user_detail.platform:
+                        upd["platform"] = "microsoft_teams"
+                    if not user_detail.team_id:
+                        upd["team_id"] = team_id
+                    if ms_user_id and not user_detail.ms_teams_member_id:
+                        upd["ms_teams_member_id"] = ms_user_id
+                    if upd:
+                        _ud_set_sub(user_detail, **upd)
+                    synced.append({"email": email, "status": "already_exists"})
+
+        except Exception as _exc:
+            logger.exception(f"[TeamsSubscribe] Member sync failed: {_exc}")
+            return {"error": str(_exc), "synced_count": len(synced)}
+
+        return {"synced_count": len(synced), "members": synced}
 
     def _expiry_datetime(self):
         from datetime import datetime, timedelta, timezone as dt_timezone
@@ -6565,13 +6656,18 @@ class TeamsWebhookView(APIView):
 
     def post(self, request):
         notifications = request.data.get("value", [])
+        logger.info(f"[TeamsWebhook] POST received: {len(notifications)} notification(s)")
         for notification in notifications:
             change_type = notification.get("changeType")
             client_state = notification.get("clientState", "")
             resource = notification.get("resource", "")
+            logger.info(f"[TeamsWebhook] Notification: changeType={change_type} resource={resource} client_state={client_state[:20] if client_state else ''}")
 
             if change_type == "created" and "members" in resource:
+                logger.info(f"[TeamsWebhook] Handling member_added: resource={resource}")
                 self._handle_member_added(notification, client_state, resource)
+            else:
+                logger.info(f"[TeamsWebhook] Skipping notification: changeType={change_type} resource={resource}")
 
         return Response({"ok": True})
 
@@ -6636,20 +6732,28 @@ class TeamsWebhookView(APIView):
         first_name = name_parts[0] if name_parts else "Teams"
         last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "User"
 
-        user_detail, created = UserDetail.objects.get_or_create(
-            admin=admin,
-            email=email,
-            defaults={
-                "first_name": first_name,
-                "last_name": last_name,
-                "user_type": "external",
-                "Member_role": ["Viewer"],
-                "team_id": team_id,
-                "platform": "microsoft_teams",
-                "ms_teams_member_id": member_id,
-            }
-        )
+        logger.info(f"[TeamsWebhook] Saving to DB: admin={admin.email} email={email} team_id={team_id}")
+        try:
+            user_detail, created = UserDetail.objects.get_or_create(
+                admin=admin,
+                email=email,
+                defaults={
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "user_type": "external",
+                    "Member_role": ["Viewer"],
+                    "team_id": team_id,
+                    "platform": "microsoft_teams",
+                    "ms_teams_member_id": member_id,
+                }
+            )
+            logger.info(f"[TeamsWebhook] get_or_create result: created={created} user_detail_id={user_detail._id}")
+        except Exception as _goc_exc:
+            logger.exception(f"[TeamsWebhook] ❌ get_or_create FAILED for email={email} admin={admin.email}: {_goc_exc}")
+            return
+
         if not created:
+            logger.info(f"[TeamsWebhook] UserDetail already exists for {email} — updating fields")
             _upd = {}
             if not user_detail.ms_teams_member_id:
                 _upd["ms_teams_member_id"] = member_id
@@ -6660,6 +6764,8 @@ class TeamsWebhookView(APIView):
             if _upd:
                 from users_details.views import _ud_set as _ud_set_webhook
                 _ud_set_webhook(user_detail, **_upd)
+        else:
+            logger.info(f"[TeamsWebhook] ✅ Created NEW UserDetail for {email} under admin {admin.email}")
 
     def _sync_all_team_members(self, admin, team_id, headers):
         """Failsafe: sync whole team membership to DB."""
@@ -6686,10 +6792,8 @@ class TeamsWebhookView(APIView):
         clientState = admin's user ID (set when subscription was created)
         """
         try:
-            # Handle multiple Graph resource formats:
-            # - teams/{team_id}/members/{member_id}
-            # - teams('{team_id}')/members('{member_id}')
-            # - resourceData.teamId / resourceData.id
+            logger.info(f"[TeamsWebhook] _handle_member_added: resource={resource} client_state={client_state[:30] if client_state else ''}")
+
             team_id = ""
             member_id = ""
             resource_data = notification.get("resourceData") or {}
@@ -6705,23 +6809,28 @@ class TeamsWebhookView(APIView):
                     team_id = (m.group(1) or m.group(2) or "").strip()
                     member_id = (m.group(3) or m.group(4) or "").strip()
 
+            logger.info(f"[TeamsWebhook] Parsed: team_id={team_id} member_id={member_id}")
+
             if not team_id or not member_id:
-                logger.warning(f"[TeamsWebhook] Unexpected resource format: {resource} resourceData={resource_data}")
+                logger.warning(f"[TeamsWebhook] Could not parse team_id/member_id from resource={resource} resourceData={resource_data}")
                 return
 
             # Find admin by client_state (admin user ID)
             try:
                 admin = User.objects.get(id=client_state)
+                logger.info(f"[TeamsWebhook] Found admin by client_state: email={admin.email} id={admin.id}")
             except User.DoesNotExist:
                 # Fallback: resolve owner by team_id
                 admin = User.objects.filter(ms_team_id=team_id).first()
                 if not admin:
-                    logger.warning(f"[TeamsWebhook] No admin found for clientState={client_state} team_id={team_id}")
+                    logger.error(f"[TeamsWebhook] ❌ No admin found for client_state={client_state} team_id={team_id} — user will NOT be saved")
                     return
+                logger.info(f"[TeamsWebhook] Found admin by ms_team_id={team_id}: email={admin.email}")
 
             access_token = admin.ms_access_token
+            logger.info(f"[TeamsWebhook] Admin token check: email={admin.email} access_token_set={bool(access_token)}")
             if not access_token:
-                logger.warning(f"[TeamsWebhook] Admin {admin.email} has no ms_access_token")
+                logger.error(f"[TeamsWebhook] ❌ Admin {admin.email} has no ms_access_token — cannot fetch member details")
                 return
 
             headers = {
