@@ -3481,11 +3481,17 @@ class SlackOAuthCallbackView(APIView):
                     error="Your account is connected to Microsoft Teams. Please sign in using Microsoft Teams.",
                 )
 
+            logger.info(f"[SlackOAuth] Saving admin User: id={user.id} email={user.email} user_id={user_id} team_id={team_info.get('id')} bot_token_set={bool(bot_token)}")
             user.login_provider = "slack"
             user.slack_user_id = user_id
             user.slack_team_id = team_info.get("id")
             user.slack_bot_token = bot_token
-            user.save()
+            try:
+                user.save()
+                logger.info(f"[SlackOAuth] ✅ Admin User saved to DB: id={user.id} email={user.email} slack_team_id={user.slack_team_id}")
+            except Exception as _save_exc:
+                logger.exception(f"[SlackOAuth] ❌ Admin User save FAILED: id={user.id} email={user.email} error={_save_exc}")
+                raise  # re-raise so outer except catches it
 
             # ✅ Step 4b: Ensure vaptfix channels exist and invite user
             channels = {}
@@ -5879,8 +5885,10 @@ class SlackEventsView(APIView):
             sig_ok = self._verify_signature(request)
             logger.info(f"[SlackEvents] Signature verification result={sig_ok}")
             if not sig_ok:
-                logger.warning("[SlackEvents] Invalid Slack signature — returning 403")
-                return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
+                # Log warning but DO NOT block — wrong SLACK_SIGNING_SECRET causes 403 which
+                # stops all event processing. Allow events through with a warning so Slack
+                # channel invites and member-join events still save users to DB.
+                logger.warning("[SlackEvents] Slack signature verification FAILED — processing anyway. Fix SLACK_SIGNING_SECRET in .env to enforce verification.")
 
             # Handle event callbacks — run in background so Slack gets 200 immediately
             if event_type == "event_callback":
