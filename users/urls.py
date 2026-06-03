@@ -84,6 +84,7 @@ from .views import (
     JiraTransitionIssueView,
     TeamsWebhookView,
     CreateTeamsSubscriptionView,
+    TeamsMemberSyncView,
     teams_webhook_handler,
 )
 
@@ -165,6 +166,7 @@ urlpatterns = [
     # MS Teams Webhook
     path("teams/webhook/", teams_webhook_handler, name="teams-webhook"),
     path("teams/webhook/subscribe/", CreateTeamsSubscriptionView.as_view(), name="teams-webhook-subscribe"),
+    path("teams/sync-members/", TeamsMemberSyncView.as_view(), name="teams-sync-members"),
     
     
     # Jira OAuth
