@@ -878,7 +878,7 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 f"&response_type=code"
                 f"&redirect_uri={backend_redirect}"
                 f"&response_mode=query"
-                f"&scope=https://graph.microsoft.com/User.Read Team.ReadBasic.All TeamSettings.Read.All Channel.ReadBasic.All ChannelMessage.Send GroupMember.ReadWrite.All offline_access openid email profile"
+                f"&scope=https://graph.microsoft.com/User.Read Team.ReadBasic.All TeamSettings.Read.All Channel.ReadBasic.All ChannelMessage.Send GroupMember.ReadWrite.All TeamMember.Read.All offline_access openid email profile"
                 f"&prompt=select_account"
                 f"&state={state}"
             )
@@ -1487,7 +1487,14 @@ class MicrosoftTeamsCallbackView(APIView):
                 user.login_provider = 'microsoft_teams'
                 user.ms_access_token = access_token
                 user.ms_refresh_token = token_data.get('refresh_token', '')
-                user.save(update_fields=['is_staff', 'login_provider', 'ms_access_token', 'ms_refresh_token'])
+                # Use filter().update() to reliably persist — avoids djongo update_fields issues
+                User.objects.filter(pk=user.pk).update(
+                    is_staff=True,
+                    login_provider='microsoft_teams',
+                    ms_access_token=access_token,
+                    ms_refresh_token=token_data.get('refresh_token', ''),
+                )
+                logger.info(f"[TeamsOAuth] Admin User updated in DB: id={user.id} email={user.email} token_set={bool(access_token)}")
 
                 # Generate Django JWT so frontend can call IsAuthenticated APIs
                 refresh = RefreshToken.for_user(user)
@@ -6454,26 +6461,31 @@ class CreateTeamsSubscriptionView(APIView):
     def post(self, request):
         team_id = request.data.get("team_id")
         if not team_id:
+            logger.error("[TeamsSubscribe] Missing team_id in request")
             return Response({"error": "team_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         access_token = request.user.ms_access_token
+        logger.info(f"[TeamsSubscribe] admin={request.user.email} team_id={team_id} access_token_set={bool(access_token)}")
         if not access_token:
+            logger.error(f"[TeamsSubscribe] No ms_access_token for admin={request.user.email} — Teams not connected")
             return Response({"error": "Microsoft Teams not connected. Please connect Teams first."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Save team_id on admin's user record
+        # Save team_id on admin's user record using filter().update() for reliability
+        User.objects.filter(pk=request.user.pk).update(ms_team_id=team_id)
         request.user.ms_team_id = team_id
-        request.user.save(update_fields=["ms_team_id"])
 
         # Webhook notification URL (must be HTTPS and publicly accessible)
         notification_url = f"{settings.BACKEND_BASE_URL}/api/admin/users/teams/webhook/"
+        logger.info(f"[TeamsSubscribe] notification_url={notification_url}")
 
         payload = {
             "changeType": "created",
             "notificationUrl": notification_url,
             "resource": f"teams/{team_id}/members",
             "expirationDateTime": self._expiry_datetime(),
-            "clientState": str(request.user.id),  # used to identify admin on webhook
+            "clientState": str(request.user.id),
         }
+        logger.info(f"[TeamsSubscribe] Graph payload: {payload}")
 
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -6486,21 +6498,26 @@ class CreateTeamsSubscriptionView(APIView):
             json=payload,
             timeout=15,
         )
+        logger.info(f"[TeamsSubscribe] Graph response: status={resp.status_code} body={resp.text[:500]}")
 
         if resp.status_code in (200, 201):
+            logger.info(f"[TeamsSubscribe] ✅ Subscription created for team={team_id} admin={request.user.email}")
             return Response({
                 "message": "Teams webhook subscription created successfully.",
                 "subscription": resp.json(),
             }, status=status.HTTP_201_CREATED)
 
+        logger.error(f"[TeamsSubscribe] ❌ Subscription FAILED: status={resp.status_code} body={resp.text}")
         return Response({
             "error": "Failed to create Teams subscription.",
             "detail": resp.text,
-        }, status=resp.status_code)
+            "graph_status": resp.status_code,
+        }, status=status.HTTP_400_BAD_REQUEST)
 
     def _expiry_datetime(self):
         from datetime import datetime, timedelta, timezone as dt_timezone
-        expiry = datetime.now(dt_timezone.utc) + timedelta(minutes=55)
+        # Max allowed by MS Graph for teams/{id}/members is 4320 min (3 days)
+        expiry = datetime.now(dt_timezone.utc) + timedelta(minutes=4230)
         return expiry.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
