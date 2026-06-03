@@ -6488,12 +6488,10 @@ class CreateTeamsSubscriptionView(APIView):
         notification_url = f"{settings.BACKEND_BASE_URL}/api/admin/users/teams/webhook/"
         logger.info(f"[TeamsSubscribe] notification_url={notification_url}")
 
-        # 'teams/{id}/members' is NOT a supported subscription resource in MS Graph v1.0.
-        # The correct resource is 'groups/{id}/members' (Teams team ID == Azure AD group ID).
         payload = {
-            "changeType": "updated",
+            "changeType": "created",
             "notificationUrl": notification_url,
-            "resource": f"groups/{team_id}/members",
+            "resource": f"teams/{team_id}/members",
             "expirationDateTime": self._expiry_datetime(),
             "clientState": str(request.user.id),
         }
@@ -6665,13 +6663,8 @@ class TeamsWebhookView(APIView):
             resource = notification.get("resource", "")
             logger.info(f"[TeamsWebhook] Notification: changeType={change_type} resource={resource} client_state={client_state[:20] if client_state else ''}")
 
-            # Handle both 'teams/{id}/members' (old) and 'groups/{id}/members' (new correct resource)
-            is_member_event = (
-                ("members" in resource and change_type == "created") or
-                ("groups/" in resource and "members" in resource and change_type in ("created", "updated"))
-            )
-            if is_member_event:
-                logger.info(f"[TeamsWebhook] Handling member event: resource={resource} changeType={change_type}")
+            if change_type == "created" and "members" in resource:
+                logger.info(f"[TeamsWebhook] Handling member_added: resource={resource}")
                 self._handle_member_added(notification, client_state, resource)
             else:
                 logger.info(f"[TeamsWebhook] Skipping notification: changeType={change_type} resource={resource}")
@@ -6795,10 +6788,8 @@ class TeamsWebhookView(APIView):
 
     def _handle_member_added(self, notification, client_state, resource):
         """
-        Handles both resource formats:
-        - teams/{team_id}/members/{member_id}  (old)
-        - groups/{group_id}/members            (new correct resource)
-        clientState = admin's user ID
+        resource format: teams/{team_id}/members/{member_id}
+        clientState = admin's user ID (set when subscription was created)
         """
         try:
             logger.info(f"[TeamsWebhook] _handle_member_added: resource={resource} client_state={client_state[:30] if client_state else ''}")
@@ -6808,16 +6799,11 @@ class TeamsWebhookView(APIView):
             resource_data = notification.get("resourceData") or {}
 
             if isinstance(resource_data, dict):
-                team_id = str(resource_data.get("teamId") or resource_data.get("team_id") or resource_data.get("groupId") or "").strip()
+                team_id = str(resource_data.get("teamId") or resource_data.get("team_id") or "").strip()
                 member_id = str(resource_data.get("id") or resource_data.get("memberId") or "").strip()
 
             if not team_id or not member_id:
                 import re as _re
-                # Handle groups/{id}/members format
-                m = _re.search(r"groups(?:\('([^']+)'\)|/([^/]+))/members", resource or "")
-                if m:
-                    team_id = (m.group(1) or m.group(2) or "").strip()
-                # Handle teams/{id}/members/{id} format
                 m = _re.search(r"teams(?:\('([^']+)'\)|/([^/]+))/members(?:\('([^']+)'\)|/([^/]+))", resource or "")
                 if m:
                     team_id = (m.group(1) or m.group(2) or "").strip()
@@ -6852,18 +6838,11 @@ class TeamsWebhookView(APIView):
                 "Content-Type": "application/json",
             }
 
-            # Sync ALL team members first (works for both 'created' and 'updated' changeTypes).
-            # For 'groups/{id}/members' + 'updated' events, member_id is often empty —
-            # full sync is the only reliable way to capture the new member.
+            # Failsafe sync: if webhook fired, ensure team members are mirrored in DB.
             logger.info(f"[TeamsWebhook] Running full team member sync for team_id={team_id}")
             self._sync_all_team_members(admin, team_id, headers)
 
-            # If no specific member_id (e.g. groups/updated event), full sync is sufficient — stop here.
-            if not member_id:
-                logger.info(f"[TeamsWebhook] No member_id in notification — full sync was done, returning")
-                return
-
-            # Fetch specific member details from MS Graph (additional precision for 'created' events)
+            # Fetch member details from MS Graph
             member_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/members/{member_id}"
             member_resp = _http_get(member_url, headers=headers, timeout=10)
             if member_resp.status_code == 401:
