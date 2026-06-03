@@ -6612,6 +6612,129 @@ class CreateTeamsSubscriptionView(APIView):
         return expiry.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+class TeamsMemberSyncView(APIView):
+    """
+    POST /api/admin/users/teams/sync-members/
+    Slack-style on-demand sync: fetches all current MS Teams team members and
+    saves any missing ones to UserDetail. Call this whenever a new member is
+    added directly from the Teams platform so VAPTFIX DB stays in sync.
+    Required body: { "team_id": "<Teams team ID>" }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        team_id = request.data.get("team_id") or getattr(request.user, "ms_team_id", None)
+        logger.info(f"[TeamsSyncMembers] admin={request.user.email} team_id={team_id}")
+
+        if not team_id:
+            return Response({"error": "team_id is required (or set ms_team_id on admin account)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = request.user.ms_access_token
+        if not access_token:
+            return Response({"error": "Microsoft Teams not connected. Please connect Teams first."}, status=status.HTTP_400_BAD_REQUEST)
+
+        from users_details.models import UserDetail
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+
+        # Token refresh if expired
+        members_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/members"
+        resp = _http_get(members_url, headers=headers, timeout=15)
+        if resp.status_code == 401:
+            logger.info(f"[TeamsSyncMembers] Token expired, refreshing...")
+            from vaptfix.mongo_client import get_db
+            new_token_data = {}
+            try:
+                refresh_token = getattr(request.user, "ms_refresh_token", None)
+                if refresh_token:
+                    token_resp = _http_post(
+                        settings.MICROSOFT_TOKEN_URL,
+                        data={
+                            "grant_type": "refresh_token",
+                            "client_id": settings.MICROSOFT_CLIENT_ID,
+                            "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                            "refresh_token": refresh_token,
+                            "scope": "https://graph.microsoft.com/.default offline_access",
+                        },
+                        timeout=15,
+                    )
+                    new_token_data = token_resp.json() if token_resp else {}
+                    new_token = new_token_data.get("access_token")
+                    if new_token:
+                        access_token = new_token
+                        headers["Authorization"] = f"Bearer {new_token}"
+                        User.objects.filter(pk=request.user.pk).update(
+                            ms_access_token=new_token,
+                            ms_refresh_token=new_token_data.get("refresh_token", refresh_token),
+                        )
+                        resp = _http_get(members_url, headers=headers, timeout=15)
+            except Exception as _te:
+                logger.warning(f"[TeamsSyncMembers] Token refresh failed: {_te}")
+
+        if resp.status_code != 200:
+            logger.error(f"[TeamsSyncMembers] Failed to fetch members: status={resp.status_code} body={resp.text[:300]}")
+            return Response({"error": f"MS Graph error: {resp.status_code}", "detail": resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        members = resp.json().get("value", [])
+        logger.info(f"[TeamsSyncMembers] Fetched {len(members)} members for team={team_id}")
+
+        synced = []
+        for member in members:
+            email = (member.get("email") or "").strip().lower()
+            display_name = member.get("displayName") or "Teams User"
+            ms_user_id = member.get("userId") or member.get("id") or ""
+
+            if not email or "@" not in email:
+                continue
+            if email == (getattr(request.user, "email", "") or "").strip().lower():
+                continue  # skip the admin themselves
+
+            name_parts = display_name.strip().split()
+            first_name = name_parts[0] if name_parts else "Teams"
+            last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "User"
+
+            try:
+                user_detail, created = UserDetail.objects.get_or_create(
+                    admin=request.user,
+                    email=email,
+                    defaults={
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "user_type": "external",
+                        "Member_role": ["Viewer"],
+                        "platform": "microsoft_teams",
+                        "team_id": team_id,
+                        "ms_teams_member_id": ms_user_id,
+                    }
+                )
+                if created:
+                    logger.info(f"[TeamsSyncMembers] ✅ Created: {email}")
+                    synced.append({"email": email, "status": "created"})
+                else:
+                    from users_details.views import _ud_set as _ud_set_sync
+                    upd = {}
+                    if not user_detail.platform:
+                        upd["platform"] = "microsoft_teams"
+                    if not user_detail.team_id:
+                        upd["team_id"] = team_id
+                    if ms_user_id and not user_detail.ms_teams_member_id:
+                        upd["ms_teams_member_id"] = ms_user_id
+                    if upd:
+                        _ud_set_sync(user_detail, **upd)
+                    synced.append({"email": email, "status": "already_exists"})
+            except Exception as _exc:
+                logger.exception(f"[TeamsSyncMembers] Failed to save {email}: {_exc}")
+                synced.append({"email": email, "status": "error", "error": str(_exc)})
+
+        created_count = sum(1 for s in synced if s["status"] == "created")
+        logger.info(f"[TeamsSyncMembers] Done: total={len(members)} new={created_count}")
+        return Response({
+            "message": f"Sync complete. {created_count} new member(s) added to VAPTFIX.",
+            "synced_count": len(synced),
+            "new_count": created_count,
+            "members": synced,
+        }, status=status.HTTP_200_OK)
+
+
 class _PlainTextRenderer(BaseRenderer):
     """Renderer that satisfies Accept: text/plain for MS Graph webhook validation."""
     media_type = 'text/plain'
