@@ -349,6 +349,16 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': False,
         },
+        'users_details': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
     },
 }
 

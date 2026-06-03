@@ -1,4 +1,7 @@
-abhi bhi nai ho rha hai to mujhe btao qki postman se production url se ho rha hai lekin slack or mc team ke plotform se nai ho rha hai 
-to q nai ho rha hai kuch slack or ms team ke plotform ki limitationhai kya ye btao mujhe to mujhe explain kro qki mujhe seniar developer ko btana hai 
+users app me slack ka check krna hai 
 
-to mujhe btao ki kya issue hai esa 
+postman me slack se user add krte hai to user add ho rha hai or database me save bhi ho rha hai  SlackInviteUserView se vale api se or status 200 bhi aa rha hai
+ 
+or production vale slack ke plotform se user add krte hai to SlackEventsView ye vala api hit ho rha hai or status 500 aa rha hai  SlackInviteUserView vala hit hi nai ho rha hai 
+sare code me log lga do taki me backend se check kr sku or api mismatch o proper kro 
+ 
