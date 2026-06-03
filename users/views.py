@@ -5863,108 +5863,149 @@ class SlackEventsView(APIView):
     authentication_classes = []
 
     def post(self, request):
-        payload = request.data
-        event_type = payload.get("type")
+        try:
+            logger.info(f"[SlackEvents] POST received — content_type={request.content_type} method={request.method}")
+            payload = request.data
+            logger.info(f"[SlackEvents] Payload keys={list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__}")
+            event_type = payload.get("type") if isinstance(payload, dict) else None
+            logger.info(f"[SlackEvents] event_type={event_type}")
 
-        # URL verification must be handled BEFORE signature check —
-        # Slack sends this during setup to confirm the endpoint is reachable.
-        if event_type == "url_verification":
-            return Response({"challenge": payload.get("challenge")})
+            # URL verification must be handled BEFORE signature check —
+            # Slack sends this during setup to confirm the endpoint is reachable.
+            if event_type == "url_verification":
+                logger.info("[SlackEvents] Handling url_verification challenge")
+                return Response({"challenge": payload.get("challenge")})
 
-        if not self._verify_signature(request):
-            return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
+            sig_ok = self._verify_signature(request)
+            logger.info(f"[SlackEvents] Signature verification result={sig_ok}")
+            if not sig_ok:
+                logger.warning("[SlackEvents] Invalid Slack signature — returning 403")
+                return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
 
-        # Handle event callbacks — run in background so Slack gets 200 immediately
-        if event_type == "event_callback":
-            event = payload.get("event", {})
-            team_id = payload.get("team_id", event.get("team", ""))
-            threading.Thread(
-                target=self._handle_event,
-                args=(event, team_id),
-                daemon=True,
-            ).start()
+            # Handle event callbacks — run in background so Slack gets 200 immediately
+            if event_type == "event_callback":
+                event = payload.get("event", {})
+                team_id = payload.get("team_id", event.get("team", ""))
+                logger.info(f"[SlackEvents] event_callback: event_type={event.get('type')} team_id={team_id}")
+                threading.Thread(
+                    target=self._handle_event,
+                    args=(event, team_id),
+                    daemon=True,
+                ).start()
+            else:
+                logger.info(f"[SlackEvents] Unhandled top-level type={event_type} — ignoring")
 
-        return Response({"ok": True})
+            return Response({"ok": True})
+
+        except Exception as _exc:
+            logger.exception(f"[SlackEvents] UNHANDLED EXCEPTION in post(): {_exc}")
+            return Response({"ok": True})  # Always return 200 to Slack to prevent retries
 
     def _verify_signature(self, request):
         signing_secret = getattr(settings, "SLACK_SIGNING_SECRET", "")
         if not signing_secret:
+            logger.warning("[SlackEvents] SLACK_SIGNING_SECRET not set — skipping signature check (INSECURE)")
             return True  # skip verification if not configured
         timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
         signature = request.headers.get("X-Slack-Signature", "")
+        logger.debug(f"[SlackEvents] _verify_signature: timestamp={timestamp} signature_present={bool(signature)}")
         # Reject requests older than 5 minutes
         try:
-            if abs(time.time() - int(timestamp)) > 300:
+            age = abs(time.time() - int(timestamp))
+            logger.debug(f"[SlackEvents] Request age={age:.1f}s")
+            if age > 300:
+                logger.warning(f"[SlackEvents] Request too old: {age:.1f}s — rejecting")
                 return False
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.warning(f"[SlackEvents] Bad timestamp={timestamp!r}: {e}")
             return False
-        body = request._request.body.decode("utf-8")
+        try:
+            body = request._request.body.decode("utf-8")
+        except Exception as e:
+            logger.error(f"[SlackEvents] Could not read raw body: {e}")
+            return False
         base = f"v0:{timestamp}:{body}"
         computed = "v0=" + hmac.new(
             signing_secret.encode(), base.encode(), hashlib.sha256
         ).hexdigest()
-        return hmac.compare_digest(computed, signature)
+        match = hmac.compare_digest(computed, signature)
+        logger.debug(f"[SlackEvents] HMAC match={match}")
+        return match
 
     def _handle_event(self, event, team_id=""):
-        from users_details.models import UserDetail
-        etype = event.get("type")
+        try:
+            from users_details.models import UserDetail
+            etype = event.get("type")
+            logger.info(f"[SlackEvent] _handle_event: etype={etype} team_id={team_id} event_keys={list(event.keys())}")
 
-        if etype == "channel_created":
-            logger.info(f"Slack channel_created: {event.get('channel', {}).get('name')}")
+            if etype == "channel_created":
+                logger.info(f"[SlackEvent] channel_created: name={event.get('channel', {}).get('name')}")
 
-        elif etype == "channel_rename":
-            ch = event.get("channel", {})
-            new_id = ch.get("id")
-            new_name = ch.get("name")
-            for ud in UserDetail.objects.filter(slack_channel_ids__contains=new_id):
-                logger.info(f"Slack channel renamed to {new_name}, updated UserDetail {ud._id}")
+            elif etype == "channel_rename":
+                ch = event.get("channel", {})
+                new_id = ch.get("id")
+                new_name = ch.get("name")
+                logger.info(f"[SlackEvent] channel_rename: id={new_id} new_name={new_name}")
+                for ud in UserDetail.objects.filter(slack_channel_ids__contains=new_id):
+                    logger.info(f"[SlackEvent] Updated channel name for UserDetail {ud._id}")
 
-        elif etype in ("channel_deleted", "channel_archive"):
-            ch_id = event.get("channel")
-            logger.info(f"Slack channel {etype}: {ch_id}")
-            for ud in UserDetail.objects.filter(slack_channel_ids__contains=ch_id):
-                ids = list(ud.slack_channel_ids or [])
-                ids.remove(ch_id)
-                ud.slack_channel_ids = ids
-                ud.save()
+            elif etype in ("channel_deleted", "channel_archive"):
+                ch_id = event.get("channel")
+                logger.info(f"[SlackEvent] {etype}: channel_id={ch_id}")
+                for ud in UserDetail.objects.filter(slack_channel_ids__contains=ch_id):
+                    ids = list(ud.slack_channel_ids or [])
+                    ids.remove(ch_id)
+                    ud.slack_channel_ids = ids
+                    ud.save()
 
-        elif etype == "channel_unarchive":
-            logger.info(f"Slack channel unarchived: {event.get('channel')}")
+            elif etype == "channel_unarchive":
+                logger.info(f"[SlackEvent] channel_unarchive: channel={event.get('channel')}")
 
-        elif etype == "team_join":
-            # Fires when ANY user joins the workspace — most reliable trigger
-            user_obj = event.get("user", {})
-            if isinstance(user_obj, dict):
-                slack_user_id = user_obj.get("id")
+            elif etype == "team_join":
+                user_obj = event.get("user", {})
+                if isinstance(user_obj, dict):
+                    slack_user_id = user_obj.get("id")
+                else:
+                    slack_user_id = user_obj
+                tid = team_id or event.get("team", "")
+                logger.info(f"[SlackEvent] team_join: slack_user_id={slack_user_id} tid={tid}")
+                self._save_slack_member_to_user_detail(slack_user_id, tid)
+
+            elif etype == "member_joined_channel":
+                slack_user_id = event.get("user")
+                channel_id = event.get("channel")
+                tid = team_id or event.get("team", "")
+                logger.info(f"[SlackEvent] member_joined_channel: slack_user_id={slack_user_id} channel_id={channel_id} tid={tid}")
+                self._save_slack_member_to_user_detail(slack_user_id, tid, channel_id=channel_id)
+
+            elif etype == "member_left_channel":
+                logger.info(f"[SlackEvent] member_left_channel: user={event.get('user')} channel={event.get('channel')}")
+
+            elif etype == "app_home_opened":
+                slack_user_id = event.get("user")
+                logger.info(f"[SlackEvent] app_home_opened: slack_user_id={slack_user_id} team_id={team_id}")
+                admin = User.objects.filter(slack_team_id=team_id).first()
+                if admin and admin.slack_bot_token:
+                    self._publish_app_home(admin.slack_bot_token, slack_user_id)
+                else:
+                    logger.warning(f"[SlackEvent] app_home_opened: no admin/bot_token for team_id={team_id}")
+
+            elif etype == "app_mention":
+                channel = event.get("channel")
+                thread_ts = event.get("ts")
+                slack_user_id = event.get("user")
+                logger.info(f"[SlackEvent] app_mention: channel={channel} slack_user_id={slack_user_id}")
+                admin = User.objects.filter(slack_team_id=team_id).first()
+                if admin and admin.slack_bot_token:
+                    self._reply_to_mention(admin.slack_bot_token, channel, thread_ts, slack_user_id)
+                else:
+                    logger.warning(f"[SlackEvent] app_mention: no admin/bot_token for team_id={team_id}")
+
             else:
-                slack_user_id = user_obj  # sometimes just a string ID
-            tid = team_id or event.get("team", "")
-            logger.info(f"[SlackEvent] team_join: user={slack_user_id} team={tid}")
-            self._save_slack_member_to_user_detail(slack_user_id, tid)
+                logger.info(f"[SlackEvent] Unhandled event type={etype}")
 
-        elif etype == "member_joined_channel":
-            slack_user_id = event.get("user")
-            channel_id = event.get("channel")
-            tid = team_id or event.get("team", "")
-            logger.info(f"Slack member {slack_user_id} joined {event.get('channel')} (team={tid})")
-            self._save_slack_member_to_user_detail(slack_user_id, tid, channel_id=channel_id)
-
-        elif etype == "member_left_channel":
-            logger.info(f"Slack member {event.get('user')} left {event.get('channel')}")
-
-        elif etype == "app_home_opened":
-            slack_user_id = event.get("user")
-            admin = User.objects.filter(slack_team_id=team_id).first()
-            if admin and admin.slack_bot_token:
-                self._publish_app_home(admin.slack_bot_token, slack_user_id)
-
-        elif etype == "app_mention":
-            channel = event.get("channel")
-            thread_ts = event.get("ts")
-            slack_user_id = event.get("user")
-            admin = User.objects.filter(slack_team_id=team_id).first()
-            if admin and admin.slack_bot_token:
-                self._reply_to_mention(admin.slack_bot_token, channel, thread_ts, slack_user_id)
+        except Exception as _exc:
+            logger.exception(f"[SlackEvent] UNHANDLED EXCEPTION in _handle_event: etype={event.get('type')} error={_exc}")
 
     def _publish_app_home(self, bot_token, slack_user_id):
         """Publish a welcome App Home tab view when user opens VaptFix in Slack sidebar."""
@@ -6043,41 +6084,52 @@ class SlackEventsView(APIView):
         5. Send same welcome email that normal user-add flow sends
         """
         try:
+            logger.info(f"[SlackEvent] _save_slack_member_to_user_detail: slack_user_id={slack_user_id} team_id={team_id} channel_id={channel_id}")
+
             if not slack_user_id or not team_id:
+                logger.warning(f"[SlackEvent] Missing slack_user_id={slack_user_id} or team_id={team_id} — aborting")
                 return
 
             # Find admin who owns this Slack workspace
             admin = User.objects.filter(slack_team_id=team_id).first()
             if not admin:
-                logger.warning(f"[SlackEvent] No admin found for team_id={team_id} — check slack_team_id field in DB")
+                logger.error(f"[SlackEvent] No admin found for team_id={team_id} — check slack_team_id field in DB. All admins with slack_team_id: {list(User.objects.exclude(slack_team_id=None).values_list('email','slack_team_id'))}")
                 return
+            logger.info(f"[SlackEvent] Found admin: email={admin.email} id={admin.id} slack_team_id={admin.slack_team_id}")
+
             if not admin.slack_bot_token:
-                logger.warning(f"[SlackEvent] Admin {admin.email} has no slack_bot_token")
+                logger.error(f"[SlackEvent] Admin {admin.email} has no slack_bot_token — cannot call Slack API")
                 return
 
             # Fetch user profile from Slack
-            user_info = _http_get(
+            logger.info(f"[SlackEvent] Calling users.info for slack_user_id={slack_user_id}")
+            user_info_resp = _http_get(
                 "https://slack.com/api/users.info",
                 params={"user": slack_user_id},
                 headers={"Authorization": f"Bearer {admin.slack_bot_token}"},
                 timeout=10,
-            ).json()
+            )
+            user_info = user_info_resp.json() if user_info_resp is not None else {}
+            logger.info(f"[SlackEvent] users.info response: ok={user_info.get('ok')} error={user_info.get('error')}")
 
             if not user_info.get("ok"):
-                logger.warning(f"[SlackEvent] users.info failed: {user_info.get('error')}")
+                logger.error(f"[SlackEvent] users.info FAILED for slack_user_id={slack_user_id}: error={user_info.get('error')} — user will NOT be saved")
                 return
 
             user_data = user_info.get("user", {})
+            logger.info(f"[SlackEvent] user_data: is_bot={user_data.get('is_bot')} deleted={user_data.get('deleted')} name={user_data.get('real_name')}")
 
             # Skip bots and deleted accounts
             if user_data.get("is_bot") or user_data.get("deleted"):
+                logger.info(f"[SlackEvent] Skipping bot/deleted user slack_user_id={slack_user_id}")
                 return
 
             profile = user_data.get("profile", {})
             email = profile.get("email")
             if not email:
-                logger.warning(f"[SlackEvent] No email for slack_user_id={slack_user_id}")
+                logger.error(f"[SlackEvent] No email in Slack profile for slack_user_id={slack_user_id} — missing users:read.email scope? profile_keys={list(profile.keys())}")
                 return
+            logger.info(f"[SlackEvent] Member email={email} name={user_data.get('real_name')}")
 
             name = user_data.get("real_name") or profile.get("display_name") or "Slack User"
             parts = name.strip().split()
@@ -6086,22 +6138,28 @@ class SlackEventsView(APIView):
 
             # Save to UserDetail — skip if already exists for this admin+email
             from users_details.models import UserDetail
-            user_detail, created = UserDetail.objects.get_or_create(
-                admin=admin,
-                email=email,
-                defaults={
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "user_type": "external",
-                    "Member_role": ["Viewer"],
-                    "platform": "slack",
-                    "slack_member_id": slack_user_id,
-                    "slack_channel_ids": [channel_id] if channel_id else [],
-                }
-            )
+            logger.info(f"[SlackEvent] Calling get_or_create for admin={admin.email} email={email}")
+            try:
+                user_detail, created = UserDetail.objects.get_or_create(
+                    admin=admin,
+                    email=email,
+                    defaults={
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "user_type": "external",
+                        "Member_role": ["Viewer"],
+                        "platform": "slack",
+                        "slack_member_id": slack_user_id,
+                        "slack_channel_ids": [channel_id] if channel_id else [],
+                    }
+                )
+                logger.info(f"[SlackEvent] get_or_create done: created={created} user_detail_id={user_detail._id}")
+            except Exception as _goc_exc:
+                logger.exception(f"[SlackEvent] get_or_create FAILED for admin={admin.email} email={email}: {_goc_exc}")
+                return
 
             if not created:
-                # Update platform fields even if record already existed
+                logger.info(f"[SlackEvent] UserDetail already exists for {email} — updating platform fields")
                 _upd = {}
                 if user_detail.email != email and not UserDetail.objects.filter(admin=admin, email=email).exclude(_id=user_detail._id).exists():
                     _upd["email"] = email
@@ -6115,12 +6173,13 @@ class SlackEventsView(APIView):
                         existing_ids.append(channel_id)
                         _upd["slack_channel_ids"] = existing_ids
                 if _upd:
+                    logger.info(f"[SlackEvent] Updating existing UserDetail fields: {list(_upd.keys())}")
                     from users_details.views import _ud_set as _ud_set_event
                     _ud_set_event(user_detail, **_upd)
-                logger.info(f"[SlackEvent] UserDetail already exists for {email} — skipping email")
+                logger.info(f"[SlackEvent] UserDetail already existed for {email} — email skipped")
                 return
 
-            logger.info(f"[SlackEvent] Created UserDetail for {email} under admin {admin.email}")
+            logger.info(f"[SlackEvent] ✅ Created NEW UserDetail for {email} under admin {admin.email}")
 
             _email = email
             _first = first_name
