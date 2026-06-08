@@ -11,6 +11,12 @@ from .views import (
     UserAssetHoldAPIView,
     UserAssetUnholdAPIView,
     UserAssetDeleteAPIView,
+    # Vulnerability-level management
+    UserAllVulnerabilitiesAPIView,
+    UserVulnAssetListAPIView,
+    UserBulkVulnHoldAPIView,
+    UserBulkVulnUnholdAPIView,
+    UserBulkVulnDeleteAPIView,
 )
 
 urlpatterns = [
@@ -107,6 +113,43 @@ urlpatterns = [
         "fix-vulnerabilities/host/<str:host_name>/closed/",
         UserClosedFixVulnerabilitiesByHostAPIView.as_view(),
         name="user-closed-fix-vulnerabilities-by-host",
+    ),
+
+    # ================== VULNERABILITY-LEVEL MANAGEMENT ==================
+
+    # GET all team-assigned vulns (grouped by plugin_name with status counts)
+    path(
+        "report/<str:report_id>/vulnerabilities/",
+        UserAllVulnerabilitiesAPIView.as_view(),
+        name="user-all-vulnerabilities",
+    ),
+
+    # GET assets that have a specific vulnerability (checkbox list)
+    path(
+        "report/<str:report_id>/vulnerability/<path:plugin_name>/assets/",
+        UserVulnAssetListAPIView.as_view(),
+        name="user-vuln-asset-list",
+    ),
+
+    # POST hold this vulnerability on selected assets
+    path(
+        "report/<str:report_id>/vulnerability/<path:plugin_name>/hold/",
+        UserBulkVulnHoldAPIView.as_view(),
+        name="user-bulk-vuln-hold",
+    ),
+
+    # POST unhold this vulnerability on selected assets
+    path(
+        "report/<str:report_id>/vulnerability/<path:plugin_name>/unhold/",
+        UserBulkVulnUnholdAPIView.as_view(),
+        name="user-bulk-vuln-unhold",
+    ),
+
+    # DELETE this vulnerability from selected assets
+    path(
+        "report/<str:report_id>/vulnerability/<path:plugin_name>/delete/",
+        UserBulkVulnDeleteAPIView.as_view(),
+        name="user-bulk-vuln-delete",
     ),
 ]
 

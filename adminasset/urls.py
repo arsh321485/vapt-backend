@@ -12,6 +12,12 @@ from .views import (
     AdminAssetsAPIView,
     AdminAssetVulnerabilitiesAPIView,
     AdminHoldAssetsAPIView,
+    # Vulnerability-level management
+    AllVulnerabilitiesAPIView,
+    VulnAssetListAPIView,
+    BulkVulnHoldAPIView,
+    BulkVulnUnholdAPIView,
+    BulkVulnDeleteAPIView,
 )
 
 urlpatterns = [
@@ -97,6 +103,43 @@ urlpatterns = [
         "report/<str:report_id>/assets/<path:host_name>/",
         AssetDeleteAPIView.as_view(),
         name="report-asset-delete",
+    ),
+
+    # ================== VULNERABILITY-LEVEL MANAGEMENT ==================
+
+    # GET all vulns in a report (grouped by plugin_name with status counts)
+    path(
+        "report/<str:report_id>/vulnerabilities/",
+        AllVulnerabilitiesAPIView.as_view(),
+        name="all-vulnerabilities",
+    ),
+
+    # GET assets that have a specific vulnerability (checkbox list)
+    path(
+        "report/<str:report_id>/vulnerability/<path:plugin_name>/assets/",
+        VulnAssetListAPIView.as_view(),
+        name="vuln-asset-list",
+    ),
+
+    # POST hold this vulnerability on selected assets
+    path(
+        "report/<str:report_id>/vulnerability/<path:plugin_name>/hold/",
+        BulkVulnHoldAPIView.as_view(),
+        name="bulk-vuln-hold",
+    ),
+
+    # POST unhold this vulnerability on selected assets
+    path(
+        "report/<str:report_id>/vulnerability/<path:plugin_name>/unhold/",
+        BulkVulnUnholdAPIView.as_view(),
+        name="bulk-vuln-unhold",
+    ),
+
+    # DELETE this vulnerability from selected assets
+    path(
+        "report/<str:report_id>/vulnerability/<path:plugin_name>/delete/",
+        BulkVulnDeleteAPIView.as_view(),
+        name="bulk-vuln-delete",
     ),
 ]
 

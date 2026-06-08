@@ -44,6 +44,8 @@ FIX_VULN_COLLECTION        = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 DELETED_ASSETS_COLLECTION  = "deleted_assets"
 SUPPORT_REQUEST_COLLECTION = "support_requests"
+HOLD_VULNS_COLLECTION      = "hold_vulnerabilities"
+DELETED_VULNS_COLLECTION   = "deleted_vulnerabilities"
 
 try:
     from users_details.models import UserDetail
@@ -1245,3 +1247,351 @@ class UserAssetDeleteAPIView(APIView):
                 {"detail": "Delete failed", "error": str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+# ================== VULNERABILITY-LEVEL MANAGEMENT APIs (User/Team) ==================
+
+class UserAllVulnerabilitiesAPIView(APIView):
+    """
+    GET /api/user/asset/report/<report_id>/vulnerabilities/
+    All unique vulnerabilities assigned to user's team, with open/held/deleted counts.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response(
+                    {"detail": "User is not linked to any team."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            teams_lower = _normalize_teams(teams)
+
+            with MongoContext() as db:
+                coll = db[NESSUS_COLLECTION]
+                doc  = coll.find_one({"report_id": str(report_id)})
+                if not doc:
+                    return Response({"detail": "Report not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                admin_id    = str(admin_user.id)
+                admin_email = getattr(admin_user, "email", None)
+                if doc.get("admin_id") != admin_id and doc.get("admin_email") != admin_email:
+                    return Response(
+                        {"detail": "Access denied. Report does not belong to your admin."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+                team_plugins, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
+
+                closed_set = {
+                    (c.get("plugin_name", ""), c.get("host_name", ""))
+                    for c in db[FIX_VULN_CLOSED_COLLECTION].find(
+                        {"report_id": str(report_id), "created_by": admin_id}
+                    )
+                }
+                held_set = {
+                    (h.get("plugin_name", ""), h.get("host_name", ""))
+                    for h in db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+                deleted_set = {
+                    (d.get("plugin_name", ""), d.get("host_name", ""))
+                    for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+
+                vuln_map = {}
+                for host in doc.get("vulnerabilities_by_host", []):
+                    host_name = (host.get("host_name") or "").strip()
+                    for v in host.get("vulnerabilities", []):
+                        plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if not plugin_name or plugin_name.lower() not in team_plugins:
+                            continue
+                        if (plugin_name, host_name) in closed_set:
+                            continue
+
+                        if plugin_name not in vuln_map:
+                            vuln_map[plugin_name] = {
+                                "plugin_name": plugin_name,
+                                "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
+                                "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
+                                "vendor_fix_available": "Yes",
+                                "assigned_team": plugin_team_map.get(plugin_name, ""),
+                                "total_assets": 0,
+                                "open_count": 0,
+                                "held_count": 0,
+                                "deleted_count": 0,
+                            }
+
+                        entry = vuln_map[plugin_name]
+                        entry["total_assets"] += 1
+                        if (plugin_name, host_name) in deleted_set:
+                            entry["deleted_count"] += 1
+                        elif (plugin_name, host_name) in held_set:
+                            entry["held_count"] += 1
+                        else:
+                            entry["open_count"] += 1
+
+                return Response({
+                    "report_id": str(report_id),
+                    "teams": teams,
+                    "total": len(vuln_map),
+                    "vulnerabilities": list(vuln_map.values()),
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class UserVulnAssetListAPIView(APIView):
+    """
+    GET /api/user/asset/report/<report_id>/vulnerability/<plugin_name>/assets/
+    Assets that have this vulnerability (team-filtered), with per-asset status.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id, plugin_name):
+        plugin_name = unquote(plugin_name)
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response(
+                    {"detail": "User is not linked to any team."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            teams_lower = _normalize_teams(teams)
+
+            with MongoContext() as db:
+                coll = db[NESSUS_COLLECTION]
+                doc  = coll.find_one({"report_id": str(report_id)})
+                if not doc:
+                    return Response({"detail": "Report not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
+                if plugin_name.lower() not in team_plugins:
+                    return Response(
+                        {"detail": "Access denied. This vulnerability is not assigned to your team."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+                held_hosts = {
+                    h.get("host_name", "")
+                    for h in db[HOLD_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "plugin_name": plugin_name}
+                    )
+                }
+                deleted_hosts = {
+                    d.get("host_name", "")
+                    for d in db[DELETED_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "plugin_name": plugin_name}
+                    )
+                }
+
+                assets = []
+                seen_hosts = set()
+                for host in doc.get("vulnerabilities_by_host", []):
+                    host_name = (host.get("host_name") or "").strip()
+                    if not host_name or host_name in seen_hosts:
+                        continue
+                    for v in host.get("vulnerabilities", []):
+                        pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if pname != plugin_name:
+                            continue
+                        seen_hosts.add(host_name)
+                        if host_name in deleted_hosts:
+                            vuln_status = "deleted"
+                        elif host_name in held_hosts:
+                            vuln_status = "held"
+                        else:
+                            vuln_status = "open"
+                        assets.append({
+                            "host_name": host_name,
+                            "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
+                            "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
+                            "status": vuln_status,
+                        })
+                        break
+
+                return Response({
+                    "report_id": str(report_id),
+                    "plugin_name": plugin_name,
+                    "total_assets": len(assets),
+                    "assets": assets,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class UserBulkVulnHoldAPIView(APIView):
+    """
+    POST /api/user/asset/report/<report_id>/vulnerability/<plugin_name>/hold/
+    Body: {"host_names": ["192.168.1.1"]}
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, report_id, plugin_name):
+        plugin_name = unquote(plugin_name)
+        host_names  = request.data.get("host_names", [])
+        if not host_names:
+            return Response({"detail": "host_names is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response(
+                    {"detail": "User is not linked to any team."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            teams_lower = _normalize_teams(teams)
+
+            with MongoContext() as db:
+                team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
+                if plugin_name.lower() not in team_plugins:
+                    return Response(
+                        {"detail": "Access denied. This vulnerability is not assigned to your team."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+                hold_coll = db[HOLD_VULNS_COLLECTION]
+                del_coll  = db[DELETED_VULNS_COLLECTION]
+                held_by   = getattr(request.user, "email", None) or str(request.user.id)
+                now       = timezone.now()
+
+                processed, skipped = [], []
+                for host_name in host_names:
+                    if del_coll.find_one({
+                        "report_id": str(report_id),
+                        "plugin_name": plugin_name,
+                        "host_name": host_name,
+                    }):
+                        skipped.append({"host_name": host_name, "reason": "already deleted"})
+                        continue
+                    hold_coll.update_one(
+                        {"report_id": str(report_id), "plugin_name": plugin_name, "host_name": host_name},
+                        {"$setOnInsert": {"held_at": now, "held_by": held_by}},
+                        upsert=True,
+                    )
+                    processed.append(host_name)
+
+                return Response({
+                    "detail": f"Held on {len(processed)} asset(s)",
+                    "plugin_name": plugin_name,
+                    "processed": processed,
+                    "skipped": skipped,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class UserBulkVulnUnholdAPIView(APIView):
+    """
+    POST /api/user/asset/report/<report_id>/vulnerability/<plugin_name>/unhold/
+    Body: {"host_names": ["192.168.1.1"]}
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, report_id, plugin_name):
+        plugin_name = unquote(plugin_name)
+        host_names  = request.data.get("host_names", [])
+        if not host_names:
+            return Response({"detail": "host_names is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response(
+                    {"detail": "User is not linked to any team."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            teams_lower = _normalize_teams(teams)
+
+            with MongoContext() as db:
+                team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
+                if plugin_name.lower() not in team_plugins:
+                    return Response(
+                        {"detail": "Access denied. This vulnerability is not assigned to your team."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+                result = db[HOLD_VULNS_COLLECTION].delete_many({
+                    "report_id": str(report_id),
+                    "plugin_name": plugin_name,
+                    "host_name": {"$in": host_names},
+                })
+
+                return Response({
+                    "detail": f"Unheld on {result.deleted_count} asset(s)",
+                    "plugin_name": plugin_name,
+                    "processed": host_names,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class UserBulkVulnDeleteAPIView(APIView):
+    """
+    DELETE /api/user/asset/report/<report_id>/vulnerability/<plugin_name>/delete/
+    Body: {"host_names": ["192.168.1.1"]}
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, report_id, plugin_name):
+        plugin_name = unquote(plugin_name)
+        host_names  = request.data.get("host_names", [])
+        if not host_names:
+            return Response({"detail": "host_names is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response(
+                    {"detail": "User is not linked to any team."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            teams_lower = _normalize_teams(teams)
+
+            with MongoContext() as db:
+                team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
+                if plugin_name.lower() not in team_plugins:
+                    return Response(
+                        {"detail": "Access denied. This vulnerability is not assigned to your team."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+                del_coll   = db[DELETED_VULNS_COLLECTION]
+                hold_coll  = db[HOLD_VULNS_COLLECTION]
+                deleted_by = getattr(request.user, "email", None) or str(request.user.id)
+                now        = timezone.now()
+
+                for host_name in host_names:
+                    del_coll.update_one(
+                        {"report_id": str(report_id), "plugin_name": plugin_name, "host_name": host_name},
+                        {"$setOnInsert": {"deleted_at": now, "deleted_by": deleted_by}},
+                        upsert=True,
+                    )
+                    hold_coll.delete_one({
+                        "report_id": str(report_id),
+                        "plugin_name": plugin_name,
+                        "host_name": host_name,
+                    })
+
+                return Response({
+                    "detail": f"Deleted from {len(host_names)} asset(s)",
+                    "plugin_name": plugin_name,
+                    "processed": host_names,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -29,11 +29,13 @@ try:
 except Exception:
     User = None
 
-NESSUS_COLLECTION = "nessus_reports"
-HOLD_COLLECTION = "hold_assets"
-FIX_VULN_COLLECTION = "fix_vulnerabilities"
+NESSUS_COLLECTION        = "nessus_reports"
+HOLD_COLLECTION          = "hold_assets"
+FIX_VULN_COLLECTION      = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
-DELETED_ASSETS_COLLECTION = "deleted_assets"
+DELETED_ASSETS_COLLECTION  = "deleted_assets"
+HOLD_VULNS_COLLECTION      = "hold_vulnerabilities"
+DELETED_VULNS_COLLECTION   = "deleted_vulnerabilities"
 
 # ---------------------- Mongo Context ----------------------
 from vaptfix.mongo_client import MongoContext
@@ -1087,3 +1089,283 @@ class AdminHoldAssetsAPIView(APIView):
                 {"detail": "Failed to fetch held assets", "error": str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+# ================== VULNERABILITY-LEVEL MANAGEMENT APIs ==================
+
+class AllVulnerabilitiesAPIView(APIView):
+    """
+    GET /api/admin/adminasset/report/<report_id>/vulnerabilities/
+    All unique vulnerabilities in the report grouped by plugin_name,
+    with open/held/deleted counts per vulnerability.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            with MongoContext() as db:
+                is_valid, doc, error_response = validate_report_ownership(db, report_id, request.user)
+                if not is_valid:
+                    return error_response
+
+                admin_id = doc.get("admin_id") or str(request.user.id)
+
+                closed_set = {
+                    (c.get("plugin_name", ""), c.get("host_name", ""))
+                    for c in db[FIX_VULN_CLOSED_COLLECTION].find(
+                        {"report_id": str(report_id), "created_by": admin_id}
+                    )
+                }
+                held_set = {
+                    (h.get("plugin_name", ""), h.get("host_name", ""))
+                    for h in db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+                deleted_set = {
+                    (d.get("plugin_name", ""), d.get("host_name", ""))
+                    for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+
+                vuln_map = {}
+                for host in doc.get("vulnerabilities_by_host", []):
+                    host_name = (host.get("host_name") or "").strip()
+                    for v in host.get("vulnerabilities", []):
+                        plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if not plugin_name:
+                            continue
+                        if (plugin_name, host_name) in closed_set:
+                            continue
+
+                        if plugin_name not in vuln_map:
+                            vuln_map[plugin_name] = {
+                                "plugin_name": plugin_name,
+                                "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
+                                "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
+                                "vendor_fix_available": "Yes",
+                                "total_assets": 0,
+                                "open_count": 0,
+                                "held_count": 0,
+                                "deleted_count": 0,
+                            }
+
+                        entry = vuln_map[plugin_name]
+                        entry["total_assets"] += 1
+                        if (plugin_name, host_name) in deleted_set:
+                            entry["deleted_count"] += 1
+                        elif (plugin_name, host_name) in held_set:
+                            entry["held_count"] += 1
+                        else:
+                            entry["open_count"] += 1
+
+                return Response({
+                    "report_id": str(report_id),
+                    "total": len(vuln_map),
+                    "vulnerabilities": list(vuln_map.values()),
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class VulnAssetListAPIView(APIView):
+    """
+    GET /api/admin/adminasset/report/<report_id>/vulnerability/<plugin_name>/assets/
+    Assets that have this vulnerability, with per-asset status (open/held/deleted).
+    Used by the frontend checkbox UI.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id, plugin_name):
+        plugin_name = unquote(plugin_name)
+        try:
+            with MongoContext() as db:
+                is_valid, doc, error_response = validate_report_ownership(db, report_id, request.user)
+                if not is_valid:
+                    return error_response
+
+                held_hosts = {
+                    h.get("host_name", "")
+                    for h in db[HOLD_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "plugin_name": plugin_name}
+                    )
+                }
+                deleted_hosts = {
+                    d.get("host_name", "")
+                    for d in db[DELETED_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "plugin_name": plugin_name}
+                    )
+                }
+
+                assets = []
+                seen_hosts = set()
+                for host in doc.get("vulnerabilities_by_host", []):
+                    host_name = (host.get("host_name") or "").strip()
+                    if not host_name or host_name in seen_hosts:
+                        continue
+                    for v in host.get("vulnerabilities", []):
+                        pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if pname != plugin_name:
+                            continue
+                        seen_hosts.add(host_name)
+                        if host_name in deleted_hosts:
+                            vuln_status = "deleted"
+                        elif host_name in held_hosts:
+                            vuln_status = "held"
+                        else:
+                            vuln_status = "open"
+                        assets.append({
+                            "host_name": host_name,
+                            "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
+                            "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
+                            "status": vuln_status,
+                        })
+                        break
+
+                return Response({
+                    "report_id": str(report_id),
+                    "plugin_name": plugin_name,
+                    "total_assets": len(assets),
+                    "assets": assets,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class BulkVulnHoldAPIView(APIView):
+    """
+    POST /api/admin/adminasset/report/<report_id>/vulnerability/<plugin_name>/hold/
+    Body: {"host_names": ["192.168.1.1", "10.0.0.5"]}
+    Holds this vulnerability on selected assets (single or bulk).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, report_id, plugin_name):
+        plugin_name = unquote(plugin_name)
+        host_names  = request.data.get("host_names", [])
+        if not host_names:
+            return Response({"detail": "host_names is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with MongoContext() as db:
+                is_valid, _, error_response = validate_report_ownership(db, report_id, request.user)
+                if not is_valid:
+                    return error_response
+
+                hold_coll = db[HOLD_VULNS_COLLECTION]
+                del_coll  = db[DELETED_VULNS_COLLECTION]
+                held_by   = getattr(request.user, "email", None) or str(request.user.id)
+                now       = timezone.now()
+
+                processed, skipped = [], []
+                for host_name in host_names:
+                    if del_coll.find_one({
+                        "report_id": str(report_id),
+                        "plugin_name": plugin_name,
+                        "host_name": host_name,
+                    }):
+                        skipped.append({"host_name": host_name, "reason": "already deleted"})
+                        continue
+                    hold_coll.update_one(
+                        {"report_id": str(report_id), "plugin_name": plugin_name, "host_name": host_name},
+                        {"$setOnInsert": {"held_at": now, "held_by": held_by}},
+                        upsert=True,
+                    )
+                    processed.append(host_name)
+
+                return Response({
+                    "detail": f"Held on {len(processed)} asset(s)",
+                    "plugin_name": plugin_name,
+                    "processed": processed,
+                    "skipped": skipped,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class BulkVulnUnholdAPIView(APIView):
+    """
+    POST /api/admin/adminasset/report/<report_id>/vulnerability/<plugin_name>/unhold/
+    Body: {"host_names": ["192.168.1.1"]}
+    Removes hold from this vulnerability on selected assets.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, report_id, plugin_name):
+        plugin_name = unquote(plugin_name)
+        host_names  = request.data.get("host_names", [])
+        if not host_names:
+            return Response({"detail": "host_names is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with MongoContext() as db:
+                is_valid, _, error_response = validate_report_ownership(db, report_id, request.user)
+                if not is_valid:
+                    return error_response
+
+                result = db[HOLD_VULNS_COLLECTION].delete_many({
+                    "report_id": str(report_id),
+                    "plugin_name": plugin_name,
+                    "host_name": {"$in": host_names},
+                })
+
+                return Response({
+                    "detail": f"Unheld on {result.deleted_count} asset(s)",
+                    "plugin_name": plugin_name,
+                    "processed": host_names,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class BulkVulnDeleteAPIView(APIView):
+    """
+    DELETE /api/admin/adminasset/report/<report_id>/vulnerability/<plugin_name>/delete/
+    Body: {"host_names": ["192.168.1.1"]}
+    Soft-deletes this vulnerability from selected assets.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, report_id, plugin_name):
+        plugin_name = unquote(plugin_name)
+        host_names  = request.data.get("host_names", [])
+        if not host_names:
+            return Response({"detail": "host_names is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with MongoContext() as db:
+                is_valid, _, error_response = validate_report_ownership(db, report_id, request.user)
+                if not is_valid:
+                    return error_response
+
+                del_coll   = db[DELETED_VULNS_COLLECTION]
+                hold_coll  = db[HOLD_VULNS_COLLECTION]
+                deleted_by = getattr(request.user, "email", None) or str(request.user.id)
+                now        = timezone.now()
+
+                for host_name in host_names:
+                    del_coll.update_one(
+                        {"report_id": str(report_id), "plugin_name": plugin_name, "host_name": host_name},
+                        {"$setOnInsert": {"deleted_at": now, "deleted_by": deleted_by}},
+                        upsert=True,
+                    )
+                    hold_coll.delete_one({
+                        "report_id": str(report_id),
+                        "plugin_name": plugin_name,
+                        "host_name": host_name,
+                    })
+
+                return Response({
+                    "detail": f"Deleted from {len(host_names)} asset(s)",
+                    "plugin_name": plugin_name,
+                    "processed": host_names,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
