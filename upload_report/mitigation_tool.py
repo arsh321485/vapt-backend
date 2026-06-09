@@ -626,6 +626,188 @@ def _ensure_execution_guidance_fields(row: dict) -> dict:
     return row
 
 
+def _parse_vaptcode_response(raw_text: str) -> dict:
+    """
+    Parse vaptcode_integrated 4-agent JSON output into mitigation_tool format.
+
+    vaptcode Card Formatter outputs:
+      { analysis{}, card{}, os_profile{}, steps[], summary{} }
+
+    Returns the same shape as _parse_response() plus 3 extra keys:
+      vaptcode_os_profile, vaptcode_analysis, vaptcode_summary
+    """
+    result = {
+        "mitigation_table":      [],
+        "vulnerability_card":    {},
+        "contextual_analysis":   [],
+        "raw_response_sections": [],
+        "vaptcode_os_profile":   {},
+        "vaptcode_analysis":     {},
+        "vaptcode_summary":      {},
+    }
+
+    # ── Extract JSON from agent output ──────────────────────────────────
+    card = None
+    text = (raw_text or "").strip()
+
+    # Try 1: pure JSON
+    try:
+        card = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Try 2: ```json ... ``` fences
+    if not isinstance(card, dict):
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+        if m:
+            try:
+                card = json.loads(m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    # Try 3: first { ... } block
+    if not isinstance(card, dict):
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                card = json.loads(m.group(0))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    if not isinstance(card, dict):
+        logger.warning("[MitigationCrew] Could not parse vaptcode JSON output")
+        return result
+
+    analysis   = card.get("analysis",  {}) or {}
+    card_meta  = card.get("card",      {}) or {}
+    os_profile = card.get("os_profile",{}) or {}
+    steps      = card.get("steps",     []) or []
+    summary    = card.get("summary",   {}) or {}
+
+    result["vaptcode_os_profile"] = os_profile
+    result["vaptcode_analysis"]   = analysis
+    result["vaptcode_summary"]    = summary
+
+    # ── Build vulnerability_card (existing schema) ───────────────────────
+    cve_list = analysis.get("cve_ids", []) or []
+    result["vulnerability_card"] = {
+        "vulnerability_type":            analysis.get("category", ""),
+        "vendor_advisory":               analysis.get("evidence", ""),
+        "reference_url":                 "",
+        "affected_packages":             ", ".join(cve_list) if isinstance(cve_list, list) else "",
+        "assigned_team":                 card_meta.get("assigned_to", ""),
+        "vendor_fix_available":          "Yes",
+        "steps_to_fix_count":            summary.get("total_steps") or len(steps),
+        "steps_to_fix_description":      summary.get("next_action", ""),
+        "deadline":                      "",
+        "artifacts_tools":               "",
+        "post_mitigation_troubleshooting_guide": summary.get("rollback_plan", ""),
+        "resource_id":                   card_meta.get("ip_address", ""),
+        "region":                        "",
+        "affected_port_ranges":          card_meta.get("port_service", ""),
+        "file_path":                     "",
+    }
+
+    # ── Build mitigation_table from steps[] ──────────────────────────────
+    mitigation_table = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        action_obj = step.get("action", {}) or {}
+
+        # Build action text (LOCATE / REMOVE / REPLACE / WHERE)
+        action_parts = []
+        for key, label in [("locate", "LOCATE"), ("remove", "REMOVE"),
+                           ("replace", "REPLACE"), ("where", "WHERE")]:
+            val = (action_obj.get(key) or "").strip()
+            if val:
+                action_parts.append(f"{label}: {val}")
+        action_text = "\n".join(action_parts)
+
+        # Build commands string from command_to_run[]
+        commands_parts = []
+        for cmd_block in (step.get("command_to_run") or []):
+            if isinstance(cmd_block, dict):
+                lbl  = (cmd_block.get("label") or "").strip()
+                cmds = cmd_block.get("commands", [])
+                if lbl:
+                    commands_parts.append(f"# ── {lbl} ──")
+                if isinstance(cmds, list):
+                    commands_parts.extend(str(c) for c in cmds if c)
+                elif isinstance(cmds, str) and cmds:
+                    commands_parts.append(cmds)
+            elif isinstance(cmd_block, str) and cmd_block:
+                commands_parts.append(cmd_block)
+        commands_str = "\n".join(commands_parts)
+
+        # Normalise artifacts_tools_used to list
+        tools = step.get("artifacts_tools_used", [])
+        if isinstance(tools, str):
+            tools = [t.strip() for t in tools.split(",") if t.strip()]
+        elif not isinstance(tools, list):
+            tools = []
+
+        row = {
+            "step_no":                  str(step.get("step_number", "")),
+            "task_name":                step.get("task_name", ""),
+            "action":                   action_text,
+            "commands_for_action":      commands_str,
+            "system_file_path":         (step.get("file_path") or "").strip(),
+            "assigned_to":              step.get("assigned_to", ""),
+            "artifacts_tools_used":     tools,
+            "verification_steps":       (action_obj.get("verify") or "").strip(),
+            "important_consideration":  (step.get("important_consideration") or "").strip(),
+        }
+
+        # Apply existing enrichment helpers
+        row = _ensure_execution_guidance_fields(row)
+        where = _infer_where_to_run(
+            row.get("commands_for_action", ""),
+            row.get("system_file_path", ""),
+        )
+        row["where_to_run"]       = where
+        row["where_to_run_label"] = _where_to_run_label(where)
+        row["sub_tasks"]          = _parse_action_sub_tasks(row.get("action", ""))
+        row["command_blocks"]     = _parse_command_blocks(
+            row.get("commands_for_action", ""),
+            row.get("system_file_path", ""),
+            row.get("step_no", ""),
+            row.get("task_name", ""),
+        )
+        mitigation_table.append(row)
+
+    result["mitigation_table"] = mitigation_table
+
+    # ── contextual_analysis (for VulnerabilityCardDetailView) ────────────
+    result["contextual_analysis"] = [
+        {
+            "section_number": "1",
+            "heading": "Vulnerability Analysis",
+            "content": (
+                f"Category: {analysis.get('category', '')}\n"
+                f"CVEs: {', '.join(analysis.get('cve_ids', []) or [])}\n"
+                f"Severity: {analysis.get('severity', '')} / "
+                f"CVSS: {analysis.get('cvss_estimate', '')}\n"
+                f"Attack Vector: {analysis.get('attack_vector', '')}\n"
+                f"Impact: {analysis.get('attacker_impact', '')}\n"
+                f"Evidence: {analysis.get('evidence', '')}"
+            ),
+        },
+        {
+            "section_number": "2",
+            "heading": "OS Profile",
+            "content": (
+                f"Platform: {os_profile.get('display_name', '')}\n"
+                f"Vendor: {os_profile.get('vendor', '')}\n"
+                f"Paradigm: {os_profile.get('paradigm', '')}\n"
+                f"Confidence: {os_profile.get('confidence', '')}"
+            ),
+        },
+    ]
+
+    return result
+
+
 def _parse_raw_response_sections(raw_text: str) -> list:
     """Parse the full raw AI response into a list of section objects."""
     if not raw_text:
@@ -772,18 +954,23 @@ class MitigationGenerationTool:
             os_category = _detect_os(os_str)  # "windows" / "linux" / "macos" / "android" / "ios"
 
             finding = {
-                "ip": host_name.strip() if host_name else "unknown",
-                "os": os_str,
+                "ip":          host_name.strip() if host_name else "unknown",
+                "os":          os_str,
                 "os_category": os_category,
-                "port": "unknown",
-                "vuln_name": plugin_name,
+                "port":        "unknown",
+                "vuln_name":   plugin_name,
                 "description": description,
                 "plugin_output": plugin_output or "",
-                "assigned_to": "Security Engineer",
+                # Agent will classify into one of the 4 valid teams
+                "assigned_to": (
+                    "Classify this vulnerability to EXACTLY ONE of: "
+                    "Patch Management | Network Security | "
+                    "Configuration Management | Architectural Flaws"
+                ),
             }
 
             agents = build_agents(llm)
-            tasks = build_tasks(agents, finding)
+            tasks  = build_tasks(agents, finding)
 
             crew = Crew(
                 agents=list(agents.values()),
@@ -792,36 +979,41 @@ class MitigationGenerationTool:
                 verbose=False,
             )
 
-            logger.info(f"[MitigationCrew] Starting 5-agent crew for: {plugin_name}")
+            logger.info(f"[MitigationCrew] Starting 4-agent vaptcode crew for: {plugin_name}")
             crew_result = crew.kickoff()
             raw_text = str(crew_result)
 
-            parsed = _parse_response(raw_text)
+            parsed = _parse_vaptcode_response(raw_text)
 
-            # Enforce valid assigned_team and convert to Title Case display name
+            # Agent-driven team classification using analysis.category
             vuln_card = parsed["vulnerability_card"]
-            team_slug = _resolve_assigned_team(plugin_name, vuln_card)
+            team_slug = _resolve_assigned_team(plugin_name, {
+                "vulnerability_type": parsed.get("vaptcode_analysis", {}).get("category", ""),
+                "assigned_team":      vuln_card.get("assigned_team", ""),
+            })
             team_display = _team_display_name(team_slug)
             vuln_card["assigned_team"] = team_display
 
-            # Sync assigned_to in every mitigation table row to the team display name
+            # Sync assigned_to in every mitigation table row
             for row in parsed["mitigation_table"]:
                 row["assigned_to"] = team_display
 
             logger.info(
-                f"[MitigationCrew] Done — table rows: {len(parsed['mitigation_table'])}, "
-                f"card fields: {len(vuln_card)}, "
+                f"[MitigationCrew] Done — steps: {len(parsed['mitigation_table'])}, "
                 f"assigned_team: {team_display}"
             )
 
             return {
                 **base,
-                "success": True,
-                "mitigation_table": parsed["mitigation_table"],
-                "vulnerability_card": vuln_card,
-                "contextual_analysis": parsed["contextual_analysis"],
+                "success":               True,
+                "mitigation_table":      parsed["mitigation_table"],
+                "vulnerability_card":    vuln_card,
+                "contextual_analysis":   parsed["contextual_analysis"],
                 "raw_response_sections": parsed["raw_response_sections"],
-                "error": None,
+                "vaptcode_os_profile":   parsed.get("vaptcode_os_profile", {}),
+                "vaptcode_analysis":     parsed.get("vaptcode_analysis", {}),
+                "vaptcode_summary":      parsed.get("vaptcode_summary", {}),
+                "error":                 None,
             }
 
         except Exception as exc:
