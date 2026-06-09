@@ -1335,6 +1335,9 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "post_mitigation_troubleshooting_guide": troubleshooting_steps,
                     "generated_at":       result.get("generated_at"),
                     "created_at":         datetime.datetime.utcnow(),
+                    "vaptcode_os_profile": result.get("vaptcode_os_profile", {}),
+                    "vaptcode_analysis":   result.get("vaptcode_analysis", {}),
+                    "vaptcode_summary":    result.get("vaptcode_summary", {}),
                 }
 
             try:
@@ -1594,6 +1597,9 @@ class GenerateVulnerabilityCardView(APIView):
                     "post_mitigation_troubleshooting_guide": troubleshooting_steps,
                     "generated_at": result.get("generated_at"),
                     "created_at": now,
+                    "vaptcode_os_profile": result.get("vaptcode_os_profile", {}),
+                    "vaptcode_analysis":   result.get("vaptcode_analysis", {}),
+                    "vaptcode_summary":    result.get("vaptcode_summary", {}),
                 }
 
                 db[VULN_CARD_COLLECTION].insert_one(document)

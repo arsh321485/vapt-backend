@@ -45,6 +45,7 @@ beautifulsoup4==4.14.2
 # AI / LLM integration
 openai>=1.0.0
 crewai>=0.80.0
+crewai-tools>=0.17.0
 langchain-openai>=0.2.0
 
 # Image processing (Teams icon upload)
