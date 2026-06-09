@@ -724,21 +724,21 @@ def _parse_vaptcode_response(raw_text: str) -> dict:
                 action_parts.append(f"{label}: {val}")
         action_text = "\n".join(action_parts)
 
-        # Build commands string from command_to_run[]
-        commands_parts = []
+        # Build commands_for_action as ARRAY directly from command_to_run[]
+        commands_array = []
+        commands_str_temp = ""  # temp string only for where_to_run inference
         for cmd_block in (step.get("command_to_run") or []):
             if isinstance(cmd_block, dict):
                 lbl  = (cmd_block.get("label") or "").strip()
                 cmds = cmd_block.get("commands", [])
-                if lbl:
-                    commands_parts.append(f"# ── {lbl} ──")
-                if isinstance(cmds, list):
-                    commands_parts.extend(str(c) for c in cmds if c)
-                elif isinstance(cmds, str) and cmds:
-                    commands_parts.append(cmds)
+                if isinstance(cmds, str):
+                    cmds = [cmds] if cmds else []
+                clean_cmds = [str(c) for c in cmds if c]
+                commands_array.append({"label": lbl, "commands": clean_cmds})
+                commands_str_temp += "\n".join(clean_cmds) + "\n"
             elif isinstance(cmd_block, str) and cmd_block:
-                commands_parts.append(cmd_block)
-        commands_str = "\n".join(commands_parts)
+                commands_array.append({"label": "", "commands": [cmd_block]})
+                commands_str_temp += cmd_block + "\n"
 
         # Normalise artifacts_tools_used to list
         tools = step.get("artifacts_tools_used", [])
@@ -747,33 +747,28 @@ def _parse_vaptcode_response(raw_text: str) -> dict:
         elif not isinstance(tools, list):
             tools = []
 
+        # Pass temp string to enrichment helpers (they expect a string)
         row = {
             "step_no":                  str(step.get("step_number", "")),
             "task_name":                step.get("task_name", ""),
             "action":                   action_text,
-            "commands_for_action":      commands_str,
+            "commands_for_action":      commands_str_temp,
             "system_file_path":         (step.get("file_path") or "").strip(),
             "assigned_to":              step.get("assigned_to", ""),
             "artifacts_tools_used":     tools,
             "verification_steps":       (action_obj.get("verify") or "").strip(),
             "important_consideration":  (step.get("important_consideration") or "").strip(),
         }
-
-        # Apply existing enrichment helpers
         row = _ensure_execution_guidance_fields(row)
-        where = _infer_where_to_run(
-            row.get("commands_for_action", ""),
-            row.get("system_file_path", ""),
-        )
+        where = _infer_where_to_run(commands_str_temp, row.get("system_file_path", ""))
         row["where_to_run"]       = where
         row["where_to_run_label"] = _where_to_run_label(where)
-        row["sub_tasks"]          = _parse_action_sub_tasks(row.get("action", ""))
-        row["command_blocks"]     = _parse_command_blocks(
-            row.get("commands_for_action", ""),
-            row.get("system_file_path", ""),
-            row.get("step_no", ""),
-            row.get("task_name", ""),
-        )
+
+        # Overwrite commands_for_action with ARRAY; remove sub_tasks & command_blocks
+        row["commands_for_action"] = commands_array
+        row.pop("sub_tasks",      None)
+        row.pop("command_blocks", None)
+
         mitigation_table.append(row)
 
     result["mitigation_table"] = mitigation_table
