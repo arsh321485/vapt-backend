@@ -252,6 +252,15 @@ class UserAssetsAPIView(APIView):
 
                 team_plugins, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
 
+                _held_vuln_set = {
+                    (h.get("plugin_name", ""), h.get("host_name", ""))
+                    for h in db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+                _deleted_vuln_set = {
+                    (d.get("plugin_name", ""), d.get("host_name", ""))
+                    for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+
                 assets = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -263,6 +272,8 @@ class UserAssetsAPIView(APIView):
                     team_vulns = [
                         v for v in host.get("vulnerabilities", [])
                         if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                        and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _held_vuln_set
+                        and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _deleted_vuln_set
                     ]
                     if not team_vulns:
                         continue
@@ -438,6 +449,15 @@ class UserReportAssetsAPIView(APIView):
                 member_type = doc.get("member_type")
                 team_plugins, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
 
+                _held_vuln_set = {
+                    (h.get("plugin_name", ""), h.get("host_name", ""))
+                    for h in db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+                _deleted_vuln_set = {
+                    (d.get("plugin_name", ""), d.get("host_name", ""))
+                    for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+
                 assets = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -449,6 +469,8 @@ class UserReportAssetsAPIView(APIView):
                     team_vulns = [
                         v for v in host.get("vulnerabilities", [])
                         if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                        and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _held_vuln_set
+                        and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _deleted_vuln_set
                     ]
                     if not team_vulns:
                         continue

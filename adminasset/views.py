@@ -141,6 +141,15 @@ class ReportAssetsAPIView(APIView):
                 uploaded_at = doc.get("uploaded_at")
                 member_type = doc.get("member_type")
 
+                _held_vuln_set = {
+                    (h.get("plugin_name", ""), h.get("host_name", ""))
+                    for h in db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+                _deleted_vuln_set = {
+                    (d.get("plugin_name", ""), d.get("host_name", ""))
+                    for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+
                 assets = {}
 
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -171,6 +180,9 @@ class ReportAssetsAPIView(APIView):
                     entry = assets[host_name]
 
                     for v in host.get("vulnerabilities", []):
+                        _pname = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
+                        if (_pname, host_name) in _held_vuln_set or (_pname, host_name) in _deleted_vuln_set:
+                            continue
                         entry["total_vulnerabilities"] += 1
                         risk = (v.get("risk_factor") or v.get("severity") or "").lower()
 
@@ -859,6 +871,15 @@ class AdminAssetsAPIView(APIView):
                 uploaded_at = doc.get("uploaded_at")
                 member_type = doc.get("member_type")
 
+                _held_vuln_set = {
+                    (h.get("plugin_name", ""), h.get("host_name", ""))
+                    for h in db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+                _deleted_vuln_set = {
+                    (d.get("plugin_name", ""), d.get("host_name", ""))
+                    for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+
                 assets = {}
 
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -889,6 +910,9 @@ class AdminAssetsAPIView(APIView):
                     entry = assets[host_name]
 
                     for v in host.get("vulnerabilities", []):
+                        _pname = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
+                        if (_pname, host_name) in _held_vuln_set or (_pname, host_name) in _deleted_vuln_set:
+                            continue
                         entry["total_vulnerabilities"] += 1
                         risk = (v.get("risk_factor") or v.get("severity") or "").lower()
 
