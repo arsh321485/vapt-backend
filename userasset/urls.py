@@ -17,6 +17,7 @@ from .views import (
     UserBulkVulnHoldAPIView,
     UserBulkVulnUnholdAPIView,
     UserBulkVulnDeleteAPIView,
+    UserVulnHoldListByReportAPIView,
 )
 
 urlpatterns = [
@@ -150,6 +151,13 @@ urlpatterns = [
         "report/<str:report_id>/vulnerability/<path:plugin_name>/delete/",
         UserBulkVulnDeleteAPIView.as_view(),
         name="user-bulk-vuln-delete",
+    ),
+
+    # GET list of all held vulnerabilities for a report (team-filtered)
+    path(
+        "report/<str:report_id>/vulnerability/hold-list/",
+        UserVulnHoldListByReportAPIView.as_view(),
+        name="user-vuln-hold-list-by-report",
     ),
 ]
 
