@@ -380,13 +380,27 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
                     )
                     closed_vulns.add(key)
 
+                held_plugins = {
+                    h.get("plugin_name", "")
+                    for h in db[HOLD_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+                deleted_plugins = {
+                    d.get("plugin_name", "")
+                    for d in db[DELETED_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+
                 out = []
                 for v in (host_entry.get("vulnerabilities") or []):
                     plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                     port = str(v.get("port", ""))
 
-                    # Only display vulnerabilities with status 'Open'
                     if (plugin_name, host_name, port) in closed_vulns:
+                        continue
+                    if plugin_name in held_plugins or plugin_name in deleted_plugins:
                         continue
 
                     item = {
@@ -1002,14 +1016,30 @@ class AdminAssetVulnerabilitiesAPIView(APIView):
                         status=status.HTTP_404_NOT_FOUND
                     )
 
+                held_plugins = {
+                    h.get("plugin_name", "")
+                    for h in db[HOLD_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+                deleted_plugins = {
+                    d.get("plugin_name", "")
+                    for d in db[DELETED_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+
                 out = []
                 for v in (host_entry.get("vulnerabilities") or []):
+                    _pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                    if _pname in held_plugins or _pname in deleted_plugins:
+                        continue
                     item = {
                         "asset": host_name,
                         "exposure": member_type,
                         "owner": organisation_name,
                         "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
-                        "vul_name": v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                        "vul_name": _pname,
                         "vendor_fix_available": "Yes",
                         "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""),
                         "description": _join_description(v),
@@ -1388,6 +1418,72 @@ class BulkVulnDeleteAPIView(APIView):
                     "detail": f"Deleted from {len(host_names)} asset(s)",
                     "plugin_name": plugin_name,
                     "processed": host_names,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class VulnHoldListByReportAPIView(APIView):
+    """
+    GET /api/admin/adminasset/report/<report_id>/vulnerability/hold-list/
+    Returns all held vulnerabilities for a specific report.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            with MongoContext() as db:
+                is_valid, doc, error_response = validate_report_ownership(db, report_id, request.user)
+                if not is_valid:
+                    return error_response
+
+                held_docs = list(db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)}))
+
+                if not held_docs:
+                    return Response({
+                        "report_id": str(report_id),
+                        "total": 0,
+                        "vulnerabilities": [],
+                    }, status=status.HTTP_200_OK)
+
+                # Build lookup: (host_name, plugin_name) → vuln details
+                vuln_lookup = {}
+                for host in (doc.get("vulnerabilities_by_host") or []):
+                    hn = (host.get("host_name") or "").strip()
+                    for v in (host.get("vulnerabilities") or []):
+                        pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if pname:
+                            vuln_lookup[(hn, pname)] = v
+
+                vuln_map = {}
+                for held in held_docs:
+                    pname = held.get("plugin_name", "")
+                    hn    = held.get("host_name", "")
+                    vuln  = vuln_lookup.get((hn, pname), {})
+
+                    if pname not in vuln_map:
+                        vuln_map[pname] = {
+                            "plugin_name": pname,
+                            "severity":    (vuln.get("risk_factor") or vuln.get("severity") or "").title(),
+                            "cvss_score":  str(vuln.get("cvss_v3_base_score") or vuln.get("cvss") or ""),
+                            "asset_count": 0,
+                            "hosts":       [],
+                        }
+
+                    vuln_map[pname]["asset_count"] += 1
+                    vuln_map[pname]["hosts"].append({
+                        "host_name": hn,
+                        "held_at":   _iso(held.get("held_at")),
+                        "held_by":   held.get("held_by", ""),
+                    })
+
+                result = list(vuln_map.values())
+                return Response({
+                    "report_id": str(report_id),
+                    "total": len(result),
+                    "vulnerabilities": result,
                 }, status=status.HTTP_200_OK)
 
         except Exception as exc:

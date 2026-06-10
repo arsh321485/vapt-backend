@@ -647,6 +647,19 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                     )
                     closed_vulns.add(key)
 
+                held_plugins = {
+                    h.get("plugin_name", "")
+                    for h in db[HOLD_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+                deleted_plugins = {
+                    d.get("plugin_name", "")
+                    for d in db[DELETED_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+
                 out = []
                 for v in (host_entry.get("vulnerabilities") or []):
                     plugin_name   = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
@@ -656,6 +669,8 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
 
                     port = str(v.get("port", ""))
                     if (plugin_name, host_name, port) in closed_vulns:
+                        continue
+                    if plugin_name in held_plugins or plugin_name in deleted_plugins:
                         continue
 
                     out.append({
@@ -756,11 +771,26 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                     )
                     closed_vulns.add(key)
 
+                held_plugins = {
+                    h.get("plugin_name", "")
+                    for h in db[HOLD_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+                deleted_plugins = {
+                    d.get("plugin_name", "")
+                    for d in db[DELETED_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+
                 out = []
                 for v in (host_entry.get("vulnerabilities") or []):
                     plugin_name   = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                     assigned_team = plugin_team_map.get(plugin_name)
                     if not assigned_team:
+                        continue
+                    if plugin_name in held_plugins or plugin_name in deleted_plugins:
                         continue
 
                     port        = str(v.get("port", ""))
@@ -1612,6 +1642,99 @@ class UserBulkVulnDeleteAPIView(APIView):
                     "detail": f"Deleted from {len(host_names)} asset(s)",
                     "plugin_name": plugin_name,
                     "processed": host_names,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class UserVulnHoldListByReportAPIView(APIView):
+    """
+    GET /api/user/asset/report/<report_id>/vulnerability/hold-list/
+    Returns held vulnerabilities for the report, filtered to user's team.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response(
+                    {"detail": "User is not linked to any team."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            teams_lower = _normalize_teams(teams)
+
+            with MongoContext() as db:
+                coll = db[NESSUS_COLLECTION]
+                doc  = coll.find_one({"report_id": str(report_id)})
+                if not doc:
+                    return Response({"detail": "Report not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                admin_id    = str(admin_user.id)
+                admin_email = getattr(admin_user, "email", None)
+                if doc.get("admin_id") != admin_id and doc.get("admin_email") != admin_email:
+                    return Response(
+                        {"detail": "Access denied. Report does not belong to your admin."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+                team_plugins, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
+
+                held_docs = list(db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)}))
+
+                if not held_docs:
+                    return Response({
+                        "report_id": str(report_id),
+                        "teams": teams,
+                        "total": 0,
+                        "vulnerabilities": [],
+                    }, status=status.HTTP_200_OK)
+
+                # Build lookup: (host_name, plugin_name) → vuln details
+                vuln_lookup = {}
+                for host in (doc.get("vulnerabilities_by_host") or []):
+                    hn = (host.get("host_name") or "").strip()
+                    for v in (host.get("vulnerabilities") or []):
+                        pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if pname:
+                            vuln_lookup[(hn, pname)] = v
+
+                vuln_map = {}
+                for held in held_docs:
+                    pname = held.get("plugin_name", "")
+                    hn    = held.get("host_name", "")
+
+                    if pname.lower() not in team_plugins:
+                        continue
+
+                    vuln = vuln_lookup.get((hn, pname), {})
+
+                    if pname not in vuln_map:
+                        vuln_map[pname] = {
+                            "plugin_name":   pname,
+                            "severity":      (vuln.get("risk_factor") or vuln.get("severity") or "").title(),
+                            "cvss_score":    str(vuln.get("cvss_v3_base_score") or vuln.get("cvss") or ""),
+                            "assigned_team": plugin_team_map.get(pname, ""),
+                            "asset_count":   0,
+                            "hosts":         [],
+                        }
+
+                    vuln_map[pname]["asset_count"] += 1
+                    vuln_map[pname]["hosts"].append({
+                        "host_name": hn,
+                        "held_at":   _iso(held.get("held_at")),
+                        "held_by":   held.get("held_by", ""),
+                    })
+
+                result = list(vuln_map.values())
+                return Response({
+                    "report_id": str(report_id),
+                    "teams": teams,
+                    "total": len(result),
+                    "vulnerabilities": result,
                 }, status=status.HTTP_200_OK)
 
         except Exception as exc:
