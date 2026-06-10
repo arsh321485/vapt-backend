@@ -1,5 +1,7 @@
-from rest_framework import generics, permissions, status,filters
+from rest_framework import generics, permissions, status, filters
 from rest_framework.response import Response
+from rest_framework.views import APIView
+from vaptfix.mongo_client import MongoContext
 from django.contrib.auth import get_user_model
 from bson import ObjectId
 from django.shortcuts import get_object_or_404
@@ -1752,3 +1754,117 @@ class UserDetailSlackResyncView(generics.GenericAPIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+NESSUS_COLLECTION    = "nessus_reports"
+VULN_CARD_COLLECTION = "vulnerability_cards"
+
+
+class ReportAssetsVulnsAPIView(APIView):
+    """
+    GET /api/admin/users-details/report-assets-vulns/?role=<role>
+    Returns assets from admin's latest nessus report, each with nested vulns.
+
+    If ?role= is provided, only assets/vulns assigned to that team
+    (via vulnerability_cards.assigned_team) are returned.
+    If no role, all assets and vulns are returned.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            admin_id   = str(request.user.id)
+            admin_email = request.user.email
+            role_filter = (request.query_params.get("role") or "").strip()
+
+            with MongoContext() as db:
+                coll = db[NESSUS_COLLECTION]
+                doc = coll.find_one(
+                    {"admin_id": admin_id},
+                    {"report_id": 1, "vulnerabilities_by_host": 1},
+                    sort=[("uploaded_at", -1)],
+                )
+                if not doc:
+                    doc = coll.find_one(
+                        {"admin_email": admin_email},
+                        {"report_id": 1, "vulnerabilities_by_host": 1},
+                        sort=[("uploaded_at", -1)],
+                    )
+                if not doc:
+                    return Response(
+                        {"report_id": None, "role": role_filter, "assets": []},
+                        status=status.HTTP_200_OK,
+                    )
+
+                report_id = str(doc.get("report_id") or doc.get("_id", ""))
+
+                # If a role is requested, build a set of plugin_names assigned to
+                # that team from vulnerability_cards (case-insensitive match).
+                role_plugins = None
+                if role_filter:
+                    role_plugins = set()
+                    for card in db[VULN_CARD_COLLECTION].find(
+                        {"report_id": report_id},
+                        {"vulnerability_name": 1, "plugin_name": 1, "assigned_team": 1},
+                    ):
+                        raw_team = (card.get("assigned_team") or "").strip()
+                        if raw_team.lower() == role_filter.lower():
+                            pname = (
+                                card.get("vulnerability_name")
+                                or card.get("plugin_name")
+                                or ""
+                            ).strip()
+                            if pname:
+                                role_plugins.add(pname.lower())
+
+                assets = []
+                for host in (doc.get("vulnerabilities_by_host") or []):
+                    host_name = (host.get("host_name") or "").strip()
+                    if not host_name:
+                        continue
+
+                    os_name = (
+                        host.get("os")
+                        or host.get("operating_system")
+                        or host.get("host-rdns")
+                        or ""
+                    )
+
+                    vulns = []
+                    for v in (host.get("vulnerabilities") or []):
+                        plugin_name = (
+                            v.get("plugin_name")
+                            or v.get("pluginname")
+                            or v.get("name")
+                            or ""
+                        ).strip()
+                        if not plugin_name:
+                            continue
+                        # Filter by role if requested
+                        if role_plugins is not None and plugin_name.lower() not in role_plugins:
+                            continue
+                        vulns.append({
+                            "plugin_name": plugin_name,
+                            "severity":    (v.get("risk_factor") or v.get("severity") or "").title(),
+                            "cvss_score":  str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
+                        })
+
+                    # Skip hosts that have no matching vulns when filtering by role
+                    if role_plugins is not None and not vulns:
+                        continue
+
+                    assets.append({
+                        "host_name":       host_name,
+                        "os":              os_name,
+                        "vuln_count":      len(vulns),
+                        "vulnerabilities": vulns,
+                    })
+
+                return Response(
+                    {"report_id": report_id, "role": role_filter or None, "assets": assets},
+                    status=status.HTTP_200_OK,
+                )
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

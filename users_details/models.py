@@ -17,6 +17,7 @@ class UserDetail(models.Model):
     team_id = models.CharField(max_length=255, blank=True, null=True)
     team_name = models.CharField(max_length=255, blank=True, null=True)
     slack_channel_ids = models.JSONField(default=list, blank=True)
+    role_assignments = models.JSONField(default=dict, blank=True)
 
     # Platform-based login fields
     platform = models.CharField(
