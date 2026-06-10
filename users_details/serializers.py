@@ -73,7 +73,6 @@ def _enforce_user_type_email_domain(user_type: str, email: str, admin_email: str
 
 class UserDetailSerializer(serializers.ModelSerializer):
     admin_id = serializers.CharField(source="admin.id", read_only=True)
-    # location_id = serializers.CharField(source="location._id", read_only=True)
     Member_role = serializers.ListField(child=serializers.CharField(), read_only=True)
 
     class Meta:
@@ -83,6 +82,7 @@ class UserDetailSerializer(serializers.ModelSerializer):
             "first_name", "last_name",
             "user_type", "email",
             "Member_role", "team_id", "team_name",
+            "role_assignments",
             "created_at", "updated_at"
         ]
         read_only_fields = ["_id", "created_at", "updated_at"]
@@ -134,6 +134,7 @@ class UserDetailCreateSerializer(serializers.ModelSerializer):
         required=False,
         default=list,
     )
+    role_assignments = serializers.DictField(required=False, default=dict)
 
     class Meta:
         model = UserDetail
@@ -145,7 +146,8 @@ class UserDetailCreateSerializer(serializers.ModelSerializer):
             "email",
             "Member_role",
             "team_id",
-            "team_name"
+            "team_name",
+            "role_assignments",
         ]
 
     def validate_admin_id(self, value):

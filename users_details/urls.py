@@ -11,6 +11,7 @@ from .views import (
     UserDetailByAdminAPIView,
     MemberProfileView,
     UserDetailSlackResyncView,
+    ReportAssetsVulnsAPIView,
 )
 
 app_name = "users_details"
@@ -31,4 +32,5 @@ urlpatterns = [
     ),
     path("member-profile/", MemberProfileView.as_view(), name="member-profile"),
     path("user-detail/<str:detail_id>/resync-slack/", UserDetailSlackResyncView.as_view(), name="userdetail-resync-slack"),
+    path("report-assets-vulns/", ReportAssetsVulnsAPIView.as_view(), name="report-assets-vulns"),
 ]
