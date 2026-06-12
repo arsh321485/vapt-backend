@@ -7,6 +7,7 @@ from .views import (
     UploadReportListByAdminAPIView,
     UploadReportDeleteAPIView,
     GenerateVulnerabilityCardView,
+    RunMitigationView,
     VulnerabilityCardListView,
     VulnerabilityCardDetailView,
 )
@@ -45,6 +46,11 @@ urlpatterns = [
         "vulnerability-cards/generate/",
         GenerateVulnerabilityCardView.as_view(),
         name="vulnerability_card_generate",
+    ),
+    path(
+        "run-mitigation/",
+        RunMitigationView.as_view(),
+        name="run_mitigation",
     ),
     path(
         "vulnerability-cards/",

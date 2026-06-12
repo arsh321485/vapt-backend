@@ -1651,6 +1651,186 @@ class GenerateVulnerabilityCardView(APIView):
             )
 
 
+class RunMitigationView(APIView):
+    """
+    POST /api/admin/upload_report/run-mitigation/
+
+    Fetch a vulnerability from MongoDB (uploaded report) and run the
+    5-agent crew (mitigation + backup card). Saves both cards to MongoDB.
+
+    Body:
+    {
+        "report_id":   "<string>",   -- required
+        "plugin_name": "<string>",   -- required
+        "host_name":   "<string>"    -- optional, narrow to specific host
+    }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        import uuid as _uuid
+        from .mitigation_tool import (
+            MitigationGenerationTool, _detect_os, _parse_troubleshooting_guide
+        )
+
+        report_id   = (request.data.get("report_id")   or "").strip()
+        plugin_name = (request.data.get("plugin_name") or "").strip()
+        host_name   = (request.data.get("host_name")   or "").strip()
+
+        if not report_id or not plugin_name:
+            return Response(
+                {"error": "report_id and plugin_name are required"}, status=400
+            )
+
+        try:
+            client, db = _get_mongo_client_and_db()
+        except RuntimeError as exc:
+            return Response({"error": str(exc)}, status=500)
+
+        # Fetch report from MongoDB
+        nessus_doc = db[NESSUS_COLLECTION].find_one({"report_id": report_id})
+        if not nessus_doc:
+            return Response({"error": "Report not found"}, status=404)
+
+        # Ownership check
+        if (
+            nessus_doc.get("admin_email", "") != getattr(request.user, "email", "")
+            and not request.user.is_superuser
+        ):
+            return Response({"error": "Access denied"}, status=403)
+
+        # Find the vulnerability in the report
+        found_vuln = None
+        found_host = ""
+        found_os   = ""
+
+        for host in nessus_doc.get("vulnerabilities_by_host", []):
+            h_name = (host.get("host_name") or "").strip()
+            if host_name and h_name != host_name:
+                continue
+            host_info = host.get("host_information") or {}
+            h_os = (
+                host_info.get("operating-system")
+                or host_info.get("os")
+                or host_info.get("OS")
+                or host_info.get("operating_system")
+                or host_info.get("system-type")
+                or ""
+            ).strip()
+            for vuln in host.get("vulnerabilities", []):
+                if vuln.get("plugin_name", "").strip() == plugin_name:
+                    found_vuln = vuln
+                    found_host = h_name
+                    found_os   = h_os
+                    break
+            if found_vuln:
+                break
+
+        if not found_vuln:
+            return Response(
+                {"error": f"Vulnerability '{plugin_name}' not found in report"},
+                status=404,
+            )
+
+        # Build description
+        description = (
+            found_vuln.get("description", "")
+            or " ".join(found_vuln.get("description_points", []))
+        ).strip()
+
+        # Get plugin_output
+        plugin_outputs = found_vuln.get("plugin_outputs")
+        if plugin_outputs and isinstance(plugin_outputs, list) and plugin_outputs:
+            plugin_output = plugin_outputs[0].get("plugin_output", "") or ""
+        else:
+            plugin_output = found_vuln.get("plugin_output", "") or ""
+
+        # Run the 5-agent crew
+        try:
+            tool   = MitigationGenerationTool()
+            result = tool._run(
+                plugin_name=plugin_name,
+                description=description,
+                plugin_output=plugin_output,
+                report_id=report_id,
+                host_name=found_host,
+                operating_system=found_os,
+            )
+        except Exception as exc:
+            return Response({"error": "Crew execution failed", "detail": str(exc)}, status=500)
+
+        if not result["success"]:
+            return Response({"error": result.get("error", "Crew failed")}, status=500)
+
+        # Build MongoDB document
+        vc = result.get("vulnerability_card", {})
+        mitigation_table_arr = _ensure_where_to_run_fields(
+            result.get("mitigation_table", []),
+            found_os,
+        )
+        troubleshooting_steps = _parse_troubleshooting_guide(
+            vc.get("post_mitigation_troubleshooting_guide", "") or ""
+        )
+        card_id = str(_uuid.uuid4())
+        now     = datetime.datetime.utcnow()
+
+        document = {
+            "card_id":            card_id,
+            "report_id":          report_id,
+            "admin_email":        getattr(request.user, "email", ""),
+            "admin_id":           str(request.user.id),
+            "vulnerability_name": plugin_name,
+            "host_name":          found_host,
+            "os_category":        _detect_os(found_os),
+            "description":        description,
+            "plugin_output":      plugin_output or None,
+            "mitigation_table":   mitigation_table_arr,
+            "resource_id":        vc.get("resource_id") or found_host or None,
+            "region":             vc.get("region"),
+            "affected_packages":  vc.get("affected_packages"),
+            "vendor_advisory":    vc.get("vendor_advisory"),
+            "reference_url":      vc.get("reference_url"),
+            "vulnerability_type": vc.get("vulnerability_type"),
+            "affected_port_ranges": vc.get("affected_port_ranges"),
+            "assigned_team":      vc.get("assigned_team"),
+            "vendor_fix_available": vc.get("vendor_fix_available"),
+            "steps_to_fix_count": vc.get("steps_to_fix_count"),
+            "steps_to_fix_description": vc.get("steps_to_fix_description"),
+            "deadline":           vc.get("deadline"),
+            "artifacts_tools":    vc.get("artifacts_tools"),
+            "post_mitigation_troubleshooting_guide": troubleshooting_steps,
+            "generated_at":       result.get("generated_at"),
+            "created_at":         now,
+            "vaptcode_os_profile": result.get("vaptcode_os_profile", {}),
+            "vaptcode_analysis":   result.get("vaptcode_analysis", {}),
+            "vaptcode_summary":    result.get("vaptcode_summary", {}),
+            "backup_card":         result.get("backup_card", {}),
+        }
+
+        db[VULN_CARD_COLLECTION].update_one(
+            {
+                "report_id":          report_id,
+                "vulnerability_name": plugin_name,
+                "host_name":          found_host,
+            },
+            {"$set": document},
+            upsert=True,
+        )
+
+        return Response(
+            {
+                "success":             True,
+                "card_id":             card_id,
+                "vulnerability_name":  plugin_name,
+                "host_name":           found_host,
+                "mitigation_steps":    len(mitigation_table_arr),
+                "backup_card_present": bool(result.get("backup_card")),
+            },
+            status=201,
+        )
+
+
 class VulnerabilityCardListView(APIView):
     """
     GET /api/admin/upload_report/vulnerability-cards/?report_id=<id>

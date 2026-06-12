@@ -519,7 +519,6 @@ def _build_command_block(
         "where_to_run_label": _where_to_run_label(where),
         "expected_output": expected_output,
         "verification_check": verification_check or "Confirm the change is in place and no error messages appear.",
-        "on_failure_what_to_do": _build_on_failure(label, where, system_file_path),
     }
 
 
@@ -531,8 +530,7 @@ def _parse_command_blocks(
 ) -> list:
     """
     Split commands_for_action into labeled blocks (# ── Label ──).
-    Each block gets its own where_to_run, expected_output,
-    verification_check, and on_failure_what_to_do.
+    Each block gets its own where_to_run, expected_output, and verification_check.
     """
     if not commands_str:
         return []
@@ -607,23 +605,48 @@ def _ensure_execution_guidance_fields(row: dict) -> dict:
         else:
             row["on_success_next_step"] = f"'{step_name}' complete. Move on to the next step."
 
-    if not row.get("on_failure_what_to_do"):
-        if fallback_remediation and fallback_remediation.lower() not in ("n/a", "na", ""):
-            row["on_failure_what_to_do"] = (
-                f"Fallback: {fallback_remediation}. "
-                "Also check file paths, permissions, and that required services are running."
-            )
-        elif commands and commands.lower() not in ("n/a", "na", ""):
-            row["on_failure_what_to_do"] = (
-                f"Verify the command syntax and that you have the required permissions to run it. "
-                f"Check system logs for error details, then retry step {step_no or 'this step'}."
-            )
-        else:
-            row["on_failure_what_to_do"] = (
-                f"Review the action instructions for '{step_name or 'this step'}', "
-                "check permissions, and consult system logs before retrying."
-            )
     return row
+
+
+def _task_raw_output(task) -> str:
+    """Extract raw text output from a crewai task across versions."""
+    out = getattr(task, "output", None)
+    if out is None:
+        return ""
+    for attr in ("raw", "raw_output", "exported_output", "result"):
+        val = getattr(out, attr, None)
+        if isinstance(val, str) and val.strip():
+            return val
+    return str(out)
+
+
+def _parse_backup_card(raw_text: str) -> dict:
+    """Parse vaptcode backup card JSON output into a dict."""
+    if not raw_text or not raw_text.strip():
+        return {}
+    text = raw_text.strip()
+
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    logger.warning("[MitigationCrew] Could not parse backup card JSON output")
+    return {"raw_backup_output": raw_text}
 
 
 def _parse_vaptcode_response(raw_text: str) -> dict:
@@ -974,9 +997,13 @@ class MitigationGenerationTool:
                 verbose=False,
             )
 
-            logger.info(f"[MitigationCrew] Starting 4-agent vaptcode crew for: {plugin_name}")
+            logger.info(f"[MitigationCrew] Starting 5-agent vaptcode crew for: {plugin_name}")
             crew_result = crew.kickoff()
             raw_text = str(crew_result)
+
+            # tasks[2] is the async backup task (parallel track)
+            backup_raw  = _task_raw_output(tasks[2])
+            backup_card = _parse_backup_card(backup_raw)
 
             parsed = _parse_vaptcode_response(raw_text)
 
@@ -1008,6 +1035,7 @@ class MitigationGenerationTool:
                 "vaptcode_os_profile":   parsed.get("vaptcode_os_profile", {}),
                 "vaptcode_analysis":     parsed.get("vaptcode_analysis", {}),
                 "vaptcode_summary":      parsed.get("vaptcode_summary", {}),
+                "backup_card":           backup_card,
                 "error":                 None,
             }
 

@@ -1217,8 +1217,8 @@ class AdminMitigationTimelineAPIView(APIView):
             total_days = critical_days + high_days + medium_days + low_days
             total_hours = days_to_hours(total_days)
 
-            # Countdown starts from report upload time (not from when criteria was saved)
-            base_datetime = report_uploaded_at or rc.updated_at or rc.created_at
+            # Countdown starts from when criteria was set/updated
+            base_datetime = rc.updated_at or rc.created_at
             if base_datetime.tzinfo is None:
                 base_datetime = base_datetime.replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
