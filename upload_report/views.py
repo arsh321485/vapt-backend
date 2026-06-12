@@ -1009,7 +1009,14 @@ def _where_to_run_label(where_to_run: str) -> str:
     return labels.get(where_to_run, "Terminal / Command Prompt (open the terminal on your system)")
 
 def _ensure_execution_guidance_fields(row: dict) -> dict:
-    commands = (row.get("commands_for_action") or "").strip()
+    raw_cmds = row.get("commands_for_action") or ""
+    if isinstance(raw_cmds, list):
+        commands = " ".join(
+            " ".join(c.get("commands", []) if isinstance(c, dict) else [str(c)])
+            for c in raw_cmds
+        ).strip()
+    else:
+        commands = raw_cmds.strip()
     verification_steps = (row.get("verification_steps") or "").strip()
     step_name = (row.get("step_name") or row.get("task_name") or "").strip()
 
@@ -1042,7 +1049,12 @@ def _ensure_execution_guidance_fields(row: dict) -> dict:
     return row
 
 
-def _infer_where_to_run(commands_for_action: str, system_file_path: str = "", operating_system: str = "") -> str:
+def _infer_where_to_run(commands_for_action, system_file_path: str = "", operating_system: str = "") -> str:
+    if isinstance(commands_for_action, list):
+        commands_for_action = " ".join(
+            " ".join(c.get("commands", []) if isinstance(c, dict) else [str(c)])
+            for c in commands_for_action
+        )
     cmd = (commands_for_action or "").strip().lower()
     path = (system_file_path or "").strip().lower()
     os_label = (operating_system or "").strip().lower()
