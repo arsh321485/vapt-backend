@@ -72,8 +72,8 @@ def check_deadlines_for_admin(admin_id_str):
         if not rc:
             return
 
-        # Use created_at as base — more stable than updated_at (auto_now can be unreliable)
-        base_dt = rc.created_at
+        # Use updated_at if criteria was updated, else created_at
+        base_dt = rc.updated_at or rc.created_at
         if not base_dt:
             return
         if is_naive(base_dt):
