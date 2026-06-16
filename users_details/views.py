@@ -66,11 +66,12 @@ def _ud_set(user_detail, **fields):
 
 
 ROLE_TO_SLACK_CHANNEL = {
-    "Patch Management": "patch-management",
-    "Configuration Management": "configuration-management",
-    "Network Security": "network-security",
-    "Architectural Flaws": "architectural-flaws",
+    "Patch Management":         "vaptfix-patch-management-team",
+    "Configuration Management": "vaptfix-configuration-management-team",
+    "Network Security":         "vaptfix-network-security-team",
+    "Architectural Flaws":      "vaptfix-architectural-flaws-team",
 }
+ADMIN_SLACK_CHANNEL = "vaptfix-admin-dashboard"
 
 TEAM_EMAIL_CONTENT = {
     "Configuration Management": {

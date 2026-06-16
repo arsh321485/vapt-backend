@@ -7127,3 +7127,584 @@ def teams_webhook_handler(request):
             return HttpResponse(tokens[0], content_type="text/plain; charset=utf-8", status=200)
         return HttpResponse("Missing validationToken", status=400)
     return TeamsWebhookView.as_view()(request)
+
+
+class SlackSlashCommandView(APIView):
+    """
+    Handles all VaptFix Slack slash commands for the admin channel (vaptfix-admin-dashboard).
+    Slack POSTs form-encoded data here on every slash command invocation.
+    We ack immediately (within 3s) and post the real result to response_url in a background thread.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    ADMIN_CHANNEL = "vaptfix-admin-dashboard"
+
+    def post(self, request):
+        # Slack sends application/x-www-form-urlencoded — use request.POST
+        data = request.POST
+        command = data.get("command", "")
+        text = (data.get("text") or "").strip()
+        channel_name = data.get("channel_name", "")
+        user_id = data.get("user_id", "")
+        team_id = data.get("team_id", "")
+        response_url = data.get("response_url", "")
+
+        if not self._verify_signature(request):
+            return Response({"response_type": "ephemeral", "text": "❌ Unauthorized request."}, status=403)
+
+        if channel_name != self.ADMIN_CHANNEL:
+            return Response({
+                "response_type": "ephemeral",
+                "text": f"❌ This command only works in *#vaptfix-admin-dashboard*.",
+            })
+
+        handlers = {
+            "/teamoverview":  self._cmd_teamoverview,
+            "/vulnstats":     self._cmd_vulnstats,
+            "/dashboard":     self._cmd_dashboard,
+            "/externalusers": self._cmd_externalusers,
+            "/adduser":       self._cmd_adduser,
+            "/deleteuser":    self._cmd_deleteuser,
+            "/supportdata":   self._cmd_supportdata,
+            "/vulndata":      self._cmd_vulndata,
+            "/approve":       self._cmd_approve,
+            "/reject":        self._cmd_reject,
+            "/request":       self._cmd_request,
+            "/report":        self._cmd_report,
+        }
+
+        handler = handlers.get(command)
+        if not handler:
+            return Response({
+                "response_type": "ephemeral",
+                "text": f"❌ Unknown command `{command}`.",
+            })
+
+        # Ack Slack immediately; process and reply via response_url in background
+        threading.Thread(
+            target=self._run_command,
+            args=(handler, text, team_id, user_id, response_url, command),
+            daemon=True,
+        ).start()
+        return Response({"response_type": "in_channel", "text": f"⏳ Processing `{command}`..."})
+
+    # ── Internal helpers ──────────────────────────────────────────────────
+
+    def _run_command(self, handler, text, team_id, user_id, response_url, command):
+        try:
+            blocks = handler(text, team_id, user_id)
+            payload = {"response_type": "in_channel", "replace_original": True, "blocks": blocks}
+        except Exception as exc:
+            logger.exception(f"[SlackCmd] {command} failed: {exc}")
+            payload = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"❌ `{command}` failed: {exc}",
+            }
+        if response_url:
+            try:
+                _http_post(response_url, json=payload, timeout=10)
+            except Exception as exc:
+                logger.error(f"[SlackCmd] response_url POST failed: {exc}")
+
+    def _verify_signature(self, request):
+        signing_secret = getattr(settings, "SLACK_SIGNING_SECRET", "")
+        if not signing_secret:
+            return True
+        timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+        signature = request.headers.get("X-Slack-Signature", "")
+        try:
+            if abs(time.time() - int(timestamp)) > 300:
+                return False
+        except (ValueError, TypeError):
+            return False
+        try:
+            body = request._request.body.decode("utf-8")
+        except Exception:
+            return False
+        base = f"v0:{timestamp}:{body}"
+        computed = "v0=" + hmac.new(signing_secret.encode(), base.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(computed, signature)
+
+    def _get_admin_token(self, team_id):
+        from rest_framework_simplejwt.tokens import RefreshToken as _RT
+        admin = User.objects.filter(slack_team_id=team_id, is_staff=True).first()
+        if not admin:
+            admin = User.objects.filter(is_staff=True).first()
+        if admin:
+            return str(_RT.for_user(admin).access_token)
+        return None
+
+    def _call_api(self, path, team_id, method="get", json_body=None, params=None):
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+        token = self._get_admin_token(team_id)
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        url = f"{backend}{path}"
+        if method == "get":
+            resp = _http_get(url, headers=headers, params=params, timeout=15)
+        elif method == "patch":
+            resp = _http_patch(url, headers=headers, json=json_body, timeout=15)
+        else:
+            resp = _http_get(url, headers=headers, timeout=15)
+        return resp.json()
+
+    def _get_bot_token(self, team_id):
+        admin = User.objects.filter(slack_team_id=team_id, is_staff=True).first()
+        return admin.slack_bot_token if admin else None
+
+    # ── Command handlers ──────────────────────────────────────────────────
+
+    def _cmd_teamoverview(self, text, team_id, user_id):
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id
+        )
+        return self._format_teamoverview(data)
+
+    def _cmd_vulnstats(self, text, team_id, user_id):
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/detailed-vulnerabilities/", team_id
+        )
+        return self._format_vulnstats(data)
+
+    def _cmd_dashboard(self, text, team_id, user_id):
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/summary/", team_id
+        )
+        return self._format_dashboard(data)
+
+    def _cmd_supportdata(self, text, team_id, user_id):
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/support-requests/", team_id
+        )
+        return self._format_supportdata(data)
+
+    def _cmd_request(self, text, team_id, user_id):
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id
+        )
+        return self._format_extension_requests(data)
+
+    def _cmd_approve(self, text, team_id, user_id):
+        request_id = text.strip()
+        if not request_id:
+            return self._text_block("Usage: `/approve [request-id]`")
+        data = self._call_api(
+            f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
+            team_id, method="patch", json_body={"status": "approved"},
+        )
+        return self._format_status_update(data, "approved", request_id)
+
+    def _cmd_reject(self, text, team_id, user_id):
+        parts = text.strip().split(None, 1)
+        if not parts:
+            return self._text_block("Usage: `/reject [request-id] [reason]`")
+        request_id = parts[0]
+        reason = parts[1] if len(parts) > 1 else ""
+        data = self._call_api(
+            f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
+            team_id, method="patch", json_body={"status": "rejected", "admin_comment": reason},
+        )
+        return self._format_status_update(data, "rejected", request_id)
+
+    def _cmd_externalusers(self, text, team_id, user_id):
+        data = self._call_api(
+            "/api/admin/users_details/list-user-details/", team_id,
+            params={"user_type": "external"},
+        )
+        return self._format_externalusers(data)
+
+    def _cmd_report(self, text, team_id, user_id):
+        frontend = getattr(settings, "FRONTEND_URL", "https://vaptfix.secureitlab.com")
+        parts = text.strip().split(None, 1)
+
+        if not parts:
+            # Full platform report — link to dashboard
+            return [
+                {"type": "header", "text": {"type": "plain_text", "text": "📄 Reports", "emoji": True}},
+                {"type": "section", "text": {"type": "mrkdwn",
+                    "text": (
+                        "*Download Options:*\n"
+                        f"• Full Report: <{frontend}/reports|Open Reports Dashboard>\n"
+                        "• Filter by team: `/report team [team-name]`\n"
+                        "• Filter by vuln: `/report vuln [vuln-id]`"
+                    )}},
+            ]
+
+        subcommand = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcommand == "team" and arg:
+            report_url = f"{frontend}/reports?team={arg.replace(' ', '+')}"
+            return [
+                {"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"📄 *Report — Team: {arg}*\n<{report_url}|Download Team Report>"}},
+            ]
+        elif subcommand == "vuln" and arg:
+            report_url = f"{frontend}/reports?vuln={arg}"
+            return [
+                {"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"📄 *Report — Vuln ID: `{arg}`*\n<{report_url}|Download Vuln Report>"}},
+            ]
+        else:
+            return self._text_block(
+                "Usage:\n"
+                "• `/report` — Full platform report\n"
+                "• `/report team [team-name]` — Team filtered report\n"
+                "• `/report vuln [vuln-id]` — Specific vulnerability report"
+            )
+
+    def _cmd_vulndata(self, text, team_id, user_id):
+        if text.lower() == "automation":
+            data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id)
+            return self._format_vulndata_automation(data)
+        elif text:
+            fix_vuln_id = text.strip()
+            data = self._call_api(
+                f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id
+            )
+            return self._format_vulndata_detail(data, fix_vuln_id)
+        else:
+            data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id)
+            return self._format_vulndata_list(data)
+
+    def _cmd_adduser(self, text, team_id, user_id):
+        parts = text.strip().split()
+        if len(parts) < 2:
+            return self._text_block(
+                "Usage: `/adduser @username [role]`\nRoles: `admin` | `team` | `external`"
+            )
+        mention = parts[0]
+        role = parts[1].lower()
+
+        # Parse Slack @mention format: <@U12345|name> or plain username
+        slack_uid = mention.lstrip("<@").split("|")[0].rstrip(">") if mention.startswith("<@") else mention.lstrip("@")
+
+        bot_token = self._get_bot_token(team_id)
+        if not bot_token:
+            return self._text_block("❌ Bot token not found for this workspace.")
+
+        resp = _http_get(
+            "https://slack.com/api/users.info",
+            params={"user": slack_uid},
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=10,
+        ).json()
+        if not resp.get("ok"):
+            return self._text_block(f"❌ Slack user lookup failed: {resp.get('error')}")
+
+        profile = resp.get("user", {}).get("profile", {})
+        real_name = resp.get("user", {}).get("real_name", "")
+        email = profile.get("email", "")
+        if not email:
+            return self._text_block(
+                "❌ Email not found. Ensure the `users:read.email` scope is granted."
+            )
+
+        first = real_name.split(" ")[0] if real_name else ""
+        last = " ".join(real_name.split(" ")[1:]) if " " in real_name else ""
+
+        user_obj, created = User.objects.get_or_create(
+            email=email,
+            defaults={
+                "firstname": first,
+                "lastname": last,
+                "is_active": True,
+                "is_staff": role == "admin",
+                "login_provider": "slack",
+                "slack_user_id": slack_uid,
+                "slack_team_id": team_id,
+            },
+        )
+        if created:
+            user_obj.set_unusable_password()
+            user_obj.save()
+            label = "✅ User created"
+        else:
+            label = "ℹ️ User already exists"
+
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "User Management", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"{label}\n*Email:* {email}\n*Name:* {real_name}\n*Role:* `{role}`"}},
+        ]
+
+    def _cmd_deleteuser(self, text, team_id, user_id):
+        mention = text.strip()
+        if not mention:
+            return self._text_block("Usage: `/deleteuser @username`")
+
+        slack_uid = mention.lstrip("<@").split("|")[0].rstrip(">") if mention.startswith("<@") else mention.lstrip("@")
+
+        bot_token = self._get_bot_token(team_id)
+        if not bot_token:
+            return self._text_block("❌ Bot token not found.")
+
+        resp = _http_get(
+            "https://slack.com/api/users.info",
+            params={"user": slack_uid},
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=10,
+        ).json()
+        if not resp.get("ok"):
+            return self._text_block(f"❌ Slack user lookup failed: {resp.get('error')}")
+
+        email = resp.get("user", {}).get("profile", {}).get("email", "")
+        if not email:
+            return self._text_block("❌ Email not found for this Slack user.")
+
+        try:
+            target = User.objects.get(email=email)
+            target.is_active = False
+            target.save(update_fields=["is_active"])
+            return [{"type": "section", "text": {"type": "mrkdwn",
+                "text": f"✅ User *{email}* has been deactivated from VaptFix."}}]
+        except User.DoesNotExist:
+            return self._text_block(f"❌ No VaptFix account found for `{email}`.")
+
+    # ── Formatters ────────────────────────────────────────────────────────
+
+    def _text_block(self, text):
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+    def _bar(self, value, max_val, width=10):
+        filled = round((value / max_val) * width) if max_val else 0
+        return "█" * filled + "░" * (width - filled)
+
+    def _format_dashboard(self, data):
+        total_assets = (data.get("total_assets") or {}).get("total_assets", 0)
+        avg_score    = (data.get("avg_score") or {}).get("avg_score", 0)
+        vulns        = data.get("vulnerabilities") or {}
+        critical     = vulns.get("critical", 0)
+        high         = vulns.get("high", 0)
+        medium       = vulns.get("medium", 0)
+        low          = vulns.get("low", 0)
+        total_vulns  = critical + high + medium + low
+        max_v        = max(total_vulns, 1)
+
+        timeline = data.get("mitigation_timeline") or {}
+        mtr      = (data.get("mean_time_remediate") or {}).get("mean_time_to_remediate") or {}
+        fixed    = data.get("vulnerabilities_fixed") or {}
+        support  = data.get("support_requests") or {}
+
+        def tl_line(sev, info):
+            if not info:
+                return f"• {sev.capitalize()}: N/A"
+            icon  = "🔴" if info.get("status") == "overdue" else "🟡"
+            label = info.get("remaining_label", "")
+            return f"• {sev.capitalize()}: {icon} {label}"
+
+        vuln_chart = (
+            f"```"
+            f"\nCritical  {self._bar(critical, max_v)}  {critical}"
+            f"\nHigh      {self._bar(high, max_v)}  {high}"
+            f"\nMedium    {self._bar(medium, max_v)}  {medium}"
+            f"\nLow       {self._bar(low, max_v)}  {low}"
+            f"```"
+        )
+
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "📊 VaptFix Admin Dashboard", "emoji": True}},
+            {"type": "divider"},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Total Assets*\n{total_assets}"},
+                {"type": "mrkdwn", "text": f"*Avg Risk Score*\n{avg_score} / 10"},
+            ]},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": "*🔴 Vulnerabilities by Severity*\n" + vuln_chart}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                "*⏱ Mitigation Timeline*\n"
+                + "\n".join([
+                    tl_line("critical", timeline.get("critical")),
+                    tl_line("high",     timeline.get("high")),
+                    tl_line("medium",   timeline.get("medium")),
+                    tl_line("low",      timeline.get("low")),
+                ])
+            )}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*⚡ Mean Time to Remediate*\n{mtr.get('label', 'N/A')}"},
+                {"type": "mrkdwn", "text": f"*🔧 Vulns Fixed*\n{fixed.get('total_fixed', 0)} / {total_vulns}"},
+            ]},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*🎫 Support Requests*\n{support.get('total', 0)} total"},
+                {"type": "mrkdwn", "text": f"*Pending / Closed*\n{support.get('pending', 0)} / {support.get('closed', 0)}"},
+            ]},
+        ]
+
+    def _format_teamoverview(self, data):
+        teams = data if isinstance(data, list) else (data.get("results") or data.get("teams") or [])
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "👥 Team Overview", "emoji": True}},
+            {"type": "divider"},
+        ]
+        if not teams:
+            return blocks + self._text_block("No team data available.")
+        for team in teams[:10]:
+            name    = team.get("team_name") or team.get("name") or "Unknown"
+            assets  = team.get("total_assets") or team.get("asset_count") or 0
+            vulns   = team.get("total_vulns") or team.get("vuln_count") or 0
+            fixed   = team.get("fixed_count") or 0
+            total   = team.get("total_count") or vulns or 1
+            rate    = round((fixed / total) * 100) if total else 0
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*{name}*\nAssets: {assets} | Vulns: {vulns} | Fixed: {fixed} ({rate}%)"}})
+        return blocks
+
+    def _format_vulnstats(self, data):
+        # Handle both list and summary response shapes
+        vulns = data.get("vulnerabilities") or data.get("results") or (data if isinstance(data, list) else [])
+        counts = {"critical": 0, "high": 0, "medium": 0, "low": 0,
+                  "open": 0, "in_progress": 0, "fixed": 0}
+        if isinstance(vulns, list):
+            for v in vulns:
+                sev = (v.get("severity") or "").lower()
+                st  = (v.get("status") or "").lower().replace(" ", "_")
+                if sev in counts:
+                    counts[sev] += 1
+                if st in counts:
+                    counts[st] += 1
+        else:
+            for k in counts:
+                counts[k] = data.get(k, 0)
+
+        total = counts["critical"] + counts["high"] + counts["medium"] + counts["low"] or data.get("total", 1)
+        max_v = max(total, 1)
+
+        bar_text = (
+            f"```"
+            f"\nCritical  {self._bar(counts['critical'], max_v)}  {counts['critical']}"
+            f"\nHigh      {self._bar(counts['high'], max_v)}  {counts['high']}"
+            f"\nMedium    {self._bar(counts['medium'], max_v)}  {counts['medium']}"
+            f"\nLow       {self._bar(counts['low'], max_v)}  {counts['low']}"
+            f"```"
+        )
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "🛡 Vulnerability Statistics", "emoji": True}},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*By Severity*\n{bar_text}"}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Open*\n{counts['open']}"},
+                {"type": "mrkdwn", "text": f"*In Progress*\n{counts['in_progress']}"},
+                {"type": "mrkdwn", "text": f"*Fixed*\n{counts['fixed']}"},
+                {"type": "mrkdwn", "text": f"*Total*\n{total}"},
+            ]},
+        ]
+
+    def _format_externalusers(self, data):
+        users = data if isinstance(data, list) else (data.get("results") or data.get("users") or [])
+        count = len(users)
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🌐 External Users", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total External Users:* {count}"}},
+            {"type": "divider"},
+        ]
+        if not users:
+            return blocks + self._text_block("No external users found.")
+        for u in users[:8]:
+            name     = f"{u.get('firstname') or u.get('first_name', '')} {u.get('lastname') or u.get('last_name', '')}".strip() or "Unknown"
+            email    = u.get("email", "—")
+            assets   = u.get("assigned_assets") or u.get("asset_count") or "—"
+            vulns    = u.get("assigned_vulns") or u.get("vuln_count") or "—"
+            deadline = u.get("deadline") or u.get("access_deadline") or "—"
+            access   = u.get("access_status") or u.get("status") or "active"
+            icon     = {"active": "🟢", "revoked": "🔴", "pending": "🟡"}.get(str(access).lower(), "⚪")
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": (
+                    f"{icon} *{name}* — `{email}`\n"
+                    f"Assets: {assets} | Vulns: {vulns} | Deadline: {deadline} | Status: {access}"
+                )}})
+        return blocks
+
+    def _format_supportdata(self, data):
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Requests", "emoji": True}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Total*\n{data.get('total', 0)}"},
+                {"type": "mrkdwn", "text": f"*Pending*\n{data.get('pending', 0)}"},
+                {"type": "mrkdwn", "text": f"*Closed*\n{data.get('closed', 0)}"},
+            ]},
+        ]
+
+    def _format_extension_requests(self, data):
+        results = data.get("results") or []
+        count   = data.get("count", len(results))
+        blocks  = [
+            {"type": "header", "text": {"type": "plain_text", "text": "⏳ Timeline Extension Requests", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Requests:* {count}"}},
+            {"type": "divider"},
+        ]
+        status_icons = {"review": "🔵", "approved": "✅", "rejected": "❌"}
+        for r in results[:8]:
+            rid   = r.get("request_id", "")
+            team  = r.get("requested_by") or "Unknown"
+            vuln  = r.get("vul_name") or "Unknown"
+            sev   = (r.get("severity") or "").capitalize()
+            st    = r.get("status", "review")
+            days  = r.get("extension_days", 0)
+            reason = r.get("reason", "—")
+            icon  = status_icons.get(st, "🔵")
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": (
+                    f"{icon} *{vuln}* [{sev}]\n"
+                    f"Team: {team} | +{days} days | Reason: {reason}\n"
+                    f"`/approve {rid}` or `/reject {rid} [reason]`"
+                )}})
+        return blocks
+
+    def _format_status_update(self, data, action, request_id):
+        if data.get("detail"):
+            return self._text_block(f"❌ {data['detail']}")
+        icon  = "✅" if action == "approved" else "❌"
+        label = "Approved" if action == "approved" else "Rejected"
+        return [{"type": "section", "text": {"type": "mrkdwn",
+            "text": f"{icon} Request `{request_id}` has been *{label}*."}}]
+
+    def _format_vulndata_list(self, data):
+        items  = data if isinstance(data, list) else (data.get("results") or data.get("vulnerabilities") or [])
+        count  = len(items)
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🔍 Vulnerability Data", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total:* {count} vulnerabilities\nUse `/vulndata [id]` for fix steps."}},
+            {"type": "divider"},
+        ]
+        for v in items[:8]:
+            vid  = v.get("fix_vuln_id") or v.get("plugin_id") or str(v.get("_id", ""))
+            name = v.get("vulnerability_name") or v.get("plugin_name") or v.get("name") or "Unknown"
+            sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize()
+            st   = v.get("status") or "open"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*{name}* [{sev}] — `{st}`\n`/vulndata {vid}`"}})
+        return blocks
+
+    def _format_vulndata_detail(self, data, fix_vuln_id):
+        name  = data.get("vulnerability_name") or data.get("name") or fix_vuln_id
+        sev   = (data.get("severity") or "").capitalize()
+        steps = data.get("steps") or []
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🔍 {name}", "emoji": True}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Severity*\n{sev}"},
+                {"type": "mrkdwn", "text": f"*Status*\n{data.get('status', 'open')}"},
+            ]},
+            {"type": "divider"},
+        ]
+        for i, step in enumerate(steps[:10], 1):
+            step_name = step.get("step_description") or step.get("name") or f"Step {i}"
+            step_st   = step.get("status") or "pending"
+            icon      = "✅" if step_st == "completed" else "⬜"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"{icon} *Step {i}:* {step_name}"}})
+        return blocks
+
+    def _format_vulndata_automation(self, data):
+        items      = data if isinstance(data, list) else (data.get("results") or data.get("vulnerabilities") or [])
+        auto_count = sum(1 for v in items if v.get("is_automated") or v.get("has_script"))
+        manual     = len(items) - auto_count
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "🤖 Automation Breakdown", "emoji": True}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Total Vulns*\n{len(items)}"},
+                {"type": "mrkdwn", "text": f"*Automated*\n{auto_count}"},
+                {"type": "mrkdwn", "text": f"*Manual Only*\n{manual}"},
+            ]},
+        ]
