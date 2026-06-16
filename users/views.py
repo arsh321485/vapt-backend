@@ -3189,19 +3189,25 @@ class DeleteTeamView(generics.GenericAPIView):
 # ─── Slack workspace / channel helpers ───────────────────────────────────────
 
 VAPTFIX_CHANNELS = [
-    "patch-management",
-    "configuration-management",
-    "network-security",
-    "architectural-flaws",
+    "vaptfix-patch-management-team",
+    "vaptfix-configuration-management-team",
+    "vaptfix-network-security-team",
+    "vaptfix-architectural-flaws-team",
 ]
+ADMIN_DASHBOARD_CHANNEL = "vaptfix-admin-dashboard"
 
 
-def ensure_vaptfix_channels(bot_token, slack_user_id=None):
+def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False):
     """
-    Ensures the 4 vaptfix Slack channels exist.
-    Creates any that are missing, bot joins them, and optionally invites the user.
+    Ensures VaptFix Slack channels exist.
+    Admins get all 5 channels (admin dashboard + 4 team channels).
+    Regular users get only the 4 team channels.
     Returns dict of {channel_name: channel_id}.
     """
+    channels_to_handle = list(VAPTFIX_CHANNELS)
+    if is_admin:
+        channels_to_handle = [ADMIN_DASHBOARD_CHANNEL] + channels_to_handle
+
     headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
 
     # List existing channels — Slack always stores names as lowercase
@@ -3213,7 +3219,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None):
     existing = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
 
     channel_ids = {}
-    for name in VAPTFIX_CHANNELS:
+    for name in channels_to_handle:
         # VAPTFIX_CHANNELS are already lowercase; Slack lowercases names automatically
         if name in existing:
             channel_ids[name] = existing[name]
@@ -3513,7 +3519,7 @@ class SlackOAuthCallbackView(APIView):
             # ✅ Step 4b: Ensure vaptfix channels exist and invite user
             channels = {}
             try:
-                channels = ensure_vaptfix_channels(bot_token, slack_user_id=user_id)
+                channels = ensure_vaptfix_channels(bot_token, slack_user_id=user_id, is_admin=True)
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in callback", exc_info=True)
 
@@ -3784,7 +3790,7 @@ class SlackLoginView(APIView):
             # 3b. Ensure vaptfix channels exist and invite user
             channels = {}
             try:
-                channels = ensure_vaptfix_channels(bot_token, slack_user_id=slack_user_id)
+                channels = ensure_vaptfix_channels(bot_token, slack_user_id=slack_user_id, is_admin=True)
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in login", exc_info=True)
 
