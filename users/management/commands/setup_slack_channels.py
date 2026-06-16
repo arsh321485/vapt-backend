@@ -55,10 +55,10 @@ class Command(BaseCommand):
         self.stdout.write("--- Renaming team channels ---")
         for old_name, new_name in RENAME_MAP.items():
             if new_name in existing_names:
-                self.stdout.write(self.style.SUCCESS(f"  ✓ '{new_name}' already exists — skipping."))
+                self.stdout.write(self.style.SUCCESS(f"  OK '{new_name}' already exists — skipping."))
                 continue
             if old_name not in name_to_id:
-                self.stdout.write(self.style.WARNING(f"  ⚠ '{old_name}' not found — skipping."))
+                self.stdout.write(self.style.WARNING(f"  WARN '{old_name}' not found — skipping."))
                 continue
 
             channel_id = name_to_id[old_name]
@@ -76,16 +76,16 @@ class Command(BaseCommand):
         self.stdout.write("\n--- Admin channel ---")
         if ADMIN_CHANNEL_NAME in existing_names:
             self.stdout.write(self.style.SUCCESS(
-                f"  ✓ '#{ADMIN_CHANNEL_NAME}' already exists — nothing to do."
+                f"  OK '#{ADMIN_CHANNEL_NAME}' already exists — nothing to do."
             ))
         else:
             self.stdout.write(f"  Creating #{ADMIN_CHANNEL_NAME} ...")
             if not dry_run:
                 ok, result = self._create_channel(bot_token, ADMIN_CHANNEL_NAME)
                 if ok:
-                    self.stdout.write(self.style.SUCCESS(f"  ✓ Channel created successfully."))
+                    self.stdout.write(self.style.SUCCESS(f"  OK Channel created successfully."))
                 else:
-                    self.stdout.write(self.style.ERROR(f"  ✗ Failed: {result}"))
+                    self.stdout.write(self.style.ERROR(f"  FAILED Failed: {result}"))
             else:
                 self.stdout.write(f"  [DRY RUN] Would create #{ADMIN_CHANNEL_NAME}")
 
