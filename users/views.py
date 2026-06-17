@@ -7223,9 +7223,10 @@ class SlackSlashCommandView(APIView):
 
     def _get_admin_token(self, team_id):
         from rest_framework_simplejwt.tokens import RefreshToken as _RT
-        admin = User.objects.filter(slack_team_id=team_id, is_staff=True).first()
+        # djongo cannot handle combined boolean + equality in WHERE — filter is_staff in Python
+        admin = next((u for u in User.objects.filter(slack_team_id=team_id) if u.is_staff), None)
         if not admin:
-            admin = User.objects.filter(is_staff=True).first()
+            admin = next((u for u in User.objects.all() if u.is_staff), None)
         if admin:
             return str(_RT.for_user(admin).access_token)
         return None
@@ -7244,8 +7245,11 @@ class SlackSlashCommandView(APIView):
         return resp.json()
 
     def _get_bot_token(self, team_id):
-        admin = User.objects.filter(slack_team_id=team_id, is_staff=True).first()
-        return admin.slack_bot_token if admin else None
+        # djongo cannot handle combined boolean + equality in WHERE — filter is_staff in Python
+        return next(
+            (u.slack_bot_token for u in User.objects.filter(slack_team_id=team_id) if u.is_staff),
+            None,
+        )
 
     # ── Command handlers ──────────────────────────────────────────────────
 
