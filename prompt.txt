@@ -1,12 +1,1 @@
-admin hi join kr skta hai esa krna 
-admin jo user ko add krega o user ko auto join nai krna hai ye sirf admin ke liye hai 
-phile plan fir code 
-admin hi vaptfix-admin-dashboard channel ko auto join kr skta hai esa krna hai or admin sare overview dekh skta hai 
-
-admin baki ke channel bhi dekh skta hai usko uska bhi access hona chahihe 
-
-jb admin slack ke plotform se aaye to usko 5 channel show hone chahihe 
-plan 
-
-or 
-vaptfix-admin-dashboard me command bhi nai chl rhi hai uska bhi dekhna hai plan btao uska fir code krna 
+me fis se secureitlabservices vale workspace se login kru to work krega?
