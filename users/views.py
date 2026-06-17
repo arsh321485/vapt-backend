@@ -7545,32 +7545,43 @@ class SlackSlashCommandView(APIView):
         ]
 
     def _format_teamoverview(self, data):
-        teams = data if isinstance(data, list) else (data.get("results") or data.get("teams") or [])
+        # API returns teams as a dict {"Team Name": {total, open, closed, by_risk}} or list
+        teams_raw = data.get("teams") or data.get("results") or (data if isinstance(data, list) else None)
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "👥 Team Overview", "emoji": True}},
             {"type": "divider"},
         ]
-        if not teams:
+        if isinstance(teams_raw, dict):
+            teams_list = list(teams_raw.items())[:10]
+        elif isinstance(teams_raw, list):
+            teams_list = [(t.get("team_name") or t.get("name") or "Unknown", t) for t in teams_raw[:10]]
+        else:
+            teams_list = []
+
+        if not teams_list:
             return blocks + self._text_block("No team data available.")
-        for team in teams[:10]:
-            name    = team.get("team_name") or team.get("name") or "Unknown"
-            assets  = team.get("total_assets") or team.get("asset_count") or 0
-            vulns   = team.get("total_vulns") or team.get("vuln_count") or 0
-            fixed   = team.get("fixed_count") or 0
-            total   = team.get("total_count") or vulns or 1
-            rate    = round((fixed / total) * 100) if total else 0
+
+        for name, stats in teams_list:
+            total  = stats.get("total", 0)
+            open_v = stats.get("open", 0)
+            closed = stats.get("closed", 0)
+            rate   = round((closed / total) * 100) if total else 0
+            by_risk = stats.get("by_risk") or {}
+            risk_parts = [f"{sev}: {cnt}" for sev, cnt in by_risk.items() if cnt]
+            risk_str = ("  _" + " | ".join(risk_parts) + "_") if risk_parts else ""
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"*{name}*\nAssets: {assets} | Vulns: {vulns} | Fixed: {fixed} ({rate}%)"}})
+                "text": f"*{name}*\nTotal: {total} | Open: {open_v} | Fixed: {closed} ({rate}%){risk_str}"}})
         return blocks
 
     def _format_vulnstats(self, data):
-        # Handle both list and summary response shapes
+        # API returns {total, vulnerabilities: [{vulnerability_name, risk_factor, assigned_team, ...}]}
         vulns = data.get("vulnerabilities") or data.get("results") or (data if isinstance(data, list) else [])
         counts = {"critical": 0, "high": 0, "medium": 0, "low": 0,
                   "open": 0, "in_progress": 0, "fixed": 0}
         if isinstance(vulns, list):
             for v in vulns:
-                sev = (v.get("severity") or "").lower()
+                # API uses risk_factor; fallback to severity for other shapes
+                sev = (v.get("risk_factor") or v.get("severity") or "").lower()
                 st  = (v.get("status") or "").lower().replace(" ", "_")
                 if sev in counts:
                     counts[sev] += 1
@@ -7580,7 +7591,7 @@ class SlackSlashCommandView(APIView):
             for k in counts:
                 counts[k] = data.get(k, 0)
 
-        total = counts["critical"] + counts["high"] + counts["medium"] + counts["low"] or data.get("total", 1)
+        total = data.get("total") or counts["critical"] + counts["high"] + counts["medium"] + counts["low"] or 0
         max_v = max(total, 1)
 
         bar_text = (
