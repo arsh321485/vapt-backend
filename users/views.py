@@ -7420,8 +7420,9 @@ class SlackSlashCommandView(APIView):
         if not email:
             return self._text_block("❌ Email not found. Ensure `users:read.email` scope is granted.")
 
-        first = real_name.split(" ")[0] if real_name else ""
-        last = " ".join(real_name.split(" ")[1:]) if " " in real_name else ""
+        parts_name = real_name.split(" ") if real_name else [""]
+        first = parts_name[0] or ""
+        last = " ".join(parts_name[1:]) if len(parts_name) > 1 else first  # fallback: repeat first name
 
         # Find the admin who ran this command (needed as admin_id for user creation)
         admin_user = next((u for u in User.objects.filter(slack_user_id=user_id)), None)
@@ -7447,9 +7448,10 @@ class SlackSlashCommandView(APIView):
             slack_user_id=user_id,
         )
 
-        if data.get("error"):
-            return self._text_block(f"❌ {data.get('error')}")
-        if "detail" in data and "already exists" not in str(data.get("detail", "")):
+        err = data.get("error") or data.get("non_field_errors") or data.get("email")
+        if err and "already exists" not in str(err):
+            return self._text_block(f"❌ {err}")
+        if data.get("detail") and "already exists" not in str(data.get("detail", "")):
             return self._text_block(f"❌ {data.get('detail')}")
 
         return [
