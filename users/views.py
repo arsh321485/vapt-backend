@@ -7147,7 +7147,13 @@ class SlackSlashCommandView(APIView):
     ADMIN_CHANNEL = "vaptfix-admin-dashboard"
 
     def post(self, request):
-        # Slack sends application/x-www-form-urlencoded — use request.POST
+        # Verify signature FIRST — before request.POST is accessed.
+        # Accessing request.POST causes DRF to consume the body stream, after which
+        # request._request.body raises RawPostDataException and signature check silently fails.
+        if not self._verify_signature(request):
+            return Response({"response_type": "ephemeral", "text": "❌ Unauthorized request."}, status=403)
+
+        # Slack sends application/x-www-form-urlencoded
         data = request.POST
         command = data.get("command", "")
         text = (data.get("text") or "").strip()
@@ -7155,9 +7161,6 @@ class SlackSlashCommandView(APIView):
         user_id = data.get("user_id", "")
         team_id = data.get("team_id", "")
         response_url = data.get("response_url", "")
-
-        if not self._verify_signature(request):
-            return Response({"response_type": "ephemeral", "text": "❌ Unauthorized request."}, status=403)
 
         if channel_name != self.ADMIN_CHANNEL:
             return Response({
