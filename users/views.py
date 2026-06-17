@@ -7244,6 +7244,8 @@ class SlackSlashCommandView(APIView):
         url = f"{backend}{path}"
         if method == "get":
             resp = _http_get(url, headers=headers, params=params, timeout=15)
+        elif method == "post":
+            resp = _http_post(url, headers=headers, json=json_body, timeout=15)
         elif method == "patch":
             resp = _http_patch(url, headers=headers, json=json_body, timeout=15)
         else:
@@ -7251,9 +7253,9 @@ class SlackSlashCommandView(APIView):
         return resp.json()
 
     def _get_bot_token(self, team_id):
-        # djongo cannot handle combined boolean + equality in WHERE — filter is_staff in Python
+        # Return bot token from any Slack-connected user in this workspace (all share the same bot token)
         return next(
-            (u.slack_bot_token for u in User.objects.filter(slack_team_id=team_id) if u.is_staff),
+            (u.slack_bot_token for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token),
             None,
         )
 
@@ -7385,18 +7387,19 @@ class SlackSlashCommandView(APIView):
         parts = text.strip().split()
         if len(parts) < 2:
             return self._text_block(
-                "Usage: `/adduser @username [role]`\nRoles: `admin` | `team` | `external`"
+                "Usage: `/adduser @username [role]`\nRoles: `external` | `internal`"
             )
         mention = parts[0]
         role = parts[1].lower()
 
-        # Parse Slack @mention format: <@U12345|name> or plain username
+        # Parse Slack @mention: <@U12345|name> or plain username
         slack_uid = mention.lstrip("<@").split("|")[0].rstrip(">") if mention.startswith("<@") else mention.lstrip("@")
 
         bot_token = self._get_bot_token(team_id)
         if not bot_token:
             return self._text_block("❌ Bot token not found for this workspace.")
 
+        # Get Slack user info
         resp = _http_get(
             "https://slack.com/api/users.info",
             params={"user": slack_uid},
@@ -7410,36 +7413,49 @@ class SlackSlashCommandView(APIView):
         real_name = resp.get("user", {}).get("real_name", "")
         email = profile.get("email", "")
         if not email:
-            return self._text_block(
-                "❌ Email not found. Ensure the `users:read.email` scope is granted."
-            )
+            return self._text_block("❌ Email not found. Ensure `users:read.email` scope is granted.")
 
         first = real_name.split(" ")[0] if real_name else ""
         last = " ".join(real_name.split(" ")[1:]) if " " in real_name else ""
 
-        user_obj, created = User.objects.get_or_create(
-            email=email,
-            defaults={
-                "firstname": first,
-                "lastname": last,
-                "is_active": True,
-                "is_staff": role == "admin",
-                "login_provider": "slack",
-                "slack_user_id": slack_uid,
-                "slack_team_id": team_id,
+        # Find the admin who ran this command (needed as admin_id for user creation)
+        admin_user = next((u for u in User.objects.filter(slack_user_id=user_id)), None)
+        if not admin_user:
+            return self._text_block("❌ Your Slack account is not linked to a VaptFix admin account.")
+
+        # Map Slack role names to VaptFix user_type
+        user_type = "internal" if role in ("internal", "team", "admin") else "external"
+
+        # Call the proper add-user-detail API — this creates users_details_userdetail
+        # linking the user to the correct admin_id so their data shows on admin dashboard
+        data = self._call_api(
+            "/api/admin/users_details/add-user-detail/", team_id,
+            method="post",
+            json_body={
+                "admin_id": str(admin_user.id),
+                "email": email,
+                "first_name": first,
+                "last_name": last,
+                "user_type": user_type,
+                "Member_role": ["Viewer"],
             },
+            slack_user_id=user_id,
         )
-        if created:
-            user_obj.set_unusable_password()
-            user_obj.save()
-            label = "✅ User created"
-        else:
-            label = "ℹ️ User already exists"
+
+        if data.get("error"):
+            return self._text_block(f"❌ {data.get('error')}")
+        if "detail" in data and "already exists" not in str(data.get("detail", "")):
+            return self._text_block(f"❌ {data.get('detail')}")
 
         return [
-            {"type": "header", "text": {"type": "plain_text", "text": "User Management", "emoji": True}},
+            {"type": "header", "text": {"type": "plain_text", "text": "✅ User Added to VaptFix", "emoji": True}},
             {"type": "section", "text": {"type": "mrkdwn",
-                "text": f"{label}\n*Email:* {email}\n*Name:* {real_name}\n*Role:* `{role}`"}},
+                "text": (
+                    f"*Name:* {real_name}\n"
+                    f"*Email:* `{email}`\n"
+                    f"*Type:* `{user_type}`\n\n"
+                    "A welcome email with login instructions has been sent."
+                )}},
         ]
 
     def _cmd_deleteuser(self, text, team_id, user_id):
