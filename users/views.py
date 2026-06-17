@@ -7388,14 +7388,40 @@ class SlackSlashCommandView(APIView):
                                   slack_user_id=user_id)
             return self._format_vulndata_list(data)
 
+    # Team short-code → full name mapping for /adduser
+    _TEAM_MAP = {
+        "pm": "Patch Management",
+        "cm": "Configuration Management",
+        "ns": "Network Security",
+        "af": "Architectural Flaws",
+    }
+
     def _cmd_adduser(self, text, team_id, user_id):
         parts = text.strip().split()
-        if len(parts) < 2:
+        # Minimum: @mention  type  team
+        if len(parts) < 3:
             return self._text_block(
-                "Usage: `/adduser @username [role]`\nRoles: `external` | `internal`"
+                "*Usage:* `/adduser @username external|internal pm|cm|ns|af [pm|cm|ns|af ...]`\n"
+                "*Teams:* `pm` = Patch Management | `cm` = Configuration Management | "
+                "`ns` = Network Security | `af` = Architectural Flaws\n"
+                "*Example:* `/adduser @Ritu external pm cm`"
             )
-        mention = parts[0]
-        role = parts[1].lower()
+
+        mention   = parts[0]
+        user_type = "internal" if parts[1].lower() in ("internal", "team", "admin") else "external"
+        team_codes = [p.lower() for p in parts[2:]]
+
+        # Validate team codes
+        unknown = [c for c in team_codes if c not in self._TEAM_MAP]
+        if unknown:
+            return self._text_block(
+                f"❌ Unknown team code(s): `{'`, `'.join(unknown)}`\n"
+                "Valid codes: `pm` | `cm` | `ns` | `af`"
+            )
+
+        team_names  = [self._TEAM_MAP[c] for c in team_codes]
+        primary_team = team_names[0]
+        member_role  = team_names  # each team grants full access to that team
 
         # Parse Slack @mention: <@U12345|name> or plain username
         slack_uid = mention.lstrip("<@").split("|")[0].rstrip(">") if mention.startswith("<@") else mention.lstrip("@")
@@ -7414,36 +7440,33 @@ class SlackSlashCommandView(APIView):
         if not resp.get("ok"):
             return self._text_block(f"❌ Slack user lookup failed: {resp.get('error')}")
 
-        profile = resp.get("user", {}).get("profile", {})
+        profile   = resp.get("user", {}).get("profile", {})
         real_name = resp.get("user", {}).get("real_name", "")
-        email = profile.get("email", "")
+        email     = profile.get("email", "")
         if not email:
             return self._text_block("❌ Email not found. Ensure `users:read.email` scope is granted.")
 
         parts_name = real_name.split(" ") if real_name else [""]
         first = parts_name[0] or ""
-        last = " ".join(parts_name[1:]) if len(parts_name) > 1 else first  # fallback: repeat first name
+        last  = " ".join(parts_name[1:]) if len(parts_name) > 1 else first
 
-        # Find the admin who ran this command (needed as admin_id for user creation)
+        # Find the admin who ran this command
         admin_user = next((u for u in User.objects.filter(slack_user_id=user_id)), None)
         if not admin_user:
             return self._text_block("❌ Your Slack account is not linked to a VaptFix admin account.")
 
-        # Map Slack role names to VaptFix user_type
-        user_type = "internal" if role in ("internal", "team", "admin") else "external"
-
-        # Call the proper add-user-detail API — this creates users_details_userdetail
-        # linking the user to the correct admin_id so their data shows on admin dashboard
+        # Call the proper add-user-detail API
         data = self._call_api(
             "/api/admin/users_details/add-user-detail/", team_id,
             method="post",
             json_body={
-                "admin_id": str(admin_user.id),
-                "email": email,
+                "admin_id":   str(admin_user.id),
+                "email":      email,
                 "first_name": first,
-                "last_name": last,
-                "user_type": user_type,
-                "Member_role": ["Viewer"],
+                "last_name":  last,
+                "user_type":  user_type,
+                "team_name":  primary_team,
+                "Member_role": member_role,
             },
             slack_user_id=user_id,
         )
@@ -7454,13 +7477,15 @@ class SlackSlashCommandView(APIView):
         if data.get("detail") and "already exists" not in str(data.get("detail", "")):
             return self._text_block(f"❌ {data.get('detail')}")
 
+        teams_display = ", ".join(team_names)
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "✅ User Added to VaptFix", "emoji": True}},
             {"type": "section", "text": {"type": "mrkdwn",
                 "text": (
                     f"*Name:* {real_name}\n"
                     f"*Email:* `{email}`\n"
-                    f"*Type:* `{user_type}`\n\n"
+                    f"*Type:* `{user_type}`\n"
+                    f"*Team(s):* {teams_display}\n\n"
                     "A welcome email with login instructions has been sent."
                 )}},
         ]
