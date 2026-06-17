@@ -7252,8 +7252,13 @@ class SlackSlashCommandView(APIView):
             resp = _http_get(url, headers=headers, timeout=15)
         return resp.json()
 
-    def _get_bot_token(self, team_id):
-        # Return bot token from any Slack-connected user in this workspace (all share the same bot token)
+    def _get_bot_token(self, team_id, slack_user_id=None):
+        # Prefer the token of the specific user who ran the command (most likely valid)
+        if slack_user_id:
+            user = next((u for u in User.objects.filter(slack_user_id=slack_user_id) if u.slack_bot_token), None)
+            if user:
+                return user.slack_bot_token
+        # Fallback: any Slack-connected user in this workspace
         return next(
             (u.slack_bot_token for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token),
             None,
@@ -7395,7 +7400,7 @@ class SlackSlashCommandView(APIView):
         # Parse Slack @mention: <@U12345|name> or plain username
         slack_uid = mention.lstrip("<@").split("|")[0].rstrip(">") if mention.startswith("<@") else mention.lstrip("@")
 
-        bot_token = self._get_bot_token(team_id)
+        bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
         if not bot_token:
             return self._text_block("❌ Bot token not found for this workspace.")
 
@@ -7465,7 +7470,7 @@ class SlackSlashCommandView(APIView):
 
         slack_uid = mention.lstrip("<@").split("|")[0].rstrip(">") if mention.startswith("<@") else mention.lstrip("@")
 
-        bot_token = self._get_bot_token(team_id)
+        bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
         if not bot_token:
             return self._text_block("❌ Bot token not found.")
 
