@@ -7221,19 +7221,25 @@ class SlackSlashCommandView(APIView):
         # Temporarily bypassed for debugging — re-enable after confirming commands work
         return True
 
-    def _get_admin_token(self, team_id):
+    def _get_admin_token(self, team_id, slack_user_id=None):
         from rest_framework_simplejwt.tokens import RefreshToken as _RT
-        # djongo cannot handle combined boolean + equality in WHERE — filter is_staff in Python
-        admin = next((u for u in User.objects.filter(slack_team_id=team_id) if u.is_staff), None)
-        if not admin:
-            admin = next((u for u in User.objects.all() if u.is_staff), None)
-        if admin:
-            return str(_RT.for_user(admin).access_token)
+        # 1. Exact match: user who ran the slash command
+        if slack_user_id:
+            user = next((u for u in User.objects.filter(slack_user_id=slack_user_id)), None)
+            if user:
+                return str(_RT.for_user(user).access_token)
+        # 2. Any Slack-connected user in this workspace (they connected the bot → they're the admin)
+        user = next((u for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token), None)
+        if not user:
+            # 3. Last resort: any Django staff user (djongo can't combine boolean+equality — filter in Python)
+            user = next((u for u in User.objects.all() if u.is_staff), None)
+        if user:
+            return str(_RT.for_user(user).access_token)
         return None
 
-    def _call_api(self, path, team_id, method="get", json_body=None, params=None):
+    def _call_api(self, path, team_id, method="get", json_body=None, params=None, slack_user_id=None):
         backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
-        token = self._get_admin_token(team_id)
+        token = self._get_admin_token(team_id, slack_user_id=slack_user_id)
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         url = f"{backend}{path}"
         if method == "get":
@@ -7255,31 +7261,36 @@ class SlackSlashCommandView(APIView):
 
     def _cmd_teamoverview(self, text, team_id, user_id):
         data = self._call_api(
-            "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id
+            "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
+            slack_user_id=user_id,
         )
         return self._format_teamoverview(data)
 
     def _cmd_vulnstats(self, text, team_id, user_id):
         data = self._call_api(
-            "/api/admin/admindashboard/dashboard/detailed-vulnerabilities/", team_id
+            "/api/admin/admindashboard/dashboard/detailed-vulnerabilities/", team_id,
+            slack_user_id=user_id,
         )
         return self._format_vulnstats(data)
 
     def _cmd_dashboard(self, text, team_id, user_id):
         data = self._call_api(
-            "/api/admin/admindashboard/dashboard/summary/", team_id
+            "/api/admin/admindashboard/dashboard/summary/", team_id,
+            slack_user_id=user_id,
         )
         return self._format_dashboard(data)
 
     def _cmd_supportdata(self, text, team_id, user_id):
         data = self._call_api(
-            "/api/admin/admindashboard/dashboard/support-requests/", team_id
+            "/api/admin/admindashboard/dashboard/support-requests/", team_id,
+            slack_user_id=user_id,
         )
         return self._format_supportdata(data)
 
     def _cmd_request(self, text, team_id, user_id):
         data = self._call_api(
-            "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id
+            "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+            slack_user_id=user_id,
         )
         return self._format_extension_requests(data)
 
@@ -7289,7 +7300,7 @@ class SlackSlashCommandView(APIView):
             return self._text_block("Usage: `/approve [request-id]`")
         data = self._call_api(
             f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
-            team_id, method="patch", json_body={"status": "approved"},
+            team_id, method="patch", json_body={"status": "approved"}, slack_user_id=user_id,
         )
         return self._format_status_update(data, "approved", request_id)
 
@@ -7302,13 +7313,14 @@ class SlackSlashCommandView(APIView):
         data = self._call_api(
             f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
             team_id, method="patch", json_body={"status": "rejected", "admin_comment": reason},
+            slack_user_id=user_id,
         )
         return self._format_status_update(data, "rejected", request_id)
 
     def _cmd_externalusers(self, text, team_id, user_id):
         data = self._call_api(
             "/api/admin/users_details/list-user-details/", team_id,
-            params={"user_type": "external"},
+            params={"user_type": "external"}, slack_user_id=user_id,
         )
         return self._format_externalusers(data)
 
@@ -7354,16 +7366,19 @@ class SlackSlashCommandView(APIView):
 
     def _cmd_vulndata(self, text, team_id, user_id):
         if text.lower() == "automation":
-            data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id)
+            data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
+                                  slack_user_id=user_id)
             return self._format_vulndata_automation(data)
         elif text:
             fix_vuln_id = text.strip()
             data = self._call_api(
-                f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id
+                f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id,
+                slack_user_id=user_id,
             )
             return self._format_vulndata_detail(data, fix_vuln_id)
         else:
-            data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id)
+            data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
+                                  slack_user_id=user_id)
             return self._format_vulndata_list(data)
 
     def _cmd_adduser(self, text, team_id, user_id):
