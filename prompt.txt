@@ -1,8 +1,6 @@
-Bharti Mali  [1:31 PM]
-/teamoverview
-vaptfix  [1:31 PM]
-:hourglass_flowing_sand: Processing /teamoverview...
-Only visible to you[1:31 PM]:x: /teamoverview failed: unhashable type: 'slice'
+Bharti Mali  [5:23 PM]
+/adduser @Ritu external
+vaptfix  [5:23 PM]
+:hourglass_flowing_sand: Processing /adduser...[5:23 PM]:x: Bot token not found for this workspace.
 
-
-ka data show nai ho rha hai 
+abhi esa aa rha hai 
