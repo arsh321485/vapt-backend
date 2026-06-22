@@ -28,6 +28,15 @@ TEAM_NAMES = [
     "Configuration Management",
 ]
 
+# vulnerability_cards stores assigned_team as slugs (e.g. "configuration-management")
+# but TEAM_NAMES uses Title Case — this mapping normalizes slugs to display names
+_SLUG_TO_TEAM = {
+    "patch-management":         "Patch Management",
+    "network-security":         "Network Security",
+    "architectural-flaws":      "Architectural Flaws",
+    "configuration-management": "Configuration Management",
+}
+
 # ── Shared MongoDB connection pool ──────────────────────────────────────────
 from vaptfix.mongo_client import MongoContext
 from vaptfix.mongo_client import ensure_performance_indexes
@@ -218,7 +227,10 @@ class MitigationStrategyByTeamAPIView(APIView):
                             vuln_cards.get((plugin_name, host_name))
                             or vuln_cards.get((plugin_name, ""))
                         )
-                        assigned_team = (card or {}).get("assigned_team", "") or ""
+                        _raw_team    = (card or {}).get("assigned_team", "") or ""
+                        # Normalize slug → Title Case (cards store "configuration-management",
+                        # teams dict keys are "Configuration Management")
+                        assigned_team = _SLUG_TO_TEAM.get(_raw_team.strip().lower(), _raw_team)
 
                         row = {
                             "id":            str(uuid.uuid4()),
@@ -315,13 +327,15 @@ class VulnerabilityAssetCountAPIView(APIView):
                 report_id = str(latest_doc.get("report_id", ""))
 
                 # Build plugin_name -> assigned_team from vulnerability_cards
+                # Normalize slug ("patch-management") → Title Case ("Patch Management")
                 plugin_team_map = {}
                 for card in vuln_card_coll.find(
                     {"report_id": report_id},
                     {"vulnerability_name": 1, "assigned_team": 1}
                 ):
-                    vname = card.get("vulnerability_name", "")
-                    team  = card.get("assigned_team", "") or ""
+                    vname    = card.get("vulnerability_name", "")
+                    raw_team = (card.get("assigned_team", "") or "").strip().lower()
+                    team     = _SLUG_TO_TEAM.get(raw_team, card.get("assigned_team", "") or "")
                     if vname and vname not in plugin_team_map:
                         plugin_team_map[vname] = team
 
