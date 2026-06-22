@@ -7645,6 +7645,64 @@ class SlackSlashCommandView(APIView):
         )
         return bool(resp and resp.json().get("ok"))
 
+    def _create_support_ticket(self, team_id, slack_user_id, team_name, message):
+        """
+        Insert a support request document into MongoDB so it appears in
+        dashboard counts and /support status. Called when a team member
+        runs /support raise via Slack.
+        """
+        from datetime import datetime as _dt
+        from vaptfix.mongo_client import MongoContext
+        import pymongo as _pymongo
+
+        try:
+            # Find workspace admin (has slack_bot_token = they connected Slack OAuth)
+            admin_user = next(
+                (u for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token),
+                None,
+            )
+            if not admin_user:
+                admin_user = next((u for u in User.objects.all() if u.is_staff), None)
+            if not admin_user:
+                logger.warning("[SlackCmd] _create_support_ticket: no admin user found")
+                return False
+
+            admin_id    = str(admin_user.id)
+            admin_email = getattr(admin_user, "email", None)
+
+            with MongoContext() as db:
+                # Get admin's latest report_id
+                conditions = [{"admin_id": admin_id}]
+                if admin_email:
+                    conditions.append({"admin_email": admin_email})
+                latest = db["nessus_reports"].find_one(
+                    {"$or": conditions},
+                    {"report_id": 1},
+                    sort=[("uploaded_at", _pymongo.DESCENDING)],
+                )
+                report_id = str(latest.get("report_id", "")) if latest else ""
+
+                doc = {
+                    "report_id":    report_id,
+                    "user_id":      slack_user_id,
+                    "admin_id":     admin_id,
+                    "vul_name":     None,
+                    "host_name":    None,
+                    "assigned_team": team_name,
+                    "step_number":  0,
+                    "description":  message,
+                    "status":       "open",
+                    "source":       "slack",
+                    "requested_by": f"slack:{slack_user_id}",
+                    "requested_at": _dt.utcnow(),
+                }
+                db["support_requests"].insert_one(doc)
+                logger.info("[SlackCmd] Support ticket created for team=%s", team_name)
+                return True
+        except Exception as exc:
+            logger.error("[SlackCmd] _create_support_ticket failed: %s", exc)
+            return False
+
     # ── Team command handlers ──────────────────────────────────────────────
 
     def _cmd_viewassigned(self, text, team_id, user_id, team_name):
@@ -7790,9 +7848,15 @@ class SlackSlashCommandView(APIView):
         parts = text.strip().split(None, 1)
         sub   = parts[0].lower() if parts else ""
         if sub == "status":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/support-requests/", team_id,
-            )
+            # Get report_id from team vulns, then fetch full support request list
+            _, report_id = self._get_team_vulns(team_name, team_id, user_id)
+            if report_id:
+                data = self._call_api(
+                    f"/api/admin/adminregister/register/support-requests/report/{report_id}/",
+                    team_id,
+                )
+            else:
+                data = {}
             return self._format_team_support_status(data, team_name)
         if sub == "raise":
             message = parts[1].strip().strip('"').strip("'") if len(parts) > 1 else ""
@@ -7801,6 +7865,9 @@ class SlackSlashCommandView(APIView):
                     '*Usage:* `/support raise "your message here"`\n'
                     '_Example:_ `/support raise "Need help with SSL cert fix on 192.168.1.1"`'
                 )
+            # Write to MongoDB so it shows in dashboard counts + /support status
+            self._create_support_ticket(team_id, user_id, team_name, message)
+            # Also notify admin via Slack
             self._notify_admin(
                 team_id, user_id,
                 f"🎫 *Support Request* — *{team_name}*\n"
@@ -8318,20 +8385,57 @@ class SlackSlashCommandView(APIView):
         ]
 
     def _format_team_support_status(self, data, team_name):
-        total   = data.get("total", 0)
-        pending = data.get("pending", 0)
-        closed  = data.get("closed", 0)
-        return [
+        # data is from SupportRequestByReportAPIView — full list filtered by team
+        all_results = data.get("results") or []
+        # Filter for this team only
+        team_results = [
+            r for r in all_results
+            if (r.get("assigned_team") or "").strip().lower() == team_name.strip().lower()
+        ] if all_results else []
+
+        total   = len(team_results)
+        pending = sum(1 for r in team_results if (r.get("status") or "open") != "closed")
+        closed  = sum(1 for r in team_results if (r.get("status") or "") == "closed")
+
+        blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🎫 {team_name} — Support Requests", "emoji": True}},
-            self._ctx('Support ticket summary for your team. Use /support raise "message" to open a new ticket'),
+            self._ctx('All support tickets raised by your team. Use /support raise "message" to open a new ticket'),
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*Total*\n{total}"},
-                {"type": "mrkdwn", "text": f"*Pending*\n{pending}"},
+                {"type": "mrkdwn", "text": f"*Open*\n{pending}"},
                 {"type": "mrkdwn", "text": f"*Closed*\n{closed}"},
             ]},
-            {"type": "section", "text": {"type": "mrkdwn",
-                "text": 'Use `/support raise "message"` to open a new ticket.'}},
         ]
+
+        if not team_results:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": (
+                    "📭 No support requests yet.\n"
+                    '_Open a ticket:_ `/support raise "your message here"`'
+                )}})
+            return blocks
+
+        blocks.append({"type": "divider"})
+        st_icons = {"open": "🔵", "closed": "✅", "pending": "🔵", "review": "🟡"}
+        for r in team_results[:8]:
+            vuln  = r.get("vul_name") or "General Request"
+            host  = r.get("host_name") or ""
+            desc  = r.get("description") or "—"
+            st    = (r.get("status") or "open").lower()
+            by    = r.get("requested_by") or "Team"
+            icon  = st_icons.get(st, "🔵")
+            host_str = f" | Host: `{host}`" if host else ""
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": (
+                    f"{icon} *{vuln}*{host_str}\n"
+                    f"_{desc}_\n"
+                    f"By: {by} | Status: *{st.capitalize()}*"
+                )}})
+
+        if total > 8:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...and {total - 8} more tickets. View all in dashboard._"}})
+        return blocks
 
     def _format_team_extend_status(self, data, team_name):
         results = data.get("results") or []
