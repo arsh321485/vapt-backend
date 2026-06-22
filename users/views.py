@@ -7137,14 +7137,23 @@ def teams_webhook_handler(request):
 
 class SlackSlashCommandView(APIView):
     """
-    Handles all VaptFix Slack slash commands for the admin channel (vaptfix-admin-dashboard).
-    Slack POSTs form-encoded data here on every slash command invocation.
-    We ack immediately (within 3s) and post the real result to response_url in a background thread.
+    Handles all VaptFix Slack slash commands.
+    Admin commands: #vaptfix-admin-dashboard
+    Team commands: #vaptfix-*-team channels (channel name determines team context).
+    Acks Slack within 3s; posts real result to response_url via background thread.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
 
     ADMIN_CHANNEL = "vaptfix-admin-dashboard"
+    TEAM_CHANNELS = {
+        "vaptfix-patch-management-team":         "Patch Management",
+        "vaptfix-configuration-management-team": "Configuration Management",
+        "vaptfix-network-security-team":         "Network Security",
+        "vaptfix-architectural-flaws-team":      "Architectural Flaws",
+    }
+    _SEV_PREFIX = [("Critical", "c"), ("High", "h"), ("Medium", "m"), ("Low", "l")]
+    _SEV_ICONS  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🔵"}
 
     def post(self, request):
         # Verify signature FIRST — before request.POST is accessed.
@@ -7162,47 +7171,67 @@ class SlackSlashCommandView(APIView):
         team_id = data.get("team_id", "")
         response_url = data.get("response_url", "")
 
-        if channel_name != self.ADMIN_CHANNEL:
+        if channel_name == self.ADMIN_CHANNEL:
+            handlers = {
+                "/teamoverview":   self._cmd_teamoverview,
+                "/vulnstats":      self._cmd_vulnstats,
+                "/dashboard":      self._cmd_dashboard,
+                "/externalusers":  self._cmd_externalusers,
+                "/adduser":        self._cmd_adduser,
+                "/deleteuser":     self._cmd_deleteuser,
+                "/supportdata":    self._cmd_supportdata,
+                "/vulndata":       self._cmd_vulndata,
+                "/approve":        self._cmd_approve,
+                "/reject":         self._cmd_reject,
+                "/request":        self._cmd_request,
+                "/report":         self._cmd_report,
+            }
+            team_name = None
+        elif channel_name in self.TEAM_CHANNELS:
+            team_name = self.TEAM_CHANNELS[channel_name]
+            handlers = {
+                "/viewassigned":     self._cmd_viewassigned,
+                "/mitigationstatus": self._cmd_mitigationstatus,
+                "/startfix":         self._cmd_startfix,
+                "/mitigated":        self._cmd_mitigated,
+                "/retest":           self._cmd_retest,
+                "/support":          self._cmd_support,
+                "/extend":           self._cmd_extend,
+                "/scriptstats":      self._cmd_scriptstats,
+            }
+        else:
             return Response({
                 "response_type": "ephemeral",
-                "text": f"❌ This command only works in *#vaptfix-admin-dashboard*.",
+                "text": (
+                    "❌ VaptFix commands are not available in this channel.\n"
+                    "*Admin commands:* `#vaptfix-admin-dashboard`\n"
+                    "*Team commands:* `#vaptfix-patch-management-team`, "
+                    "`#vaptfix-configuration-management-team`, "
+                    "`#vaptfix-network-security-team`, "
+                    "`#vaptfix-architectural-flaws-team`"
+                ),
             })
-
-        handlers = {
-            "/teamoverview":  self._cmd_teamoverview,
-            "/vulnstats":     self._cmd_vulnstats,
-            "/dashboard":     self._cmd_dashboard,
-            "/externalusers": self._cmd_externalusers,
-            "/adduser":       self._cmd_adduser,
-            "/deleteuser":    self._cmd_deleteuser,
-            "/supportdata":   self._cmd_supportdata,
-            "/vulndata":      self._cmd_vulndata,
-            "/approve":       self._cmd_approve,
-            "/reject":        self._cmd_reject,
-            "/request":       self._cmd_request,
-            "/report":        self._cmd_report,
-        }
 
         handler = handlers.get(command)
         if not handler:
             return Response({
                 "response_type": "ephemeral",
-                "text": f"❌ Unknown command `{command}`.",
+                "text": f"❌ Unknown command `{command}` for this channel.",
             })
 
         # Ack Slack immediately; process and reply via response_url in background
         threading.Thread(
             target=self._run_command,
-            args=(handler, text, team_id, user_id, response_url, command),
+            args=(handler, text, team_id, user_id, response_url, command, team_name),
             daemon=True,
         ).start()
         return Response({"response_type": "in_channel", "text": f"⏳ Processing `{command}`..."})
 
     # ── Internal helpers ──────────────────────────────────────────────────
 
-    def _run_command(self, handler, text, team_id, user_id, response_url, command):
+    def _run_command(self, handler, text, team_id, user_id, response_url, command, team_name=None):
         try:
-            blocks = handler(text, team_id, user_id)
+            blocks = handler(text, team_id, user_id, team_name) if team_name is not None else handler(text, team_id, user_id)
             payload = {"response_type": "in_channel", "replace_original": True, "blocks": blocks}
         except Exception as exc:
             logger.exception(f"[SlackCmd] {command} failed: {exc}")
@@ -7523,6 +7552,313 @@ class SlackSlashCommandView(APIView):
         except User.DoesNotExist:
             return self._text_block(f"❌ No VaptFix account found for `{email}`.")
 
+    # ── Team command helpers ───────────────────────────────────────────────
+
+    def _get_team_vulns(self, team_name, team_id, user_id):
+        """
+        Fetch vulns for a specific team and assign deterministic short IDs.
+        Short IDs: c1/c2 = Critical, h1/h2 = High, m1/m2 = Medium, l1/l2 = Low.
+        Sorted alphabetically within each severity — same order every call.
+        Returns (sorted_vulns, report_id).
+        """
+        data = self._call_api("/api/admin/adminmitigationstrategy/by-team/", team_id, slack_user_id=user_id)
+        teams     = data.get("teams") or {}
+        team_data = teams.get(team_name) or {}
+        vulns     = team_data.get("vulnerabilities") or []
+        report_id = data.get("report_id", "")
+
+        grouped = {"Critical": [], "High": [], "Medium": [], "Low": []}
+        for v in vulns:
+            sev = (v.get("risk_factor") or "").strip().title()
+            bucket = grouped.get(sev, grouped["Low"])
+            bucket.append(v)
+        for sev_list in grouped.values():
+            sev_list.sort(key=lambda x: (x.get("plugin_name") or "").lower())
+
+        result = []
+        for sev, prefix in self._SEV_PREFIX:
+            for i, v in enumerate(grouped[sev], 1):
+                entry = dict(v)
+                entry["short_id"]  = f"{prefix}{i}"
+                entry["sev_label"] = sev
+                result.append(entry)
+        return result, report_id
+
+    def _resolve_vuln_id(self, short_id, team_name, team_id, user_id):
+        """Resolve a short ID (e.g. c2, h1) to the actual vuln dict."""
+        vulns, report_id = self._get_team_vulns(team_name, team_id, user_id)
+        target = next((v for v in vulns if v.get("short_id") == short_id.lower()), None)
+        return target, report_id
+
+    def _get_admin_channel_id(self, bot_token):
+        """Look up the vaptfix-admin-dashboard channel ID via Slack API."""
+        resp = _http_get(
+            "https://slack.com/api/conversations.list",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            params={"types": "public_channel,private_channel", "limit": 200},
+            timeout=10,
+        )
+        if not resp:
+            return None
+        for ch in (resp.json().get("channels") or []):
+            if ch.get("name") == self.ADMIN_CHANNEL:
+                return ch.get("id")
+        return None
+
+    def _notify_admin(self, team_id, user_id, message):
+        """Post a notification message to #vaptfix-admin-dashboard."""
+        bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
+        if not bot_token:
+            return False
+        admin_ch_id = self._get_admin_channel_id(bot_token)
+        if not admin_ch_id:
+            return False
+        resp = _http_post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+            json={"channel": admin_ch_id, "text": message},
+            timeout=10,
+        )
+        return bool(resp and resp.json().get("ok"))
+
+    # ── Team command handlers ──────────────────────────────────────────────
+
+    def _cmd_viewassigned(self, text, team_id, user_id, team_name):
+        """
+        /viewassigned — Show all assets & vulns assigned to your team
+        /viewassigned vulns — Show only vulnerabilities with IDs (c1, h1...)
+        /viewassigned assets — Show only assigned assets (hosts)
+        """
+        arg = text.strip().lower()
+        if arg == "assets":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/assets-by-team/", team_id, slack_user_id=user_id,
+            )
+            return self._format_team_assets(data, team_name)
+        vulns, _ = self._get_team_vulns(team_name, team_id, user_id)
+        return self._format_viewassigned(vulns, team_name)
+
+    def _cmd_mitigationstatus(self, text, team_id, user_id, team_name):
+        """
+        /mitigationstatus — Check mitigation status for all vulns assigned to your team
+        Shows: open | in-progress | closed | overdue counts and fix rate
+        """
+        vulns, _ = self._get_team_vulns(team_name, team_id, user_id)
+        return self._format_mitigationstatus(vulns, team_name)
+
+    def _cmd_startfix(self, text, team_id, user_id, team_name):
+        """
+        /startfix — Start fix workflow (Critical → High → Medium → Low, most common first)
+        /startfix [vuln-id] — Jump to a specific vulnerability e.g. /startfix h1
+        """
+        vuln_id = text.strip().lower()
+        vulns, _ = self._get_team_vulns(team_name, team_id, user_id)
+        if not vulns:
+            return self._text_block(f"✅ No vulnerabilities currently assigned to *{team_name}* team.")
+        if vuln_id:
+            target = next((v for v in vulns if v.get("short_id") == vuln_id), None)
+            if not target:
+                return self._text_block(
+                    f"❌ Vulnerability `{vuln_id}` not found.\n"
+                    "Use `/viewassigned vulns` to see all IDs."
+                )
+            return self._format_startfix_single(target, team_name)
+        return self._format_startfix_list(vulns, team_name)
+
+    def _cmd_mitigated(self, text, team_id, user_id, team_name):
+        """
+        /mitigated [vuln-id] — Mark a full vulnerability as mitigated e.g. /mitigated h1
+        /mitigated [vuln-id] [step-id] — Mark a specific step done e.g. /mitigated h1 s3
+        Admin is notified automatically for verification.
+        """
+        parts = text.strip().lower().split()
+        if not parts:
+            return self._text_block(
+                "*Usage:*\n"
+                "• `/mitigated [vuln-id]` — Mark full vuln as done  _e.g. `/mitigated h1`_\n"
+                "• `/mitigated [vuln-id] [step-id]` — Mark a step done  _e.g. `/mitigated h1 s3`_\n"
+                "Use `/viewassigned vulns` to see IDs."
+            )
+        vuln_id = parts[0]
+        step_id = parts[1] if len(parts) > 1 else None
+        target, _ = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
+        if not target:
+            return self._text_block(
+                f"❌ Vulnerability `{vuln_id}` not found in *{team_name}*.\n"
+                "Use `/viewassigned vulns` to see IDs."
+            )
+        plugin_name = target.get("plugin_name") or ""
+        host_name   = target.get("host_name") or ""
+        sev         = target.get("risk_factor") or target.get("sev_label") or "Medium"
+        icon        = self._SEV_ICONS.get(sev, "⚪")
+        if step_id:
+            step_num = step_id.lstrip("s")
+            self._notify_admin(
+                team_id, user_id,
+                f"🔧 *Step Update* — *{team_name}*\n"
+                f"Vulnerability: `{plugin_name}` {icon} {sev} on `{host_name}`\n"
+                f"Step {step_num} marked complete by team."
+            )
+            return self._text_block(
+                f"✅ *Step {step_num} marked complete*\n"
+                f"Vuln: `{plugin_name}` | Host: `{host_name}`\n"
+                "_Admin notified. Continue with next step or run `/retest {vuln_id}` when fully done._"
+            )
+        self._notify_admin(
+            team_id, user_id,
+            f"✅ *Mitigation Complete* — *{team_name}*\n"
+            f"Vulnerability: `{plugin_name}` {icon} {sev} on `{host_name}`\n"
+            f"Team has marked this as fully mitigated. Please verify in dashboard."
+        )
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "✅ Marked as Mitigated", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*Vulnerability:* `{plugin_name}`\n"
+                f"*Host:* `{host_name}`\n"
+                f"*Severity:* {icon} {sev}\n"
+                f"*Team:* {team_name}\n\n"
+                f"_Admin has been notified. Run `/retest {vuln_id}` to request formal retesting._"
+            )}},
+        ]
+
+    def _cmd_retest(self, text, team_id, user_id, team_name):
+        """
+        /retest [vuln-id] — Submit a fixed vulnerability for admin retesting e.g. /retest h1
+        Admin is notified to schedule a verification scan.
+        """
+        vuln_id = text.strip().lower()
+        if not vuln_id:
+            return self._text_block(
+                "*Usage:* `/retest [vuln-id]`  _e.g. `/retest h1`_\n"
+                "Use `/viewassigned vulns` to see IDs."
+            )
+        target, _ = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
+        if not target:
+            return self._text_block(
+                f"❌ Vulnerability `{vuln_id}` not found.\n"
+                "Use `/viewassigned vulns` to see IDs."
+            )
+        plugin_name = target.get("plugin_name") or ""
+        host_name   = target.get("host_name") or ""
+        sev         = target.get("risk_factor") or target.get("sev_label") or "Medium"
+        icon        = self._SEV_ICONS.get(sev, "⚪")
+        self._notify_admin(
+            team_id, user_id,
+            f"🔁 *Retest Request* — *{team_name}*\n"
+            f"Vulnerability: `{plugin_name}` {icon} {sev} on `{host_name}`\n"
+            f"Team reports fix is complete and requests admin verification/retesting."
+        )
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "🔁 Retest Request Submitted", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*Vulnerability:* `{plugin_name}`\n"
+                f"*Host:* `{host_name}`\n"
+                f"*Severity:* {icon} {sev}\n\n"
+                "_Admin notified. They will schedule verification and confirm the fix._"
+            )}},
+        ]
+
+    def _cmd_support(self, text, team_id, user_id, team_name):
+        """
+        /support raise "message" — Open a new support ticket with your description
+        /support status — View your team's support request status
+        """
+        parts = text.strip().split(None, 1)
+        sub   = parts[0].lower() if parts else ""
+        if sub == "status":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/support-requests/", team_id, slack_user_id=user_id,
+            )
+            return self._format_team_support_status(data, team_name)
+        if sub == "raise":
+            message = parts[1].strip().strip('"').strip("'") if len(parts) > 1 else ""
+            if not message:
+                return self._text_block(
+                    '*Usage:* `/support raise "your message here"`\n'
+                    '_Example:_ `/support raise "Need help with SSL cert fix on 192.168.1.1"`'
+                )
+            self._notify_admin(
+                team_id, user_id,
+                f"🎫 *Support Request* — *{team_name}*\n"
+                f"Message: {message}\n"
+                f"Please review and respond via dashboard."
+            )
+            return [
+                {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Request Raised", "emoji": True}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": (
+                    f"*Message:* {message}\n"
+                    f"*Team:* {team_name}\n\n"
+                    "_Admin has been notified. Use `/support status` to track updates._"
+                )}},
+            ]
+        return self._text_block(
+            "*Support Commands:*\n"
+            '• `/support raise "message"` — Open a new support ticket\n'
+            "• `/support status` — View your team's support tickets"
+        )
+
+    def _cmd_extend(self, text, team_id, user_id, team_name):
+        """
+        /extend [vuln-id] [reason] — Request a deadline extension e.g. /extend h1 Need 7 more days
+        /extend status — Check status of your team's extension requests
+        """
+        parts = text.strip().split(None, 1)
+        sub   = parts[0].lower() if parts else ""
+        if sub == "status":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/",
+                team_id, slack_user_id=user_id,
+            )
+            return self._format_team_extend_status(data, team_name)
+        if not sub:
+            return self._text_block(
+                "*Extension Commands:*\n"
+                "• `/extend [vuln-id] [reason]` — Request deadline extension\n"
+                "  _Example:_ `/extend h1 Need 7 more days for patch testing`\n"
+                "• `/extend status` — Check your extension request status"
+            )
+        vuln_id = sub
+        reason  = parts[1].strip() if len(parts) > 1 else ""
+        if not reason:
+            return self._text_block(
+                f"*Usage:* `/extend {vuln_id} [reason]`\n"
+                f"_Example:_ `/extend {vuln_id} Need 7 more days for patch testing`"
+            )
+        target, _ = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
+        if not target:
+            return self._text_block(
+                f"❌ Vulnerability `{vuln_id}` not found.\n"
+                "Use `/viewassigned vulns` to see IDs."
+            )
+        plugin_name = target.get("plugin_name") or ""
+        host_name   = target.get("host_name") or ""
+        sev         = target.get("risk_factor") or target.get("sev_label") or "Medium"
+        icon        = self._SEV_ICONS.get(sev, "⚪")
+        self._notify_admin(
+            team_id, user_id,
+            f"⏳ *Timeline Extension Request* — *{team_name}*\n"
+            f"Vulnerability: `{plugin_name}` {icon} {sev} on `{host_name}`\n"
+            f"Reason: {reason}\n"
+            f"Use `/approve [request-id]` or `/reject [request-id]` to respond."
+        )
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "⏳ Extension Request Submitted", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*Vulnerability:* `{plugin_name}`\n"
+                f"*Severity:* {icon} {sev}\n"
+                f"*Reason:* {reason}\n\n"
+                "_Admin notified. Use `/extend status` to track the decision._"
+            )}},
+        ]
+
+    def _cmd_scriptstats(self, text, team_id, user_id, team_name):
+        """
+        /scriptstats — View script download stats for your team
+        /scriptstats [vuln-id] — Stats for a specific vulnerability e.g. /scriptstats h1
+        """
+        data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=user_id)
+        return self._format_scriptstats(data, team_name)
+
     # ── Formatters ────────────────────────────────────────────────────────
 
     def _text_block(self, text):
@@ -7780,3 +8116,238 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*Manual Only*\n{manual}"},
             ]},
         ]
+
+    # ── Team channel formatters ────────────────────────────────────────────
+
+    def _ctx(self, text):
+        """Small context/description line shown under the header in Slack."""
+        return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+    def _format_viewassigned(self, vulns, team_name):
+        if not vulns:
+            return [
+                {"type": "header", "text": {"type": "plain_text", "text": f"📋 {team_name}", "emoji": True}},
+                self._ctx("Shows all vulnerabilities & assets assigned to your team with short IDs (c1, h1, m1, l1...). Use these IDs with /startfix, /mitigated, /retest, /extend"),
+                {"type": "section", "text": {"type": "mrkdwn",
+                    "text": "✅ No vulnerabilities currently assigned to your team."}},
+            ]
+        total  = len(vulns)
+        open_c = sum(1 for v in vulns if v.get("status") == "open")
+        closed = sum(1 for v in vulns if v.get("status") == "closed")
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"📋 {team_name} — Assigned Work", "emoji": True}},
+            self._ctx("All vulnerabilities assigned to your team. Use IDs (c1, h1...) with /startfix, /mitigated, /retest, /extend"),
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Total Vulns*\n{total}"},
+                {"type": "mrkdwn", "text": f"*Open*\n{open_c}"},
+                {"type": "mrkdwn", "text": f"*Fixed*\n{closed}"},
+            ]},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": "_IDs: use with `/startfix`, `/mitigated`, `/retest`, `/extend`_"}},
+            {"type": "divider"},
+        ]
+        for v in vulns[:12]:
+            sid    = v.get("short_id", "?")
+            name   = v.get("plugin_name") or "Unknown"
+            host   = v.get("host_name") or "—"
+            sev    = v.get("risk_factor") or v.get("sev_label") or "Low"
+            status = v.get("status") or "open"
+            icon   = self._SEV_ICONS.get(sev, "⚪")
+            st_icon = "✅" if status == "closed" else "🔓"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"{icon} `{sid}` *{name}*\n      Host: `{host}` | {st_icon} {status.capitalize()}"}})
+        if total > 12:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...and {total - 12} more vulnerabilities._"}})
+        return blocks
+
+    def _format_team_assets(self, data, team_name):
+        by_team = data.get("by_team") or []
+        team_entry = next(
+            (t for t in by_team if (t.get("team") or "").lower() == team_name.lower()), None
+        )
+        if not team_entry:
+            return self._text_block(f"No assets currently assigned to *{team_name}* team.")
+        count  = team_entry.get("asset_count") or team_entry.get("count") or 0
+        assets = team_entry.get("assets") or team_entry.get("hosts") or []
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🖥 {team_name} — Assets", "emoji": True}},
+            self._ctx("All host/IP assets currently assigned to your team from the latest report"),
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Assets:* {count}"}},
+            {"type": "divider"},
+        ]
+        for a in assets[:10]:
+            host = a if isinstance(a, str) else (a.get("host_name") or a.get("host") or str(a))
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"🔹 `{host}`"}})
+        if count > 10:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...and {count - 10} more._"}})
+        return blocks
+
+    def _format_mitigationstatus(self, vulns, team_name):
+        counts     = {"open": 0, "closed": 0, "in_progress": 0, "overdue": 0}
+        sev_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+        for v in vulns:
+            st  = (v.get("status") or "open").lower().replace(" ", "_").replace("-", "_")
+            if st in counts:
+                counts[st] += 1
+            sev = (v.get("risk_factor") or v.get("sev_label") or "").strip().title()
+            if sev in sev_counts:
+                sev_counts[sev] += 1
+        total = len(vulns)
+        rate  = round((counts["closed"] / total) * 100) if total else 0
+        bar   = self._bar(counts["closed"], max(total, 1), width=10)
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": f"📊 {team_name} — Mitigation Status", "emoji": True}},
+            self._ctx("Current fix progress for all your team's vulnerabilities — open, closed, in-progress, overdue counts"),
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Total*\n{total}"},
+                {"type": "mrkdwn", "text": f"*Fix Rate*\n{rate}%"},
+                {"type": "mrkdwn", "text": f"*Open*\n{counts['open']}"},
+                {"type": "mrkdwn", "text": f"*Closed*\n{counts['closed']}"},
+                {"type": "mrkdwn", "text": f"*In Progress*\n{counts['in_progress']}"},
+                {"type": "mrkdwn", "text": f"*Overdue*\n{counts['overdue']}"},
+            ]},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Progress:* `{bar}` {rate}%"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*By Severity:* "
+                f"🔴 Critical: {sev_counts['Critical']} | "
+                f"🟠 High: {sev_counts['High']} | "
+                f"🟡 Medium: {sev_counts['Medium']} | "
+                f"🔵 Low: {sev_counts['Low']}"
+            )}},
+        ]
+
+    def _format_startfix_list(self, vulns, team_name):
+        next_vuln = next((v for v in vulns if v.get("status") != "closed"), None)
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🔧 {team_name} — Fix Workflow", "emoji": True}},
+            self._ctx("Priority fix order: Critical → High → Medium → Low. Run /startfix [id] e.g. /startfix h1 for step-by-step fix guide"),
+        ]
+        if next_vuln:
+            sid  = next_vuln.get("short_id", "?")
+            name = next_vuln.get("plugin_name") or "Unknown"
+            sev  = next_vuln.get("risk_factor") or next_vuln.get("sev_label") or ""
+            host = next_vuln.get("host_name") or "—"
+            icon = self._SEV_ICONS.get(sev, "⚪")
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*▶ Next Priority:* {icon} `{sid}` — *{name}*\n"
+                f"Host: `{host}` | Severity: {sev}\n"
+                f"Run `/startfix {sid}` for fix steps."
+            )}})
+            blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+            "text": "*All Assigned Vulnerabilities (Priority Order):*"}})
+        for v in vulns[:10]:
+            sid    = v.get("short_id", "?")
+            name   = v.get("plugin_name") or "Unknown"
+            sev    = v.get("risk_factor") or v.get("sev_label") or "Low"
+            status = v.get("status") or "open"
+            icon   = self._SEV_ICONS.get(sev, "⚪")
+            st_icon = "✅" if status == "closed" else "🔓"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"{st_icon} {icon} `{sid}` {name}"}})
+        if len(vulns) > 10:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...{len(vulns) - 10} more. Use `/viewassigned` for full list._"}})
+        return blocks
+
+    def _format_startfix_single(self, vuln, team_name):
+        name = vuln.get("plugin_name") or "Unknown"
+        sev  = vuln.get("risk_factor") or vuln.get("sev_label") or "Medium"
+        host = vuln.get("host_name") or "—"
+        port = vuln.get("port") or "—"
+        os_v = vuln.get("os") or "—"
+        sid  = vuln.get("short_id", "?")
+        icon = self._SEV_ICONS.get(sev, "⚪")
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🔧 Fix: {name[:60]}", "emoji": True}},
+            self._ctx(f"Step-by-step fix guide for {name[:50]}. Run /mitigated {sid} when done, then /retest {sid} to notify admin"),
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
+                {"type": "mrkdwn", "text": f"*Severity*\n{icon} {sev}"},
+                {"type": "mrkdwn", "text": f"*Host*\n`{host}`"},
+                {"type": "mrkdwn", "text": f"*Port*\n{port}"},
+            ]},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                "*Fix Steps:*\n"
+                "1️⃣ Identify & isolate the affected system\n"
+                "2️⃣ Apply the recommended patch or configuration fix\n"
+                "3️⃣ Verify the fix is correctly applied\n"
+                f"4️⃣ Run `/mitigated {sid}` when complete\n"
+                f"5️⃣ Run `/retest {sid}` to notify admin for verification"
+            )}},
+        ]
+
+    def _format_team_support_status(self, data, team_name):
+        total   = data.get("total", 0)
+        pending = data.get("pending", 0)
+        closed  = data.get("closed", 0)
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🎫 {team_name} — Support Requests", "emoji": True}},
+            self._ctx('Support ticket summary for your team. Use /support raise "message" to open a new ticket'),
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Total*\n{total}"},
+                {"type": "mrkdwn", "text": f"*Pending*\n{pending}"},
+                {"type": "mrkdwn", "text": f"*Closed*\n{closed}"},
+            ]},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": 'Use `/support raise "message"` to open a new ticket.'}},
+        ]
+
+    def _format_team_extend_status(self, data, team_name):
+        results = data.get("results") or []
+        team_results = [
+            r for r in results
+            if (r.get("requested_by") or "").lower() == team_name.lower()
+        ] or results
+        status_icons = {"review": "🔵", "approved": "✅", "rejected": "❌"}
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"⏳ {team_name} — Extension Requests", "emoji": True}},
+            self._ctx("Timeline extension requests for your team. Use /extend [id] reason to request a new extension"),
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Total Requests:* {len(team_results)}"}},
+            {"type": "divider"},
+        ]
+        if not team_results:
+            return blocks + self._text_block("No extension requests found.")
+        for r in team_results[:6]:
+            vuln   = r.get("vul_name") or "Unknown"
+            sev    = (r.get("severity") or "").capitalize()
+            st     = r.get("status", "review")
+            days   = r.get("extension_days", 0)
+            reason = r.get("reason", "—")
+            icon   = status_icons.get(st, "🔵")
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"{icon} *{vuln}* [{sev}] — +{days} days\n_Status: {st}_ | Reason: {reason}"}})
+        return blocks
+
+    def _format_scriptstats(self, data, team_name):
+        items = data if isinstance(data, list) else (data.get("results") or data.get("vulnerabilities") or [])
+        team_items = [
+            v for v in items
+            if (v.get("assigned_team") or "").lower() == team_name.lower()
+        ] or items
+        auto_count = sum(1 for v in team_items if v.get("is_automated") or v.get("has_script"))
+        total      = len(team_items)
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🤖 {team_name} — Script Stats", "emoji": True}},
+            self._ctx("Script download stats — shows which vulnerabilities have automated fix scripts available for your team"),
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Total Vulns*\n{total}"},
+                {"type": "mrkdwn", "text": f"*With Scripts*\n{auto_count}"},
+                {"type": "mrkdwn", "text": f"*Manual Only*\n{total - auto_count}"},
+            ]},
+            {"type": "divider"},
+        ]
+        if not team_items:
+            return blocks + self._text_block("No script data available for your team.")
+        for v in team_items[:8]:
+            name     = v.get("vulnerability_name") or v.get("plugin_name") or "Unknown"
+            has_scr  = v.get("is_automated") or v.get("has_script")
+            dl_count = v.get("download_count") or v.get("script_downloads") or 0
+            icon     = "🤖" if has_scr else "📝"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"{icon} *{name}*\n      Downloads: {dl_count}"}})
+        return blocks
