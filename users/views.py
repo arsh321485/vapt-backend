@@ -7878,12 +7878,12 @@ class SlackSlashCommandView(APIView):
         /viewassigned assets — Show only assigned assets (hosts)
         """
         arg = text.strip().lower()
-        if arg == "assets":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/assets-by-team/", team_id,
-            )
-            return self._format_team_assets(data, team_name)
         vulns, _, raw_data = self._get_team_vulns(team_name, team_id, user_id)
+        if arg == "assets":
+            # Build asset list from vulns — avoids a separate API call with wrong JWT
+            hosts = sorted({v.get("host_name", "") for v in vulns if v.get("host_name")})
+            data  = {"by_team": [{"team": team_name, "asset_count": len(hosts), "assets": hosts}]}
+            return self._format_team_assets(data, team_name)
         return self._format_viewassigned(vulns, team_name, raw_data)
 
     def _cmd_mitigationstatus(self, text, team_id, user_id, team_name):
