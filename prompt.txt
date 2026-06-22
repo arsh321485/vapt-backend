@@ -1,0 +1,10 @@
+ /viewassigned       → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+  /mitigationstatus   → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+  /startfix           → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+  /mitigated          → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+  /retest             → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+  /support            → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+  /extend             → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+  /scriptstats        → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+
+  mujhe eske according hi short description do na
