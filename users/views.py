@@ -7582,14 +7582,18 @@ class SlackSlashCommandView(APIView):
         Fetch vulns for a specific team and assign deterministic short IDs.
         Short IDs: c1/c2 = Critical, h1/h2 = High, m1/m2 = Medium, l1/l2 = Low.
         Sorted alphabetically within each severity — same order every call.
-        Returns (sorted_vulns, report_id).
+        Returns (sorted_vulns, report_id, raw_data).
         """
         # Always use workspace admin token — team members don't own this data
-        data = self._call_api("/api/admin/adminmitigationstrategy/by-team/", team_id)
+        data      = self._call_api("/api/admin/adminmitigationstrategy/by-team/", team_id)
         teams     = data.get("teams") or {}
         team_data = teams.get(team_name) or {}
         vulns     = team_data.get("vulnerabilities") or []
         report_id = data.get("report_id", "")
+        logger.info(
+            "[SlackCmd] _get_team_vulns team=%s report_id=%s vuln_count=%d teams_in_response=%s api_detail=%s",
+            team_name, report_id, len(vulns), list(teams.keys()), data.get("detail", ""),
+        )
 
         grouped = {"Critical": [], "High": [], "Medium": [], "Low": []}
         for v in vulns:
@@ -7606,11 +7610,11 @@ class SlackSlashCommandView(APIView):
                 entry["short_id"]  = f"{prefix}{i}"
                 entry["sev_label"] = sev
                 result.append(entry)
-        return result, report_id
+        return result, report_id, data
 
     def _resolve_vuln_id(self, short_id, team_name, team_id, user_id):
         """Resolve a short ID (e.g. c2, h1) to the actual vuln dict."""
-        vulns, report_id = self._get_team_vulns(team_name, team_id, user_id)
+        vulns, report_id, _ = self._get_team_vulns(team_name, team_id, user_id)
         target = next((v for v in vulns if v.get("short_id") == short_id.lower()), None)
         return target, report_id
 
@@ -7717,15 +7721,15 @@ class SlackSlashCommandView(APIView):
                 "/api/admin/admindashboard/dashboard/assets-by-team/", team_id,
             )
             return self._format_team_assets(data, team_name)
-        vulns, _ = self._get_team_vulns(team_name, team_id, user_id)
-        return self._format_viewassigned(vulns, team_name)
+        vulns, _, raw_data = self._get_team_vulns(team_name, team_id, user_id)
+        return self._format_viewassigned(vulns, team_name, raw_data)
 
     def _cmd_mitigationstatus(self, text, team_id, user_id, team_name):
         """
         /mitigationstatus — Check mitigation status for all vulns assigned to your team
         Shows: open | in-progress | closed | overdue counts and fix rate
         """
-        vulns, _ = self._get_team_vulns(team_name, team_id, user_id)
+        vulns, _, _ = self._get_team_vulns(team_name, team_id, user_id)
         return self._format_mitigationstatus(vulns, team_name)
 
     def _cmd_startfix(self, text, team_id, user_id, team_name):
@@ -7734,7 +7738,7 @@ class SlackSlashCommandView(APIView):
         /startfix [vuln-id] — Jump to a specific vulnerability e.g. /startfix h1
         """
         vuln_id = text.strip().lower()
-        vulns, _ = self._get_team_vulns(team_name, team_id, user_id)
+        vulns, _, _ = self._get_team_vulns(team_name, team_id, user_id)
         if not vulns:
             return self._text_block(f"✅ No vulnerabilities currently assigned to *{team_name}* team.")
         if vuln_id:
@@ -7849,7 +7853,7 @@ class SlackSlashCommandView(APIView):
         sub   = parts[0].lower() if parts else ""
         if sub == "status":
             # Get report_id from team vulns, then fetch full support request list
-            _, report_id = self._get_team_vulns(team_name, team_id, user_id)
+            _, report_id, _ = self._get_team_vulns(team_name, team_id, user_id)
             if report_id:
                 data = self._call_api(
                     f"/api/admin/adminregister/register/support-requests/report/{report_id}/",
@@ -8221,8 +8225,18 @@ class SlackSlashCommandView(APIView):
         """Small context/description line shown under the header in Slack."""
         return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
-    def _format_viewassigned(self, vulns, team_name):
+    def _format_viewassigned(self, vulns, team_name, raw_data=None):
         if not vulns:
+            diag = ""
+            if raw_data is not None:
+                detail     = raw_data.get("detail", "")
+                report_id  = raw_data.get("report_id", "")
+                teams_keys = list((raw_data.get("teams") or {}).keys())
+                diag = (
+                    f"\n\n_Debug info:_ report_id=`{report_id or 'none'}` | "
+                    f"teams in API={teams_keys} | "
+                    f"detail=`{detail or 'ok'}`"
+                )
             return [
                 {"type": "header", "text": {"type": "plain_text", "text": f"📋 {team_name}", "emoji": True}},
                 self._ctx("Shows all vulnerabilities & assets assigned to your team with short IDs (c1, h1, m1, l1...). Use these IDs with /startfix, /mitigated, /retest, /extend"),
@@ -8233,6 +8247,7 @@ class SlackSlashCommandView(APIView):
                         "• Admin hasn't assigned vulns to this team yet in the dashboard\n"
                         "• No active report uploaded for this workspace\n\n"
                         "Contact your admin to assign vulnerabilities via the VaptFix dashboard."
+                        + diag
                     )}},
             ]
         total  = len(vulns)
