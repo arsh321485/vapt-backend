@@ -1,6 +1,0 @@
-Bharti Mali  [5:23 PM]
-/adduser @Ritu external
-vaptfix  [5:23 PM]
-:hourglass_flowing_sand: Processing /adduser...[5:23 PM]:x: Bot token not found for this workspace.
-
-abhi esa aa rha hai 
