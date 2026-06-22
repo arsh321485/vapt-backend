@@ -1,10 +1,10 @@
- /viewassigned       → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
-  /mitigationstatus   → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
-  /startfix           → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
-  /mitigated          → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
-  /retest             → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
-  /support            → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
-  /extend             → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
-  /scriptstats        → https://vaptbackend.secureitlab.com/api/admin/users/slack/commands/
+mujhe vaptfix-admin-dashboard ko admin ke alva koe access krta hai to usko properly msg show hona chahihe 
+abhi to admin ke alava koe used krta hai to data show nai ho rha hai but mujhe vha proper msg chahihe 
 
-  mujhe eske according hi short description do na
+
+or jo admin ke command ke uske liye hint bhi provide kro 
+
+or admin team ko access kr skta hai kya ? for example patch managemenet team 
+
+
+mene aapko vaptfix project folder me user-side .png vali image di hai user ke command ka proper response nai aa rha hai to o check kro or mujhe plan btao fir code krna 

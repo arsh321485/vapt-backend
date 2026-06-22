@@ -7172,6 +7172,21 @@ class SlackSlashCommandView(APIView):
         response_url = data.get("response_url", "")
 
         if channel_name == self.ADMIN_CHANNEL:
+            # Block non-admins with a clear message instead of showing empty data
+            workspace_users   = User.objects.filter(slack_team_id=team_id)
+            admin_slack_ids   = {u.slack_user_id for u in workspace_users if u.slack_user_id}
+            if admin_slack_ids and user_id not in admin_slack_ids:
+                return Response({
+                    "response_type": "ephemeral",
+                    "text": (
+                        "❌ *Access Denied* — `#vaptfix-admin-dashboard` is for VaptFix admins only.\n\n"
+                        "Team members, please use commands in your team channel:\n"
+                        "• `#vaptfix-patch-management-team`\n"
+                        "• `#vaptfix-configuration-management-team`\n"
+                        "• `#vaptfix-network-security-team`\n"
+                        "• `#vaptfix-architectural-flaws-team`"
+                    ),
+                })
             handlers = {
                 "/teamoverview":   self._cmd_teamoverview,
                 "/vulnstats":      self._cmd_vulnstats,
@@ -7333,7 +7348,10 @@ class SlackSlashCommandView(APIView):
     def _cmd_approve(self, text, team_id, user_id):
         request_id = text.strip()
         if not request_id:
-            return self._text_block("Usage: `/approve [request-id]`")
+            return self._text_block(
+                "*Usage:* `/approve [request-id]`\n"
+                "_Approves a team's mitigation deadline extension request. Get request IDs from `/request`._"
+            )
         data = self._call_api(
             f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
             team_id, method="patch", json_body={"status": "approved"}, slack_user_id=user_id,
@@ -7343,7 +7361,10 @@ class SlackSlashCommandView(APIView):
     def _cmd_reject(self, text, team_id, user_id):
         parts = text.strip().split(None, 1)
         if not parts:
-            return self._text_block("Usage: `/reject [request-id] [reason]`")
+            return self._text_block(
+                "*Usage:* `/reject [request-id] [reason]`\n"
+                "_Rejects a team's timeline extension request with an optional reason. Get IDs from `/request`._"
+            )
         request_id = parts[0]
         reason = parts[1] if len(parts) > 1 else ""
         data = self._call_api(
@@ -7368,6 +7389,7 @@ class SlackSlashCommandView(APIView):
             # Full platform report — link to dashboard
             return [
                 {"type": "header", "text": {"type": "plain_text", "text": "📄 Reports", "emoji": True}},
+                self._ctx("Download full or filtered vulnerability reports. Filter by team or specific vuln ID."),
                 {"type": "section", "text": {"type": "mrkdwn",
                     "text": (
                         "*Download Options:*\n"
@@ -7509,6 +7531,7 @@ class SlackSlashCommandView(APIView):
         teams_display = ", ".join(team_names)
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "✅ User Added to VaptFix", "emoji": True}},
+            self._ctx("Adds a Slack user to VaptFix with team access. Usage: `/adduser @username external|internal pm|cm|ns|af`"),
             {"type": "section", "text": {"type": "mrkdwn",
                 "text": (
                     f"*Name:* {real_name}\n"
@@ -7561,7 +7584,8 @@ class SlackSlashCommandView(APIView):
         Sorted alphabetically within each severity — same order every call.
         Returns (sorted_vulns, report_id).
         """
-        data = self._call_api("/api/admin/adminmitigationstrategy/by-team/", team_id, slack_user_id=user_id)
+        # Always use workspace admin token — team members don't own this data
+        data = self._call_api("/api/admin/adminmitigationstrategy/by-team/", team_id)
         teams     = data.get("teams") or {}
         team_data = teams.get(team_name) or {}
         vulns     = team_data.get("vulnerabilities") or []
@@ -7632,7 +7656,7 @@ class SlackSlashCommandView(APIView):
         arg = text.strip().lower()
         if arg == "assets":
             data = self._call_api(
-                "/api/admin/admindashboard/dashboard/assets-by-team/", team_id, slack_user_id=user_id,
+                "/api/admin/admindashboard/dashboard/assets-by-team/", team_id,
             )
             return self._format_team_assets(data, team_name)
         vulns, _ = self._get_team_vulns(team_name, team_id, user_id)
@@ -7767,7 +7791,7 @@ class SlackSlashCommandView(APIView):
         sub   = parts[0].lower() if parts else ""
         if sub == "status":
             data = self._call_api(
-                "/api/admin/admindashboard/dashboard/support-requests/", team_id, slack_user_id=user_id,
+                "/api/admin/admindashboard/dashboard/support-requests/", team_id,
             )
             return self._format_team_support_status(data, team_name)
         if sub == "raise":
@@ -7807,7 +7831,7 @@ class SlackSlashCommandView(APIView):
         if sub == "status":
             data = self._call_api(
                 "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/",
-                team_id, slack_user_id=user_id,
+                team_id,
             )
             return self._format_team_extend_status(data, team_name)
         if not sub:
@@ -7856,7 +7880,7 @@ class SlackSlashCommandView(APIView):
         /scriptstats — View script download stats for your team
         /scriptstats [vuln-id] — Stats for a specific vulnerability e.g. /scriptstats h1
         """
-        data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=user_id)
+        data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id)
         return self._format_scriptstats(data, team_name)
 
     # ── Formatters ────────────────────────────────────────────────────────
@@ -7902,6 +7926,7 @@ class SlackSlashCommandView(APIView):
 
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "📊 VaptFix Admin Dashboard", "emoji": True}},
+            self._ctx("Overall summary — assets, vuln severity, mitigation timeline, mean fix time, and support tickets."),
             {"type": "divider"},
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*Total Assets*\n{total_assets}"},
@@ -7933,6 +7958,7 @@ class SlackSlashCommandView(APIView):
         teams_raw = data.get("teams") or data.get("results") or (data if isinstance(data, list) else None)
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "👥 Team Overview", "emoji": True}},
+            self._ctx("Per-team breakdown — total, open, and fixed vulns with severity distribution across all teams."),
             {"type": "divider"},
         ]
         if isinstance(teams_raw, dict):
@@ -7988,6 +8014,7 @@ class SlackSlashCommandView(APIView):
         )
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "🛡 Vulnerability Statistics", "emoji": True}},
+            self._ctx("Total vuln counts by severity (Critical/High/Medium/Low) and by status (Open/In Progress/Fixed)."),
             {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*By Severity*\n{bar_text}"}},
             {"type": "section", "fields": [
@@ -8003,6 +8030,7 @@ class SlackSlashCommandView(APIView):
         count = len(users)
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🌐 External Users", "emoji": True}},
+            self._ctx("All external users — name, email, assigned assets/vulns, access deadline, and status."),
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total External Users:* {count}"}},
             {"type": "divider"},
         ]
@@ -8026,6 +8054,7 @@ class SlackSlashCommandView(APIView):
     def _format_supportdata(self, data):
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Requests", "emoji": True}},
+            self._ctx("Platform-wide support ticket counts — total raised by teams, pending review, and closed by admin."),
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*Total*\n{data.get('total', 0)}"},
                 {"type": "mrkdwn", "text": f"*Pending*\n{data.get('pending', 0)}"},
@@ -8038,6 +8067,7 @@ class SlackSlashCommandView(APIView):
         count   = data.get("count", len(results))
         blocks  = [
             {"type": "header", "text": {"type": "plain_text", "text": "⏳ Timeline Extension Requests", "emoji": True}},
+            self._ctx("All team requests to extend mitigation deadlines. Use `/approve` or `/reject` to respond."),
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Requests:* {count}"}},
             {"type": "divider"},
         ]
@@ -8072,6 +8102,7 @@ class SlackSlashCommandView(APIView):
         count  = len(items)
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🔍 Vulnerability Data", "emoji": True}},
+            self._ctx("All registered vulnerabilities with fix steps. Use `/vulndata [id]` for step-by-step fix guide, `/vulndata automation` for script stats."),
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total:* {count} vulnerabilities\nUse `/vulndata [id]` for fix steps."}},
             {"type": "divider"},
         ]
@@ -8129,7 +8160,13 @@ class SlackSlashCommandView(APIView):
                 {"type": "header", "text": {"type": "plain_text", "text": f"📋 {team_name}", "emoji": True}},
                 self._ctx("Shows all vulnerabilities & assets assigned to your team with short IDs (c1, h1, m1, l1...). Use these IDs with /startfix, /mitigated, /retest, /extend"),
                 {"type": "section", "text": {"type": "mrkdwn",
-                    "text": "✅ No vulnerabilities currently assigned to your team."}},
+                    "text": (
+                        "📭 No vulnerabilities currently assigned to *" + team_name + "* team.\n\n"
+                        "_Possible reasons:_\n"
+                        "• Admin hasn't assigned vulns to this team yet in the dashboard\n"
+                        "• No active report uploaded for this workspace\n\n"
+                        "Contact your admin to assign vulnerabilities via the VaptFix dashboard."
+                    )}},
             ]
         total  = len(vulns)
         open_c = sum(1 for v in vulns if v.get("status") == "open")
