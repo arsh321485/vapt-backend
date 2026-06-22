@@ -7449,32 +7449,30 @@ class SlackSlashCommandView(APIView):
         import pymongo as _pymongo
         from vaptfix.mongo_client import MongoContext
 
-        admin_user = next(
-            (u for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token), None
-        )
-        if not admin_user:
-            admin_user = next((u for u in User.objects.all() if u.is_staff), None)
+        # Search ALL workspace users — report may have been uploaded by a different account
+        workspace_users = list(User.objects.filter(slack_team_id=team_id))
+        if not workspace_users:
+            workspace_users = [u for u in User.objects.all() if u.is_staff]
 
-        if not admin_user:
-            return self._text_block("❌ No admin user found for this Slack workspace. Connect VaptFix to Slack first.")
+        if not workspace_users:
+            return self._text_block("❌ No users found for this Slack workspace. Connect VaptFix to Slack first.")
 
-        admin_id    = str(admin_user.id)
-        admin_email = getattr(admin_user, "email", None) or ""
+        all_ids    = [str(u.id) for u in workspace_users]
+        all_emails = [e for e in (getattr(u, "email", "") for u in workspace_users) if e]
+        conditions = [{"admin_id": aid} for aid in all_ids]
+        conditions += [{"admin_email": em} for em in all_emails]
 
         with MongoContext() as db:
-            conditions = [{"admin_id": admin_id}]
-            if admin_email:
-                conditions.append({"admin_email": admin_email})
-
             report_count = db["nessus_reports"].count_documents({"$or": conditions})
             latest_doc   = db["nessus_reports"].find_one(
                 {"$or": conditions},
-                {"report_id": 1, "uploaded_at": 1, "vulnerabilities_by_host": 1},
+                {"report_id": 1, "uploaded_at": 1, "admin_email": 1, "admin_id": 1, "vulnerabilities_by_host": 1},
                 sort=[("uploaded_at", _pymongo.DESCENDING)],
             )
 
-            report_id   = str(latest_doc.get("report_id", "")) if latest_doc else "none"
-            uploaded_at = str(latest_doc.get("uploaded_at", ""))[:19] if latest_doc else "—"
+            report_id      = str(latest_doc.get("report_id", "")) if latest_doc else "none"
+            uploaded_at    = str(latest_doc.get("uploaded_at", ""))[:19] if latest_doc else "—"
+            report_owner   = latest_doc.get("admin_email", latest_doc.get("admin_id", "?")) if latest_doc else "—"
 
             # Count total vulns in latest report
             total_vulns = 0
@@ -7483,7 +7481,7 @@ class SlackSlashCommandView(APIView):
                     total_vulns += len(host.get("vulnerabilities", []))
 
             # Count cards and sample assigned_teams
-            card_count  = db["vulnerability_cards"].count_documents({"report_id": report_id}) if report_id != "none" else 0
+            card_count   = db["vulnerability_cards"].count_documents({"report_id": report_id}) if report_id != "none" else 0
             sample_teams = []
             if card_count > 0:
                 for card in db["vulnerability_cards"].find(
@@ -7495,21 +7493,21 @@ class SlackSlashCommandView(APIView):
                     vn = (card.get("vulnerability_name", "") or "")[:40]
                     sample_teams.append(f"• `{at}` — {vn}")
 
-            # Count support requests
-            support_count = db["support_requests"].count_documents({"admin_id": admin_id}) if admin_id else 0
+            # Count support requests across all workspace users
+            support_count = db["support_requests"].count_documents({"admin_id": {"$in": all_ids}})
 
         status_icon  = "✅" if report_count > 0 else "❌"
         cards_icon   = "✅" if card_count > 0 else "⚠️"
-        fallback_msg = "" if card_count > 0 else "\n_No cards found — keyword-based team assignment is active (teams will still see data)._"
-
-        sample_text = "\n".join(sample_teams) if sample_teams else "_No cards yet_"
+        fallback_msg = "" if card_count > 0 else "\n_No AI cards — keyword-based team assignment active._"
+        ws_emails    = ", ".join(all_emails[:4])
+        sample_text  = "\n".join(sample_teams) if sample_teams else "_No cards yet_"
 
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "🔍 VaptFix DB Diagnostic", "emoji": True}},
             self._ctx("Direct MongoDB check — use this to verify data is in the database"),
             {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Admin Found*\n{admin_email}"},
-                {"type": "mrkdwn", "text": f"*Admin ID*\n`{admin_id}`"},
+                {"type": "mrkdwn", "text": f"*Workspace Users Checked*\n{ws_emails}"},
+                {"type": "mrkdwn", "text": f"*Report Owner (in DB)*\n{report_owner}"},
             ]},
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*Reports in DB*\n{status_icon} {report_count}"},
@@ -7690,28 +7688,27 @@ class SlackSlashCommandView(APIView):
         import pymongo as _pymongo
         from vaptfix.mongo_client import MongoContext
 
-        # Find the admin who connected Slack for this workspace
-        admin_user = next(
-            (u for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token), None
-        )
-        if not admin_user:
-            admin_user = next((u for u in User.objects.all() if u.is_staff), None)
+        # Search ALL users in this Slack workspace — report may have been uploaded
+        # by a different account than the one that connected Slack (bot token).
+        workspace_users = list(User.objects.filter(slack_team_id=team_id))
+        if not workspace_users:
+            workspace_users = [u for u in User.objects.all() if u.is_staff]
 
         raw_data = {"report_id": "", "teams": {}, "admin_email": "not_found"}
-        if not admin_user:
-            logger.warning("[SlackCmd] _get_team_vulns: no admin for team_id=%s", team_id)
+        if not workspace_users:
+            logger.warning("[SlackCmd] _get_team_vulns: no users for team_id=%s", team_id)
             return [], "", raw_data
 
-        admin_id    = str(admin_user.id)
-        admin_email = getattr(admin_user, "email", None) or ""
-        raw_data["admin_email"] = admin_email
+        # Build OR conditions covering every workspace user's id and email
+        all_admin_ids    = [str(u.id) for u in workspace_users]
+        all_admin_emails = [e for e in (getattr(u, "email", "") for u in workspace_users) if e]
+        raw_data["admin_email"] = ", ".join(all_admin_emails[:3])
+
+        conditions = [{"admin_id": aid} for aid in all_admin_ids]
+        conditions += [{"admin_email": em} for em in all_admin_emails]
 
         with MongoContext() as db:
-            # Find latest Nessus report for this admin (by id OR email)
-            conditions = [{"admin_id": admin_id}]
-            if admin_email:
-                conditions.append({"admin_email": admin_email})
-
+            # Find the most recent report belonging to ANY workspace user
             latest_doc = db["nessus_reports"].find_one(
                 {"$or": conditions},
                 {
@@ -7731,7 +7728,7 @@ class SlackSlashCommandView(APIView):
             )
 
             if not latest_doc:
-                logger.warning("[SlackCmd] no report for admin_id=%s email=%s", admin_id, admin_email)
+                logger.warning("[SlackCmd] no report for any workspace user: ids=%s emails=%s", all_admin_ids, all_admin_emails)
                 raw_data["detail"] = "no_report_found"
                 return [], "", raw_data
 
