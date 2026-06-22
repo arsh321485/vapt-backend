@@ -7824,31 +7824,29 @@ class SlackSlashCommandView(APIView):
         import pymongo as _pymongo
 
         try:
-            # Find workspace admin (has slack_bot_token = they connected Slack OAuth)
-            admin_user = next(
-                (u for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token),
-                None,
-            )
-            if not admin_user:
-                admin_user = next((u for u in User.objects.all() if u.is_staff), None)
-            if not admin_user:
-                logger.warning("[SlackCmd] _create_support_ticket: no admin user found")
+            # Search workspace users + staff to find the admin who has reports
+            workspace_users = list(User.objects.filter(slack_team_id=team_id))
+            staff_users     = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
+            all_users       = list({u.id: u for u in workspace_users + staff_users}.values())
+            if not all_users:
+                logger.warning("[SlackCmd] _create_support_ticket: no users found")
                 return False
 
-            admin_id    = str(admin_user.id)
-            admin_email = getattr(admin_user, "email", None)
+            all_ids    = [str(u.id) for u in all_users]
+            all_emails = [e for e in (getattr(u, "email", "") for u in all_users) if e]
+            conditions = [{"admin_id": aid} for aid in all_ids]
+            conditions += [{"admin_email": em} for em in all_emails]
 
             with MongoContext() as db:
-                # Get admin's latest report_id
-                conditions = [{"admin_id": admin_id}]
-                if admin_email:
-                    conditions.append({"admin_email": admin_email})
+                # Find the latest report among all workspace/staff users
                 latest = db["nessus_reports"].find_one(
                     {"$or": conditions},
-                    {"report_id": 1},
+                    {"report_id": 1, "admin_id": 1, "admin_email": 1},
                     sort=[("uploaded_at", _pymongo.DESCENDING)],
                 )
-                report_id = str(latest.get("report_id", "")) if latest else ""
+                report_id   = str(latest.get("report_id", "")) if latest else ""
+                admin_id    = latest.get("admin_id", all_ids[0]) if latest else all_ids[0]
+                admin_email = latest.get("admin_email", all_emails[0] if all_emails else "") if latest else ""
 
                 doc = {
                     "report_id":    report_id,
@@ -8016,15 +8014,21 @@ class SlackSlashCommandView(APIView):
         parts = text.strip().split(None, 1)
         sub   = parts[0].lower() if parts else ""
         if sub == "status":
-            # Get report_id from team vulns, then fetch full support request list
+            # Query MongoDB directly — avoids JWT admin-mismatch issue
+            from vaptfix.mongo_client import MongoContext
+            import pymongo as _pymongo
             _, report_id, _ = self._get_team_vulns(team_name, team_id, user_id)
-            if report_id:
-                data = self._call_api(
-                    f"/api/admin/adminregister/register/support-requests/report/{report_id}/",
-                    team_id,
-                )
-            else:
-                data = {}
+            with MongoContext() as db:
+                query = {"assigned_team": team_name}
+                if report_id:
+                    query["report_id"] = report_id
+                tickets = list(db["support_requests"].find(
+                    query,
+                    sort=[("requested_at", _pymongo.DESCENDING)],
+                ))
+                for t in tickets:
+                    t["_id"] = str(t.get("_id", ""))
+            data = {"results": tickets}
             return self._format_team_support_status(data, team_name)
         if sub == "raise":
             message = parts[1].strip().strip('"').strip("'") if len(parts) > 1 else ""
