@@ -157,8 +157,9 @@ class MitigationStrategyByTeamAPIView(APIView):
                         if _pname:
                             plugin_asset_map.setdefault(_pname, set()).add(_host_name)
 
+                # Vulns appearing on 2+ different assets (match comment intent: > 1 not > 3)
                 multi_asset_plugins = {
-                    p for p, assets in plugin_asset_map.items() if len(assets) > 3
+                    p for p, assets in plugin_asset_map.items() if len(assets) > 1
                 }
 
                 # Initialize team buckets
@@ -184,9 +185,14 @@ class MitigationStrategyByTeamAPIView(APIView):
                             or ""
                         )
 
-                        # Only include vulns that appear on 2+ different assets
+                        # Include if multi-asset vuln OR explicitly assigned to a team
                         if plugin_name not in multi_asset_plugins:
-                            continue
+                            _card = (
+                                vuln_cards.get((plugin_name, host_name))
+                                or vuln_cards.get((plugin_name, ""))
+                            )
+                            if not _card or not (_card.get("assigned_team") or "").strip():
+                                continue
 
                         port     = v.get("port", "")
                         protocol = v.get("protocol", "")
