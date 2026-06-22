@@ -7449,16 +7449,17 @@ class SlackSlashCommandView(APIView):
         import pymongo as _pymongo
         from vaptfix.mongo_client import MongoContext
 
-        # Search ALL workspace users — report may have been uploaded by a different account
+        # Combine workspace Slack users AND staff users — same logic as _get_team_vulns
         workspace_users = list(User.objects.filter(slack_team_id=team_id))
-        if not workspace_users:
-            workspace_users = [u for u in User.objects.all() if u.is_staff]
+        staff_users     = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
+        combined        = {u.id: u for u in workspace_users + staff_users}
+        all_users       = list(combined.values())
 
-        if not workspace_users:
+        if not all_users:
             return self._text_block("❌ No users found for this Slack workspace. Connect VaptFix to Slack first.")
 
-        all_ids    = [str(u.id) for u in workspace_users]
-        all_emails = [e for e in (getattr(u, "email", "") for u in workspace_users) if e]
+        all_ids    = [str(u.id) for u in all_users]
+        all_emails = [e for e in (getattr(u, "email", "") for u in all_users) if e]
         conditions = [{"admin_id": aid} for aid in all_ids]
         conditions += [{"admin_email": em} for em in all_emails]
 
@@ -7688,20 +7689,21 @@ class SlackSlashCommandView(APIView):
         import pymongo as _pymongo
         from vaptfix.mongo_client import MongoContext
 
-        # Search ALL users in this Slack workspace — report may have been uploaded
-        # by a different account than the one that connected Slack (bot token).
+        # Combine workspace Slack users AND all staff users — report uploader may not
+        # have gone through Slack OAuth (no slack_team_id) but is still a staff admin.
         workspace_users = list(User.objects.filter(slack_team_id=team_id))
-        if not workspace_users:
-            workspace_users = [u for u in User.objects.all() if u.is_staff]
+        staff_users     = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
+        combined        = {u.id: u for u in workspace_users + staff_users}  # deduplicate
+        all_users       = list(combined.values())
 
         raw_data = {"report_id": "", "teams": {}, "admin_email": "not_found"}
-        if not workspace_users:
+        if not all_users:
             logger.warning("[SlackCmd] _get_team_vulns: no users for team_id=%s", team_id)
             return [], "", raw_data
 
-        # Build OR conditions covering every workspace user's id and email
-        all_admin_ids    = [str(u.id) for u in workspace_users]
-        all_admin_emails = [e for e in (getattr(u, "email", "") for u in workspace_users) if e]
+        # Build OR conditions covering every user's id and email
+        all_admin_ids    = [str(u.id) for u in all_users]
+        all_admin_emails = [e for e in (getattr(u, "email", "") for u in all_users) if e]
         raw_data["admin_email"] = ", ".join(all_admin_emails[:3])
 
         conditions = [{"admin_id": aid} for aid in all_admin_ids]
