@@ -2,7 +2,10 @@ from django.contrib import admin
 from django import forms
 from django.conf import settings
 from django.contrib import messages
-from .models import UploadReport
+from django.http import HttpResponseRedirect
+from django.urls import reverse
+from django.template.response import TemplateResponse
+from .models import UploadReport, FixVulnVerification
 from users.models import User
 import hashlib
 import os
@@ -577,3 +580,165 @@ class UploadReportAdmin(admin.ModelAdmin):
         if not request.user.is_authenticated:
             return False
         return getattr(request.user, 'is_superuser', False)
+
+
+# ---------------------------------------------------------------------------
+# Pending Verification Admin (Superadmin only)
+# ---------------------------------------------------------------------------
+
+@admin.register(FixVulnVerification)
+class FixVulnVerificationAdmin(admin.ModelAdmin):
+    """
+    Custom admin panel for superadmin to review and approve
+    fix vulnerability verifications (status = "open/review").
+    """
+
+    def has_module_permission(self, request):
+        return request.user.is_authenticated and request.user.is_superuser
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_authenticated and request.user.is_superuser
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_queryset(self, request):
+        return FixVulnVerification.objects.none()
+
+    def _get_pending(self):
+        from vaptfix.mongo_client import get_shared_client, get_shared_db
+        client = get_shared_client()
+        db = get_shared_db(client)
+        docs = list(db["fix_vulnerabilities"].find({"status": "open/review"}).sort("verification_sent_at", -1))
+        result = []
+        for doc in docs:
+            fix_vuln_id = str(doc["_id"])
+            sent    = doc.get("verification_sent_at")
+            created = doc.get("created_at")
+
+            # Find who completed the steps (last updated_by in steps collection)
+            completed_by_id = doc.get("created_by", "")
+            last_step = db["fix_vulnerability_steps"].find_one(
+                {"fix_vulnerability_id": fix_vuln_id, "status": "completed"},
+                sort=[("updated_at", -1)],
+            )
+            if last_step and last_step.get("updated_by"):
+                completed_by_id = last_step["updated_by"]
+
+            # Resolve user email from users_user collection
+            completed_by_email = ""
+            if completed_by_id:
+                try:
+                    from bson import ObjectId as _OId
+                    u = db["users_user"].find_one(
+                        {"$or": [{"id": completed_by_id}, {"_id": _OId(completed_by_id)}]},
+                        {"email": 1}
+                    )
+                    completed_by_email = (u or {}).get("email", completed_by_id)
+                except Exception:
+                    completed_by_email = completed_by_id
+
+            result.append({
+                "fix_id": fix_vuln_id,
+                "vulnerability_name": doc.get("plugin_name", ""),
+                "asset": doc.get("host_name", ""),
+                "severity": doc.get("risk_factor", ""),
+                "port": doc.get("port", ""),
+                "assigned_team": doc.get("assigned_team", ""),
+                "admin_id": doc.get("admin_id", ""),
+                "completed_by": completed_by_email,
+                "verification_sent_at": sent.strftime("%Y-%m-%d %H:%M UTC") if sent else "-",
+                "created_at": created.strftime("%Y-%m-%d") if created else "-",
+            })
+        return result
+
+    def changelist_view(self, request, extra_context=None):
+        if not (request.user.is_authenticated and request.user.is_superuser):
+            from django.contrib.auth.views import redirect_to_login
+            return redirect_to_login(request.get_full_path())
+
+        # Handle approve POST
+        if request.method == "POST":
+            fix_vuln_id = request.POST.get("fix_vuln_id", "").strip()
+            if fix_vuln_id:
+                try:
+                    from bson import ObjectId
+                    from vaptfix.mongo_client import get_shared_client, get_shared_db
+                    import datetime as _dt
+                    client = get_shared_client()
+                    db = get_shared_db(client)
+                    fix_coll    = db["fix_vulnerabilities"]
+                    closed_coll = db["fix_vulnerabilities_closed"]
+
+                    fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+                    if fix_doc and fix_doc.get("status") == "open/review":
+                        now = _dt.datetime.utcnow()
+                        superadmin_id = str(request.user.id)
+
+                        closed_doc = fix_doc.copy()
+                        closed_doc["fix_vulnerability_id"] = str(fix_doc["_id"])
+                        closed_doc.pop("_id", None)
+                        closed_doc.update({
+                            "status": "closed",
+                            "closed_at": now,
+                            "closed_by": superadmin_id,
+                            "approved_by_superadmin": superadmin_id,
+                            "approved_at": now,
+                        })
+                        closed_coll.insert_one(closed_doc)
+                        fix_coll.delete_one({"_id": ObjectId(fix_vuln_id)})
+
+                        db["tickets"].update_many(
+                            {"fix_vulnerability_id": fix_vuln_id, "status": "open"},
+                            {"$set": {
+                                "status": "closed",
+                                "closed_at": now,
+                                "close_comment": "Auto-closed: approved by superadmin",
+                            }},
+                        )
+
+                        try:
+                            from notifications.utils import create_notification
+                            _vuln = fix_doc.get("plugin_name", "")
+                            _asset = fix_doc.get("host_name", "")
+                            _team = fix_doc.get("assigned_team", "")
+                            _admin_id = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
+                            _title = f"Vulnerability Verified & Closed: {_vuln[:80]}"
+                            _msg = f"{_vuln} on {_asset} has been verified and closed by superadmin. Team: {_team}."
+                            _meta = {"vulnerability_name": _vuln, "asset": _asset, "fix_vulnerability_id": fix_vuln_id}
+                            if _admin_id:
+                                create_notification(_admin_id, 'admin', 'vuln_closed', _title, _msg, _meta)
+                                create_notification(_admin_id, 'user', 'vuln_closed', _title, _msg, _meta)
+                        except Exception:
+                            pass
+
+                        messages.success(request, f"✅ '{fix_doc.get('plugin_name')}' on {fix_doc.get('host_name')} approved and closed.")
+                    else:
+                        messages.warning(request, "Vulnerability not found or not in open/review status.")
+                except Exception as exc:
+                    messages.error(request, f"Error approving: {exc}")
+
+            return HttpResponseRedirect(
+                reverse("admin:upload_report_fixvulnverification_changelist")
+            )
+
+        # GET — show pending list
+        pending = self._get_pending()
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Pending Verifications",
+            "opts": self.model._meta,
+            "pending_verifications": pending,
+            "cl": type("FakeCL", (), {"opts": self.model._meta})(),
+        }
+        return TemplateResponse(
+            request,
+            "admin/upload_report/fixvulnverification/change_list.html",
+            context,
+        )

@@ -202,17 +202,25 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                 # Step 1: Build plugin_name -> assigned_team map (team-filtered)
                 _, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
 
-                # Step 2: Build closed vuln set (plugin_name, host_name, port)
-                closed_vulns = set()
-                for doc in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": str(report_id)}
-                ):
+                # Step 2: Build fix_doc lookup (plugin_name, host_name, port) -> fix_doc
+                # Include both active and closed docs so verification_sent_at is available
+                fix_doc_lookup = {}
+                _closed_keys = set()
+                for fdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": str(report_id)}):
                     key = (
-                        doc.get("plugin_name", ""),
-                        doc.get("host_name", ""),
-                        str(doc.get("port", ""))
+                        fdoc.get("plugin_name", ""),
+                        fdoc.get("host_name", ""),
+                        str(fdoc.get("port", "")),
                     )
-                    closed_vulns.add(key)
+                    fix_doc_lookup[key] = fdoc
+                    _closed_keys.add(key)
+                for fdoc in db[FIX_VULN_COLLECTION].find({"report_id": str(report_id)}):
+                    key = (
+                        fdoc.get("plugin_name", ""),
+                        fdoc.get("host_name", ""),
+                        str(fdoc.get("port", "")),
+                    )
+                    fix_doc_lookup[key] = fdoc  # active overrides closed if both exist
 
                 # Step 3: Build rows — only team-assigned vulnerabilities
                 rows = []
@@ -235,9 +243,10 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                         port     = v.get("port", "")
                         protocol = v.get("protocol", "")
 
-                        vuln_status = (
+                        _fix = fix_doc_lookup.get((plugin_name, host_name, str(port)), {})
+                        vuln_status = _fix.get("status") or (
                             "closed"
-                            if (plugin_name, host_name, str(port)) in closed_vulns
+                            if (plugin_name, host_name, str(port)) in _closed_keys
                             else "open"
                         )
 
@@ -250,7 +259,7 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                         severity = risk_raw.strip().title() if isinstance(risk_raw, str) else ""
 
                         first_obs  = v.get("created_at") or uploaded_at
-                        second_obs = v.get("updated_at")
+                        second_obs = _fix.get("verification_sent_at") or v.get("updated_at")
 
                         rows.append({
                             "id": str(uuid.uuid4()),
@@ -840,7 +849,10 @@ class UserFixVulnerabilityStepsAPIView(APIView):
         return "Configuration Management"
 
     def _ensure_execution_guidance_fields(self, os_data: dict) -> dict:
-        commands = (os_data.get("commands_for_action") or "").strip()
+        _raw_cmd = os_data.get("commands_for_action") or ""
+        if isinstance(_raw_cmd, list):
+            _raw_cmd = "\n".join(str(c) for c in _raw_cmd if c)
+        commands = str(_raw_cmd).strip()
         where_to_run = os_data.get("where_to_run", "terminal")
 
         if not os_data.get("how_to_run"):
@@ -1228,6 +1240,8 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         "completed_steps": completed_count,
                         "total_steps": total_steps,
                         "next_step": next_step,
+                        "all_steps_completed": completed_count >= total_steps,
+                        "verification_sent": status_value in ("open/review", "closed"),
                         "steps": steps,
                     },
                     status=status.HTTP_200_OK,
@@ -1247,6 +1261,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
             step_status    = request.data.get("status", "completed")
             deadline       = request.data.get("deadline")
             assigned_member_id = request.data.get("assigned_member_id")
+            complete_all   = bool(request.data.get("complete_all", False))
 
             with MongoContext() as db:
                 fix_coll    = db[FIX_VULN_COLLECTION]
@@ -1311,7 +1326,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     "status": "completed",
                 })
 
-                if completed_count >= total_steps:
+                if completed_count >= total_steps and not complete_all:
                     return Response(
                         {
                             "detail": "All steps are already completed.",
@@ -1321,109 +1336,100 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-                # internal_step_number = actual DB step number (e.g. 1,3,5,7 for Windows)
-                # display_step_number  = sequential for frontend (1,2,3,4...)
-                internal_step_number = step_order[completed_count] if step_order else (completed_count + 1)
-                display_step_number  = completed_count + 1
-                step_number = internal_step_number  # used for DB operations
-                step_name   = (
-                    steps_dict[internal_step_number]["step_name"]
-                    if internal_step_number in steps_dict
-                    else self.DEFAULT_STEP_DESCRIPTIONS.get(internal_step_number, f"Step {display_step_number}")
-                )
+                _now = datetime.utcnow()
+                step_id          = ""
+                display_step_number = total_steps
+                step_name        = "All Steps"
 
-                update_fields = {
-                    "status": step_status,
-                    "step_name": step_name,
-                    "comment": comment,
-                    "updated_by": user_id,
-                    "updated_at": datetime.utcnow(),
-                }
-                if deadline:
-                    update_fields["deadline"] = deadline
-                if assigned_member_id:
-                    for member in fix_doc.get("assigned_team_members", []):
-                        if member.get("user_id") == assigned_member_id:
-                            update_fields["assigned_member"] = member
-                            break
+                if complete_all:
+                    # Mark every step in step_order as completed in one bulk pass
+                    for snum in step_order:
+                        sname = (
+                            steps_dict[snum]["step_name"]
+                            if snum in steps_dict
+                            else self.DEFAULT_STEP_DESCRIPTIONS.get(snum, f"Step {snum}")
+                        )
+                        steps_coll.update_one(
+                            {"fix_vulnerability_id": fix_vuln_id, "step_number": snum},
+                            {
+                                "$set": {
+                                    "status": "completed",
+                                    "step_name": sname,
+                                    "comment": comment,
+                                    "updated_by": user_id,
+                                    "updated_at": _now,
+                                },
+                                "$setOnInsert": {
+                                    "created_at": _now,
+                                    "created_by": user_id,
+                                },
+                            },
+                            upsert=True,
+                        )
+                    completed_steps = total_steps
+                else:
+                    # 1-by-1: complete the next pending step
+                    internal_step_number = step_order[completed_count] if step_order else (completed_count + 1)
+                    display_step_number  = completed_count + 1
+                    step_name = (
+                        steps_dict[internal_step_number]["step_name"]
+                        if internal_step_number in steps_dict
+                        else self.DEFAULT_STEP_DESCRIPTIONS.get(internal_step_number, f"Step {display_step_number}")
+                    )
 
-                steps_coll.update_one(
-                    {"fix_vulnerability_id": fix_vuln_id, "step_number": step_number},
-                    {
-                        "$set": update_fields,
-                        "$setOnInsert": {
-                            "created_at": datetime.utcnow(),
-                            "created_by": user_id,
+                    update_fields = {
+                        "status": step_status,
+                        "step_name": step_name,
+                        "comment": comment,
+                        "updated_by": user_id,
+                        "updated_at": _now,
+                    }
+                    if deadline:
+                        update_fields["deadline"] = deadline
+                    if assigned_member_id:
+                        for member in fix_doc.get("assigned_team_members", []):
+                            if member.get("user_id") == assigned_member_id:
+                                update_fields["assigned_member"] = member
+                                break
+
+                    steps_coll.update_one(
+                        {"fix_vulnerability_id": fix_vuln_id, "step_number": internal_step_number},
+                        {
+                            "$set": update_fields,
+                            "$setOnInsert": {
+                                "created_at": _now,
+                                "created_by": user_id,
+                            },
                         },
-                    },
-                    upsert=True,
-                )
+                        upsert=True,
+                    )
+
+                    step_doc = steps_coll.find_one({
+                        "fix_vulnerability_id": fix_vuln_id,
+                        "step_number": internal_step_number,
+                    })
+                    step_id = str(step_doc["_id"]) if step_doc else ""
+
+                    completed_steps = steps_coll.count_documents({
+                        "fix_vulnerability_id": fix_vuln_id,
+                        "status": "completed",
+                    })
 
                 _admin_id_cache = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
                 if _admin_id_cache:
                     _clear_admin_dashboard_cache(_admin_id_cache)
 
-                step_doc = steps_coll.find_one({
-                    "fix_vulnerability_id": fix_vuln_id,
-                    "step_number": step_number,
-                })
-                step_id = str(step_doc["_id"]) if step_doc else ""
-
-                completed_steps = steps_coll.count_documents({
-                    "fix_vulnerability_id": fix_vuln_id,
-                    "status": "completed",
-                })
-
                 if completed_steps >= total_steps:
-                    closed_doc = fix_doc.copy()
-                    closed_doc["fix_vulnerability_id"] = str(fix_doc["_id"])
-                    closed_doc.pop("_id", None)
-                    closed_doc.update({
-                        "status": "closed",
-                        "closed_at": datetime.utcnow(),
-                        "closed_by": user_id,
-                        "operating_system": host_os,
-                    })
-                    closed_coll.insert_one(closed_doc)
-                    fix_coll.delete_one({"_id": ObjectId(fix_vuln_id)})
-
-                    # Auto-close any open ticket linked to this fix vulnerability
-                    db[TICKETS_COLLECTION].update_many(
-                        {"fix_vulnerability_id": fix_vuln_id, "status": "open"},
-                        {"$set": {
-                            "status": "closed",
-                            "closed_at": datetime.utcnow(),
-                            "close_comment": "Auto-closed: vulnerability patched",
-                        }},
+                    _msg = (
+                        f"All {total_steps} steps completed at once. Click 'Send Verification' to notify superadmin."
+                        if complete_all
+                        else f"All steps completed. Click 'Send Verification' to notify superadmin."
                     )
-
-                    try:
-                        from notifications.utils import create_notification
-                        _vuln_name  = fix_doc.get("plugin_name", "")
-                        _asset      = fix_doc.get("host_name", "")
-                        _team       = fix_doc.get("assigned_team", "")
-                        _admin_id   = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
-                        if _admin_id:
-                            _n_title = f"Vulnerability Fixed: {_vuln_name[:80]}"
-                            _n_msg = (
-                                f"Vulnerability Closed: {_vuln_name} on {_asset} has been "
-                                f"successfully remediated and closed. Team: {_team}."
-                            )
-                            _n_meta = {
-                                "vulnerability_name":  _vuln_name,
-                                "asset":               _asset,
-                                "assigned_team":       _team,
-                                "fix_vulnerability_id": fix_vuln_id,
-                            }
-                            create_notification(_admin_id, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
-                            create_notification(_admin_id, 'user', 'vuln_closed', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
-                    except Exception:
-                        pass
-
                     return Response(
                         {
-                            "message": "All steps completed. Fix vulnerability closed.",
-                            "status": "closed",
+                            "message": _msg,
+                            "status": "open",
+                            "all_steps_completed": True,
                             "completed_steps": completed_steps,
                             "total_steps": total_steps,
                             "step_saved": {
@@ -1431,14 +1437,14 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                                 "fix_vulnerability_step_id": step_id,
                                 "step_number": display_step_number,
                                 "step_name": step_name,
-                                "status": step_status,
+                                "status": "completed",
                                 "assigned_team": fix_doc.get("assigned_team", ""),
                             },
                         },
                         status=status.HTTP_200_OK,
                     )
 
-                # next_step as sequential display number
+                # Partial progress — return next step info
                 next_display_step = completed_steps + 1 if completed_steps < total_steps else None
                 next_internal     = step_order[completed_steps] if step_order and completed_steps < len(step_order) else None
                 next_step_name    = (
@@ -1449,8 +1455,9 @@ class UserFixVulnerabilityStepsAPIView(APIView):
 
                 return Response(
                     {
-                        "message": f"Step {display_step_number} saved successfully",
+                        "message": f"Step {display_step_number} saved successfully.",
                         "status": "open",
+                        "all_steps_completed": False,
                         "completed_steps": completed_steps,
                         "total_steps": total_steps,
                         "next_step": next_display_step,
@@ -1477,6 +1484,162 @@ class UserFixVulnerabilityStepsAPIView(APIView):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. FIX STEP FEEDBACK
+# ─────────────────────────────────────────────────────────────────────────────
+# 5b. SEND VERIFICATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+class UserSendVerificationAPIView(APIView):
+    """
+    POST /api/user/register/fix-vulnerability/<fix_vuln_id>/send-verification/
+    User manually sends verification request after all steps are done.
+    Sets status = "open/review" and notifies superadmin.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, fix_vuln_id):
+        try:
+            with MongoContext() as db:
+                fix_coll    = db[FIX_VULN_COLLECTION]
+                steps_coll  = db[FIX_VULN_STEPS_COLLECTION]
+                closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+                # Already closed?
+                closed_doc = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
+                if closed_doc:
+                    return Response(
+                        {
+                            "message": "This vulnerability is already verified and closed.",
+                            "status": "closed",
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+                fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+                if not fix_doc:
+                    return Response(
+                        {"detail": "Fix vulnerability not found."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                # Already in review?
+                if fix_doc.get("status") == "open/review":
+                    return Response(
+                        {
+                            "message": "Verification already sent. Awaiting superadmin review.",
+                            "status": "open/review",
+                            "verification_sent_at": _normalize_iso(fix_doc.get("verification_sent_at")),
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+                # Check all steps complete
+                vuln_card = (
+                    db[VULN_CARD_COLLECTION].find_one({
+                        "report_id": fix_doc.get("report_id"),
+                        "vulnerability_name": fix_doc.get("plugin_name"),
+                        "host_name": fix_doc.get("host_name"),
+                    })
+                    or db[VULN_CARD_COLLECTION].find_one({
+                        "report_id": fix_doc.get("report_id"),
+                        "vulnerability_name": fix_doc.get("plugin_name"),
+                    })
+                    or {}
+                )
+                mitigation_table = vuln_card.get("mitigation_table", [])
+
+                # Count expected steps (reuse same OS-aware logic)
+                host_os = fix_doc.get("operating_system", "Windows")
+                total_steps = 6  # default fallback
+                if mitigation_table:
+                    step_nums = set()
+                    for row in mitigation_table:
+                        try:
+                            snum = int(row.get("step_no", 0))
+                        except (ValueError, TypeError):
+                            continue
+                        if snum > 0:
+                            os_raw = (row.get("operating_system") or "").strip().lower()
+                            os_key = "linux" if "linux" in os_raw else "windows"
+                            expected_key = "linux" if host_os.lower() in ("linux", "unix") else "windows"
+                            if os_key == expected_key:
+                                step_nums.add(snum)
+                    if step_nums:
+                        total_steps = len(step_nums)
+
+                completed_steps = steps_coll.count_documents({
+                    "fix_vulnerability_id": fix_vuln_id,
+                    "status": "completed",
+                })
+
+                if completed_steps < total_steps:
+                    return Response(
+                        {
+                            "message": (
+                                f"Please complete all steps before sending verification. "
+                                f"Completed: {completed_steps}/{total_steps}."
+                            ),
+                            "status": "open",
+                            "completed_steps": completed_steps,
+                            "total_steps": total_steps,
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                # All steps done — send verification
+                now = datetime.utcnow()
+                fix_coll.update_one(
+                    {"_id": ObjectId(fix_vuln_id)},
+                    {"$set": {
+                        "status": "open/review",
+                        "verification_sent_at": now,
+                    }},
+                )
+
+                try:
+                    from notifications.utils import create_notification
+                    from users.models import User as _UserModel
+                    _vuln_name = fix_doc.get("plugin_name", "")
+                    _asset     = fix_doc.get("host_name", "")
+                    _team      = fix_doc.get("assigned_team", "")
+                    _admin_id  = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
+                    _n_title = f"Verification Request: {_vuln_name[:80]}"
+                    _n_msg   = (
+                        f"All remediation steps completed for '{_vuln_name}' on {_asset}. "
+                        f"Team: {_team}. Please review and approve to close."
+                    )
+                    _n_meta = {
+                        "vulnerability_name":   _vuln_name,
+                        "asset":                _asset,
+                        "assigned_team":        _team,
+                        "fix_vulnerability_id": fix_vuln_id,
+                    }
+                    for _su in _UserModel.objects.filter(is_superuser=True):
+                        create_notification(str(_su.id), 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
+                    if _admin_id:
+                        create_notification(_admin_id, 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
+                        create_notification(_admin_id, 'user', 'vuln_verification_request', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                except Exception:
+                    pass
+
+                return Response(
+                    {
+                        "message": "Verification sent successfully. Superadmin will review and close.",
+                        "status": "open/review",
+                        "verification_sent_at": now.isoformat(),
+                        "completed_steps": completed_steps,
+                        "total_steps": total_steps,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response(
+                {"detail": "unexpected error", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 class UserFixStepFeedbackAPIView(APIView):

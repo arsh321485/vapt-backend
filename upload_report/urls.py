@@ -10,6 +10,8 @@ from .views import (
     RunMitigationView,
     VulnerabilityCardListView,
     VulnerabilityCardDetailView,
+    SuperAdminVerificationListAPIView,
+    SuperAdminApproveVerificationAPIView,
 )
 
 app_name = 'upload_report'
@@ -61,5 +63,17 @@ urlpatterns = [
         "vulnerability-cards/<str:card_id>/",
         VulnerabilityCardDetailView.as_view(),
         name="vulnerability_card_detail",
+    ),
+
+    # Superadmin verification
+    path(
+        "verifications/pending/",
+        SuperAdminVerificationListAPIView.as_view(),
+        name="superadmin_verification_list",
+    ),
+    path(
+        "verifications/approve/",
+        SuperAdminApproveVerificationAPIView.as_view(),
+        name="superadmin_verification_approve",
     ),
 ]
