@@ -5,7 +5,12 @@ from rest_framework.parsers import JSONParser
 from datetime import datetime
 from django.utils.timezone import is_naive, make_aware
 import pymongo
+import uuid
 
+from adminmitigationstrategy.views import (
+    _SLUG_TO_TEAM,
+    _qualifies_for_mitigation_strategy,
+)
 from vaptfix.mongo_client import MongoContext
 
 NESSUS_COLLECTION          = "nessus_reports"
@@ -28,12 +33,19 @@ def _normalize_iso(dt):
     return str(dt)
 
 
+def _normalize_team_name(raw_team):
+    raw = (raw_team or "").strip()
+    return _SLUG_TO_TEAM.get(raw.lower(), raw)
+
+
 class UserMitigationStrategyByTeamAPIView(APIView):
     """
     Returns vulnerabilities from the admin's latest nessus report,
     filtered to only the teams the logged-in member belongs to.
 
-    GET /api/user/mitigation/by-team/
+    GET /api/user/usermitigationstrategy/by-team/
+
+    Only includes vulnerabilities present on 4+ distinct assets (more than 3).
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -56,6 +68,7 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            member_teams_normalized = {_normalize_team_name(t) for t in member_teams}
             admin_id = str(user_detail.admin.id)
 
             with MongoContext() as db:
@@ -112,11 +125,15 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                             plugin_asset_map.setdefault(_pname, set()).add(_host_name)
 
                 multi_asset_plugins = {
-                    p for p, assets in plugin_asset_map.items() if len(assets) > 3
+                    p for p, assets in plugin_asset_map.items()
+                    if _qualifies_for_mitigation_strategy(len(assets))
+                }
+                plugin_asset_counts = {
+                    p: len(assets) for p, assets in plugin_asset_map.items()
                 }
 
                 # Step 6: Filter by member's teams only
-                teams = {name: [] for name in member_teams}
+                teams = {name: [] for name in member_teams_normalized}
 
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
@@ -163,16 +180,18 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                             vuln_cards.get((plugin_name, host_name))
                             or vuln_cards.get((plugin_name, ""))
                         )
-                        assigned_team = (card or {}).get("assigned_team", "") or ""
+                        _raw_team = (card or {}).get("assigned_team", "") or ""
+                        assigned_team = _normalize_team_name(_raw_team)
 
-                        # Only include if assigned_team is in this member's teams
-                        if assigned_team not in member_teams:
+                        if assigned_team not in member_teams_normalized:
                             continue
 
                         row = {
+                            "id":            str(uuid.uuid4()),
                             "host_name":     host_name,
                             "os":            os_value,
                             "plugin_name":   plugin_name,
+                            "asset_count":   plugin_asset_counts.get(plugin_name, 0),
                             "risk_factor":   risk_factor,
                             "port":          port,
                             "protocol":      protocol,
@@ -192,7 +211,7 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                 return Response(
                     {
                         "report_id":    report_id,
-                        "member_teams": member_teams,
+                        "member_teams": sorted(member_teams_normalized),
                         "uploaded_at":  _normalize_iso(latest_doc.get("uploaded_at")),
                         "teams":        teams_response,
                     },
@@ -240,6 +259,7 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            member_teams_normalized = {_normalize_team_name(t) for t in member_teams}
             admin_id = str(user_detail.admin.id)
 
             with MongoContext() as db:
@@ -267,7 +287,7 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                     {"vulnerability_name": 1, "assigned_team": 1}
                 ):
                     vname = card.get("vulnerability_name", "")
-                    team  = card.get("assigned_team", "") or ""
+                    team  = _normalize_team_name(card.get("assigned_team", "") or "")
                     if vname and vname not in plugin_team_map:
                         plugin_team_map[vname] = team
 
@@ -291,14 +311,14 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                         plugin_map.setdefault(plugin_name, set()).add(host_name)
 
                 # Step 5: Group by member's teams, filter 4+ assets
-                teams = {name: [] for name in member_teams}
+                teams = {name: [] for name in member_teams_normalized}
 
                 for plugin_name, assets in plugin_map.items():
-                    if len(assets) <= 3:
+                    if not _qualifies_for_mitigation_strategy(len(assets)):
                         continue
 
                     assigned_team = plugin_team_map.get(plugin_name, "")
-                    if assigned_team not in member_teams:
+                    if assigned_team not in member_teams_normalized:
                         continue
 
                     teams[assigned_team].append({
@@ -318,7 +338,7 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                 return Response(
                     {
                         "report_id":    report_id,
-                        "member_teams": member_teams,
+                        "member_teams": sorted(member_teams_normalized),
                         "teams":        teams_response,
                     },
                     status=status.HTTP_200_OK,

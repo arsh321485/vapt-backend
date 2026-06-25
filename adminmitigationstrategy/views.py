@@ -1,6 +1,5 @@
-from django.shortcuts import render
+import logging
 
-# Create your views here.
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -15,6 +14,11 @@ from rest_framework.parsers import JSONParser
 from bson import ObjectId
 
 from upload_report.models import UploadReport
+
+logger = logging.getLogger(__name__)
+
+# Include vulnerabilities that appear on more than 3 assets (i.e. 4+).
+MIN_MITIGATION_ASSET_COUNT = 4
 
 # ── Collection names ────────────────────────────────────────────────────────
 NESSUS_COLLECTION          = "nessus_reports"
@@ -54,6 +58,10 @@ def _normalize_iso(dt):
     return str(dt)
 
 
+def _qualifies_for_mitigation_strategy(asset_count):
+    return asset_count >= MIN_MITIGATION_ASSET_COUNT
+
+
 # ── API View ─────────────────────────────────────────────────────────────────
 
 class MitigationStrategyByTeamAPIView(APIView):
@@ -61,14 +69,16 @@ class MitigationStrategyByTeamAPIView(APIView):
     Returns vulnerabilities from latest nessus report, grouped by assigned_team.
     Team is fetched from vulnerability_cards collection (matched by report_id + vulnerability_name + host_name).
 
-    GET /api/admin/adminmitigation-strategy/by-team/
+    GET /api/admin/adminmitigationstrategy/by-team/
+
+    Only includes vulnerabilities present on 4+ distinct assets (more than 3).
     """
 
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser]
 
     def get(self, request):
-        cache_key = f"mitigation_by_team_{request.user.id}"
+        cache_key = f"mitigation_by_team_v2_{request.user.id}"
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
@@ -166,9 +176,12 @@ class MitigationStrategyByTeamAPIView(APIView):
                         if _pname:
                             plugin_asset_map.setdefault(_pname, set()).add(_host_name)
 
-                # Vulns appearing on 2+ different assets (match comment intent: > 1 not > 3)
                 multi_asset_plugins = {
-                    p for p, assets in plugin_asset_map.items() if len(assets) > 1
+                    p for p, assets in plugin_asset_map.items()
+                    if _qualifies_for_mitigation_strategy(len(assets))
+                }
+                plugin_asset_counts = {
+                    p: len(assets) for p, assets in plugin_asset_map.items()
                 }
 
                 # Initialize team buckets
@@ -194,14 +207,8 @@ class MitigationStrategyByTeamAPIView(APIView):
                             or ""
                         )
 
-                        # Include if multi-asset vuln OR explicitly assigned to a team
                         if plugin_name not in multi_asset_plugins:
-                            _card = (
-                                vuln_cards.get((plugin_name, host_name))
-                                or vuln_cards.get((plugin_name, ""))
-                            )
-                            if not _card or not (_card.get("assigned_team") or "").strip():
-                                continue
+                            continue
 
                         port     = v.get("port", "")
                         protocol = v.get("protocol", "")
@@ -237,6 +244,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                             "host_name":     host_name,
                             "os":            os_value,
                             "plugin_name":   plugin_name,
+                            "asset_count":   plugin_asset_counts.get(plugin_name, 0),
                             "risk_factor":   risk_factor,
                             "port":          port,
                             "protocol":      protocol,
@@ -364,9 +372,8 @@ class VulnerabilityAssetCountAPIView(APIView):
                 teams = {name: [] for name in TEAM_NAMES}
                 teams["Unassigned"] = []
 
-                # Only include vulns that appear on 4+ DIFFERENT assets, grouped by team
                 for plugin_name, assets in plugin_map.items():
-                    if len(assets) <= 3:
+                    if not _qualifies_for_mitigation_strategy(len(assets)):
                         continue
                     entry = {
                         "plugin_name": plugin_name,
