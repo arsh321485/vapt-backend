@@ -2092,6 +2092,22 @@ class SuperAdminApproveVerificationAPIView(APIView):
                 }},
             )
 
+            # Clear admin dashboard cache so counts reflect the closure immediately
+            try:
+                from django.core.cache import cache as _cache
+                _admin_id_cache = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
+                if _admin_id_cache:
+                    for _ck in (
+                        f"admin_vulnerabilities_{_admin_id_cache}",
+                        f"admin_dashboard_summary_{_admin_id_cache}",
+                        f"admin_total_assets_{_admin_id_cache}",
+                        f"admin_avg_score_{_admin_id_cache}",
+                        f"admin_inprocess_timeline_{_admin_id_cache}",
+                    ):
+                        _cache.delete(_ck)
+            except Exception:
+                pass
+
             # Notifications to admin and user
             try:
                 from notifications.utils import create_notification
