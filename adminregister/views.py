@@ -254,16 +254,25 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 admin_id = latest_doc.get("admin_id")
                 admin_email = latest_doc.get("admin_email")
 
-                # Build a set of closed vulnerability keys (plugin_name, host_name, port)
-                # Scope by report_id only — same as userregister — avoids created_by mismatch
+                # Build fix_doc lookup (plugin_name, host_name, port) -> fix_doc
+                # Include both active and closed docs so verification_sent_at is available
+                fix_doc_lookup = {}
                 closed_vulns = set()
-                for doc in closed_coll.find({"report_id": str(report_id)}):
+                for fdoc in closed_coll.find({"report_id": str(report_id)}):
                     key = (
-                        doc.get("plugin_name", ""),
-                        doc.get("host_name", ""),
-                        str(doc.get("port", ""))
+                        fdoc.get("plugin_name", ""),
+                        fdoc.get("host_name", ""),
+                        str(fdoc.get("port", "")),
                     )
+                    fix_doc_lookup[key] = fdoc
                     closed_vulns.add(key)
+                for fdoc in db[FIX_VULN_COLLECTION].find({"report_id": str(report_id)}):
+                    key = (
+                        fdoc.get("plugin_name", ""),
+                        fdoc.get("host_name", ""),
+                        str(fdoc.get("port", "")),
+                    )
+                    fix_doc_lookup[key] = fdoc  # active overrides closed if both exist
 
                 rows = []
 
@@ -283,8 +292,8 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
 
                         port = v.get("port", "")
 
-                        # Determine status: only the exact record (plugin+host+port) is closed
-                        vuln_status = (
+                        _fix = fix_doc_lookup.get((plugin_name, host_name, str(port)), {})
+                        vuln_status = _fix.get("status") or (
                             "closed"
                             if (plugin_name, host_name, str(port)) in closed_vulns
                             else "open"
@@ -305,8 +314,8 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
 
                         protocol = v.get("protocol", "")
 
-                        first_obs = v.get("created_at") or uploaded_at
-                        second_obs = v.get("updated_at")
+                        first_obs  = v.get("created_at") or uploaded_at
+                        second_obs = _fix.get("verification_sent_at") or v.get("updated_at")
 
                         rows.append({
                             "id": str(uuid.uuid4()),
@@ -1427,7 +1436,10 @@ class FixVulnerabilityStepsAPIView(APIView):
         return "Configuration Management"
 
     def _ensure_execution_guidance_fields(self, os_data: dict) -> dict:
-        commands = (os_data.get("commands_for_action") or "").strip()
+        _raw_cmd = os_data.get("commands_for_action") or ""
+        if isinstance(_raw_cmd, list):
+            _raw_cmd = "\n".join(str(c) for c in _raw_cmd if c)
+        commands = str(_raw_cmd).strip()
         where_to_run = os_data.get("where_to_run", "terminal")
 
         if not os_data.get("how_to_run"):

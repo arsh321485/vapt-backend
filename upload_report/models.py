@@ -50,3 +50,13 @@ class UploadReport(models.Model):
         loc = self.location.location_name if self.location else "NoLocation"
         admin_email = getattr(self.admin, "email", "NoAdmin")
         return f"{self.file} - {loc} ({admin_email})"
+
+
+class FixVulnVerification(models.Model):
+    """Proxy model for Django admin — no DB table created (managed=False).
+    Used only to show pending verifications panel in superadmin."""
+    class Meta:
+        app_label = 'upload_report'
+        managed = False
+        verbose_name = 'Pending Verification'
+        verbose_name_plural = 'Pending Verifications'

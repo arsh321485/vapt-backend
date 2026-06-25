@@ -1949,3 +1949,182 @@ class VulnerabilityCardDetailView(APIView):
                 {"error": "Failed to retrieve card", "detail": str(exc)},
                 status=500,
             )
+
+
+# ---------------------------------------------------------------------------
+# Superadmin Verification APIs
+# ---------------------------------------------------------------------------
+
+FIX_VULN_COLLECTION        = "fix_vulnerabilities"
+FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
+FIX_VULN_STEPS_COLLECTION  = "fix_vulnerability_steps"
+TICKETS_COLLECTION         = "tickets"
+
+
+def _su_normalize_iso(val):
+    if val is None:
+        return None
+    if isinstance(val, datetime.datetime):
+        return val.isoformat()
+    return str(val)
+
+
+class SuperAdminVerificationListAPIView(APIView):
+    """
+    GET /api/upload/verifications/pending/
+    Returns all fix vulnerabilities with status "open/review" (awaiting superadmin approval).
+    Only accessible by superadmin (is_superuser=True).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_superuser:
+            return Response({"detail": "Superadmin access required."}, status=403)
+
+        try:
+            _, db = _get_mongo_client_and_db()
+            fix_coll   = db[FIX_VULN_COLLECTION]
+            steps_coll = db[FIX_VULN_STEPS_COLLECTION]
+
+            pending = list(fix_coll.find({"status": "open/review"}).sort("verification_sent_at", -1))
+
+            results = []
+            for doc in pending:
+                fix_vuln_id = str(doc["_id"])
+                completed_count = steps_coll.count_documents({
+                    "fix_vulnerability_id": fix_vuln_id,
+                    "status": "completed",
+                })
+                results.append({
+                    "fix_vulnerability_id": fix_vuln_id,
+                    "report_id": doc.get("report_id"),
+                    "vulnerability_name": doc.get("plugin_name"),
+                    "asset": doc.get("host_name"),
+                    "severity": doc.get("risk_factor"),
+                    "port": doc.get("port", ""),
+                    "assigned_team": doc.get("assigned_team", ""),
+                    "assigned_team_members": doc.get("assigned_team_members", []),
+                    "status": doc.get("status"),
+                    "verification_sent_at": _su_normalize_iso(doc.get("verification_sent_at")),
+                    "completed_steps": completed_count,
+                    "admin_id": doc.get("admin_id", ""),
+                    "created_at": _su_normalize_iso(doc.get("created_at")),
+                })
+
+            return Response({
+                "message": "Pending verifications fetched successfully",
+                "count": len(results),
+                "results": results,
+            }, status=200)
+
+        except Exception as exc:
+            return Response({"detail": "unexpected error", "error": str(exc)}, status=500)
+
+
+class SuperAdminApproveVerificationAPIView(APIView):
+    """
+    POST /api/upload/verifications/approve/
+    Superadmin approves a verification request → vulnerability is closed.
+    Only accessible by superadmin (is_superuser=True).
+
+    Body: { "fix_vuln_id": "<id>", "action": "approve" }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.is_superuser:
+            return Response({"detail": "Superadmin access required."}, status=403)
+
+        fix_vuln_id = request.data.get("fix_vuln_id", "").strip()
+        action      = request.data.get("action", "").strip().lower()
+
+        if not fix_vuln_id:
+            return Response({"detail": "fix_vuln_id is required."}, status=400)
+        if action != "approve":
+            return Response({"detail": "Invalid action. Use 'approve'."}, status=400)
+
+        try:
+            from bson import ObjectId
+            from bson.errors import InvalidId
+            try:
+                oid = ObjectId(fix_vuln_id)
+            except (InvalidId, Exception):
+                return Response({"detail": "Invalid fix_vuln_id."}, status=400)
+
+            _, db = _get_mongo_client_and_db()
+            fix_coll    = db[FIX_VULN_COLLECTION]
+            closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+            fix_doc = fix_coll.find_one({"_id": oid})
+            if not fix_doc:
+                return Response({"detail": "Fix vulnerability not found or already closed."}, status=404)
+
+            if fix_doc.get("status") != "open/review":
+                return Response({
+                    "detail": "This vulnerability is not pending verification.",
+                    "current_status": fix_doc.get("status"),
+                }, status=400)
+
+            now = datetime.datetime.utcnow()
+            superadmin_id = str(request.user.id)
+
+            # Move to closed collection
+            closed_doc = fix_doc.copy()
+            closed_doc["fix_vulnerability_id"] = str(fix_doc["_id"])
+            closed_doc.pop("_id", None)
+            closed_doc.update({
+                "status": "closed",
+                "closed_at": now,
+                "closed_by": superadmin_id,
+                "approved_by_superadmin": superadmin_id,
+                "approved_at": now,
+            })
+            closed_coll.insert_one(closed_doc)
+            fix_coll.delete_one({"_id": oid})
+
+            # Auto-close linked open tickets
+            db[TICKETS_COLLECTION].update_many(
+                {"fix_vulnerability_id": fix_vuln_id, "status": "open"},
+                {"$set": {
+                    "status": "closed",
+                    "closed_at": now,
+                    "close_comment": "Auto-closed: vulnerability verified and approved by superadmin",
+                }},
+            )
+
+            # Notifications to admin and user
+            try:
+                from notifications.utils import create_notification
+                _vuln_name = fix_doc.get("plugin_name", "")
+                _asset     = fix_doc.get("host_name", "")
+                _team      = fix_doc.get("assigned_team", "")
+                _admin_id  = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
+                _n_title = f"Vulnerability Verified & Closed: {_vuln_name[:80]}"
+                _n_msg   = (
+                    f"{_vuln_name} on {_asset} has been verified and closed by superadmin. "
+                    f"Team: {_team}."
+                )
+                _n_meta = {
+                    "vulnerability_name":   _vuln_name,
+                    "asset":                _asset,
+                    "assigned_team":        _team,
+                    "fix_vulnerability_id": fix_vuln_id,
+                }
+                if _admin_id:
+                    create_notification(_admin_id, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
+                    create_notification(_admin_id, 'user', 'vuln_closed', _n_title, _n_msg, _n_meta)
+            except Exception:
+                pass
+
+            return Response({
+                "message": "Vulnerability verified and closed successfully.",
+                "fix_vulnerability_id": fix_vuln_id,
+                "vulnerability_name": fix_doc.get("plugin_name"),
+                "asset": fix_doc.get("host_name"),
+                "status": "closed",
+                "closed_at": now.isoformat(),
+                "approved_by": superadmin_id,
+            }, status=200)
+
+        except Exception as exc:
+            return Response({"detail": "unexpected error", "error": str(exc)}, status=500)

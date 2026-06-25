@@ -4,6 +4,7 @@ from .views import (
     UserFixVulnerabilityCreateAPIView,
     UserFixVulnerabilityCardAPIView,
     UserFixVulnerabilityStepsAPIView,
+    UserSendVerificationAPIView,
     UserFixStepFeedbackAPIView,
     UserFixVulnerabilityFinalFeedbackAPIView,
     UserVulnerabilityTimelineAPIView,
@@ -48,7 +49,14 @@ urlpatterns = [
         name="user-fix-vuln-steps",
     ),
 
-    # 5. Step feedback
+    # 5. Send verification (after all steps complete)
+    path(
+        "fix-vulnerability/<str:fix_vuln_id>/send-verification/",
+        UserSendVerificationAPIView.as_view(),
+        name="user-send-verification",
+    ),
+
+    # 6. Step feedback
     path(
         "fix-vulnerability/<str:fix_vuln_id>/feedback/",
         UserFixStepFeedbackAPIView.as_view(),

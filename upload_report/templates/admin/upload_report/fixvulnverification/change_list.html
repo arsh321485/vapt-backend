@@ -1,0 +1,92 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block title %}Pending Verifications | Django Admin{% endblock %}
+
+{% block content_title %}<h1>Pending Verifications</h1>{% endblock %}
+
+{% block content %}
+<div id="content-main">
+
+  {% if messages %}
+  <ul class="messagelist">
+    {% for message in messages %}
+    <li class="{{ message.tags }}">{{ message }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <p style="color:#666; margin-bottom:16px;">
+    These vulnerabilities have all steps completed and are awaiting your approval to close.
+  </p>
+
+  {% if pending_verifications %}
+  <div style="overflow-x:auto;">
+    <table style="width:100%; border-collapse:collapse; background:#fff; border:1px solid #ddd; border-radius:4px;">
+      <thead>
+        <tr style="background:#417690; color:#fff;">
+          <th style="padding:10px 12px; text-align:left;">#</th>
+          <th style="padding:10px 12px; text-align:left;">Vulnerability</th>
+          <th style="padding:10px 12px; text-align:left;">Asset</th>
+          <th style="padding:10px 12px; text-align:left;">Severity</th>
+          <th style="padding:10px 12px; text-align:left;">Port</th>
+          <th style="padding:10px 12px; text-align:left;">Team</th>
+          <th style="padding:10px 12px; text-align:left;">Completed By</th>
+          <th style="padding:10px 12px; text-align:left;">Verification Sent</th>
+          <th style="padding:10px 12px; text-align:center;">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for v in pending_verifications %}
+        <tr style="border-bottom:1px solid #eee; {% if forloop.counter|divisibleby:2 %}background:#f9f9f9;{% endif %}">
+          <td style="padding:10px 12px; color:#999;">{{ forloop.counter }}</td>
+          <td style="padding:10px 12px; font-weight:bold; max-width:220px; word-break:break-word;">{{ v.vulnerability_name }}</td>
+          <td style="padding:10px 12px;">{{ v.asset }}</td>
+          <td style="padding:10px 12px;">
+            {% if v.severity == "Critical" %}
+              <span style="background:#c0392b;color:#fff;padding:2px 8px;border-radius:3px;font-size:12px;">{{ v.severity }}</span>
+            {% elif v.severity == "High" %}
+              <span style="background:#e67e22;color:#fff;padding:2px 8px;border-radius:3px;font-size:12px;">{{ v.severity }}</span>
+            {% elif v.severity == "Medium" %}
+              <span style="background:#f39c12;color:#fff;padding:2px 8px;border-radius:3px;font-size:12px;">{{ v.severity }}</span>
+            {% elif v.severity == "Low" %}
+              <span style="background:#27ae60;color:#fff;padding:2px 8px;border-radius:3px;font-size:12px;">{{ v.severity }}</span>
+            {% else %}
+              <span style="background:#95a5a6;color:#fff;padding:2px 8px;border-radius:3px;font-size:12px;">{{ v.severity|default:"N/A" }}</span>
+            {% endif %}
+          </td>
+          <td style="padding:10px 12px;">{{ v.port|default:"-" }}</td>
+          <td style="padding:10px 12px;">{{ v.assigned_team|default:"-" }}</td>
+          <td style="padding:10px 12px; font-size:13px; color:#1a6496;">
+            {{ v.completed_by|default:"-" }}
+          </td>
+          <td style="padding:10px 12px; font-size:13px; color:#555;">{{ v.verification_sent_at }}</td>
+          <td style="padding:10px 12px; text-align:center;">
+            <form method="post" action="" onsubmit="return confirm('Approve and close: {{ v.vulnerability_name|escapejs }}?')">
+              {% csrf_token %}
+              <input type="hidden" name="fix_vuln_id" value="{{ v.fix_id }}">
+              <button type="submit"
+                style="background:#28a745;color:#fff;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold;">
+                ✔ Approve & Close
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p style="margin-top:12px; color:#666; font-size:13px;">
+    Total pending: <strong>{{ pending_verifications|length }}</strong>
+  </p>
+
+  {% else %}
+  <div style="padding:40px; text-align:center; background:#fff; border:1px solid #ddd; border-radius:4px; color:#888;">
+    <p style="font-size:18px;">✅ No pending verifications</p>
+    <p style="font-size:13px;">All vulnerabilities have been reviewed.</p>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
