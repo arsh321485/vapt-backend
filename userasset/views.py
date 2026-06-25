@@ -634,18 +634,15 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                 if not host_entry:
                     return Response({"detail": "Asset not found in report"}, status=status.HTTP_404_NOT_FOUND)
 
-                # Build closed vuln set
-                admin_id = str(admin_user.id)
-                closed_vulns = set()
-                for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": str(report_id), "created_by": admin_id}
-                ):
-                    key = (
-                        cdoc.get("plugin_name", ""),
-                        cdoc.get("host_name", ""),
-                        str(cdoc.get("port", ""))
-                    )
-                    closed_vulns.add(key)
+                # Build status lookup: (plugin_name, host_name, port) → status
+                _status_lookup = {}
+                for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": str(report_id)}):
+                    _key = (cdoc.get("plugin_name", ""), cdoc.get("host_name", ""), str(cdoc.get("port", "")))
+                    _status_lookup[_key] = "closed"
+                for fdoc in db[FIX_VULN_COLLECTION].find({"report_id": str(report_id)}):
+                    _key = (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""), str(fdoc.get("port", "")))
+                    if _key not in _status_lookup:
+                        _status_lookup[_key] = fdoc.get("status", "open")
 
                 held_plugins = {
                     h.get("plugin_name", "")
@@ -666,12 +663,11 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                     assigned_team = plugin_team_map.get(plugin_name)
                     if not assigned_team:
                         continue
-
-                    port = str(v.get("port", ""))
-                    if (plugin_name, host_name, port) in closed_vulns:
-                        continue
                     if plugin_name in held_plugins or plugin_name in deleted_plugins:
                         continue
+
+                    port        = str(v.get("port", ""))
+                    vuln_status = _status_lookup.get((plugin_name, host_name, port), "open")
 
                     out.append({
                         "asset": host_name,
@@ -684,7 +680,7 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                             v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
                         ),
                         "description": _join_description(v),
-                        "status": "open",
+                        "status": vuln_status,
                         "assigned_team": assigned_team,
                     })
 
@@ -759,17 +755,15 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                         status=status.HTTP_404_NOT_FOUND
                     )
 
-                # Build closed vuln set
-                closed_vulns = set()
-                for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": str(report_id)}
-                ):
-                    key = (
-                        cdoc.get("plugin_name", ""),
-                        cdoc.get("host_name", ""),
-                        str(cdoc.get("port", ""))
-                    )
-                    closed_vulns.add(key)
+                # Build status lookup: (plugin_name, host_name, port) → status
+                _status_lookup = {}
+                for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": str(report_id)}):
+                    _key = (cdoc.get("plugin_name", ""), cdoc.get("host_name", ""), str(cdoc.get("port", "")))
+                    _status_lookup[_key] = "closed"
+                for fdoc in db[FIX_VULN_COLLECTION].find({"report_id": str(report_id)}):
+                    _key = (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""), str(fdoc.get("port", "")))
+                    if _key not in _status_lookup:
+                        _status_lookup[_key] = fdoc.get("status", "open")
 
                 held_plugins = {
                     h.get("plugin_name", "")
@@ -794,11 +788,7 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                         continue
 
                     port        = str(v.get("port", ""))
-                    vuln_status = (
-                        "closed"
-                        if (plugin_name, host_name, port) in closed_vulns
-                        else "open"
-                    )
+                    vuln_status = _status_lookup.get((plugin_name, host_name, port), "open")
 
                     out.append({
                         "asset": host_name,
@@ -1441,6 +1431,19 @@ class UserVulnAssetListAPIView(APIView):
                     )
                 }
 
+                # Build status lookup per host for this plugin
+                _fix_status = {}
+                for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find(
+                    {"report_id": str(report_id), "plugin_name": plugin_name}
+                ):
+                    _fix_status[cdoc.get("host_name", "")] = "closed"
+                for fdoc in db[FIX_VULN_COLLECTION].find(
+                    {"report_id": str(report_id), "plugin_name": plugin_name}
+                ):
+                    _hn = fdoc.get("host_name", "")
+                    if _hn not in _fix_status:
+                        _fix_status[_hn] = fdoc.get("status", "open")
+
                 assets = []
                 seen_hosts = set()
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -1457,7 +1460,7 @@ class UserVulnAssetListAPIView(APIView):
                         elif host_name in held_hosts:
                             vuln_status = "held"
                         else:
-                            vuln_status = "open"
+                            vuln_status = _fix_status.get(host_name, "open")
                         assets.append({
                             "host_name": host_name,
                             "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
