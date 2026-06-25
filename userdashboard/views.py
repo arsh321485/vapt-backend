@@ -421,17 +421,33 @@ class UserVulnerabilitiesAPIView(APIView):
                 report_id  = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
                 plugin_risk = _build_plugin_risk_map(nessus_doc)
 
+                # Build set of closed plugin names for this report
+                closed_plugins = {
+                    (cdoc.get("plugin_name", ""), cdoc.get("host_name", ""))
+                    for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find(
+                        {"report_id": str(report_id)},
+                        {"plugin_name": 1, "host_name": 1}
+                    )
+                }
+
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1, "_id": 0},
+                    {"vulnerability_name": 1, "assigned_team": 1, "host_name": 1, "_id": 0},
                 ):
                     raw_team = (card.get("assigned_team") or "").strip()
                     if not teams_lower.get(raw_team.lower()):
                         continue
-                    pname = (card.get("vulnerability_name") or "").strip()
-                    risk  = plugin_risk.get(pname)
+                    pname     = (card.get("vulnerability_name") or "").strip()
+                    card_host = (card.get("host_name") or "").strip()
+                    # Skip if this (plugin, host) pair is closed
+                    if (pname, card_host) in closed_plugins:
+                        continue
+                    # Also skip if plugin is closed on any host (when card has no host_name)
+                    if not card_host and any(p == pname for p, _ in closed_plugins):
+                        continue
+                    risk = plugin_risk.get(pname)
                     if risk in counts:
                         counts[risk] += 1
 
