@@ -675,6 +675,7 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                         "owner": organisation_name,
                         "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
                         "vul_name": plugin_name,
+                        "plugin_id": str(v.get("plugin_id") or ""),
                         "vendor_fix_available": "Yes",
                         "cvss_score": str(
                             v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
@@ -796,6 +797,7 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                         "owner": organisation_name,
                         "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
                         "vul_name": plugin_name,
+                        "plugin_id": str(v.get("plugin_id") or ""),
                         "vendor_fix_available": "Yes",
                         "cvss_score": str(
                             v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
