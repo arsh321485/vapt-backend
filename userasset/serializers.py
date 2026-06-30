@@ -22,6 +22,7 @@ class UserAssetVulnSerializer(serializers.Serializer):
     owner = serializers.CharField(allow_blank=True, allow_null=True)
     severity = serializers.CharField(allow_blank=True)
     vul_name = serializers.CharField(allow_blank=True)
+    plugin_id = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     vendor_fix_available = serializers.CharField()
     cvss_score = serializers.CharField(allow_blank=True, allow_null=True)
     description = serializers.CharField(allow_blank=True)
