@@ -15,10 +15,11 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path,include
+from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from upload_report.views import serve_report_file 
+from upload_report.views import serve_report_file
+from automation_scripts_api.urls import admin_urlpatterns, user_urlpatterns
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -39,7 +40,8 @@ urlpatterns = [
     path("api/user/mitigation/", include("usermitigationstrategy.urls")),
     path("api/user/risk_criteria/", include("userrisk_criteria.urls")),
     path("api/notifications/", include("notifications.urls")),
-    path("api/admin/automation-scripts/", include("automation_scripts_api.urls")),
+    path("api/admin/automation-scripts/", include(admin_urlpatterns)),
+    path("api/user/automation-scripts/", include(user_urlpatterns)),
 
     path("media/<path:path>", serve_report_file),
 
