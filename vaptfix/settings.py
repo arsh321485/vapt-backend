@@ -78,6 +78,7 @@ INSTALLED_APPS = [
     "usermitigationstrategy",
     "userrisk_criteria",
     "notifications",
+    "automation_scripts_api",
 ]
 
 MIDDLEWARE = [
