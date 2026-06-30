@@ -39,6 +39,7 @@ urlpatterns = [
     path("api/user/mitigation/", include("usermitigationstrategy.urls")),
     path("api/user/risk_criteria/", include("userrisk_criteria.urls")),
     path("api/notifications/", include("notifications.urls")),
+    path("api/admin/automation-scripts/", include("automation_scripts_api.urls")),
 
     path("media/<path:path>", serve_report_file),
 
