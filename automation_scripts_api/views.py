@@ -72,10 +72,6 @@ def _not_found_response(plugin_id):
 
 
 def _build_stats(docs):
-    """
-    For each script, look up assigned_team from vulnerability_cards by vulnerability_name,
-    then return the stats row.
-    """
     if not docs:
         return []
 
@@ -86,7 +82,6 @@ def _build_stats(docs):
             {"vulnerability_name": {"$in": vuln_names}},
             {"vulnerability_name": 1, "assigned_team": 1, "_id": 0}
         )
-        # Use first card found per vulnerability_name
         team_map = {}
         for card in cards:
             vname = card.get("vulnerability_name", "")
@@ -105,6 +100,23 @@ def _build_stats(docs):
             "team": team_map.get(vuln, ""),
         })
     return stats
+
+
+def _get_feedback_summary(plugin_id):
+    """Return thumb_up_count, thumb_down_count, feedbacks list for a plugin_id."""
+    with MongoContext() as db:
+        docs = list(db["script_feedback"].find(
+            {"plugin_id": int(plugin_id)},
+            {"_id": 0, "user_email": 1, "working": 1, "created_at": 1}
+        ).sort("created_at", -1))
+
+    thumb_up = sum(1 for d in docs if d.get("working") is True)
+    thumb_down = sum(1 for d in docs if d.get("working") is False)
+    return {
+        "thumb_up_count": thumb_up,
+        "thumb_down_count": thumb_down,
+        "feedbacks": docs,
+    }
 
 
 # ── ADMIN VIEWS (read-only, no download) ─────────────────────────────────────
@@ -154,10 +166,7 @@ def admin_list_scripts(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def admin_download_stats(request):
-    """
-    Returns download stats for all scripts.
-    Columns: Vulnerability Name | Severity | No. of Times Downloaded | Team
-    """
+    """Columns: Vulnerability Name | Severity | No. of Times Downloaded | Team"""
     with MongoContext() as db:
         docs = list(db["automation_scripts"].find(
             {},
@@ -166,6 +175,53 @@ def admin_download_stats(request):
 
     stats = _build_stats(docs)
     return Response({"count": len(stats), "stats": stats})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def admin_script_feedback(request, plugin_id):
+    """Admin read-only: see thumb up/down feedback for a specific script."""
+    doc = _fetch_script(plugin_id)
+    if not doc:
+        return Response(_not_found_response(plugin_id), status=404)
+
+    summary = _get_feedback_summary(plugin_id)
+    return Response({
+        "plugin_id": int(plugin_id),
+        "vulnerability": doc.get("vulnerability", ""),
+        "severity": doc.get("severity", ""),
+        **summary,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def admin_all_feedback(request):
+    """Admin read-only: see thumb up/down counts for all scripts."""
+    with MongoContext() as db:
+        pipeline = [
+            {"$group": {
+                "_id": "$plugin_id",
+                "thumb_up_count":   {"$sum": {"$cond": [{"$eq": ["$working", True]}, 1, 0]}},
+                "thumb_down_count": {"$sum": {"$cond": [{"$eq": ["$working", False]}, 1, 0]}},
+                "vulnerability":    {"$first": "$vulnerability"},
+                "severity":         {"$first": "$severity"},
+            }},
+            {"$sort": {"_id": 1}},
+        ]
+        results = list(db["script_feedback"].aggregate(pipeline))
+
+    data = [
+        {
+            "plugin_id":        r["_id"],
+            "vulnerability":    r.get("vulnerability", ""),
+            "severity":         r.get("severity", ""),
+            "thumb_up_count":   r.get("thumb_up_count", 0),
+            "thumb_down_count": r.get("thumb_down_count", 0),
+        }
+        for r in results
+    ]
+    return Response({"count": len(data), "feedback_summary": data})
 
 
 # ── USER VIEWS ────────────────────────────────────────────────────────────────
@@ -215,27 +271,24 @@ def user_list_scripts(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_download_script(request, plugin_id):
-    """
-    Download the fix script (.py) for a given plugin_id.
-    Only users can access this endpoint. Increments download_count on each call.
-    """
+    """Download fix script. Increments download_count. Admins cannot download."""
+    if request.user.is_staff or request.user.is_superuser:
+        return Response(
+            {"error": "Admins cannot download scripts. Read-only access only."},
+            status=403
+        )
+
     doc = _fetch_script(plugin_id)
     if not doc:
         return Response(_not_found_response(plugin_id), status=404)
 
     fix_script_path = doc.get("fix_script_path")
     if not fix_script_path:
-        return Response(
-            {"error": "Script file not available for this vulnerability."},
-            status=404
-        )
+        return Response({"error": "Script file not available for this vulnerability."}, status=404)
 
     full_path = BASE_DIR / fix_script_path
     if not full_path.exists():
-        return Response(
-            {"error": f"Script file not found on server: {fix_script_path}"},
-            status=404
-        )
+        return Response({"error": f"Script file not found on server: {fix_script_path}"}, status=404)
 
     with MongoContext() as db:
         db["automation_scripts"].update_one(
@@ -254,10 +307,7 @@ def user_download_script(request, plugin_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_download_stats(request):
-    """
-    Returns download stats visible to users.
-    Columns: Vulnerability Name | Severity | No. of Times Downloaded | Team
-    """
+    """Columns: Vulnerability Name | Severity | No. of Times Downloaded | Team"""
     with MongoContext() as db:
         docs = list(db["automation_scripts"].find(
             {},
@@ -266,3 +316,85 @@ def user_download_stats(request):
 
     stats = _build_stats(docs)
     return Response({"count": len(stats), "stats": stats})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def user_submit_feedback(request):
+    """
+    User submits thumb up/down after running a script.
+    Body: { "plugin_id": 103669, "working": true }
+    Admin users are not allowed to submit feedback.
+    """
+    if request.user.is_staff or request.user.is_superuser:
+        return Response(
+            {"error": "Admins cannot submit feedback. Read-only access only."},
+            status=403
+        )
+
+    plugin_id_raw = request.data.get("plugin_id")
+    working = request.data.get("working")
+
+    if plugin_id_raw is None:
+        return Response({"error": "plugin_id is required."}, status=400)
+    if working is None or not isinstance(working, bool):
+        return Response({"error": "working must be true or false."}, status=400)
+
+    try:
+        plugin_id = int(plugin_id_raw)
+    except (ValueError, TypeError):
+        return Response({"error": "plugin_id must be a number."}, status=400)
+
+    doc = _fetch_script(plugin_id)
+    if not doc:
+        return Response(_not_found_response(plugin_id), status=404)
+
+    user_email = request.user.email
+    now = datetime.datetime.utcnow().isoformat()
+
+    with MongoContext() as db:
+        db["script_feedback"].update_one(
+            {"plugin_id": plugin_id, "user_email": user_email},
+            {"$set": {
+                "plugin_id":     plugin_id,
+                "vulnerability": doc.get("vulnerability", ""),
+                "severity":      doc.get("severity", ""),
+                "user_email":    user_email,
+                "working":       working,
+                "updated_at":    now,
+            },
+            "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+
+    return Response({
+        "success": True,
+        "plugin_id": plugin_id,
+        "working": working,
+        "message": "Feedback submitted." ,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_get_feedback(request, plugin_id):
+    """User sees their own feedback + overall counts for this script."""
+    doc = _fetch_script(plugin_id)
+    if not doc:
+        return Response(_not_found_response(plugin_id), status=404)
+
+    user_email = request.user.email
+
+    with MongoContext() as db:
+        my_feedback = db["script_feedback"].find_one(
+            {"plugin_id": int(plugin_id), "user_email": user_email},
+            {"_id": 0, "working": 1, "updated_at": 1}
+        )
+
+    summary = _get_feedback_summary(plugin_id)
+    return Response({
+        "plugin_id":      int(plugin_id),
+        "vulnerability":  doc.get("vulnerability", ""),
+        "my_feedback":    my_feedback,
+        **summary,
+    })
