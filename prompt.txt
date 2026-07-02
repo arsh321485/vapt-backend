@@ -1,0 +1,31 @@
+https://vaptbackend.secureitlab.com/api/admin/upload_report/download-report/?format=pdf
+
+
+{
+    "detail": "Not found."
+}
+
+
+
+secureitlab@support:/var/www/backend/vapt-backend$ tail -20 /var/log/gunicorn-error.log
+[2026-07-02 09:38:36 +0200] [3025528] [INFO] Booting worker with pid: 3025528
+[2026-07-02 09:38:36 +0200] [3025529] [INFO] Booting worker with pid: 3025529
+[2026-07-02 09:38:36 +0200] [3025530] [INFO] Booting worker with pid: 3025530
+[2026-07-02 09:42:23 +0200] [3025512] [INFO] Handling signal: term
+[2026-07-02 02:42:23 -0500] [3025529] [INFO] Worker exiting (pid: 3025529)
+[2026-07-02 02:42:23 -0500] [3025528] [INFO] Worker exiting (pid: 3025528)
+[2026-07-02 02:42:23 -0500] [3025530] [INFO] Worker exiting (pid: 3025530)
+[2026-07-02 02:42:23 -0500] [3025526] [INFO] Worker exiting (pid: 3025526)
+[2026-07-02 02:42:23 -0500] [3025527] [INFO] Worker exiting (pid: 3025527)
+[2026-07-02 02:42:23 -0500] [3025525] [INFO] Worker exiting (pid: 3025525)
+[2026-07-02 09:42:24 +0200] [3025512] [INFO] Shutting down: Master
+[2026-07-02 09:42:24 +0200] [3026027] [INFO] Starting gunicorn 21.2.0
+[2026-07-02 09:42:24 +0200] [3026027] [INFO] Listening at: http://127.0.0.1:9001 (3026027)
+[2026-07-02 09:42:24 +0200] [3026027] [INFO] Using worker: gthread
+[2026-07-02 09:42:24 +0200] [3026041] [INFO] Booting worker with pid: 3026041
+[2026-07-02 09:42:24 +0200] [3026042] [INFO] Booting worker with pid: 3026042
+[2026-07-02 09:42:24 +0200] [3026043] [INFO] Booting worker with pid: 3026043
+[2026-07-02 09:42:24 +0200] [3026044] [INFO] Booting worker with pid: 3026044
+[2026-07-02 09:42:24 +0200] [3026045] [INFO] Booting worker with pid: 3026045
+[2026-07-02 09:42:25 +0200] [3026046] [INFO] Booting worker with pid: 3026046
+secureitlab@support:/var/www/backend/vapt-backend$

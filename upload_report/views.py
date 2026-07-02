@@ -2451,6 +2451,19 @@ class DownloadReportAPIView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    def dispatch(self, request, *args, **kwargs):
+        import sys
+        print(f"[DownloadReport DISPATCH] method={request.method} user={getattr(request, 'user', 'NONE')}", file=sys.stderr)
+        sys.stderr.flush()
+        try:
+            return super().dispatch(request, *args, **kwargs)
+        except Exception as _exc:
+            import traceback as _tb
+            print(f"[DownloadReport DISPATCH ERROR] {type(_exc).__name__}: {_exc}", file=sys.stderr)
+            _tb.print_exc(file=sys.stderr)
+            sys.stderr.flush()
+            raise
+
     def get(self, request):
         import sys, traceback as _tb
         try:
