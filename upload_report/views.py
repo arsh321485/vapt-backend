@@ -2441,59 +2441,9 @@ def _render_html_report(data, file_name, generated_on, date_of_testing):
     return html
 
 
-class DownloadReportAPIView(APIView):
-    """
-    GET /api/admin/upload_report/download-report/?format=html
-    Generates and serves the vulnerability report as a downloadable file.
-    format=html (default) → .html file
-    format=pdf  → .pdf file (requires weasyprint)
-    Admin only. Used by Slack/MS Teams bots for report delivery.
-    """
-    permission_classes = [IsAuthenticated]
-
-    def handle_exception(self, exc):
-        import traceback as _tb
-        try:
-            with open("/tmp/dlr_debug.txt", "a") as _f:
-                _f.write(f"EXCEPTION {type(exc).__name__}: {exc}\n")
-                _tb.print_exc(file=_f)
-        except Exception:
-            pass
-        return super().handle_exception(exc)
-
-    def dispatch(self, request, *args, **kwargs):
-        try:
-            with open("/tmp/dlr_debug.txt", "a") as _f:
-                _f.write(f"DISPATCH called method={request.method}\n")
-        except Exception:
-            pass
-        resp = super().dispatch(request, *args, **kwargs)
-        try:
-            with open("/tmp/dlr_debug.txt", "a") as _f:
-                _f.write(f"DISPATCH done status={resp.status_code}\n")
-        except Exception:
-            pass
-        return resp
-
-    def get(self, request):
-        try:
-            with open("/tmp/dlr_debug.txt", "a") as _f:
-                _f.write(f"GET called user={request.user} is_auth={request.user.is_authenticated}\n")
-        except Exception:
-            pass
-        try:
-            return self._get_impl(request)
-        except Exception as _exc:
-            import traceback as _tb
-            try:
-                with open("/tmp/dlr_debug.txt", "a") as _f:
-                    _f.write(f"GET EXCEPTION {type(_exc).__name__}: {_exc}\n")
-                    _tb.print_exc(file=_f)
-            except Exception:
-                pass
-            return Response({"error": f"{type(_exc).__name__}: {_exc}"}, status=500)
-
-    def _get_impl(self, request):
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def download_report_view(request):
         fmt = request.query_params.get("format", "html").lower().strip()
         if fmt not in ("html", "pdf"):
             return Response({"error": "format must be 'html' or 'pdf'"}, status=400)

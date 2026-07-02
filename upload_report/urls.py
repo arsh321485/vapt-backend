@@ -14,7 +14,7 @@ from .views import (
     SuperAdminApproveVerificationAPIView,
     AdminLatestReportAPIView,
     ReportHeaderAPIView,
-    DownloadReportAPIView,
+    download_report_view,
 )
 
 app_name = 'upload_report'
@@ -85,7 +85,7 @@ urlpatterns = [
     # Download report as HTML or PDF
     path(
         "download-report/",
-        DownloadReportAPIView.as_view(),
+        download_report_view,
         name="download_report",
     ),
 
