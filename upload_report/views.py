@@ -2021,6 +2021,500 @@ class SuperAdminVerificationListAPIView(APIView):
             return Response({"detail": "unexpected error", "error": str(exc)}, status=500)
 
 
+class AdminLatestReportAPIView(APIView):
+    """
+    GET /api/admin/upload_report/latest-report/
+    Returns the latest uploaded report file for the logged-in admin.
+    Response includes: report_id, file_name, uploaded_at.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        latest = (
+            UploadReport.objects
+            .filter(admin=request.user)
+            .order_by("-uploaded_at")
+            .first()
+        )
+
+        if not latest:
+            return Response({
+                "success": True,
+                "report_id":   None,
+                "file_name":   None,
+                "uploaded_at": None,
+            }, status=200)
+
+        file_name = os.path.basename(latest.file.name) if latest.file else ""
+        return Response({
+            "success":   True,
+            "report_id": str(latest._id),
+            "file_name": file_name,
+            "uploaded_at": latest.uploaded_at.isoformat() if latest.uploaded_at else None,
+        }, status=200)
+
+
+class ReportHeaderAPIView(APIView):
+    """
+    GET /api/admin/upload_report/report-header/
+    Returns report metadata for the logged-in admin's latest report.
+    Used by frontend report page to populate file name, dates.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from vaptfix.mongo_client import MongoContext as MC
+
+        admin_id    = str(request.user.id)
+        admin_email = request.user.email
+
+        # 1. Latest upload from Django model (file name + uploaded_at)
+        latest_upload = (
+            UploadReport.objects
+            .filter(admin=request.user)
+            .order_by("-uploaded_at")
+            .first()
+        )
+
+        file_name   = ""
+        uploaded_at = None
+        report_id   = None
+
+        if latest_upload:
+            raw = latest_upload.file.name if latest_upload.file else ""
+            file_name   = os.path.splitext(os.path.basename(raw))[0]
+            uploaded_at = latest_upload.uploaded_at.isoformat() if latest_upload.uploaded_at else None
+            report_id   = str(latest_upload._id)
+
+        # 2. Scan dates from nessus_reports (MongoDB)
+        report_generated_on = None
+        date_of_testing     = None
+
+        try:
+            with MC() as db:
+                query = {"$or": [{"admin_id": admin_id}, {"admin_email": admin_email}]}
+                nessus_doc = db["nessus_reports"].find_one(
+                    query,
+                    {"uploaded_at": 1, "scan_start": 1, "scan_end": 1,
+                     "report_id": 1, "generated_on": 1},
+                    sort=[("uploaded_at", -1)],
+                )
+                if nessus_doc:
+                    report_generated_on = (
+                        nessus_doc.get("generated_on")
+                        or nessus_doc.get("uploaded_at")
+                        or uploaded_at
+                    )
+                    if hasattr(report_generated_on, "isoformat"):
+                        report_generated_on = report_generated_on.isoformat()
+                    date_of_testing = nessus_doc.get("scan_start")
+                    if hasattr(date_of_testing, "isoformat"):
+                        date_of_testing = date_of_testing.isoformat()
+                    if not report_id:
+                        report_id = str(nessus_doc.get("report_id") or nessus_doc.get("_id", ""))
+        except Exception:
+            pass
+
+        return Response({
+            "success":            True,
+            "report_id":          report_id,
+            "file_name":          file_name,
+            "uploaded_at":        uploaded_at,
+            "report_generated_on": report_generated_on or uploaded_at,
+            "date_of_testing":    date_of_testing,
+        }, status=200)
+
+
+# ── helpers for DownloadReportAPIView ─────────────────────────────────────────
+
+_SLUG_TO_TEAM_REPORT = {
+    "patch-management":         "Patch Management",
+    "network-security":         "Network Security",
+    "architectural-flaws":      "Architectural Flaws",
+    "configuration-management": "Configuration Management",
+}
+
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _collect_report_data(admin_id, admin_email):
+    """Collect all data needed for report generation from MongoDB."""
+    from vaptfix.mongo_client import MongoContext as MC
+
+    result = {
+        "vuln_stats":    {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "team_dist":     {},
+        "vulnerabilities": [],
+        "uploaded_at":   None,
+        "scan_start":    None,
+        "report_id":     None,
+    }
+
+    with MC() as db:
+        query = {"$or": [{"admin_id": str(admin_id)}, {"admin_email": admin_email}]}
+        doc = db["nessus_reports"].find_one(
+            query,
+            {
+                "report_id": 1, "uploaded_at": 1, "scan_start": 1,
+                "vulnerabilities_by_host.host_name": 1,
+                "vulnerabilities_by_host.host": 1,
+                "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
+                "vulnerabilities_by_host.vulnerabilities.pluginname": 1,
+                "vulnerabilities_by_host.vulnerabilities.name": 1,
+                "vulnerabilities_by_host.vulnerabilities.risk_factor": 1,
+                "vulnerabilities_by_host.vulnerabilities.severity": 1,
+                "vulnerabilities_by_host.vulnerabilities.risk": 1,
+                "vulnerabilities_by_host.vulnerabilities.port": 1,
+            },
+            sort=[("uploaded_at", -1)],
+        )
+
+        if not doc:
+            return result
+
+        report_id = str(doc.get("report_id") or doc.get("_id", ""))
+        result["report_id"]   = report_id
+        result["uploaded_at"] = doc.get("uploaded_at")
+        result["scan_start"]  = doc.get("scan_start")
+
+        # Closed vulnerabilities set
+        closed_set = set()
+        for cd in db["fix_vulnerabilities_closed"].find(
+            {"report_id": report_id},
+            {"plugin_name": 1, "host_name": 1},
+        ):
+            closed_set.add((
+                (cd.get("plugin_name") or "").strip().lower(),
+                (cd.get("host_name")   or "").strip().lower(),
+            ))
+
+        # Vulnerability cards → team map
+        team_map = {}
+        for card in db["vulnerability_cards"].find(
+            {"report_id": report_id},
+            {"vulnerability_name": 1, "assigned_team": 1},
+        ):
+            vname = card.get("vulnerability_name", "")
+            if vname and vname not in team_map:
+                raw  = (card.get("assigned_team") or "").strip().lower()
+                team_map[vname] = _SLUG_TO_TEAM_REPORT.get(raw, card.get("assigned_team") or "")
+
+        # Build rows
+        rows = []
+        counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        team_dist = {}
+
+        for host in doc.get("vulnerabilities_by_host") or []:
+            host_name = (host.get("host_name") or host.get("host") or "").strip()
+            for v in host.get("vulnerabilities") or []:
+                pname = (
+                    v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                ).strip()
+                if not pname:
+                    continue
+
+                key = (pname.lower(), host_name.lower())
+                status_val = "closed" if key in closed_set else "open"
+
+                risk_raw = (v.get("risk_factor") or v.get("severity") or v.get("risk") or "").strip().lower()
+                if risk_raw.startswith("crit"):
+                    sev = "critical"
+                elif risk_raw.startswith("high"):
+                    sev = "high"
+                elif risk_raw.startswith("med"):
+                    sev = "medium"
+                elif risk_raw.startswith("low"):
+                    sev = "low"
+                else:
+                    continue  # skip None/info
+
+                if status_val == "open":
+                    counts[sev] += 1
+
+                team = team_map.get(pname, "Unassigned")
+                team_dist[team] = team_dist.get(team, 0) + 1
+
+                rows.append({
+                    "name":    pname,
+                    "asset":   host_name,
+                    "team":    team,
+                    "severity": sev,
+                    "port":    str(v.get("port") or ""),
+                    "status":  status_val,
+                })
+
+        rows.sort(key=lambda r: _SEV_ORDER.get(r["severity"], 9))
+        result["vuln_stats"]     = counts
+        result["team_dist"]      = team_dist
+        result["vulnerabilities"] = rows
+
+    return result
+
+
+def _render_html_report(data, file_name, generated_on, date_of_testing):
+    """Generate a standalone HTML report string."""
+    stats  = data["vuln_stats"]
+    total  = sum(stats.values())
+    rows   = data["vulnerabilities"]
+    closed = sum(1 for r in rows if r["status"] == "closed")
+    open_  = sum(1 for r in rows if r["status"] == "open")
+    rem_pct = round((closed / len(rows)) * 100) if rows else 0
+
+    _sev_colors = {
+        "critical": ("#fee2e2", "#b91c1c"),
+        "high":     ("#ffedd5", "#c2410c"),
+        "medium":   ("#fef3c7", "#a16207"),
+        "low":      ("#ccfbf1", "#0f766e"),
+    }
+    _team_colors = {
+        "Patch Management":         ("#fff3dd", "#8a4f00"),
+        "Network Security":         ("#e6f7f8", "#0f696e"),
+        "Configuration Management": ("#e6f7f8", "#0f696e"),
+        "Architectural Flaws":      ("#f3e8ff", "#6b21a8"),
+        "Unassigned":               ("#f4f5f8", "#6b7280"),
+    }
+
+    def sev_badge(sev):
+        bg, color = _sev_colors.get(sev, ("#f4f5f8", "#374151"))
+        return (f'<span style="background:{bg};color:{color};'
+                f'font-size:10px;font-weight:800;border-radius:6px;'
+                f'padding:3px 8px;text-transform:uppercase;">{sev}</span>')
+
+    def team_badge(team):
+        bg, color = _team_colors.get(team, ("#f4f5f8", "#374151"))
+        return (f'<span style="background:{bg};color:{color};'
+                f'font-size:11px;font-weight:700;border-radius:999px;'
+                f'padding:3px 10px;border:1px solid {color}33;">{team}</span>')
+
+    def status_badge(s):
+        color = "#b91c1c" if s == "open" else "#0f766e"
+        return f'<span style="color:{color};font-weight:700;font-size:12px;">{s}</span>'
+
+    table_rows = ""
+    for i, r in enumerate(rows, 1):
+        table_rows += f"""
+        <tr style="border-bottom:1px solid #edf0f4;">
+          <td style="padding:10px 8px;color:#8b95a7;font-size:12px;">{i}</td>
+          <td style="padding:10px 8px;font-weight:600;color:#1f2a42;font-size:13px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{r['name']}">{r['name']}</td>
+          <td style="padding:10px 8px;font-size:13px;color:#2d3748;">{r['asset']}</td>
+          <td style="padding:10px 8px;">{team_badge(r['team'])}</td>
+          <td style="padding:10px 8px;">{sev_badge(r['severity'])}</td>
+          <td style="padding:10px 8px;">{status_badge(r['status'])}</td>
+        </tr>"""
+
+    team_dist_rows = ""
+    for team, count in sorted(data["team_dist"].items(), key=lambda x: -x[1]):
+        bg, color = _team_colors.get(team, ("#f4f5f8", "#374151"))
+        pct = round((count / len(rows)) * 100) if rows else 0
+        team_dist_rows += f"""
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+          <span style="width:130px;font-size:12px;color:#374151;font-weight:600;">{team}</span>
+          <div style="flex:1;background:#f4f5f8;border-radius:999px;height:8px;">
+            <div style="width:{pct}%;background:{color};height:8px;border-radius:999px;"></div>
+          </div>
+          <span style="font-size:12px;color:#6b7280;width:36px;text-align:right;">{count}</span>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Vulnerability Management Report — {file_name}</title>
+<style>
+  *{{box-sizing:border-box;}}
+  body{{font-family:'Segoe UI',Arial,sans-serif;background:#f5f6fa;margin:0;padding:0;color:#1f2a42;}}
+  .wrapper{{max-width:1200px;margin:0 auto;padding:40px 48px;}}
+  .watermark{{
+    position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='580' height='420'%3E%3Ctext x='290' y='210' transform='rotate(-38 290 210)' font-family='Arial' font-size='52' font-weight='700' fill='rgba(140,145,155,0.10)' text-anchor='middle' dominant-baseline='middle'%3Evaptfix.ai%3C/text%3E%3C/svg%3E");
+    background-repeat:repeat;background-size:580px 420px;
+  }}
+  .content{{position:relative;z-index:1;}}
+  .eyebrow{{color:#0f696e;font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;margin:0 0 4px;}}
+  h1{{margin:0 0 16px;font-size:38px;font-weight:800;color:#241447;letter-spacing:-.02em;}}
+  .meta-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px;}}
+  .meta-item span{{display:block;font-size:10px;color:#8b95a7;text-transform:uppercase;font-weight:700;letter-spacing:.08em;}}
+  .meta-item strong{{font-size:14px;color:#20293a;font-weight:700;}}
+  .top-grid{{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:20px;}}
+  .card{{background:#fff;border:1px solid #e8e8ef;border-radius:16px;padding:18px;}}
+  .dark-card{{background:#25124d;color:#fff;}}
+  .card h2{{margin:0 0 10px;font-size:16px;font-weight:700;color:#222848;}}
+  .dark-card h2{{color:#fff;}}
+  .score-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;}}
+  .score-box{{background:#f4f5f8;border-radius:10px;padding:12px;}}
+  .score-box span{{display:block;font-size:10px;color:#8b95a7;text-transform:uppercase;font-weight:700;}}
+  .score-box strong{{font-size:28px;color:#1f2a42;font-weight:800;}}
+  .sev-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}}
+  .sev-box{{background:#fff;border:1px solid #ececf2;border-radius:14px;padding:14px;text-align:center;}}
+  .sev-box span{{display:block;font-size:10px;color:#8b95a7;text-transform:uppercase;font-weight:800;letter-spacing:.07em;}}
+  .sev-box strong{{display:block;font-size:36px;font-weight:800;line-height:1.1;}}
+  .sev-box.critical strong{{color:#b91c1c;}} .sev-box.critical{{border-bottom:3px solid #b91c1c;}}
+  .sev-box.high strong{{color:#d97706;}}     .sev-box.high{{border-bottom:3px solid #d97706;}}
+  .sev-box.medium strong{{color:#ca8a04;}}   .sev-box.medium{{border-bottom:3px solid #ca8a04;}}
+  .sev-box.low strong{{color:#0f696e;}}      .sev-box.low{{border-bottom:3px solid #0f696e;}}
+  table{{width:100%;border-collapse:collapse;font-size:13px;}}
+  th{{background:#f4f5f8;font-size:10px;color:#8b95a7;text-transform:uppercase;letter-spacing:.08em;font-weight:800;padding:12px 8px;text-align:left;}}
+  .progress-bar-wrap{{margin-top:12px;}}
+  .rem-pct{{font-size:52px;font-weight:800;color:#fff;text-align:center;}}
+  .rem-label{{text-align:center;color:#d6d3e8;font-size:13px;margin-top:4px;}}
+  .section-title{{font-size:16px;font-weight:700;color:#222848;margin:0 0 12px;}}
+  .footer{{margin-top:32px;text-align:center;font-size:11px;color:#8b95a7;}}
+  @media print{{
+    body{{background:#fff;}}
+    .watermark{{print-color-adjust:exact;-webkit-print-color-adjust:exact;}}
+    .card{{break-inside:avoid;}}
+    .top-grid,.sev-grid{{break-inside:avoid;}}
+  }}
+</style>
+</head>
+<body>
+<div class="watermark"></div>
+<div class="wrapper content">
+
+  <p class="eyebrow">Comprehensive Audit</p>
+  <h1>Vulnerability Management Report</h1>
+
+  <div class="meta-grid">
+    <div class="meta-item"><span>Report generated on</span><strong>{generated_on or '—'}</strong></div>
+    <div class="meta-item"><span>Vul management program</span><strong>{file_name or '—'}</strong></div>
+    <div class="meta-item"><span>Date of testing</span><strong>{date_of_testing or '—'}</strong></div>
+  </div>
+
+  <div class="top-grid">
+    <div class="card">
+      <h2>◫ Executive Summary</h2>
+      <p style="color:#5a6477;font-size:14px;line-height:1.6;">
+        The security assessment reveals a total of <strong>{total}</strong> distinct security findings.
+        The overall security posture is currently rated as
+        <em style="color:#b72323;font-weight:700;">High Risk</em>,
+        primarily driven by unpatched critical assets.
+        Immediate remediation is advised for top findings to reduce the attack surface.
+      </p>
+      <div class="score-grid">
+        <div class="score-box"><span>Total Findings</span><strong>{total}</strong></div>
+        <div class="score-box"><span>Remediation</span><strong>{rem_pct}%</strong></div>
+        <div class="score-box"><span>Open</span><strong>{open_}</strong></div>
+        <div class="score-box"><span>Closed</span><strong>{closed}</strong></div>
+      </div>
+    </div>
+    <div class="card dark-card">
+      <h2>Team Distribution</h2>
+      <div class="progress-bar-wrap">{team_dist_rows}</div>
+    </div>
+  </div>
+
+  <div class="sev-grid">
+    <div class="sev-box critical"><span>Critical</span><strong>{stats['critical']}</strong></div>
+    <div class="sev-box high"><span>High</span><strong>{stats['high']}</strong></div>
+    <div class="sev-box medium"><span>Medium</span><strong>{stats['medium']}</strong></div>
+    <div class="sev-box low"><span>Low</span><strong>{stats['low']}</strong></div>
+  </div>
+
+  <div class="card">
+    <p class="section-title">Detailed Vulnerability Log</p>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:40px;">#</th>
+            <th>Vulnerability</th>
+            <th style="width:140px;">Asset</th>
+            <th style="width:180px;">Team</th>
+            <th style="width:100px;">Severity</th>
+            <th style="width:80px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>{table_rows}</tbody>
+      </table>
+    </div>
+    <p style="margin:12px 0 0;font-size:12px;color:#7b8497;">
+      Showing {len(rows)} total findings
+    </p>
+  </div>
+
+  <div class="footer">
+    Generated by vaptfix.ai &nbsp;·&nbsp; {generated_on or ''}
+  </div>
+</div>
+</body>
+</html>"""
+    return html
+
+
+class DownloadReportAPIView(APIView):
+    """
+    GET /api/admin/upload_report/download-report/?format=html
+    Generates and serves the vulnerability report as a downloadable file.
+    format=html (default) → .html file
+    format=pdf  → .pdf file (requires weasyprint)
+    Admin only. Used by Slack/MS Teams bots for report delivery.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        fmt = request.query_params.get("format", "html").lower().strip()
+        if fmt not in ("html", "pdf"):
+            return Response({"error": "format must be 'html' or 'pdf'"}, status=400)
+
+        admin_id    = str(request.user.id)
+        admin_email = request.user.email
+
+        # Get file metadata
+        latest_upload = (
+            UploadReport.objects
+            .filter(admin=request.user)
+            .order_by("-uploaded_at")
+            .first()
+        )
+        raw_name    = latest_upload.file.name if (latest_upload and latest_upload.file) else ""
+        file_name   = os.path.splitext(os.path.basename(raw_name))[0] or "report"
+        uploaded_at = (
+            latest_upload.uploaded_at.strftime("%b %d, %Y")
+            if (latest_upload and latest_upload.uploaded_at) else ""
+        )
+
+        # Collect vulnerability data
+        data = _collect_report_data(admin_id, admin_email)
+
+        scan_start = data.get("scan_start")
+        date_of_testing = (
+            scan_start.strftime("%b %d, %Y") if hasattr(scan_start, "strftime")
+            else (str(scan_start)[:10] if scan_start else "")
+        )
+
+        html_content = _render_html_report(data, file_name, uploaded_at, date_of_testing)
+        download_name = f"vaptfix-report-{file_name}"
+
+        if fmt == "html":
+            from django.http import HttpResponse
+            response = HttpResponse(html_content, content_type="text/html; charset=utf-8")
+            response["Content-Disposition"] = f'attachment; filename="{download_name}.html"'
+            return response
+
+        # PDF via WeasyPrint
+        try:
+            from weasyprint import HTML as WeasyprintHTML
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                WeasyprintHTML(string=html_content).write_pdf(tmp.name)
+                tmp_path = tmp.name
+            from django.http import FileResponse as DjFileResponse
+            resp = DjFileResponse(
+                open(tmp_path, "rb"),
+                content_type="application/pdf",
+                as_attachment=True,
+                filename=f"{download_name}.pdf",
+            )
+            return resp
+        except ImportError:
+            return Response(
+                {"error": "PDF generation requires WeasyPrint. Install it or use format=html."},
+                status=501,
+            )
+        except Exception as e:
+            return Response({"error": f"PDF generation failed: {e}"}, status=500)
+
+
 class SuperAdminApproveVerificationAPIView(APIView):
     """
     POST /api/upload/verifications/approve/

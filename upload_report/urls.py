@@ -12,6 +12,9 @@ from .views import (
     VulnerabilityCardDetailView,
     SuperAdminVerificationListAPIView,
     SuperAdminApproveVerificationAPIView,
+    AdminLatestReportAPIView,
+    ReportHeaderAPIView,
+    DownloadReportAPIView,
 )
 
 app_name = 'upload_report'
@@ -63,6 +66,27 @@ urlpatterns = [
         "vulnerability-cards/<str:card_id>/",
         VulnerabilityCardDetailView.as_view(),
         name="vulnerability_card_detail",
+    ),
+
+    # Latest report for logged-in admin
+    path(
+        "latest-report/",
+        AdminLatestReportAPIView.as_view(),
+        name="admin_latest_report",
+    ),
+
+    # Report header metadata (for frontend report page)
+    path(
+        "report-header/",
+        ReportHeaderAPIView.as_view(),
+        name="report_header",
+    ),
+
+    # Download report as HTML or PDF
+    path(
+        "download-report/",
+        DownloadReportAPIView.as_view(),
+        name="download_report",
     ),
 
     # Superadmin verification
