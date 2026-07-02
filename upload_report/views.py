@@ -713,6 +713,16 @@ class UploadReportView(APIView):
                             except Exception as _upe:
                                 logger.warning(f"[UploadTiming] Could not store upload_processing_seconds: {_upe}")
 
+                        # Invalidate the team-mitigation cache so /viewassigned, /startfix etc.
+                        # (Slack bot) and the admin dashboard immediately see this new report
+                        # instead of a stale cached one for up to 5 minutes.
+                        if mongodb_stored:
+                            try:
+                                from django.core.cache import cache as _mit_cache
+                                _mit_cache.delete(f"mitigation_by_team_v2_{target_admin.id}")
+                            except Exception as _mce:
+                                logger.warning(f"[UploadCache] Could not clear mitigation_by_team cache: {_mce}")
+
                         # Auto-generate vulnerability cards in background (only for nessus reports)
                         print(f"[AutoGenCards] mongodb_stored={mongodb_stored}, report_type={parsed_data.get('type')}", flush=True)
                         if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html"):
@@ -1383,6 +1393,15 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             {"report_id": report_id},
             {"$set": {"cards_generation_complete": True, "cards_generated_count": actual_count}}
         )
+
+        # Cards just changed team assignments for this report — clear the cached
+        # by-team view again so Slack (/viewassigned etc.) and the dashboard don't
+        # keep showing "Unassigned" for vulns that just got a real team.
+        try:
+            from django.core.cache import cache as _mit_cache2
+            _mit_cache2.delete(f"mitigation_by_team_v2_{admin_id}")
+        except Exception as _mce2:
+            logger.warning(f"[AutoGenCards] Could not clear mitigation_by_team cache: {_mce2}")
 
     except Exception as e:
         logger.error(f"[AutoGenCards] Background generation failed for report_id={report_id}: {str(e)}", exc_info=True)

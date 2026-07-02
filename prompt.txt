@@ -1,0 +1,48 @@
+Ritika  [6:59 PM]
+/viewassigned vulns
+vaptfix  [6:59 PM]
+:hourglass_flowing_sand: Processing /viewassigned...
+[6:59 PM]:clipboard: Configuration Management — Assigned WorkAll vulnerabilities assigned to your team. Use IDs (c1, h1...) with /startfix, /mitigated, /retest, /extendTotal Vulns
+26Open
+26Fixed
+0IDs: use with /startfix, /mitigated, /retest, /extend:large_yellow_circle: l1 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.2 | :unlock: Open:large_yellow_circle: l2 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.5 | :unlock: Open:large_yellow_circle: l3 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.6 | :unlock: Open:large_yellow_circle: l4 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.9 | :unlock: Open:large_yellow_circle: l5 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.20 | :unlock: Open:large_yellow_circle: l6 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.21 | :unlock: Open:large_yellow_circle: l7 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.26 | :unlock: Open:large_yellow_circle: l8 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.30 | :unlock: Open:large_yellow_circle: l9 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.43 | :unlock: Open:large_yellow_circle: l10 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.101 | :unlock: Open:large_yellow_circle: l11 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.121 | :unlock: Open:large_yellow_circle: l12 SSL Certificate Cannot Be Trusted
+      Host: 192.168.0.185 | :unlock: Open...and 14 more vulnerabilities.Ritika  [7:01 PM]
+/startfix l1
+vaptfix  [7:01 PM]
+:hourglass_flowing_sand: Processing /startfix...
+[7:01 PM]:x: Could not start fix workflow: Data must come from the latest uploaded report only
+Make sure your admin added you via /adduser with the correct team.Ritika  [7:02 PM]
+/startfix l12
+vaptfix  [7:02 PM]
+:hourglass_flowing_sand: Processing /startfix...
+[7:02 PM]:x: Vulnerability ``l12`` not found.
+Use /viewassigned vulns to see all IDs.Ritika  [7:05 PM]
+/mitigationstatus
+vaptfix  [7:05 PM]
+:hourglass_flowing_sand: Processing /mitigationstatus...[7:05 PM]:bar_chart: Configuration Management — Mitigation StatusCurrent fix progress for all your team's vulnerabilities — open, closed, in-progress, overdue countsTotal
+26Fix Rate
+0%Open
+26Closed
+0In Progress
+0Overdue
+0Progress: ░░░░░░░░░░ 0%By Severity: :red_circle: Critical: 0 | :large_orange_circle: High: 0 | :large_yellow_circle: Medium: 26 | :large_blue_circle: Low: 0
+
+
+mene jo lateset file upload ki hai mujhe uska hi data show krna hai 
+
+jo file admin pr login hai vha 6 hi vul hi hai 
+
+to o check kro na 
+
+esa q aa rha hai 
