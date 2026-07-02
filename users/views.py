@@ -7752,93 +7752,54 @@ class SlackSlashCommandView(APIView):
 
     def _get_team_vulns(self, team_name, team_id, user_id):
         """
-        Fetch vulns for a specific team.
-        Step 1: Fast MongoDB metadata query → finds which admin owns the latest report.
-        Step 2: Calls the API with that admin's JWT → gets cached, processed vuln data.
-        This avoids reading huge nessus documents and fixes the wrong-admin-JWT problem.
+        Fetch vulns assigned to a specific team, scoped to the actual team member
+        who ran the Slack command — via the same member-facing API their own
+        dashboard uses (/api/user/register/latest/vulns/). This authenticates as
+        the specific member (via _call_user_api), so there is no admin-guessing:
+        the backend resolves "their" admin/report via the member's own UserDetail.
+        Unlike /api/admin/adminmitigationstrategy/by-team/ (used previously),
+        this endpoint does NOT restrict to vulns appearing on 4+ assets — that
+        filter was hiding everything on small reports.
         Returns (sorted_vulns, report_id, raw_data).
         """
-        import pymongo as _pymongo
         from vaptfix.mongo_client import MongoContext
-        from rest_framework_simplejwt.tokens import RefreshToken as _RT
-
-        # Workspace-scoped Slack admins for THIS Slack team only.
-        workspace_users = list(User.objects.filter(slack_team_id=team_id))
 
         raw_data = {"report_id": "", "teams": {}, "admin_email": "not_found"}
-        if not workspace_users:
-            logger.warning("[SlackCmd] _get_team_vulns: no workspace users for team_id=%s", team_id)
+
+        data = self._call_user_api(
+            "/api/user/register/latest/vulns/", team_id, user_id,
+            params={"team": team_name},
+        )
+        if data.get("detail") and "rows" not in data:
+            logger.warning("[SlackCmd] _get_team_vulns team=%s failed: %s", team_name, data.get("detail"))
+            raw_data["detail"] = data.get("detail")
             return [], "", raw_data
 
-        def _find_latest(users):
-            ids    = [str(u.id) for u in users]
-            emails = [e for e in (getattr(u, "email", "") for u in users) if e]
-            conds  = [{"admin_id": aid} for aid in ids] + [{"admin_email": em} for em in emails]
-            with MongoContext() as db:
-                return db["nessus_reports"].find_one(
-                    {"$or": conds},
-                    {"report_id": 1, "admin_id": 1, "admin_email": 1},  # no vuln data — stays small
-                    sort=[("uploaded_at", _pymongo.DESCENDING)],
-                )
-
-        # ── Step 1: Find the latest report strictly among THIS workspace's admins ──
-        # (Do NOT widen to "all staff system-wide" first — on a multi-tenant install
-        # that picks whichever admin anywhere uploaded most recently, showing a
-        # completely different admin's data to this team.)
-        latest_meta = _find_latest(workspace_users)
-        all_users   = workspace_users
-
-        if not latest_meta:
-            # Fallback: the report-uploading admin may not have slack_team_id set
-            # (e.g. uploaded via the web dashboard, never did the Slack OAuth login).
-            # Only now widen the search to all staff users.
-            staff_users = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
-            combined    = {u.id: u for u in workspace_users + staff_users}
-            all_users   = list(combined.values())
-            latest_meta = _find_latest(all_users)
-
-        if not latest_meta:
-            all_ids    = [str(u.id) for u in all_users]
-            all_emails = [e for e in (getattr(u, "email", "") for u in all_users) if e]
-            logger.warning("[SlackCmd] no report found for ids=%s emails=%s", all_ids, all_emails)
-            raw_data["detail"] = "no_report_found"
-            return [], "", raw_data
-
-        report_admin_id    = latest_meta.get("admin_id", "")
-        report_admin_email = latest_meta.get("admin_email", "")
-
-        # Find the Django User that matches the report owner
-        admin_user = next(
-            (u for u in all_users
-             if str(u.id) == report_admin_id
-             or getattr(u, "email", "") == report_admin_email),
-            all_users[0],  # fallback: any workspace/staff user
-        )
-        raw_data["admin_email"] = getattr(admin_user, "email", "")
-
-        # ── Step 2: Call API with the CORRECT admin's JWT ──────────────────────
-        token   = str(_RT.for_user(admin_user).access_token)
-        backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
-        resp    = _http_get(
-            f"{backend}/api/admin/adminmitigationstrategy/by-team/",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=20,
-        )
-        data = resp.json()
-
-        teams     = data.get("teams") or {}
-        team_data = teams.get(team_name) or {}
-        vulns     = team_data.get("vulnerabilities") or []
         report_id = data.get("report_id", "")
+        rows      = data.get("rows") or []
+        team_lower = team_name.strip().lower()
+        vulns = [
+            {
+                "plugin_name":   r.get("vul_name", ""),
+                "host_name":     r.get("asset", ""),
+                "risk_factor":   r.get("severity", ""),
+                "port":          r.get("port", ""),
+                "protocol":      r.get("protocol", ""),
+                "status":        r.get("status", "open"),
+                "assigned_team": r.get("assigned_team", ""),
+            }
+            for r in rows
+            if (r.get("assigned_team") or "").strip().lower() == team_lower
+        ]
 
-        raw_data["report_id"] = report_id
-        raw_data["teams"]     = {team_name: {"count": len(vulns)}}
+        raw_data["report_id"]  = report_id
+        raw_data["teams"]      = {team_name: {"count": len(vulns)}}
         raw_data["card_count"] = "via_api"
         raw_data["has_cards"]  = bool(vulns)
 
         logger.info(
-            "[SlackCmd] _get_team_vulns team=%s report_id=%s vuln_count=%d admin=%s",
-            team_name, report_id, len(vulns), raw_data["admin_email"],
+            "[SlackCmd] _get_team_vulns team=%s report_id=%s vuln_count=%d",
+            team_name, report_id, len(vulns),
         )
 
         # ── Attach plugin_id (Nessus numeric ID) via a direct Mongo read ────────
