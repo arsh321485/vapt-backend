@@ -7209,6 +7209,9 @@ class SlackSlashCommandView(APIView):
                 "/viewassigned":     self._cmd_viewassigned,
                 "/mitigationstatus": self._cmd_mitigationstatus,
                 "/startfix":         self._cmd_startfix,
+                "/manualfix":        self._cmd_manualfix,
+                "/autofix":          self._cmd_autofix,
+                "/scriptfeedback":   self._cmd_scriptfeedback,
                 "/mitigated":        self._cmd_mitigated,
                 "/retest":           self._cmd_retest,
                 "/support":          self._cmd_support,
@@ -7296,6 +7299,66 @@ class SlackSlashCommandView(APIView):
         else:
             resp = _http_get(url, headers=headers, timeout=15)
         return resp.json()
+
+    def _get_member_token(self, team_id, slack_user_id):
+        """
+        Resolve the JWT of the exact team member who ran the command — required for
+        user-scoped fix/automation APIs (/api/user/register/*, /api/user/automation-scripts/*)
+        which check request.user against a UserDetail record.
+        Resolved via Slack user_id -> email (Slack API) -> Django User, since the member
+        may never have personally done Slack OAuth login (only /adduser'd by the admin).
+        """
+        from rest_framework_simplejwt.tokens import RefreshToken as _RT
+        bot_token = self._get_bot_token(team_id, slack_user_id=slack_user_id)
+        if not bot_token:
+            return None
+        resp = _http_get(
+            "https://slack.com/api/users.info",
+            params={"user": slack_user_id},
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=10,
+        ).json()
+        if not resp.get("ok"):
+            return None
+        email = resp.get("user", {}).get("profile", {}).get("email", "")
+        if not email:
+            return None
+        user = User.objects.filter(email=email).first()
+        if not user:
+            return None
+        return str(_RT.for_user(user).access_token)
+
+    def _call_user_api(self, path, team_id, user_id, method="get", json_body=None, params=None):
+        """Like _call_api but authenticates as the team member (not the admin) — for
+        /api/user/register/* and /api/user/automation-scripts/* endpoints."""
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+        token = self._get_member_token(team_id, user_id)
+        if not token:
+            return {
+                "detail": "Your Slack account is not linked to a VaptFix user account. Ask your admin to add you via /adduser.",
+            }
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"{backend}{path}"
+        if method == "get":
+            resp = _http_get(url, headers=headers, params=params, timeout=15)
+        elif method == "post":
+            resp = _http_post(url, headers=headers, json=json_body, timeout=15)
+        else:
+            resp = _http_get(url, headers=headers, timeout=15)
+        try:
+            return resp.json()
+        except ValueError:
+            return {"detail": "invalid_response", "status_code": resp.status_code}
+
+    def _call_user_api_raw(self, path, team_id, user_id, params=None):
+        """Like _call_user_api but returns the raw response (for binary file downloads)."""
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+        token = self._get_member_token(team_id, user_id)
+        if not token:
+            return None
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"{backend}{path}"
+        return _http_get(url, headers=headers, params=params, timeout=20)
 
     def _get_bot_token(self, team_id, slack_user_id=None):
         # Prefer the token of the specific user who ran the command (most likely valid)
@@ -7758,6 +7821,31 @@ class SlackSlashCommandView(APIView):
             team_name, report_id, len(vulns), raw_data["admin_email"],
         )
 
+        # ── Attach plugin_id (Nessus numeric ID) via a direct Mongo read ────────
+        # Needed to look up automated-fix scripts (automation_scripts collection is
+        # keyed by plugin_id). No API is touched — same direct MongoContext pattern
+        # already used elsewhere in this file (e.g. _cmd_vaptcheck).
+        plugin_id_map = {}
+        if report_id:
+            with MongoContext() as _db:
+                _nessus_doc = _db["nessus_reports"].find_one(
+                    {"report_id": report_id},
+                    {
+                        "vulnerabilities_by_host.host_name": 1,
+                        "vulnerabilities_by_host.host": 1,
+                        "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
+                        "vulnerabilities_by_host.vulnerabilities.plugin_id": 1,
+                    },
+                )
+            if _nessus_doc:
+                for _host in _nessus_doc.get("vulnerabilities_by_host", []):
+                    _h_name = _host.get("host_name") or _host.get("host") or ""
+                    for _v in _host.get("vulnerabilities", []):
+                        _pname = _v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or ""
+                        _pid   = _v.get("plugin_id")
+                        if _pname and _pid:
+                            plugin_id_map[(_pname, _h_name)] = _pid
+
         # ── Assign deterministic short IDs grouped by severity ─────────────────
         grouped = {"Critical": [], "High": [], "Medium": [], "Low": []}
         for v in vulns:
@@ -7773,6 +7861,7 @@ class SlackSlashCommandView(APIView):
                 entry = dict(v)
                 entry["short_id"]  = f"{prefix}{i}"
                 entry["sev_label"] = sev
+                entry["plugin_id"] = plugin_id_map.get((v.get("plugin_name", ""), v.get("host_name", "")))
                 result.append(entry)
         return result, report_id, raw_data
 
@@ -7781,6 +7870,27 @@ class SlackSlashCommandView(APIView):
         vulns, report_id, _ = self._get_team_vulns(team_name, team_id, user_id)
         target = next((v for v in vulns if v.get("short_id") == short_id.lower()), None)
         return target, report_id
+
+    def _get_or_create_fix_vuln_id(self, vuln, report_id, team_id, user_id):
+        """
+        Get-or-create the fix_vulnerability_id for a vuln via the existing
+        idempotent user-facing API (POST is safe to call repeatedly — it
+        returns the existing record if one already exists). No new API —
+        reuses /api/user/register/fix-vulnerability/report/.../asset/.../create/.
+        Returns (fix_vuln_id_or_None, raw_response_dict).
+        """
+        host_name = vuln.get("host_name") or ""
+        data = self._call_user_api(
+            f"/api/user/register/fix-vulnerability/report/{report_id}/asset/{host_name}/create/",
+            team_id, user_id, method="post",
+            json_body={
+                "plugin_name": vuln.get("plugin_name", ""),
+                "risk_factor": vuln.get("risk_factor") or vuln.get("sev_label") or "Medium",
+                "port": vuln.get("port", ""),
+            },
+        )
+        fix_vuln_id = (data.get("data") or {}).get("_id")
+        return fix_vuln_id, data
 
     def _get_admin_channel_id(self, bot_token):
         """Look up the vaptfix-admin-dashboard channel ID via Slack API."""
@@ -7898,9 +8008,12 @@ class SlackSlashCommandView(APIView):
         """
         /startfix — Start fix workflow (Critical → High → Medium → Low, most common first)
         /startfix [vuln-id] — Jump to a specific vulnerability e.g. /startfix h1
+        Shows whether an automated-fix script exists (/autofix) alongside the
+        manual step-by-step guide (/manualfix) — both backed by the real
+        automation_scripts / fix_vulnerability_steps data, not placeholder text.
         """
         vuln_id = text.strip().lower()
-        vulns, _, _ = self._get_team_vulns(team_name, team_id, user_id)
+        vulns, report_id, _ = self._get_team_vulns(team_name, team_id, user_id)
         if not vulns:
             return self._text_block(f"✅ No vulnerabilities currently assigned to *{team_name}* team.")
         if vuln_id:
@@ -7910,12 +8023,25 @@ class SlackSlashCommandView(APIView):
                     f"❌ Vulnerability `{vuln_id}` not found.\n"
                     "Use `/viewassigned vulns` to see all IDs."
                 )
-            return self._format_startfix_single(target, team_name)
+            fix_vuln_id, create_resp = self._get_or_create_fix_vuln_id(target, report_id, team_id, user_id)
+            if not fix_vuln_id:
+                return self._text_block(
+                    f"❌ Could not start fix workflow: {create_resp.get('detail') or create_resp.get('error') or 'unknown error'}\n"
+                    "_Make sure your admin added you via `/adduser` with the correct team._"
+                )
+            automation = None
+            plugin_id = target.get("plugin_id")
+            if plugin_id:
+                automation = self._call_user_api(
+                    f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
+                )
+            return self._format_startfix_real(target, fix_vuln_id, automation)
         return self._format_startfix_list(vulns, team_name)
 
     def _cmd_mitigated(self, text, team_id, user_id, team_name):
         """
-        /mitigated [vuln-id] — Mark a full vulnerability as mitigated e.g. /mitigated h1
+        /mitigated [vuln-id] — Mark ALL remaining steps done e.g. /mitigated h1
+            (calls the real step-complete API with complete_all=true)
         /mitigated [vuln-id] [step-id] — Mark a specific step done e.g. /mitigated h1 s3
         Admin is notified automatically for verification.
         """
@@ -7929,7 +8055,7 @@ class SlackSlashCommandView(APIView):
             )
         vuln_id = parts[0]
         step_id = parts[1] if len(parts) > 1 else None
-        target, _ = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
+        target, report_id = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
         if not target:
             return self._text_block(
                 f"❌ Vulnerability `{vuln_id}` not found in *{team_name}*.\n"
@@ -7939,8 +8065,25 @@ class SlackSlashCommandView(APIView):
         host_name   = target.get("host_name") or ""
         sev         = target.get("risk_factor") or target.get("sev_label") or "Medium"
         icon        = self._SEV_ICONS.get(sev, "⚪")
+
+        fix_vuln_id, create_resp = self._get_or_create_fix_vuln_id(target, report_id, team_id, user_id)
+        if not fix_vuln_id:
+            return self._text_block(
+                f"❌ Could not update fix status: {create_resp.get('detail') or create_resp.get('error') or 'unknown error'}"
+            )
+
         if step_id:
             step_num = step_id.lstrip("s")
+            try:
+                step_num_int = int(step_num)
+            except ValueError:
+                return self._text_block(f"❌ Invalid step id `{step_id}`. Use e.g. `s1`, `s2`.")
+            step_resp = self._call_user_api(
+                f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, user_id,
+                method="post", json_body={"step_number": step_num_int},
+            )
+            if step_resp.get("detail") and not step_resp.get("message"):
+                return self._text_block(f"❌ `{step_resp.get('detail')}`")
             self._notify_admin(
                 team_id, user_id,
                 f"🔧 *Step Update* — *{team_name}*\n"
@@ -7950,8 +8093,17 @@ class SlackSlashCommandView(APIView):
             return self._text_block(
                 f"✅ *Step {step_num} marked complete*\n"
                 f"Vuln: `{plugin_name}` | Host: `{host_name}`\n"
-                "_Admin notified. Continue with next step or run `/retest {vuln_id}` when fully done._"
+                f"_Admin notified. Continue with next step or run `/retest {vuln_id}` when fully done._"
             )
+
+        # Full vuln — complete_all=true uses the real API's bulk-complete option
+        all_resp = self._call_user_api(
+            f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, user_id,
+            method="post", json_body={"step_number": 1, "complete_all": True},
+        )
+        if all_resp.get("detail") and not all_resp.get("message"):
+            return self._text_block(f"❌ `{all_resp.get('detail')}`")
+
         self._notify_admin(
             team_id, user_id,
             f"✅ *Mitigation Complete* — *{team_name}*\n"
@@ -7965,14 +8117,16 @@ class SlackSlashCommandView(APIView):
                 f"*Host:* `{host_name}`\n"
                 f"*Severity:* {icon} {sev}\n"
                 f"*Team:* {team_name}\n\n"
-                f"_Admin has been notified. Run `/retest {vuln_id}` to request formal retesting._"
+                f"_All steps marked complete in the system. Admin notified. "
+                f"Run `/retest {vuln_id}` to request formal retesting._"
             )}},
         ]
 
     def _cmd_retest(self, text, team_id, user_id, team_name):
         """
         /retest [vuln-id] — Submit a fixed vulnerability for admin retesting e.g. /retest h1
-        Admin is notified to schedule a verification scan.
+        Calls the real send-verification API (requires all steps completed first via
+        /mitigated) and notifies the admin in Slack.
         """
         vuln_id = text.strip().lower()
         if not vuln_id:
@@ -7980,7 +8134,7 @@ class SlackSlashCommandView(APIView):
                 "*Usage:* `/retest [vuln-id]`  _e.g. `/retest h1`_\n"
                 "Use `/viewassigned vulns` to see IDs."
             )
-        target, _ = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
+        target, report_id = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
         if not target:
             return self._text_block(
                 f"❌ Vulnerability `{vuln_id}` not found.\n"
@@ -7990,6 +8144,23 @@ class SlackSlashCommandView(APIView):
         host_name   = target.get("host_name") or ""
         sev         = target.get("risk_factor") or target.get("sev_label") or "Medium"
         icon        = self._SEV_ICONS.get(sev, "⚪")
+
+        fix_vuln_id, create_resp = self._get_or_create_fix_vuln_id(target, report_id, team_id, user_id)
+        if not fix_vuln_id:
+            return self._text_block(
+                f"❌ Could not submit retest: {create_resp.get('detail') or create_resp.get('error') or 'unknown error'}"
+            )
+        verify_resp = self._call_user_api(
+            f"/api/user/register/fix-vulnerability/{fix_vuln_id}/send-verification/", team_id, user_id,
+            method="post",
+        )
+        if verify_resp.get("status") not in ("open/review", "closed"):
+            err = verify_resp.get("message") or verify_resp.get("detail") or verify_resp.get("error") or "unknown error"
+            return self._text_block(
+                f"❌ `{err}`\n"
+                f"_Run `/mitigated {vuln_id}` first to mark all fix steps complete._"
+            )
+
         self._notify_admin(
             team_id, user_id,
             f"🔁 *Retest Request* — *{team_name}*\n"
@@ -8002,9 +8173,115 @@ class SlackSlashCommandView(APIView):
                 f"*Vulnerability:* `{plugin_name}`\n"
                 f"*Host:* `{host_name}`\n"
                 f"*Severity:* {icon} {sev}\n\n"
-                "_Admin notified. They will schedule verification and confirm the fix._"
+                "_Verification request recorded in VaptFix. Admin notified — "
+                "they will schedule verification and confirm the fix._"
             )}},
         ]
+
+    def _cmd_manualfix(self, text, team_id, user_id, team_name):
+        """
+        /manualfix [vuln-id] — Real step-by-step manual fix guide (OS-specific
+        commands, where-to-run, verification checks) pulled from the same
+        fix_vulnerability_steps API the web dashboard uses. e.g. /manualfix h1
+        """
+        vuln_id = text.strip().lower()
+        if not vuln_id:
+            return self._text_block(
+                "*Usage:* `/manualfix [vuln-id]`  _e.g. `/manualfix h1`_\n"
+                "Run `/startfix [vuln-id]` first to see what's available."
+            )
+        target, report_id = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
+        if not target:
+            return self._text_block(
+                f"❌ Vulnerability `{vuln_id}` not found.\n"
+                "Use `/viewassigned vulns` to see IDs."
+            )
+        fix_vuln_id, create_resp = self._get_or_create_fix_vuln_id(target, report_id, team_id, user_id)
+        if not fix_vuln_id:
+            return self._text_block(
+                f"❌ Could not fetch fix steps: {create_resp.get('detail') or create_resp.get('error') or 'unknown error'}"
+            )
+        steps_data = self._call_user_api(
+            f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, user_id,
+        )
+        if steps_data.get("detail"):
+            return self._text_block(f"❌ `{steps_data.get('detail')}`")
+        return self._format_manualfix_steps(steps_data, vuln_id)
+
+    def _cmd_autofix(self, text, team_id, user_id, team_name):
+        """
+        /autofix [vuln-id] — Shows the ready-made automated-fix script for this
+        vulnerability (from the automation_scripts library), with the exact
+        commands to run and before/after considerations. e.g. /autofix h1
+        """
+        vuln_id = text.strip().lower()
+        if not vuln_id:
+            return self._text_block(
+                "*Usage:* `/autofix [vuln-id]`  _e.g. `/autofix h1`_\n"
+                "Run `/startfix [vuln-id]` first to see what's available."
+            )
+        target, _ = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
+        if not target:
+            return self._text_block(
+                f"❌ Vulnerability `{vuln_id}` not found.\n"
+                "Use `/viewassigned vulns` to see IDs."
+            )
+        plugin_id = target.get("plugin_id")
+        if not plugin_id:
+            return self._text_block(
+                f"❌ No Nessus plugin ID found for this vulnerability — cannot check for an automated fix.\n"
+                f"Use `/manualfix {vuln_id}` instead."
+            )
+        automation = self._call_user_api(
+            f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
+        )
+        if automation.get("detail") and "matched" not in automation:
+            return self._text_block(f"❌ `{automation.get('detail')}`")
+        if not automation.get("matched"):
+            return self._text_block(
+                f"📭 No automated-fix script available for this vulnerability.\n"
+                f"Use `/manualfix {vuln_id}` for the step-by-step guide instead."
+            )
+        script_resp = self._call_user_api_raw(
+            f"/api/user/automation-scripts/download/{plugin_id}/", team_id, user_id,
+        )
+        script_text = ""
+        if script_resp is not None and script_resp.status_code == 200:
+            try:
+                script_text = script_resp.content.decode("utf-8", errors="replace")
+            except Exception:
+                script_text = ""
+        return self._format_autofix(automation, script_text, vuln_id)
+
+    def _cmd_scriptfeedback(self, text, team_id, user_id, team_name):
+        """
+        /scriptfeedback [vuln-id] up|down — Report whether the automated-fix
+        script worked, after running it via /autofix. e.g. /scriptfeedback h1 up
+        """
+        parts = text.strip().lower().split()
+        if len(parts) < 2 or parts[1] not in ("up", "down"):
+            return self._text_block(
+                "*Usage:* `/scriptfeedback [vuln-id] up|down`  _e.g. `/scriptfeedback h1 up`_\n"
+                "_Run this after trying the script from `/autofix`._"
+            )
+        vuln_id, direction = parts[0], parts[1]
+        target, _ = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
+        if not target:
+            return self._text_block(
+                f"❌ Vulnerability `{vuln_id}` not found.\n"
+                "Use `/viewassigned vulns` to see IDs."
+            )
+        plugin_id = target.get("plugin_id")
+        if not plugin_id:
+            return self._text_block("❌ No plugin ID found for this vulnerability.")
+        resp = self._call_user_api(
+            "/api/user/automation-scripts/feedback/", team_id, user_id,
+            method="post", json_body={"plugin_id": plugin_id, "working": direction == "up"},
+        )
+        if not resp.get("success"):
+            return self._text_block(f"❌ `{resp.get('error') or resp.get('detail') or 'Could not submit feedback.'}`")
+        icon = "👍" if direction == "up" else "👎"
+        return self._text_block(f"{icon} Thanks! Feedback recorded for `{target.get('plugin_name', vuln_id)}`.")
 
     def _cmd_support(self, text, team_id, user_id, team_name):
         """
@@ -8542,32 +8819,157 @@ class SlackSlashCommandView(APIView):
                 "text": f"_...{len(vulns) - 10} more. Use `/viewassigned` for full list._"}})
         return blocks
 
-    def _format_startfix_single(self, vuln, team_name):
+    def _format_startfix_real(self, vuln, fix_vuln_id, automation=None):
+        """
+        Real /startfix detail screen — no hardcoded steps. Points to /manualfix
+        (always) and /autofix (only when automation_scripts has a match).
+        """
         name = vuln.get("plugin_name") or "Unknown"
         sev  = vuln.get("risk_factor") or vuln.get("sev_label") or "Medium"
         host = vuln.get("host_name") or "—"
         port = vuln.get("port") or "—"
-        os_v = vuln.get("os") or "—"
         sid  = vuln.get("short_id", "?")
         icon = self._SEV_ICONS.get(sev, "⚪")
-        return [
+        blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🔧 Fix: {name[:60]}", "emoji": True}},
-            self._ctx(f"Step-by-step fix guide for {name[:50]}. Run /mitigated {sid} when done, then /retest {sid} to notify admin"),
+            self._ctx(f"Fix ID `{fix_vuln_id}` — use with /manualfix, /autofix, /mitigated, /retest"),
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
                 {"type": "mrkdwn", "text": f"*Severity*\n{icon} {sev}"},
                 {"type": "mrkdwn", "text": f"*Host*\n`{host}`"},
                 {"type": "mrkdwn", "text": f"*Port*\n{port}"},
             ]},
-            {"type": "section", "text": {"type": "mrkdwn", "text": (
-                "*Fix Steps:*\n"
-                "1️⃣ Identify & isolate the affected system\n"
-                "2️⃣ Apply the recommended patch or configuration fix\n"
-                "3️⃣ Verify the fix is correctly applied\n"
-                f"4️⃣ Run `/mitigated {sid}` when complete\n"
-                f"5️⃣ Run `/retest {sid}` to notify admin for verification"
-            )}},
+            {"type": "divider"},
         ]
+        if automation and automation.get("matched") and automation.get("automation_possible"):
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"🤖 *Automated fix available.*\nRun `/autofix {sid}` to get the ready-made fix script."
+            )}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"📖 *Manual step-by-step guide available.*\nRun `/manualfix {sid}` for exact commands for your OS."
+        )}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"When done: `/mitigated {sid}` to mark complete, then `/retest {sid}` to notify admin."
+        )}})
+        return blocks
+
+    def _format_manualfix_steps(self, data, vuln_id):
+        """Format the real fix_vulnerability_steps API response into Slack blocks."""
+        name        = data.get("vulnerability_name") or "Unknown"
+        asset       = data.get("asset") or "—"
+        sev         = (data.get("severity") or "").capitalize() or "Medium"
+        os_v        = data.get("operating_system") or "—"
+        icon        = self._SEV_ICONS.get(sev, "⚪")
+        completed   = data.get("completed_steps", 0)
+        total       = data.get("total_steps", 0)
+        steps       = data.get("steps") or []
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"📖 Manual Fix: {name[:55]}", "emoji": True}},
+            self._ctx(f"OS-specific steps for {asset}. Run /mitigated {vuln_id} [step] as you complete each one."),
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Severity*\n{icon} {sev}"},
+                {"type": "mrkdwn", "text": f"*OS*\n{os_v}"},
+                {"type": "mrkdwn", "text": f"*Asset*\n`{asset}`"},
+                {"type": "mrkdwn", "text": f"*Progress*\n{completed}/{total} steps done"},
+            ]},
+            {"type": "divider"},
+        ]
+
+        if not steps:
+            blocks.append(self._text_block("No mitigation steps found for this vulnerability.")[0])
+            return blocks
+
+        # Slack blocks have a per-message limit — show up to 4 steps per reply,
+        # prioritizing the current/next actionable step first.
+        current = next((s for s in steps if s.get("is_current")), None)
+        ordered = ([current] if current else []) + [s for s in steps if s is not current]
+
+        for step in ordered[:4]:
+            step_num  = step.get("step_number")
+            step_name = step.get("step_name") or f"Step {step_num}"
+            status_v  = step.get("status", "pending")
+            locked    = step.get("is_locked")
+            st_icon   = "✅" if status_v == "completed" else ("🔒" if locked else "▶️")
+
+            os_key = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
+            os_data = step.get(os_key) or {}
+            commands = os_data.get("command_to_run") or os_data.get("commands_for_action") or ""
+            if isinstance(commands, list):
+                commands = "\n".join(
+                    "\n".join(c.get("commands", []) if isinstance(c, dict) else [str(c)])
+                    for c in commands
+                )
+            where_label = os_data.get("where_to_run_label", "Terminal")
+            verify_check = os_data.get("verification_check", "")
+
+            text = f"{st_icon} *Step {step_num}: {step_name}*\n_Run in: {where_label}_\n"
+            if commands and str(commands).strip().lower() not in ("n/a", "na"):
+                snippet = str(commands).strip()[:500]
+                text += f"```{snippet}```\n"
+            if verify_check:
+                text += f"✔️ *Verify:* {verify_check[:200]}\n"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
+
+        if len(steps) > 4:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...and {len(steps) - 4} more step(s). Complete these first, then run `/manualfix {vuln_id}` again._"}})
+
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"Mark a step done: `/mitigated {vuln_id} s[step-number]`  _e.g._ `/mitigated {vuln_id} s{steps[0].get('step_number', 1)}`\n"
+            f"Mark everything done: `/mitigated {vuln_id}`"
+        )}})
+        return blocks
+
+    def _format_autofix(self, automation, script_text, vuln_id):
+        """Format the automation_scripts match + downloaded script into Slack blocks."""
+        vuln_name  = automation.get("vulnerability") or "Unknown"
+        severity   = (automation.get("severity") or "").capitalize()
+        os_v       = automation.get("os") or "—"
+        language   = automation.get("language") or "—"
+        script_name = automation.get("script_name") or automation.get("fix_script_name") or "fix_script"
+        desc       = automation.get("script_description") or ""
+        before     = automation.get("considerations_before") or ""
+        after      = automation.get("considerations_after") or ""
+        run_cmd    = automation.get("command_run_script") or ""
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Automated Fix: {vuln_name[:55]}", "emoji": True}},
+            self._ctx("Ready-made fix script from the automation library. Test in a safe environment first."),
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Severity*\n{severity}"},
+                {"type": "mrkdwn", "text": f"*OS*\n{os_v}"},
+                {"type": "mrkdwn", "text": f"*Language*\n{language}"},
+                {"type": "mrkdwn", "text": f"*Script*\n`{script_name}`"},
+            ]},
+            {"type": "divider"},
+        ]
+        if desc:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*What this does:*\n{desc[:500]}"}})
+        if before:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ *Before running:*\n{before[:400]}"}})
+
+        if script_text:
+            snippet = script_text[:2500]
+            truncated = len(script_text) > 2500
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Script (`{script_name}`):*\n```{snippet}```" + ("\n_...truncated — full script also on the VaptFix dashboard._" if truncated else "")}})
+        else:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": "_Script file could not be fetched — download it from the VaptFix dashboard instead._"}})
+
+        if run_cmd:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Run with:*\n```{run_cmd}```"}})
+        if after:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"✔️ *After running:*\n{after[:400]}"}})
+
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"After running, tell us if it worked: `/scriptfeedback {vuln_id} up` or `/scriptfeedback {vuln_id} down`\n"
+            f"Then: `/mitigated {vuln_id}` to mark complete, `/retest {vuln_id}` to notify admin."
+        )}})
+        return blocks
 
     def _format_team_support_status(self, data, team_name):
         # data is from SupportRequestByReportAPIView — full list filtered by team
