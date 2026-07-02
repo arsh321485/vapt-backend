@@ -2452,6 +2452,15 @@ class DownloadReportAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        import sys, traceback as _tb
+        try:
+            return self._get_impl(request)
+        except Exception as _exc:
+            print(f"[DownloadReport DEBUG] {type(_exc).__name__}: {_exc}", file=sys.stderr)
+            _tb.print_exc(file=sys.stderr)
+            return Response({"error": f"{type(_exc).__name__}: {_exc}"}, status=500)
+
+    def _get_impl(self, request):
         fmt = request.query_params.get("format", "html").lower().strip()
         if fmt not in ("html", "pdf"):
             return Response({"error": "format must be 'html' or 'pdf'"}, status=400)
