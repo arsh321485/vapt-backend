@@ -55,3 +55,6 @@ Pillow>=10.0.0
 
 # Slack official SDK (marketplace requirement)
 slack-sdk>=3.27.0
+
+# PDF report generation (optional — needed for download-report?format=pdf)
+weasyprint>=60.0
