@@ -2454,28 +2454,40 @@ class DownloadReportAPIView(APIView):
     def dispatch(self, request, *args, **kwargs):
         try:
             with open("/tmp/dlr_debug.txt", "a") as _f:
-                _f.write(f"DISPATCH method={request.method} user={getattr(request, 'user', 'NONE')}\n")
+                _f.write(f"DISPATCH called method={request.method}\n")
         except Exception:
             pass
         try:
-            return super().dispatch(request, *args, **kwargs)
+            resp = super().dispatch(request, *args, **kwargs)
+            with open("/tmp/dlr_debug.txt", "a") as _f:
+                _f.write(f"DISPATCH done status={resp.status_code}\n")
+            return resp
         except Exception as _exc:
             import traceback as _tb
             try:
                 with open("/tmp/dlr_debug.txt", "a") as _f:
-                    _f.write(f"DISPATCH ERROR {type(_exc).__name__}: {_exc}\n")
+                    _f.write(f"DISPATCH EXCEPTION {type(_exc).__name__}: {_exc}\n")
                     _tb.print_exc(file=_f)
             except Exception:
                 pass
             raise
 
     def get(self, request):
-        import sys, traceback as _tb
+        try:
+            with open("/tmp/dlr_debug.txt", "a") as _f:
+                _f.write(f"GET called user={request.user} is_auth={request.user.is_authenticated}\n")
+        except Exception:
+            pass
         try:
             return self._get_impl(request)
         except Exception as _exc:
-            print(f"[DownloadReport DEBUG] {type(_exc).__name__}: {_exc}", file=sys.stderr)
-            _tb.print_exc(file=sys.stderr)
+            import traceback as _tb
+            try:
+                with open("/tmp/dlr_debug.txt", "a") as _f:
+                    _f.write(f"GET EXCEPTION {type(_exc).__name__}: {_exc}\n")
+                    _tb.print_exc(file=_f)
+            except Exception:
+                pass
             return Response({"error": f"{type(_exc).__name__}: {_exc}"}, status=500)
 
     def _get_impl(self, request):
