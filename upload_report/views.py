@@ -2451,26 +2451,29 @@ class DownloadReportAPIView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    def handle_exception(self, exc):
+        import traceback as _tb
+        try:
+            with open("/tmp/dlr_debug.txt", "a") as _f:
+                _f.write(f"EXCEPTION {type(exc).__name__}: {exc}\n")
+                _tb.print_exc(file=_f)
+        except Exception:
+            pass
+        return super().handle_exception(exc)
+
     def dispatch(self, request, *args, **kwargs):
         try:
             with open("/tmp/dlr_debug.txt", "a") as _f:
                 _f.write(f"DISPATCH called method={request.method}\n")
         except Exception:
             pass
+        resp = super().dispatch(request, *args, **kwargs)
         try:
-            resp = super().dispatch(request, *args, **kwargs)
             with open("/tmp/dlr_debug.txt", "a") as _f:
                 _f.write(f"DISPATCH done status={resp.status_code}\n")
-            return resp
-        except Exception as _exc:
-            import traceback as _tb
-            try:
-                with open("/tmp/dlr_debug.txt", "a") as _f:
-                    _f.write(f"DISPATCH EXCEPTION {type(_exc).__name__}: {_exc}\n")
-                    _tb.print_exc(file=_f)
-            except Exception:
-                pass
-            raise
+        except Exception:
+            pass
+        return resp
 
     def get(self, request):
         try:
