@@ -7512,19 +7512,27 @@ class SlackSlashCommandView(APIView):
         import pymongo as _pymongo
         from vaptfix.mongo_client import MongoContext
 
-        # Combine workspace Slack users AND staff users — same logic as _get_team_vulns
+        # Workspace-scoped Slack admins for THIS Slack team only (do NOT widen to
+        # all staff system-wide by default — that would show an unrelated admin's
+        # data on a multi-tenant install). Only fall back if this workspace has
+        # no report at all.
         workspace_users = list(User.objects.filter(slack_team_id=team_id))
-        staff_users     = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
-        combined        = {u.id: u for u in workspace_users + staff_users}
-        all_users       = list(combined.values())
+        all_users        = workspace_users
 
         if not all_users:
             return self._text_block("❌ No users found for this Slack workspace. Connect VaptFix to Slack first.")
 
-        all_ids    = [str(u.id) for u in all_users]
-        all_emails = [e for e in (getattr(u, "email", "") for u in all_users) if e]
-        conditions = [{"admin_id": aid} for aid in all_ids]
-        conditions += [{"admin_email": em} for em in all_emails]
+        def _conditions_for(users):
+            ids    = [str(u.id) for u in users]
+            emails = [e for e in (getattr(u, "email", "") for u in users) if e]
+            return [{"admin_id": aid} for aid in ids] + [{"admin_email": em} for em in emails]
+
+        conditions = _conditions_for(all_users)
+        with MongoContext() as _probe_db:
+            if _probe_db["nessus_reports"].count_documents({"$or": conditions}) == 0:
+                staff_users = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
+                all_users   = list({u.id: u for u in workspace_users + staff_users}.values())
+                conditions  = _conditions_for(all_users)
 
         with MongoContext() as db:
             report_count = db["nessus_reports"].count_documents({"$or": conditions})
@@ -7754,32 +7762,44 @@ class SlackSlashCommandView(APIView):
         from vaptfix.mongo_client import MongoContext
         from rest_framework_simplejwt.tokens import RefreshToken as _RT
 
-        # Combine workspace Slack users AND all staff users (report uploader may differ
-        # from Slack-connected user).
+        # Workspace-scoped Slack admins for THIS Slack team only.
         workspace_users = list(User.objects.filter(slack_team_id=team_id))
-        staff_users     = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
-        combined        = {u.id: u for u in workspace_users + staff_users}
-        all_users       = list(combined.values())
 
         raw_data = {"report_id": "", "teams": {}, "admin_email": "not_found"}
-        if not all_users:
-            logger.warning("[SlackCmd] _get_team_vulns: no users for team_id=%s", team_id)
+        if not workspace_users:
+            logger.warning("[SlackCmd] _get_team_vulns: no workspace users for team_id=%s", team_id)
             return [], "", raw_data
 
-        all_ids    = [str(u.id) for u in all_users]
-        all_emails = [e for e in (getattr(u, "email", "") for u in all_users) if e]
-        conditions = [{"admin_id": aid} for aid in all_ids]
-        conditions += [{"admin_email": em} for em in all_emails]
+        def _find_latest(users):
+            ids    = [str(u.id) for u in users]
+            emails = [e for e in (getattr(u, "email", "") for u in users) if e]
+            conds  = [{"admin_id": aid} for aid in ids] + [{"admin_email": em} for em in emails]
+            with MongoContext() as db:
+                return db["nessus_reports"].find_one(
+                    {"$or": conds},
+                    {"report_id": 1, "admin_id": 1, "admin_email": 1},  # no vuln data — stays small
+                    sort=[("uploaded_at", _pymongo.DESCENDING)],
+                )
 
-        # ── Step 1: Tiny metadata query — find which admin has the latest report ──
-        with MongoContext() as db:
-            latest_meta = db["nessus_reports"].find_one(
-                {"$or": conditions},
-                {"report_id": 1, "admin_id": 1, "admin_email": 1},  # no vuln data — stays small
-                sort=[("uploaded_at", _pymongo.DESCENDING)],
-            )
+        # ── Step 1: Find the latest report strictly among THIS workspace's admins ──
+        # (Do NOT widen to "all staff system-wide" first — on a multi-tenant install
+        # that picks whichever admin anywhere uploaded most recently, showing a
+        # completely different admin's data to this team.)
+        latest_meta = _find_latest(workspace_users)
+        all_users   = workspace_users
 
         if not latest_meta:
+            # Fallback: the report-uploading admin may not have slack_team_id set
+            # (e.g. uploaded via the web dashboard, never did the Slack OAuth login).
+            # Only now widen the search to all staff users.
+            staff_users = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
+            combined    = {u.id: u for u in workspace_users + staff_users}
+            all_users   = list(combined.values())
+            latest_meta = _find_latest(all_users)
+
+        if not latest_meta:
+            all_ids    = [str(u.id) for u in all_users]
+            all_emails = [e for e in (getattr(u, "email", "") for u in all_users) if e]
             logger.warning("[SlackCmd] no report found for ids=%s emails=%s", all_ids, all_emails)
             raw_data["detail"] = "no_report_found"
             return [], "", raw_data
