@@ -1,0 +1,27 @@
+Ritika  [10:00 PM]
+/viewassigned vulns
+vaptfix  [10:00 PM]
+:hourglass_flowing_sand: Processing /viewassigned...
+[10:00 PM]:clipboard: Configuration ManagementShows all vulnerabilities & assets assigned to your team with short IDs (c1, h1, m1, l1...). Use these IDs with /startfix, /mitigated, /retest, /extend:mailbox_with_no_mail: No vulnerabilities currently assigned to Configuration Management team.
+
+Possible reasons:
+• Admin hasn't assigned vulns to this team yet in the dashboard
+• No active report uploaded for this workspace
+
+Contact your admin to assign vulnerabilities via the VaptFix dashboard.
+
+Debug: report=none | admin=not_found | cards=? | cards_mode=? | error=invalid_responseRitika  [10:00 PM]
+/mitigationstatus
+vaptfix  [10:00 PM]
+:hourglass_flowing_sand: Processing /mitigationstatus...[10:00 PM]:bar_chart: Configuration Management — Mitigation StatusCurrent fix progress for all your team's vulnerabilities — open, closed, in-progress, overdue countsTotal
+0Fix Rate
+0%Open
+0Closed
+0In Progress
+0Overdue
+0Progress: ░░░░░░░░░░ 0%By Severity: :red_circle: Critical: 0 | :large_orange_circle: High: 0 | :large_yellow_circle: Medium: 0 | :large_blue_circle: Low: 0
+
+
+abhi bhi output same hi aa rha hai jo lateset file ki vulnerabilities ka data show hona chahihe 
+
+so kya issue hai bta do 

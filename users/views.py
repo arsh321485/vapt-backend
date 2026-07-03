@@ -7754,12 +7754,17 @@ class SlackSlashCommandView(APIView):
         """
         Fetch vulns assigned to a specific team, scoped to the actual team member
         who ran the Slack command — via the same member-facing API their own
-        dashboard uses (/api/user/register/latest/vulns/). This authenticates as
-        the specific member (via _call_user_api), so there is no admin-guessing:
-        the backend resolves "their" admin/report via the member's own UserDetail.
-        Unlike /api/admin/adminmitigationstrategy/by-team/ (used previously),
-        this endpoint does NOT restrict to vulns appearing on 4+ assets — that
-        filter was hiding everything on small reports.
+        dashboard uses (/api/user/register/register/latest/vulns/). This
+        authenticates as the specific member (via _call_user_api), so there is
+        no admin-guessing: the backend resolves "their" admin/report via the
+        member's own UserDetail. Unlike /api/admin/adminmitigationstrategy/by-team/
+        (used previously), this endpoint does NOT restrict to vulns appearing on
+        4+ assets — that filter was hiding everything on small reports.
+
+        NOTE the doubled "register/register/" segment: userregister/urls.py
+        defines this path as "register/latest/vulns/" and vaptfix/urls.py mounts
+        the whole app under "api/user/register/", so the two "register" segments
+        stack. Verified against userregister/urls.py — not a typo here.
         Returns (sorted_vulns, report_id, raw_data).
         """
         from vaptfix.mongo_client import MongoContext
@@ -7767,7 +7772,7 @@ class SlackSlashCommandView(APIView):
         raw_data = {"report_id": "", "teams": {}, "admin_email": "not_found"}
 
         data = self._call_user_api(
-            "/api/user/register/latest/vulns/", team_id, user_id,
+            "/api/user/register/register/latest/vulns/", team_id, user_id,
             params={"team": team_name},
         )
         if data.get("detail") and "rows" not in data:
