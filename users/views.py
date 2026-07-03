@@ -7640,12 +7640,37 @@ class SlackSlashCommandView(APIView):
         )
         if resp.get("status") != "closed":
             return self._text_block(f"❌ `{resp.get('detail') or 'Could not approve verification.'}`")
+
+        vuln_name = resp.get("vulnerability_name", "")
+        asset     = resp.get("asset", "")
+
+        # The approve API doesn't return assigned_team — read it directly from
+        # the record it just moved into fix_vulnerabilities_closed, so we know
+        # which team's Slack channel to notify. Direct Mongo read, no new API.
+        from vaptfix.mongo_client import MongoContext
+        assigned_team = ""
+        with MongoContext() as db:
+            closed_doc = db["fix_vulnerabilities_closed"].find_one(
+                {"fix_vulnerability_id": fix_vuln_id}, {"assigned_team": 1},
+            )
+            if closed_doc:
+                assigned_team = closed_doc.get("assigned_team", "")
+
+        if assigned_team:
+            self._notify_team(
+                team_id, user_id, assigned_team,
+                f"✅ *Vulnerability Verified & Closed*\n"
+                f"`{vuln_name}` on `{asset}` has been approved by the superadmin and is now closed. Great work!"
+            )
+
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "✅ Verification Approved & Closed", "emoji": True}},
             {"type": "section", "text": {"type": "mrkdwn", "text": (
-                f"*Vulnerability:* {resp.get('vulnerability_name', '')}\n"
-                f"*Asset:* `{resp.get('asset', '')}`\n\n"
-                "_Vulnerability is now closed. Team has been notified._"
+                f"*Vulnerability:* {vuln_name}\n"
+                f"*Asset:* `{asset}`\n\n"
+                + ("_Vulnerability is now closed. Team has been notified in their channel._"
+                   if assigned_team else
+                   "_Vulnerability is now closed._ ⚠️ _Could not determine team channel to notify._")
             )}},
         ]
 
@@ -7934,8 +7959,8 @@ class SlackSlashCommandView(APIView):
         fix_vuln_id = (data.get("data") or {}).get("_id")
         return fix_vuln_id, data
 
-    def _get_admin_channel_id(self, bot_token):
-        """Look up the vaptfix-admin-dashboard channel ID via Slack API."""
+    def _get_channel_id_by_name(self, bot_token, channel_name):
+        """Look up a Slack channel's ID by name via the Slack API."""
         resp = _http_get(
             "https://slack.com/api/conversations.list",
             headers={"Authorization": f"Bearer {bot_token}"},
@@ -7945,9 +7970,22 @@ class SlackSlashCommandView(APIView):
         if not resp:
             return None
         for ch in (resp.json().get("channels") or []):
-            if ch.get("name") == self.ADMIN_CHANNEL:
+            if ch.get("name") == channel_name:
                 return ch.get("id")
         return None
+
+    def _get_admin_channel_id(self, bot_token):
+        """Look up the vaptfix-admin-dashboard channel ID via Slack API."""
+        return self._get_channel_id_by_name(bot_token, self.ADMIN_CHANNEL)
+
+    def _post_to_channel(self, bot_token, channel_id, message):
+        resp = _http_post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+            json={"channel": channel_id, "text": message},
+            timeout=10,
+        )
+        return bool(resp and resp.json().get("ok"))
 
     def _notify_admin(self, team_id, user_id, message):
         """Post a notification message to #vaptfix-admin-dashboard."""
@@ -7957,13 +7995,20 @@ class SlackSlashCommandView(APIView):
         admin_ch_id = self._get_admin_channel_id(bot_token)
         if not admin_ch_id:
             return False
-        resp = _http_post(
-            "https://slack.com/api/chat.postMessage",
-            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
-            json={"channel": admin_ch_id, "text": message},
-            timeout=10,
-        )
-        return bool(resp and resp.json().get("ok"))
+        return self._post_to_channel(bot_token, admin_ch_id, message)
+
+    def _notify_team(self, team_id, user_id, team_name, message):
+        """Post a notification message to a team's own channel (e.g. #vaptfix-configuration-management-team)."""
+        channel_name = next((cn for cn, tn in self.TEAM_CHANNELS.items() if tn == team_name), None)
+        if not channel_name:
+            return False
+        bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
+        if not bot_token:
+            return False
+        team_ch_id = self._get_channel_id_by_name(bot_token, channel_name)
+        if not team_ch_id:
+            return False
+        return self._post_to_channel(bot_token, team_ch_id, message)
 
     def _create_support_ticket(self, team_id, slack_user_id, team_name, message):
         """
@@ -8225,9 +8270,12 @@ class SlackSlashCommandView(APIView):
 
     def _cmd_manualfix(self, text, team_id, user_id, team_name):
         """
-        /manualfix [vuln-id] — Real step-by-step manual fix guide (OS-specific
-        commands, where-to-run, verification checks) pulled from the same
-        fix_vulnerability_steps API the web dashboard uses. e.g. /manualfix h1
+        /manualfix [vuln-id] — Full step-by-step manual fix detail (Action,
+        Where/How to Run, Command, Expected Output, Verification, Tools,
+        Important Considerations) — same content as the web dashboard's
+        Manual Fix tab — plus two buttons to mark progress:
+        "Mark Step Done" (one at a time) and "Mark All Steps Done".
+        e.g. /manualfix h1
         """
         vuln_id = text.strip().lower()
         if not vuln_id:
@@ -8251,7 +8299,7 @@ class SlackSlashCommandView(APIView):
         )
         if steps_data.get("detail"):
             return self._text_block(f"❌ `{steps_data.get('detail')}`")
-        return self._format_manualfix_steps(steps_data, vuln_id)
+        return self._format_steps_status(steps_data, vuln_id, fix_vuln_id, team_name)
 
     def _cmd_autofix(self, text, team_id, user_id, team_name):
         """
@@ -8961,73 +9009,133 @@ class SlackSlashCommandView(APIView):
         )}})
         return blocks
 
-    def _format_manualfix_steps(self, data, vuln_id):
-        """Format the real fix_vulnerability_steps API response into Slack blocks."""
-        name        = data.get("vulnerability_name") or "Unknown"
-        asset       = data.get("asset") or "—"
-        sev         = (data.get("severity") or "").capitalize() or "Medium"
-        os_v        = data.get("operating_system") or "—"
-        icon        = self._SEV_ICONS.get(sev, "⚪")
-        completed   = data.get("completed_steps", 0)
-        total       = data.get("total_steps", 0)
-        steps       = data.get("steps") or []
+    def _format_steps_status(self, data, vuln_id, fix_vuln_id, team_name):
+        """
+        Full per-step detail — same content as the web dashboard's Manual Fix
+        tab (Action LOCATE/REMOVE/REPLACE/WHERE, Assigned Team, Where/How to
+        Run, Command, Expected Output, Verification Check, Tools, Important
+        Considerations) — all of it already comes from the step-complete API,
+        just not previously surfaced in Slack.
+        """
+        name      = data.get("vulnerability_name") or "Unknown"
+        asset     = data.get("asset") or "—"
+        os_v      = data.get("operating_system") or "—"
+        completed = data.get("completed_steps", 0)
+        total     = data.get("total_steps", 0)
+        all_done  = data.get("all_steps_completed", False)
+        steps     = data.get("steps") or []
 
         blocks = [
-            {"type": "header", "text": {"type": "plain_text", "text": f"📖 Manual Fix: {name[:55]}", "emoji": True}},
-            self._ctx(f"OS-specific steps for {asset}. Run /mitigated {vuln_id} [step] as you complete each one."),
+            {"type": "header", "text": {"type": "plain_text", "text": f"📋 Steps: {name[:55]}", "emoji": True}},
+            self._ctx(f"Full step-by-step detail for {asset} — same content as the dashboard's Manual Fix tab."),
             {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Severity*\n{icon} {sev}"},
-                {"type": "mrkdwn", "text": f"*OS*\n{os_v}"},
                 {"type": "mrkdwn", "text": f"*Asset*\n`{asset}`"},
-                {"type": "mrkdwn", "text": f"*Progress*\n{completed}/{total} steps done"},
+                {"type": "mrkdwn", "text": f"*OS*\n{os_v}"},
+                {"type": "mrkdwn", "text": f"*Progress*\n{completed}/{total} done"},
             ]},
-            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"`{self._bar(completed, max(total, 1))}` {round((completed/total)*100) if total else 0}%"}},
         ]
 
         if not steps:
+            blocks.append({"type": "divider"})
             blocks.append(self._text_block("No mitigation steps found for this vulnerability.")[0])
             return blocks
 
-        # Slack blocks have a per-message limit — show up to 4 steps per reply,
-        # prioritizing the current/next actionable step first.
-        current = next((s for s in steps if s.get("is_current")), None)
-        ordered = ([current] if current else []) + [s for s in steps if s is not current]
+        os_key = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
 
-        for step in ordered[:4]:
+        # Full detail is heavy — show the current/next step first, then only
+        # already-done steps as one-liners, capped so the message stays sane.
+        current = next((s for s in steps if s.get("is_current")), None)
+        detail_steps = ([current] if current else []) + [s for s in steps if s is not current][:2]
+
+        for step in detail_steps:
             step_num  = step.get("step_number")
             step_name = step.get("step_name") or f"Step {step_num}"
             status_v  = step.get("status", "pending")
             locked    = step.get("is_locked")
-            st_icon   = "✅" if status_v == "completed" else ("🔒" if locked else "▶️")
+            done      = status_v == "completed"
+            badge     = "✅ Done" if done else ("🔒 Locked" if locked else "▶️ Pending")
 
-            os_key = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
-            os_data = step.get(os_key) or {}
-            commands = os_data.get("command_to_run") or os_data.get("commands_for_action") or ""
-            if isinstance(commands, list):
-                commands = "\n".join(
-                    "\n".join(c.get("commands", []) if isinstance(c, dict) else [str(c)])
-                    for c in commands
-                )
+            os_data     = step.get(os_key) or {}
+            action      = (os_data.get("action") or "").strip()
+            assigned    = step.get("assigned_team") or "—"
             where_label = os_data.get("where_to_run_label", "Terminal")
-            verify_check = os_data.get("verification_check", "")
+            how_to_run  = os_data.get("how_to_run", "")
+            command     = os_data.get("command_to_run") or os_data.get("commands_for_action") or ""
+            if isinstance(command, list):
+                command = "\n".join(
+                    "\n".join(c.get("commands", []) if isinstance(c, dict) else [str(c)])
+                    for c in command
+                )
+            expected  = os_data.get("expected_output", "")
+            verify    = os_data.get("verification_check", "")
+            tools     = os_data.get("artifacts_tools_used") or []
+            if isinstance(tools, str):
+                tools = [tools] if tools else []
+            important = os_data.get("important_consideration", "")
 
-            text = f"{st_icon} *Step {step_num}: {step_name}*\n_Run in: {where_label}_\n"
-            if commands and str(commands).strip().lower() not in ("n/a", "na"):
-                snippet = str(commands).strip()[:500]
-                text += f"```{snippet}```\n"
-            if verify_check:
-                text += f"✔️ *Verify:* {verify_check[:200]}\n"
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
-
-        if len(steps) > 4:
+            blocks.append({"type": "divider"})
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"_...and {len(steps) - 4} more step(s). Complete these first, then run `/manualfix {vuln_id}` again._"}})
+                "text": f"*{step_num}. {step_name}* — {badge}"}})
+            blocks.append({"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Assigned Team*\n{assigned}"},
+                {"type": "mrkdwn", "text": f"*Where to Run*\n{where_label}"},
+            ]})
+            if action:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Action:*\n{action[:600]}"}})
+            if how_to_run:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*How to Run:*\n{how_to_run[:300]}"}})
+            if command and str(command).strip().lower() not in ("n/a", "na", ""):
+                blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"*Command to Run:*\n```{str(command).strip()[:600]}```"}})
+            if expected:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Expected Output:*\n{expected[:300]}"}})
+            if verify:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Verification Check:*\n{verify[:300]}"}})
+            if tools:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Tools:* {', '.join(tools)}"}})
+            if important:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ *Important:* {important[:300]}"}})
+
+        if len(steps) > len(detail_steps):
+            blocks.append({"type": "divider"})
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...{len(steps) - len(detail_steps)} more step(s). Run `/manualfix {vuln_id}` again after completing these to see the next ones._"}})
 
         blocks.append({"type": "divider"})
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
-            f"Mark a step done: `/mitigated {vuln_id} s[step-number]`  _e.g._ `/mitigated {vuln_id} s{steps[0].get('step_number', 1)}`\n"
-            f"Mark everything done: `/mitigated {vuln_id}`"
-        )}})
+        if all_done:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"✅ All steps complete. Run `/retest {vuln_id}` to send for superadmin verification."
+            )}})
+        else:
+            button_value = f"{fix_vuln_id}|{vuln_id}|{team_name}"
+            next_step_num = completed + 1
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": f"▶️ Mark Step {next_step_num} Done", "emoji": True},
+                        "action_id": "mitigate_step",
+                        "value": button_value,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "✅ Mark All Steps Done", "emoji": True},
+                        "style": "primary",
+                        "action_id": "mitigate_all",
+                        "value": button_value,
+                        "confirm": {
+                            "title": {"type": "plain_text", "text": "Mark all steps done?"},
+                            "text": {"type": "plain_text",
+                                     "text": "This completes every remaining step for this vulnerability at once."},
+                            "confirm": {"type": "plain_text", "text": "Yes, mark all done"},
+                            "deny": {"type": "plain_text", "text": "Cancel"},
+                        },
+                    },
+                ],
+            })
         return blocks
 
     def _format_autofix(self, automation, script_text, vuln_id):
@@ -9186,4 +9294,119 @@ class SlackSlashCommandView(APIView):
             icon     = "🤖" if has_scr else "📝"
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": f"{icon} *{name}*\n      Downloads: {dl_count}"}})
+
+
+class SlackInteractivityView(APIView):
+    """
+    Handles Slack Block Kit button clicks (block_actions payloads) — e.g. the
+    "Mark Step Done" / "Mark All Steps Done" buttons on /manualfix.
+
+    This is a SEPARATE Slack feature from slash commands — Slack apps have a
+    distinct "Interactivity & Shortcuts" setting with its own Request URL.
+    Acks Slack immediately; does the real work in a background thread and
+    updates the original message in place via response_url (same
+    ack-then-respond-async pattern as SlackSlashCommandView).
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        try:
+            payload = json.loads(request.POST.get("payload", "{}"))
+        except (ValueError, TypeError):
+            return Response({}, status=200)
+
+        if payload.get("type") != "block_actions":
+            return Response({}, status=200)
+
+        actions = payload.get("actions") or []
+        if not actions:
+            return Response({}, status=200)
+
+        action        = actions[0]
+        action_id     = action.get("action_id", "")
+        value         = action.get("value", "")
+        team_id       = (payload.get("team") or {}).get("id", "")
+        slack_user_id = (payload.get("user") or {}).get("id", "")
+        response_url  = payload.get("response_url", "")
+
+        threading.Thread(
+            target=self._handle_action,
+            args=(action_id, value, team_id, slack_user_id, response_url),
+            daemon=True,
+        ).start()
+
+        # Slack just needs a 200 within 3s for block_actions — no visible body needed.
+        return Response({}, status=200)
+
+    def _handle_action(self, action_id, value, team_id, slack_user_id, response_url):
+        try:
+            parts       = value.split("|")
+            fix_vuln_id = parts[0] if len(parts) > 0 else ""
+            vuln_id     = parts[1] if len(parts) > 1 else ""
+            team_name   = parts[2] if len(parts) > 2 else ""
+
+            slash = SlackSlashCommandView()
+
+            if action_id == "mitigate_all":
+                json_body = {"complete_all": True}
+                admin_msg = (
+                    f"✅ *Mitigation Complete* — *{team_name}*\n"
+                    f"Vulnerability `{vuln_id}` — all steps marked complete by team (via button)."
+                )
+            elif action_id == "mitigate_step":
+                json_body = {}
+                admin_msg = (
+                    f"🔧 *Step Update* — *{team_name}*\n"
+                    f"Vulnerability `{vuln_id}` — a step was marked complete by team (via button)."
+                )
+            else:
+                if response_url:
+                    _http_post(response_url, json={"response_type": "ephemeral", "text": "❌ Unknown action."}, timeout=10)
+                return
+
+            resp = slash._call_user_api(
+                f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/",
+                team_id, slack_user_id, method="post", json_body=json_body,
+            )
+
+            if not resp.get("message"):
+                if response_url:
+                    _http_post(response_url, json={
+                        "response_type": "ephemeral",
+                        "text": f"❌ {resp.get('detail') or 'Could not update step.'}",
+                    }, timeout=10)
+                return
+
+            if team_name:
+                slash._notify_admin(team_id, slack_user_id, admin_msg)
+
+            # Re-fetch fresh step data and redraw the message in place — the
+            # progress bar, step statuses, and the next button's label
+            # ("Mark Step N+1 Done") all update to reflect what just happened.
+            steps_data = slash._call_user_api(
+                f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, slack_user_id,
+            )
+            if steps_data.get("detail"):
+                blocks = slash._text_block(f"❌ `{steps_data.get('detail')}`")
+            else:
+                blocks = slash._format_steps_status(steps_data, vuln_id, fix_vuln_id, team_name)
+
+            if response_url:
+                _http_post(response_url, json={
+                    "response_type": "in_channel",
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, timeout=10)
+
+        except Exception as exc:
+            logger.exception(f"[SlackInteractivity] {action_id} failed: {exc}")
+            if response_url:
+                try:
+                    _http_post(response_url, json={
+                        "response_type": "ephemeral",
+                        "text": f"❌ Action failed: {exc}",
+                    }, timeout=10)
+                except Exception:
+                    pass
         return blocks
