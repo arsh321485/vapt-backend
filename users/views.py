@@ -3366,7 +3366,7 @@ class SlackOAuthUrlView(APIView):
         slack_url = (
             f"https://slack.com/oauth/v2/authorize?"
             f"client_id={client_id}"
-            f"&scope=chat:write,channels:read,channels:manage,channels:join,groups:read,groups:write,mpim:write,im:write,users:read,users:read.email"
+            f"&scope=chat:write,channels:read,channels:manage,channels:join,groups:read,groups:write,mpim:write,im:write,users:read,users:read.email,commands"
             f"&user_scope=identity.basic,identity.email,identity.avatar,identity.team"
             f"&redirect_uri={redirect_uri}"
             f"&state={state}"
@@ -6328,7 +6328,7 @@ class SlackInstallView(APIView):
         scopes = ",".join(getattr(settings, "SLACK_SCOPES", [
             "chat:write", "channels:manage", "channels:join",
             "mpim:write", "groups:write", "im:write",
-            "users:read", "users:read.email",
+            "users:read", "users:read.email", "commands",
         ]))
         user_scopes = "identity.basic,identity.email,identity.avatar,identity.team"
 
@@ -7965,11 +7965,13 @@ class SlackSlashCommandView(APIView):
             team_name, report_id, len(vulns),
         )
 
-        # ── Attach plugin_id (Nessus numeric ID) via a direct Mongo read ────────
+        # ── Attach plugin_id + host OS via a direct Mongo read ──────────────────
         # Needed to look up automated-fix scripts (automation_scripts collection is
-        # keyed by plugin_id). No API is touched — same direct MongoContext pattern
+        # keyed by plugin_id + os, since fix scripts now differ by target
+        # platform). No API is touched — same direct MongoContext pattern
         # already used elsewhere in this file (e.g. _cmd_vaptcheck).
         plugin_id_map = {}
+        host_os_map = {}
         if report_id:
             with MongoContext() as _db:
                 _nessus_doc = _db["nessus_reports"].find_one(
@@ -7977,6 +7979,7 @@ class SlackSlashCommandView(APIView):
                     {
                         "vulnerabilities_by_host.host_name": 1,
                         "vulnerabilities_by_host.host": 1,
+                        "vulnerabilities_by_host.host_information": 1,
                         "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
                         "vulnerabilities_by_host.vulnerabilities.plugin_id": 1,
                     },
@@ -7984,6 +7987,20 @@ class SlackSlashCommandView(APIView):
             if _nessus_doc:
                 for _host in _nessus_doc.get("vulnerabilities_by_host", []):
                     _h_name = _host.get("host_name") or _host.get("host") or ""
+                    _os_raw = (
+                        (_host.get("host_information") or {}).get("OS")
+                        or (_host.get("host_information") or {}).get("operating-system")
+                        or (_host.get("host_information") or {}).get("operating_system")
+                        or (_host.get("host_information") or {}).get("os")
+                        or ""
+                    ).strip().lower()
+                    if _os_raw:
+                        if "windows" in _os_raw:
+                            host_os_map[_h_name] = "Windows"
+                        elif "linux" in _os_raw or "ubuntu" in _os_raw or "unix" in _os_raw:
+                            host_os_map[_h_name] = "Linux"
+                        elif "cisco" in _os_raw or "ios" in _os_raw:
+                            host_os_map[_h_name] = "Cisco"
                     for _v in _host.get("vulnerabilities", []):
                         _pname = _v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or ""
                         _pid   = _v.get("plugin_id")
@@ -8011,6 +8028,7 @@ class SlackSlashCommandView(APIView):
                 entry["short_id"]  = f"{prefix}{i}"
                 entry["sev_label"] = sev
                 entry["plugin_id"] = plugin_id_map.get((v.get("plugin_name", ""), v.get("host_name", "")))
+                entry["host_os"]   = host_os_map.get(v.get("host_name", ""))
                 result.append(entry)
         return result, report_id, raw_data
 
@@ -8407,18 +8425,25 @@ class SlackSlashCommandView(APIView):
                 f"❌ No Nessus plugin ID found for this vulnerability — cannot check for an automated fix.\n"
                 f"Use `/manualfix {vuln_id}` instead."
             )
+        host_os = target.get("host_os")  # "Windows" / "Linux" / "Cisco" / None
+        os_params = {"os": host_os} if host_os else None
         automation = self._call_user_api(
-            f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
+            f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id, params=os_params,
         )
         if automation.get("detail") and "matched" not in automation:
             return self._text_block(f"❌ `{automation.get('detail')}`")
         if not automation.get("matched"):
+            available = automation.get("available_os") or []
+            hint = (
+                f" (available for: {', '.join(available)} — this host is {host_os or 'unknown OS'})"
+                if available else ""
+            )
             return self._text_block(
-                f"📭 No automated-fix script available for this vulnerability.\n"
+                f"📭 No automated-fix script available for this vulnerability{hint}.\n"
                 f"Use `/manualfix {vuln_id}` for the step-by-step guide instead."
             )
         script_resp = self._call_user_api_raw(
-            f"/api/user/automation-scripts/download/{plugin_id}/", team_id, user_id,
+            f"/api/user/automation-scripts/download/{plugin_id}/", team_id, user_id, params=os_params,
         )
         script_text = ""
         if script_resp is not None and script_resp.status_code == 200:

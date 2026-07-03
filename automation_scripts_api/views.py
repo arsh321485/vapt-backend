@@ -20,20 +20,65 @@ _SLUG_TO_TEAM = {
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
-def _fetch_script(plugin_id):
-    with MongoContext() as db:
-        return db["automation_scripts"].find_one({"plugin_id": int(plugin_id)}, {"_id": 0})
+def _fetch_script(plugin_id, os=None):
+    """
+    A plugin_id can now have multiple documents — one per OS (Windows, Linux,
+    Cisco) — since automation scripts differ by target platform. Returns
+    (matched_doc_or_None, available_os_list).
 
-
-def _fetch_scripts_bulk(int_ids):
+    If `os` is given, returns the document for that exact OS (case-insensitive).
+    If not given, falls back to the first variant found (old single-script
+    behavior) so existing callers that don't pass ?os= don't break outright.
+    """
     with MongoContext() as db:
-        return list(db["automation_scripts"].find(
-            {"plugin_id": {"$in": int_ids}},
-            {"_id": 0}
+        variants = list(db["automation_scripts"].find(
+            {"plugin_id": int(plugin_id)}, {"_id": 0}
         ))
 
+    if not variants:
+        return None, []
 
-def _build_response(doc):
+    available_os = [v.get("os") for v in variants if v.get("os")]
+
+    if os:
+        match = next(
+            (v for v in variants if (v.get("os") or "").strip().lower() == os.strip().lower()),
+            None,
+        )
+        return match, available_os
+
+    return variants[0], available_os
+
+
+def _fetch_scripts_bulk(int_ids, os=None):
+    """Bulk variant of _fetch_script. Returns {plugin_id: (doc_or_None, available_os)}."""
+    with MongoContext() as db:
+        docs = list(db["automation_scripts"].find(
+            {"plugin_id": {"$in": int_ids}}, {"_id": 0}
+        ))
+
+    by_plugin = {}
+    for doc in docs:
+        by_plugin.setdefault(doc["plugin_id"], []).append(doc)
+
+    result = {}
+    for pid in int_ids:
+        variants = by_plugin.get(pid, [])
+        available_os = [v.get("os") for v in variants if v.get("os")]
+        if not variants:
+            result[pid] = (None, [])
+        elif os:
+            match = next(
+                (v for v in variants if (v.get("os") or "").strip().lower() == os.strip().lower()),
+                None,
+            )
+            result[pid] = (match, available_os)
+        else:
+            result[pid] = (variants[0], available_os)
+    return result
+
+
+def _build_response(doc, available_os=None):
     return {
         "matched": True,
         "plugin_id": doc.get("plugin_id"),
@@ -42,6 +87,7 @@ def _build_response(doc):
         "port": doc.get("port"),
         "description": doc.get("description"),
         "os": doc.get("os"),
+        "available_os": available_os or ([doc.get("os")] if doc.get("os") else []),
         "automation_possible": doc.get("automation_possible"),
         "script_description": doc.get("script_description"),
         "considerations_before": doc.get("considerations_before"),
@@ -124,17 +170,20 @@ def _get_feedback_summary(plugin_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def admin_match_script(request, plugin_id):
-    doc = _fetch_script(plugin_id)
+    """?os=Windows|Linux|Cisco — optional; omit to get any available variant."""
+    os_param = request.query_params.get("os")
+    doc, available_os = _fetch_script(plugin_id, os=os_param)
     if doc:
-        return Response(_build_response(doc))
+        return Response(_build_response(doc, available_os))
     return Response(_not_found_response(plugin_id))
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def admin_match_scripts_bulk(request):
-    """Body: { "plugin_ids": [103669, 41028, 99999] }"""
+    """Body: { "plugin_ids": [103669, 41028, 99999], "os": "Windows" }"""
     plugin_ids = request.data.get("plugin_ids", [])
+    os_param = request.data.get("os")
     if not isinstance(plugin_ids, list):
         return Response({"error": "plugin_ids must be a list"}, status=400)
 
@@ -145,10 +194,9 @@ def admin_match_scripts_bulk(request):
         except (ValueError, TypeError):
             pass
 
-    docs = _fetch_scripts_bulk(int_ids)
-    matched_map = {doc["plugin_id"]: doc for doc in docs}
+    by_plugin = _fetch_scripts_bulk(int_ids, os=os_param)
     results = [
-        _build_response(matched_map[pid]) if pid in matched_map
+        _build_response(by_plugin[pid][0], by_plugin[pid][1]) if by_plugin[pid][0]
         else _not_found_response(pid)
         for pid in int_ids
     ]
@@ -181,7 +229,7 @@ def admin_download_stats(request):
 @permission_classes([IsAuthenticated])
 def admin_script_feedback(request, plugin_id):
     """Admin read-only: see thumb up/down feedback for a specific script."""
-    doc = _fetch_script(plugin_id)
+    doc, _ = _fetch_script(plugin_id)
     if not doc:
         return Response(_not_found_response(plugin_id), status=404)
 
@@ -229,17 +277,20 @@ def admin_all_feedback(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_match_script(request, plugin_id):
-    doc = _fetch_script(plugin_id)
+    """?os=Windows|Linux|Cisco — optional; omit to get any available variant."""
+    os_param = request.query_params.get("os")
+    doc, available_os = _fetch_script(plugin_id, os=os_param)
     if doc:
-        return Response(_build_response(doc))
+        return Response(_build_response(doc, available_os))
     return Response(_not_found_response(plugin_id))
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def user_match_scripts_bulk(request):
-    """Body: { "plugin_ids": [103669, 41028, 99999] }"""
+    """Body: { "plugin_ids": [103669, 41028, 99999], "os": "Windows" }"""
     plugin_ids = request.data.get("plugin_ids", [])
+    os_param = request.data.get("os")
     if not isinstance(plugin_ids, list):
         return Response({"error": "plugin_ids must be a list"}, status=400)
 
@@ -250,10 +301,9 @@ def user_match_scripts_bulk(request):
         except (ValueError, TypeError):
             pass
 
-    docs = _fetch_scripts_bulk(int_ids)
-    matched_map = {doc["plugin_id"]: doc for doc in docs}
+    by_plugin = _fetch_scripts_bulk(int_ids, os=os_param)
     results = [
-        _build_response(matched_map[pid]) if pid in matched_map
+        _build_response(by_plugin[pid][0], by_plugin[pid][1]) if by_plugin[pid][0]
         else _not_found_response(pid)
         for pid in int_ids
     ]
@@ -271,14 +321,18 @@ def user_list_scripts(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_download_script(request, plugin_id):
-    """Download fix script. Increments download_count. Admins cannot download."""
+    """
+    Download fix script. Increments download_count. Admins cannot download.
+    ?os=Windows|Linux|Cisco — optional; omit to get any available variant.
+    """
     if request.user.is_staff or request.user.is_superuser:
         return Response(
             {"error": "Admins cannot download scripts. Read-only access only."},
             status=403
         )
 
-    doc = _fetch_script(plugin_id)
+    os_param = request.query_params.get("os")
+    doc, available_os = _fetch_script(plugin_id, os=os_param)
     if not doc:
         return Response(_not_found_response(plugin_id), status=404)
 
@@ -292,7 +346,7 @@ def user_download_script(request, plugin_id):
 
     with MongoContext() as db:
         db["automation_scripts"].update_one(
-            {"plugin_id": int(plugin_id)},
+            {"plugin_id": int(plugin_id), "os": doc.get("os")},
             {"$inc": {"download_count": 1}}
         )
 
@@ -345,7 +399,7 @@ def user_submit_feedback(request):
     except (ValueError, TypeError):
         return Response({"error": "plugin_id must be a number."}, status=400)
 
-    doc = _fetch_script(plugin_id)
+    doc, _ = _fetch_script(plugin_id)
     if not doc:
         return Response(_not_found_response(plugin_id), status=404)
 
@@ -379,7 +433,7 @@ def user_submit_feedback(request):
 @permission_classes([IsAuthenticated])
 def user_get_feedback(request, plugin_id):
     """User sees their own feedback + overall counts for this script."""
-    doc = _fetch_script(plugin_id)
+    doc, _ = _fetch_script(plugin_id)
     if not doc:
         return Response(_not_found_response(plugin_id), status=404)
 
