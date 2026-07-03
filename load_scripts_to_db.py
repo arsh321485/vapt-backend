@@ -74,68 +74,6 @@ def extract_vuln_name(filepath: Path) -> str:
     return ""
 
 
-_STDLIB_IMPORTS = {
-    "subprocess", "logging", "sys", "datetime", "os", "shutil", "re",
-    "json", "time", "ast", "pathlib", "urllib", "io", "csv",
-}
-
-
-def extract_doc_sections(filepath: Path) -> dict:
-    """
-    Best-effort extraction of a script's self-documentation into DB fields —
-    this is the "doc file data" living inside each script rather than in a
-    separate metadata file.
-
-    Cisco-style scripts have a module docstring with an "Actions:" (numbered
-    steps) section and a "KEY NOTES:" (bullets) section. Windows/Linux
-    scripts usually have no docstring — fall back to the '# ─── Label ───'
-    section banners scattered through the file as a step-by-step summary.
-    Also pulls a CVE ID and any third-party library imports when present.
-    """
-    result = {}
-    try:
-        source = filepath.read_text(encoding="utf-8")
-
-        try:
-            tree = ast.parse(source)
-            docstring = ast.get_docstring(tree) or ""
-        except SyntaxError:
-            docstring = ""
-
-        if docstring:
-            actions_match = re.search(r"Actions:\s*\n((?:\s*\d+\..*\n?)+)", docstring)
-            if actions_match:
-                result["script_description"] = actions_match.group(1).strip()
-
-            notes_match = re.search(r"KEY NOTES:\s*\n((?:\s*-.*\n?)+)", docstring)
-            if notes_match:
-                result["considerations_before"] = notes_match.group(1).strip()
-
-        if "script_description" not in result:
-            banners = [
-                b.strip() for b in re.findall(r"#\s*[─━\-]{2,}\s*(.+?)\s*[─━\-]*\s*$", source, re.MULTILINE)
-                if b.strip()
-            ]
-            if banners:
-                result["script_description"] = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(banners))
-
-        cve_match = re.search(r"(CVE-\d{4}-\d+)", source)
-        if cve_match:
-            result["cve_id"] = cve_match.group(1)
-
-        libs = set()
-        for m in re.finditer(r"^\s*(?:from|import)\s+([a-zA-Z0-9_]+)", source, re.MULTILINE):
-            name = m.group(1)
-            if name not in _STDLIB_IMPORTS:
-                libs.add(name)
-        if libs:
-            result["libraries"] = ", ".join(sorted(libs))
-
-    except Exception as e:
-        print(f"  WARNING: Could not extract doc sections from {filepath.name}: {e}")
-    return result
-
-
 def find_script(os_dir: Path, keyword: str):
     """Find the fix/verify script in an OS folder by keyword in the filename
     (case-insensitive) rather than assuming an exact naming pattern — the
@@ -235,7 +173,10 @@ def main():
             }
             if vuln_name:
                 doc["vulnerability"] = vuln_name
-            doc.update(extract_doc_sections(fix_file))
+            # Severity, Description, Considerations, Script Description, etc.
+            # are NOT derived from the script files — they come exclusively
+            # from the Google Sheet via `sync_automation_scripts` (run that
+            # separately, or after this, to populate those columns).
 
             collection.update_one(
                 {"plugin_id": plugin_id, "os": os_value},

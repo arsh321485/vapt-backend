@@ -1,0 +1,42 @@
+
+_id
+6a480892ab729c661d644576
+os
+"Cisco"
+plugin_id
+103675
+created_at
+"2026-07-03"
+fix_script_name
+"103675_fix_NS.py"
+fix_script_path
+"automation_scripts/103675/CISCO/103675_fix_NS.py"
+language
+"python"
+updated_at
+"2026-07-03"
+verify_script_name
+"103675_verify_NS.py"
+verify_script_path
+"automation_scripts/103675/CISCO/103675_verify_NS.py"
+vulnerability
+"Cisco IOS Software PnP PKI API Certificate Validation"
+considerations_before
+"- CVE-2017-12228 — PnP PKI API cert validation
+  - CVE-2019-1748 — PnP…"
+cve_id
+"CVE-2017-12228"
+libraries
+"netmiko"
+script_description
+"1. Backup running config
+  2. Collect IOS version
+  3. Check PnP agent…"
+
+  mujhe esa nai chahile
+
+  https://docs.google.com/spreadsheets/d/1ctRVrFS60_d_ZEdUZArNi5fCwFF-WcNl/edit?gid=1898467439#gid=1898467439
+
+  Plugin ID	Severity	Vulnerability Name	Port	Description	OS	Automation Possible ( Yes / No / Partial )	Script Description	Considerations before execution	Considerations after execution	Script Name 	Libraries	Tested Manually	✓ What can be automated	✗ What must remain manual	Recommended approach	Command to download libraries 	Command to run script 		
+
+  all comman ka data database me save ho rha tha phile mujhe vese hi krke do 							

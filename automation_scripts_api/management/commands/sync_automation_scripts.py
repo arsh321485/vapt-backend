@@ -23,6 +23,26 @@ SHEET_CSV_URL = (
     "/export?format=csv&gid=1898467439"
 )
 
+def _normalize_os(raw: str) -> str:
+    """
+    Normalize any case/spelling variant of the sheet's OS column to the
+    canonical value used everywhere else (load_scripts_to_db.py, the
+    automation-scripts API's ?os= param) — so "windows", "WINDOWS", and
+    "Windows" all resolve to the same (plugin_id, os) document instead of
+    creating separate ones.
+    """
+    v = (raw or "").strip().lower()
+    if not v:
+        return ""
+    if "win" in v:
+        return "Windows"
+    if "linux" in v or "ubuntu" in v or "unix" in v:
+        return "Linux"
+    if "cisco" in v or "ios" in v:
+        return "Cisco"
+    return (raw or "").strip()  # unrecognized — keep the original rather than dropping it
+
+
 COLUMN_MAP = {
     "Severity": "severity",
     "Vulnerability Name": "vulnerability",
@@ -112,6 +132,9 @@ class Command(BaseCommand):
                     val = row.get(sheet_col, "")
                     if val:
                         doc[mongo_field] = val
+
+                if doc.get("os"):
+                    doc["os"] = _normalize_os(doc["os"])
 
                 doc["sheet_updated_at"] = datetime.date.today().isoformat()
 
