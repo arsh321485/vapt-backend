@@ -6105,14 +6105,43 @@ class SlackEventsView(APIView):
         except Exception:
             logger.exception(f"[SlackEvent] Failed to reply to app_mention in channel={channel}")
 
+    def _resolve_channel_team_role(self, bot_token, channel_id):
+        """
+        Resolve a Slack channel_id to its team name using the same
+        TEAM_CHANNELS mapping the slash commands use (e.g.
+        "vaptfix-network-security-team" -> "Network Security"). Returns
+        None if the channel isn't one of the 4 team channels (e.g. #general,
+        #vaptfix-admin-dashboard) — caller should fall back to "Viewer".
+        """
+        if not channel_id:
+            return None
+        try:
+            resp = _http_get(
+                "https://slack.com/api/conversations.info",
+                params={"channel": channel_id},
+                headers={"Authorization": f"Bearer {bot_token}"},
+                timeout=10,
+            )
+            data = resp.json() if resp is not None else {}
+            if not data.get("ok"):
+                logger.warning(f"[SlackEvent] conversations.info failed for channel_id={channel_id}: {data.get('error')}")
+                return None
+            channel_name = (data.get("channel") or {}).get("name", "")
+            return SlackSlashCommandView.TEAM_CHANNELS.get(channel_name)
+        except Exception:
+            logger.exception(f"[SlackEvent] _resolve_channel_team_role failed for channel_id={channel_id}")
+            return None
+
     def _save_slack_member_to_user_detail(self, slack_user_id, team_id, channel_id=None):
         """
         When a member joins a Slack channel:
         1. Find the admin who owns this workspace (by slack_team_id)
         2. Fetch user info from Slack
-        3. Save to UserDetail (if not already exists)
-        4. Create Django User + generate set-password link
-        5. Send same welcome email that normal user-add flow sends
+        3. Resolve the channel they joined to a team (Network Security etc.)
+        4. Save to UserDetail (if not already exists) with that team as
+           Member_role — falls back to "Viewer" only for non-team channels
+        5. Create Django User + generate set-password link
+        6. Send same welcome email that normal user-add flow sends
         """
         try:
             logger.info(f"[SlackEvent] _save_slack_member_to_user_detail: slack_user_id={slack_user_id} team_id={team_id} channel_id={channel_id}")
@@ -6167,6 +6196,13 @@ class SlackEventsView(APIView):
             first_name = parts[0] if parts else "Slack"
             last_name = " ".join(parts[1:]) if len(parts) > 1 else "User"
 
+            # Resolve which team (if any) this channel belongs to, so
+            # Member_role reflects the actual team channel the admin invited
+            # them to instead of always defaulting to "Viewer".
+            resolved_team = self._resolve_channel_team_role(admin.slack_bot_token, channel_id)
+            initial_roles = [resolved_team] if resolved_team else ["Viewer"]
+            logger.info(f"[SlackEvent] channel_id={channel_id} resolved_team={resolved_team}")
+
             # Save to UserDetail — skip if already exists for this admin+email
             from users_details.models import UserDetail
             logger.info(f"[SlackEvent] Calling get_or_create for admin={admin.email} email={email}")
@@ -6178,7 +6214,7 @@ class SlackEventsView(APIView):
                         "first_name": first_name,
                         "last_name": last_name,
                         "user_type": "external",
-                        "Member_role": ["Viewer"],
+                        "Member_role": initial_roles,
                         "platform": "slack",
                         "slack_member_id": slack_user_id,
                         "slack_channel_ids": [channel_id] if channel_id else [],
@@ -6198,6 +6234,15 @@ class SlackEventsView(APIView):
                     _upd["slack_member_id"] = slack_user_id
                 if not user_detail.platform:
                     _upd["platform"] = "slack"
+                # Joined another team's channel — add that team to their
+                # existing roles instead of leaving them stuck on "Viewer"
+                # (or missing this newer team) forever.
+                if resolved_team:
+                    existing_roles = list(user_detail.Member_role or [])
+                    if resolved_team not in existing_roles:
+                        existing_roles = [r for r in existing_roles if r != "Viewer"]
+                        existing_roles.append(resolved_team)
+                        _upd["Member_role"] = existing_roles
                 if channel_id:
                     existing_ids = list(user_detail.slack_channel_ids or [])
                     if channel_id not in existing_ids:
@@ -6216,6 +6261,7 @@ class SlackEventsView(APIView):
             _first = first_name
             _last = last_name
             _admin_email = getattr(admin, "email", "")
+            _roles = initial_roles
 
             def _send_slack_event_emails():
                 try:
@@ -6241,7 +6287,7 @@ class SlackEventsView(APIView):
                     view = UserDetailCreateView()
                     email_sent, error = view.send_welcome_email(
                         email=_email, first_name=_first, last_name=_last,
-                        roles=["Viewer"], set_password_url=set_password_url,
+                        roles=_roles, set_password_url=set_password_url,
                     )
                     if email_sent:
                         logger.info(f"[SlackEvent] Set-password email sent to {_email}")
@@ -6250,7 +6296,7 @@ class SlackEventsView(APIView):
 
                     view.send_team_welcome_emails(
                         email=_email, first_name=_first, last_name=_last,
-                        roles=["Viewer"], admin_email=_admin_email,
+                        roles=_roles, admin_email=_admin_email,
                     )
                 except Exception:
                     logger.exception(f"[SlackEvent] Email thread failed for {_email}")
@@ -7760,14 +7806,48 @@ class SlackSlashCommandView(APIView):
         )
 
         err = data.get("error") or data.get("non_field_errors") or data.get("email")
-        if err and "already exists" not in str(err):
+        detail = data.get("detail", "")
+        already_exists = ("already exists" in str(err or "")) or ("already exists" in str(detail))
+
+        if err and not already_exists:
             return self._text_block(f"❌ {err}")
-        if data.get("detail") and "already exists" not in str(data.get("detail", "")):
-            return self._text_block(f"❌ {data.get('detail')}")
+        if detail and not already_exists:
+            return self._text_block(f"❌ {detail}")
+
+        updated_existing = False
+        if already_exists:
+            # The create API just rejects duplicates without updating anything
+            # — so re-running /adduser on an existing user (e.g. to add them
+            # to another team, or to fix a bad role from a Slack channel
+            # invite) silently did nothing. Merge the requested teams into
+            # their existing Member_role directly via the ORM instead.
+            try:
+                from users_details.models import UserDetail
+                from users_details.views import _ud_set
+                existing = UserDetail.objects.filter(admin=admin_user, email=email).first()
+                if existing:
+                    current_roles = [r for r in (existing.Member_role or []) if r != "Viewer"]
+                    for t in team_names:
+                        if t not in current_roles:
+                            current_roles.append(t)
+                    _upd = {"Member_role": current_roles, "user_type": user_type}
+                    if not existing.team_name:
+                        _upd["team_name"] = primary_team
+                    _ud_set(existing, **_upd)  # djongo's .save(update_fields=...) is unreliable here
+                    updated_existing = True
+                    team_names = current_roles  # reflect the full merged list in the reply
+            except Exception:
+                logger.exception(f"[SlackCmd] /adduser: failed to merge roles for existing user {email}")
 
         teams_display = ", ".join(team_names)
+        header = "✅ User Updated in VaptFix" if updated_existing else "✅ User Added to VaptFix"
+        footer = (
+            f"Their team access now includes: {teams_display}."
+            if updated_existing else
+            "A welcome email with login instructions has been sent."
+        )
         return [
-            {"type": "header", "text": {"type": "plain_text", "text": "✅ User Added to VaptFix", "emoji": True}},
+            {"type": "header", "text": {"type": "plain_text", "text": header, "emoji": True}},
             self._ctx("Adds a Slack user to VaptFix with team access. Usage: `/adduser @username external|internal pm|cm|ns|af`"),
             {"type": "section", "text": {"type": "mrkdwn",
                 "text": (
@@ -7775,7 +7855,7 @@ class SlackSlashCommandView(APIView):
                     f"*Email:* `{email}`\n"
                     f"*Type:* `{user_type}`\n"
                     f"*Team(s):* {teams_display}\n\n"
-                    "A welcome email with login instructions has been sent."
+                    f"{footer}"
                 )}},
         ]
 
