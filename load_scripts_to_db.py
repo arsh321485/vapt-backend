@@ -107,7 +107,15 @@ def main():
     collection = db["automation_scripts"]
 
     # plugin_id alone is no longer unique (a plugin can have Windows AND
-    # Linux variants) — the real unique key is now (plugin_id, os).
+    # Linux variants) — the real unique key is now (plugin_id, os). Drop the
+    # old unique-on-plugin_id-alone index first: besides the name clashing
+    # with the new (non-unique) one, its UNIQUE constraint would reject
+    # inserting a second OS variant for the same plugin_id.
+    existing_index_names = set(collection.index_information().keys())
+    if "idx_automation_plugin_id" in existing_index_names:
+        collection.drop_index("idx_automation_plugin_id")
+        print("Dropped old unique index 'idx_automation_plugin_id' (plugin_id alone).")
+
     collection.create_index([("plugin_id", 1)], name="idx_automation_plugin_id")
     collection.create_index(
         [("plugin_id", 1), ("os", 1)], unique=True, name="idx_automation_plugin_id_os"
