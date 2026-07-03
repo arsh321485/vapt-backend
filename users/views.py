@@ -9136,12 +9136,22 @@ class SlackSlashCommandView(APIView):
             })
 
         blocks.append({"type": "divider"})
+        button_value = f"{fix_vuln_id}|{vuln_id}|{team_name}"
         if all_done:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
-                f"✅ All steps complete. Run `/retest {vuln_id}` to send for superadmin verification."
+                "✅ All steps complete."
             )}})
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📨 Send for Verification", "emoji": True},
+                    "style": "primary",
+                    "action_id": "send_verification",
+                    "value": button_value,
+                }],
+            })
         else:
-            button_value = f"{fix_vuln_id}|{vuln_id}|{team_name}"
             next_step_num = completed + 1
             blocks.append({
                 "type": "actions",
@@ -9394,6 +9404,39 @@ class SlackInteractivityView(APIView):
                         "response_type": "in_channel",
                         "replace_original": True,
                         "blocks": blocks,
+                    }, timeout=10)
+                return
+
+            if action_id == "send_verification":
+                resp = slash._call_user_api(
+                    f"/api/user/register/fix-vulnerability/{fix_vuln_id}/send-verification/",
+                    team_id, slack_user_id, method="post",
+                )
+                if resp.get("status") not in ("open/review", "closed"):
+                    if response_url:
+                        _http_post(response_url, json={
+                            "response_type": "ephemeral",
+                            "text": f"❌ {resp.get('message') or resp.get('detail') or 'Could not send verification.'}",
+                        }, timeout=10)
+                    return
+                if team_name:
+                    slash._notify_admin(
+                        team_id, slack_user_id,
+                        f"🔁 *Retest Request* — *{team_name}*\n"
+                        f"Vulnerability `{vuln_id}` — team requests admin verification/retesting (via button)."
+                    )
+                if response_url:
+                    _http_post(response_url, json={
+                        "response_type": "in_channel",
+                        "replace_original": True,
+                        "blocks": [
+                            {"type": "header", "text": {"type": "plain_text", "text": "🔁 Retest Request Submitted", "emoji": True}},
+                            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                                f"*Vulnerability ID:* `{vuln_id}`\n\n"
+                                "_Verification request recorded in VaptFix. Admin notified — "
+                                "they will schedule verification and confirm the fix._"
+                            )}},
+                        ],
                     }, timeout=10)
                 return
 
