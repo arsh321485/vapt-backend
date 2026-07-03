@@ -9011,14 +9011,19 @@ class SlackSlashCommandView(APIView):
         )}})
         return blocks
 
-    def _format_steps_status(self, data, vuln_id, fix_vuln_id, team_name):
+    def _format_steps_status(self, data, vuln_id, fix_vuln_id, team_name, offset=0):
         """
         Full per-step detail — same content as the web dashboard's Manual Fix
         tab (Action LOCATE/REMOVE/REPLACE/WHERE, Assigned Team, Where/How to
         Run, Command, Expected Output, Verification Check, Tools, Important
         Considerations) — all of it already comes from the step-complete API,
         just not previously surfaced in Slack.
+
+        `offset` paginates through steps (PAGE_SIZE at a time) via a real
+        "View Next Steps" button — not a "run the command again" instruction,
+        which would have just shown the same first steps every time.
         """
+        PAGE_SIZE = 2
         name      = data.get("vulnerability_name") or "Unknown"
         asset     = data.get("asset") or "—"
         os_v      = data.get("operating_system") or "—"
@@ -9046,10 +9051,17 @@ class SlackSlashCommandView(APIView):
 
         os_key = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
 
-        # Full detail is heavy — show the current/next step first, then only
-        # already-done steps as one-liners, capped so the message stays sane.
-        current = next((s for s in steps if s.get("is_current")), None)
-        detail_steps = ([current] if current else []) + [s for s in steps if s is not current][:2]
+        # Page start: on the first page, jump straight to the current/next
+        # actionable step instead of always starting at step 1.
+        if offset:
+            start_idx = min(offset, len(steps))
+        else:
+            current = next((s for s in steps if s.get("is_current")), None)
+            start_idx = steps.index(current) if current else 0
+
+        detail_steps = steps[start_idx:start_idx + PAGE_SIZE]
+        next_offset  = start_idx + PAGE_SIZE
+        remaining    = len(steps) - next_offset
 
         for step in detail_steps:
             step_num  = step.get("step_number")
@@ -9064,7 +9076,15 @@ class SlackSlashCommandView(APIView):
             assigned    = step.get("assigned_team") or "—"
             where_label = os_data.get("where_to_run_label", "Terminal")
             how_to_run  = os_data.get("how_to_run", "")
-            command     = os_data.get("command_to_run") or os_data.get("commands_for_action") or ""
+            # Prefer commands_for_action (still a clean list of {label, commands})
+            # over command_to_run — the backend's own string-flattening of that
+            # same list (in _ensure_execution_guidance_fields) does a naive
+            # str(dict) per entry when it can't join it as commands, which
+            # produces literal Python-repr text like "{'label': ..., ...}".
+            # Reading the structured list ourselves avoids that entirely.
+            command = os_data.get("commands_for_action")
+            if not command:
+                command = os_data.get("command_to_run") or ""
             if isinstance(command, list):
                 command = "\n".join(
                     "\n".join(c.get("commands", []) if isinstance(c, dict) else [str(c)])
@@ -9100,10 +9120,20 @@ class SlackSlashCommandView(APIView):
             if important:
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ *Important:* {important[:300]}"}})
 
-        if len(steps) > len(detail_steps):
+        if remaining > 0:
             blocks.append({"type": "divider"})
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"_...{len(steps) - len(detail_steps)} more step(s). Run `/manualfix {vuln_id}` again after completing these to see the next ones._"}})
+                "text": f"_{remaining} more step(s) below._"}})
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text",
+                              "text": f"🔎 View Next {min(PAGE_SIZE, remaining)} Step(s)", "emoji": True},
+                    "action_id": "view_more_steps",
+                    "value": f"{fix_vuln_id}|{vuln_id}|{team_name}|{next_offset}",
+                }],
+            })
 
         blocks.append({"type": "divider"})
         if all_done:
@@ -9349,6 +9379,23 @@ class SlackInteractivityView(APIView):
             team_name   = parts[2] if len(parts) > 2 else ""
 
             slash = SlackSlashCommandView()
+
+            if action_id == "view_more_steps":
+                offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                steps_data = slash._call_user_api(
+                    f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, slack_user_id,
+                )
+                if steps_data.get("detail"):
+                    blocks = slash._text_block(f"❌ `{steps_data.get('detail')}`")
+                else:
+                    blocks = slash._format_steps_status(steps_data, vuln_id, fix_vuln_id, team_name, offset=offset)
+                if response_url:
+                    _http_post(response_url, json={
+                        "response_type": "in_channel",
+                        "replace_original": True,
+                        "blocks": blocks,
+                    }, timeout=10)
+                return
 
             if action_id == "mitigate_all":
                 json_body = {"complete_all": True}
