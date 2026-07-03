@@ -200,18 +200,19 @@ SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 
 SLACK_SCOPES = [
-    'channels:read',           
-    'channels:write',       
-    'chat:write',             
-    'users:read',            
-    'users:read.email',     
-    'groups:read',            
-    'groups:write',           
-    'im:read',                
-    'im:write',               
-    'mpim:read',             
-    'mpim:write',           
-    'team:read',              
+    'channels:read',
+    'channels:write',
+    'chat:write',
+    'users:read',
+    'users:read.email',
+    'groups:read',
+    'groups:write',
+    'im:read',
+    'im:write',
+    'mpim:read',
+    'mpim:write',
+    'team:read',
+    'commands',
 ]
 
 JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "")
