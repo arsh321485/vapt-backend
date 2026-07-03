@@ -7202,7 +7202,7 @@ class SlackSlashCommandView(APIView):
                 "/report":         self._cmd_report,
                 "/vaptcheck":      self._cmd_vaptcheck,
                 "/verifications":  self._cmd_verifications,
-                "/verify":         self._cmd_verify,
+                "/approvefix":     self._cmd_verify,
             }
             team_name = None
         elif channel_name in self.TEAM_CHANNELS:
@@ -7623,14 +7623,16 @@ class SlackSlashCommandView(APIView):
 
     def _cmd_verify(self, text, team_id, user_id):
         """
-        /verify [fix_vuln_id] — Approve a pending verification request.
+        /approvefix [fix_vuln_id] — Approve a pending verification request.
         This CLOSES the vulnerability immediately (matches the web dashboard's
         superadmin approval flow). Get fix_vuln_id from /verifications.
+        (Command is named /approvefix, not /verify — Slack rejected /verify
+        as a reserved/unavailable command name.)
         """
         fix_vuln_id = text.strip()
         if not fix_vuln_id:
             return self._text_block(
-                "*Usage:* `/verify [fix_vuln_id]`\n"
+                "*Usage:* `/approvefix [fix_vuln_id]`\n"
                 "_Approves & closes a vulnerability pending verification. Get IDs from `/verifications`._"
             )
         resp = self._call_api(
@@ -8795,7 +8797,7 @@ class SlackSlashCommandView(APIView):
     def _format_verifications(self, results):
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🔍 Pending Verifications", "emoji": True}},
-            self._ctx("Vulnerabilities a team has marked fixed via /retest — awaiting your approval to close. Use /verify [fix_vuln_id]."),
+            self._ctx("Vulnerabilities a team has marked fixed via /retest — awaiting your approval to close. Use /approvefix [fix_vuln_id]."),
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Pending:* {len(results)}"}},
             {"type": "divider"},
         ]
@@ -8808,7 +8810,7 @@ class SlackSlashCommandView(APIView):
                 f"{icon} *{r.get('vulnerability_name', 'Unknown')}*\n"
                 f"Host: `{r.get('asset', '—')}` | Team: {r.get('assigned_team', '—')} | "
                 f"Steps done: {r.get('completed_steps', 0)}\n"
-                f"`/verify {r.get('fix_vulnerability_id', '')}`"
+                f"`/approvefix {r.get('fix_vulnerability_id', '')}`"
             )}})
         if len(results) > 10:
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
