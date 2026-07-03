@@ -11,11 +11,24 @@ Schedule via Linux cron (e.g. every day at 2 AM):
 import csv
 import datetime
 import io
+import re
 
 import requests
 from django.core.management.base import BaseCommand
 
 from vaptfix.mongo_client import MongoContext
+
+
+def _normalize_header(h: str) -> str:
+    """
+    Strip symbols (✓/✗/parens/etc.) and collapse whitespace so a sheet
+    header matches COLUMN_MAP regardless of which Unicode checkmark variant,
+    extra spaces, or punctuation Google Sheets' CSV export used — exact
+    string matching was silently skipping columns like "✓ What can be
+    automated" whenever the checkmark byte didn't match ours exactly.
+    """
+    cleaned = re.sub(r"[^a-zA-Z0-9 ]+", " ", h or "")
+    return re.sub(r"\s+", " ", cleaned).strip().lower()
 
 SHEET_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/"
@@ -56,12 +69,17 @@ COLUMN_MAP = {
     "Script Name": "script_name",
     "Libraries": "libraries",
     "Tested Manually": "tested_manually",
-    "✓ What can be automated": "what_can_be_automated",
-    "✗ What must remain manual": "what_must_remain_manual",
+    "What can be automated": "what_can_be_automated",
+    "What must remain manual": "what_must_remain_manual",
     "Recommended approach": "recommended_approach",
     "Command to download libraries": "command_download_libraries",
     "Command to run script": "command_run_script",
 }
+
+# Keyed by normalized header text so lookups are immune to checkmark
+# variants, extra spaces, and punctuation differences in the sheet.
+NORMALIZED_COLUMN_MAP = {_normalize_header(k): v for k, v in COLUMN_MAP.items()}
+PLUGIN_ID_KEY = _normalize_header("Plugin ID")
 
 
 class Command(BaseCommand):
@@ -78,17 +96,20 @@ class Command(BaseCommand):
 
         reader = csv.DictReader(io.StringIO(resp.text))
 
-        # Normalize headers (strip whitespace + BOM)
+        # Normalize headers (strip BOM, symbols, whitespace) so matching is
+        # immune to Unicode checkmark variants / spacing differences.
         raw_headers = reader.fieldnames or []
-        normalized = {h.strip().lstrip("﻿"): h for h in raw_headers}
+        header_norm_to_raw = {_normalize_header(h.lstrip("﻿")): h for h in raw_headers}
 
-        if "Plugin ID" not in normalized:
+        if PLUGIN_ID_KEY not in header_norm_to_raw:
             self.stderr.write(self.style.ERROR("'Plugin ID' column not found in sheet. Aborting."))
             return
 
         # Warn about any expected columns not found
-        for col in list(COLUMN_MAP.keys()) + ["Plugin ID"]:
-            if col not in normalized:
+        for col, col_norm in [("Plugin ID", PLUGIN_ID_KEY)] + [
+            (k, _normalize_header(k)) for k in COLUMN_MAP
+        ]:
+            if col_norm not in header_norm_to_raw:
                 self.stdout.write(self.style.WARNING(f"  WARNING: column '{col}' not in sheet — skipped"))
 
         total = 0
@@ -110,12 +131,15 @@ class Command(BaseCommand):
             )
 
             for raw_row in reader:
-                row = {
-                    k.strip().lstrip("﻿"): (v.strip() if v else "")
+                # Re-key each row by normalized header text (same normalization
+                # used for the header check above) so column lookups below
+                # work regardless of the exact symbol/whitespace in the sheet.
+                row_norm = {
+                    _normalize_header(k.lstrip("﻿")): (v.strip() if v else "")
                     for k, v in raw_row.items()
                 }
 
-                plugin_id_raw = row.get("Plugin ID", "")
+                plugin_id_raw = row_norm.get(PLUGIN_ID_KEY, "")
                 if not plugin_id_raw:
                     skipped += 1
                     continue
@@ -128,8 +152,8 @@ class Command(BaseCommand):
                     continue
 
                 doc = {"plugin_id": plugin_id}
-                for sheet_col, mongo_field in COLUMN_MAP.items():
-                    val = row.get(sheet_col, "")
+                for col_norm, mongo_field in NORMALIZED_COLUMN_MAP.items():
+                    val = row_norm.get(col_norm, "")
                     if val:
                         doc[mongo_field] = val
 
