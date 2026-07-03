@@ -76,8 +76,17 @@ class Command(BaseCommand):
 
         with MongoContext() as db:
             collection = db["automation_scripts"]
+            # plugin_id alone is no longer unique — a plugin can have separate
+            # documents per OS (Windows/Linux/Cisco). Drop the old unique-on-
+            # plugin_id-alone index if present so it doesn't reject a second
+            # OS variant, and use a compound (plugin_id, os) unique index
+            # instead — matches load_scripts_to_db.py's indexing.
+            existing_index_names = set(collection.index_information().keys())
+            if "idx_automation_plugin_id" in existing_index_names:
+                collection.drop_index("idx_automation_plugin_id")
+            collection.create_index([("plugin_id", 1)], name="idx_automation_plugin_id")
             collection.create_index(
-                [("plugin_id", 1)], unique=True, name="idx_automation_plugin_id"
+                [("plugin_id", 1), ("os", 1)], unique=True, name="idx_automation_plugin_id_os"
             )
 
             for raw_row in reader:
@@ -106,7 +115,13 @@ class Command(BaseCommand):
 
                 doc["sheet_updated_at"] = datetime.date.today().isoformat()
 
-                collection.update_one({"plugin_id": plugin_id}, {"$set": doc}, upsert=True)
+                # Match on (plugin_id, os) when the sheet row has an OS value
+                # — a plugin can have separate rows per OS. Falls back to
+                # plugin_id alone for rows without an OS column value.
+                match_filter = {"plugin_id": plugin_id}
+                if doc.get("os"):
+                    match_filter["os"] = doc["os"]
+                collection.update_one(match_filter, {"$set": doc}, upsert=True)
                 vuln = doc.get("vulnerability", "")
                 self.stdout.write(self.style.SUCCESS(f"  OK  {plugin_id}: {vuln[:65]}"))
                 total += 1
