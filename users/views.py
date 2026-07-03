@@ -7201,6 +7201,8 @@ class SlackSlashCommandView(APIView):
                 "/request":        self._cmd_request,
                 "/report":         self._cmd_report,
                 "/vaptcheck":      self._cmd_vaptcheck,
+                "/verifications":  self._cmd_verifications,
+                "/verify":         self._cmd_verify,
             }
             team_name = None
         elif channel_name in self.TEAM_CHANNELS:
@@ -7598,6 +7600,55 @@ class SlackSlashCommandView(APIView):
                 "text": f"*Sample Card Team Assignments (first 5):*\n{sample_text}"}},
         ]
 
+    def _cmd_verifications(self, text, team_id, user_id):
+        """
+        /verifications — List vulnerabilities pending superadmin approval
+        (status = open/review, i.e. a team ran /retest and is waiting).
+        The backing API (/api/admin/upload_report/verifications/pending/) is
+        superadmin-only (is_superuser=True) and returns pending items across
+        ALL tenants — results are filtered here to this Slack workspace's
+        own admin so other tenants' data is never shown.
+        """
+        data = self._call_api(
+            "/api/admin/upload_report/verifications/pending/", team_id, slack_user_id=user_id,
+        )
+        if data.get("detail"):
+            return self._text_block(
+                f"❌ `{data.get('detail')}`\n"
+                "_This command requires your VaptFix account to be a superadmin (is_superuser)._"
+            )
+        workspace_admin_ids = {str(u.id) for u in User.objects.filter(slack_team_id=team_id)}
+        results = [r for r in (data.get("results") or []) if str(r.get("admin_id", "")) in workspace_admin_ids]
+        return self._format_verifications(results)
+
+    def _cmd_verify(self, text, team_id, user_id):
+        """
+        /verify [fix_vuln_id] — Approve a pending verification request.
+        This CLOSES the vulnerability immediately (matches the web dashboard's
+        superadmin approval flow). Get fix_vuln_id from /verifications.
+        """
+        fix_vuln_id = text.strip()
+        if not fix_vuln_id:
+            return self._text_block(
+                "*Usage:* `/verify [fix_vuln_id]`\n"
+                "_Approves & closes a vulnerability pending verification. Get IDs from `/verifications`._"
+            )
+        resp = self._call_api(
+            "/api/admin/upload_report/verifications/approve/", team_id,
+            method="post", json_body={"fix_vuln_id": fix_vuln_id, "action": "approve"},
+            slack_user_id=user_id,
+        )
+        if resp.get("status") != "closed":
+            return self._text_block(f"❌ `{resp.get('detail') or 'Could not approve verification.'}`")
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "✅ Verification Approved & Closed", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*Vulnerability:* {resp.get('vulnerability_name', '')}\n"
+                f"*Asset:* `{resp.get('asset', '')}`\n\n"
+                "_Vulnerability is now closed. Team has been notified._"
+            )}},
+        ]
+
     # Team short-code → full name mapping for /adduser
     _TEAM_MAP = {
         "pm": "Patch Management",
@@ -7836,7 +7887,12 @@ class SlackSlashCommandView(APIView):
         grouped = {"Critical": [], "High": [], "Medium": [], "Low": []}
         for v in vulns:
             sev    = (v.get("risk_factor") or "").strip().title()
-            bucket = grouped.get(sev) or grouped["Low"]
+            # NOTE: must check key membership, not truthiness — `grouped[sev]` is an
+            # empty list `[]` (falsy) until something is appended to it, so
+            # `grouped.get(sev) or grouped["Low"]` would silently route EVERY
+            # severity into "Low" on first use. That was the bug behind c/h/m
+            # IDs never appearing — everything showed up as `l1, l2, l3...`.
+            bucket = grouped[sev] if sev in grouped else grouped["Low"]
             bucket.append(v)
         for sev_list in grouped.values():
             sev_list.sort(key=lambda x: (x.get("plugin_name") or "").lower())
@@ -8021,7 +8077,10 @@ class SlackSlashCommandView(APIView):
                 automation = self._call_user_api(
                     f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
                 )
-            return self._format_startfix_real(target, fix_vuln_id, automation)
+            steps_data = self._call_user_api(
+                f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, user_id,
+            )
+            return self._format_startfix_real(target, fix_vuln_id, automation, steps_data)
         return self._format_startfix_list(vulns, team_name)
 
     def _cmd_mitigated(self, text, team_id, user_id, team_name):
@@ -8325,30 +8384,48 @@ class SlackSlashCommandView(APIView):
 
     def _cmd_extend(self, text, team_id, user_id, team_name):
         """
-        /extend [vuln-id] [reason] — Request a deadline extension e.g. /extend h1 Need 7 more days
+        /extend [vuln-id] [days] [reason] — Request a deadline extension e.g. /extend h1 7 Need more time
         /extend status — Check status of your team's extension requests
+        Writes to the real timeline_extension_requests collection (via the
+        member-scoped create API) so it actually shows up in the admin's
+        /request, /approve, /reject commands — previously this only sent a
+        Slack notification and never touched the database.
         """
         parts = text.strip().split(None, 1)
         sub   = parts[0].lower() if parts else ""
         if sub == "status":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/",
-                team_id,
+            data = self._call_user_api(
+                "/api/user/dashboard/mitigation-timeline-extension/report/", team_id, user_id,
             )
             return self._format_team_extend_status(data, team_name)
         if not sub:
             return self._text_block(
                 "*Extension Commands:*\n"
-                "• `/extend [vuln-id] [reason]` — Request deadline extension\n"
-                "  _Example:_ `/extend h1 Need 7 more days for patch testing`\n"
+                "• `/extend [vuln-id] [days] [reason]` — Request deadline extension\n"
+                "  _Example:_ `/extend h1 7 Need more time for patch testing`\n"
                 "• `/extend status` — Check your extension request status"
             )
         vuln_id = sub
-        reason  = parts[1].strip() if len(parts) > 1 else ""
+        rest    = parts[1].strip() if len(parts) > 1 else ""
+        if not rest:
+            return self._text_block(
+                f"*Usage:* `/extend {vuln_id} [days] [reason]`\n"
+                f"_Example:_ `/extend {vuln_id} 7 Need more time for patch testing`"
+            )
+        # First word = number of extra days if it's a plain integer; otherwise
+        # scan the whole text for a number, defaulting to 7 if none is given.
+        rest_parts = rest.split(None, 1)
+        if rest_parts[0].isdigit():
+            days   = int(rest_parts[0])
+            reason = rest_parts[1].strip() if len(rest_parts) > 1 else ""
+        else:
+            _num   = re.search(r"\d+", rest)
+            days   = int(_num.group()) if _num else 7
+            reason = rest
         if not reason:
             return self._text_block(
-                f"*Usage:* `/extend {vuln_id} [reason]`\n"
-                f"_Example:_ `/extend {vuln_id} Need 7 more days for patch testing`"
+                f"*Usage:* `/extend {vuln_id} [days] [reason]`\n"
+                f"_Example:_ `/extend {vuln_id} 7 Need more time for patch testing`"
             )
         target, _ = self._resolve_vuln_id(vuln_id, team_name, team_id, user_id)
         if not target:
@@ -8360,20 +8437,37 @@ class SlackSlashCommandView(APIView):
         host_name   = target.get("host_name") or ""
         sev         = target.get("risk_factor") or target.get("sev_label") or "Medium"
         icon        = self._SEV_ICONS.get(sev, "⚪")
+
+        resp = self._call_user_api(
+            "/api/user/dashboard/mitigation-timeline-extension/request/", team_id, user_id,
+            method="post",
+            json_body={
+                "severity": sev,
+                "asset": host_name,
+                "vulnerability_name": plugin_name,
+                "requested_extension_days": days,
+                "reason": reason,
+            },
+        )
+        if not resp.get("request_id"):
+            return self._text_block(f"❌ Could not submit extension request: {resp.get('detail') or 'unknown error'}")
+
         self._notify_admin(
             team_id, user_id,
             f"⏳ *Timeline Extension Request* — *{team_name}*\n"
             f"Vulnerability: `{plugin_name}` {icon} {sev} on `{host_name}`\n"
-            f"Reason: {reason}\n"
-            f"Use `/approve [request-id]` or `/reject [request-id]` to respond."
+            f"Requested: +{days} day(s) | Reason: {reason}\n"
+            f"Use `/request` to review, then `/approve [request-id]` or `/reject [request-id]`."
         )
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "⏳ Extension Request Submitted", "emoji": True}},
             {"type": "section", "text": {"type": "mrkdwn", "text": (
                 f"*Vulnerability:* `{plugin_name}`\n"
                 f"*Severity:* {icon} {sev}\n"
+                f"*Requested:* +{days} day(s)\n"
                 f"*Reason:* {reason}\n\n"
-                "_Admin notified. Use `/extend status` to track the decision._"
+                "_Recorded in VaptFix — admin can review it via `/request` and approve/reject it. "
+                "Use `/extend status` to track the decision._"
             )}},
         ]
 
@@ -8650,6 +8744,29 @@ class SlackSlashCommandView(APIView):
             ]},
         ]
 
+    def _format_verifications(self, results):
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🔍 Pending Verifications", "emoji": True}},
+            self._ctx("Vulnerabilities a team has marked fixed via /retest — awaiting your approval to close. Use /verify [fix_vuln_id]."),
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Pending:* {len(results)}"}},
+            {"type": "divider"},
+        ]
+        if not results:
+            return blocks + self._text_block("✅ Nothing pending verification right now.")
+        for r in results[:10]:
+            sev  = (r.get("severity") or "").capitalize()
+            icon = self._SEV_ICONS.get(sev, "⚪")
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"{icon} *{r.get('vulnerability_name', 'Unknown')}*\n"
+                f"Host: `{r.get('asset', '—')}` | Team: {r.get('assigned_team', '—')} | "
+                f"Steps done: {r.get('completed_steps', 0)}\n"
+                f"`/verify {r.get('fix_vulnerability_id', '')}`"
+            )}})
+        if len(results) > 10:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...and {len(results) - 10} more._"}})
+        return blocks
+
     # ── Team channel formatters ────────────────────────────────────────────
 
     def _ctx(self, text):
@@ -8805,7 +8922,7 @@ class SlackSlashCommandView(APIView):
                 "text": f"_...{len(vulns) - 10} more. Use `/viewassigned` for full list._"}})
         return blocks
 
-    def _format_startfix_real(self, vuln, fix_vuln_id, automation=None):
+    def _format_startfix_real(self, vuln, fix_vuln_id, automation=None, steps_data=None):
         """
         Real /startfix detail screen — no hardcoded steps. Points to /manualfix
         (always) and /autofix (only when automation_scripts has a match).
@@ -8816,15 +8933,20 @@ class SlackSlashCommandView(APIView):
         port = vuln.get("port") or "—"
         sid  = vuln.get("short_id", "?")
         icon = self._SEV_ICONS.get(sev, "⚪")
+        fields = [
+            {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
+            {"type": "mrkdwn", "text": f"*Severity*\n{icon} {sev}"},
+            {"type": "mrkdwn", "text": f"*Host*\n`{host}`"},
+            {"type": "mrkdwn", "text": f"*Port*\n{port}"},
+        ]
+        if steps_data and steps_data.get("total_steps") is not None:
+            fields.append({"type": "mrkdwn", "text": (
+                f"*Steps*\n{steps_data.get('completed_steps', 0)}/{steps_data.get('total_steps', 0)} done"
+            )})
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🔧 Fix: {name[:60]}", "emoji": True}},
             self._ctx(f"Fix ID `{fix_vuln_id}` — use with /manualfix, /autofix, /mitigated, /retest"),
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
-                {"type": "mrkdwn", "text": f"*Severity*\n{icon} {sev}"},
-                {"type": "mrkdwn", "text": f"*Host*\n`{host}`"},
-                {"type": "mrkdwn", "text": f"*Port*\n{port}"},
-            ]},
+            {"type": "section", "fields": fields},
             {"type": "divider"},
         ]
         if automation and automation.get("matched") and automation.get("automation_possible"):
