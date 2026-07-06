@@ -7810,7 +7810,8 @@ class SlackSlashCommandView(APIView):
         already_exists = ("already exists" in str(err or "")) or ("already exists" in str(detail))
 
         if err and not already_exists:
-            return self._text_block(f"❌ {err}")
+            reason = f"{err} — {detail}" if detail and detail != err else err
+            return self._text_block(f"❌ {reason}")
         if detail and not already_exists:
             return self._text_block(f"❌ {detail}")
 
