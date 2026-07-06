@@ -7927,7 +7927,7 @@ class SlackSlashCommandView(APIView):
         """
         from vaptfix.mongo_client import MongoContext
 
-        raw_data = {"report_id": "", "teams": {}, "admin_email": "not_found"}
+        raw_data = {"report_id": "", "teams": {}}
 
         data = self._call_user_api(
             "/api/user/register/register/latest/vulns/", team_id, user_id,
@@ -7938,9 +7938,17 @@ class SlackSlashCommandView(APIView):
             raw_data["detail"] = data.get("detail")
             return [], "", raw_data
 
-        report_id = data.get("report_id", "")
-        rows      = data.get("rows") or []
-        team_lower = team_name.strip().lower()
+        report_id    = data.get("report_id", "")
+        rows         = data.get("rows") or []
+        member_teams = data.get("teams") or []
+        team_lower   = team_name.strip().lower()
+
+        # This channel's team isn't one of the member's own teams at all
+        # (admin added them to a different team) — distinct from "on the
+        # team but nothing assigned yet", so the message can say so plainly.
+        raw_data["not_member_of_team"] = team_lower not in [t.strip().lower() for t in member_teams]
+        raw_data["member_teams"] = member_teams
+
         vulns = [
             {
                 "plugin_name":   r.get("vul_name", ""),
@@ -8930,16 +8938,38 @@ class SlackSlashCommandView(APIView):
 
     def _format_viewassigned(self, vulns, team_name, raw_data=None):
         if not vulns:
+            raw_data = raw_data or {}
+
+            # Distinct, clear message when the admin simply never added this
+            # person to THIS team at all — as opposed to being on the team
+            # with nothing assigned yet. Previously both cases showed the
+            # same generic "no vulns assigned" text with a confusing debug
+            # line (e.g. "admin=not_found"), which looked like an error.
+            if raw_data.get("not_member_of_team"):
+                member_teams = raw_data.get("member_teams") or []
+                your_teams = (
+                    f"Your team(s): {', '.join(member_teams)}."
+                    if member_teams else
+                    "You don't appear to be assigned to any team yet."
+                )
+                return [
+                    {"type": "header", "text": {"type": "plain_text", "text": f"📋 {team_name}", "emoji": True}},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": (
+                        f"🚫 You're not a member of *{team_name}*.\n\n"
+                        f"{your_teams}\n\n"
+                        f"Use commands in your own team's channel instead, or ask your admin "
+                        f"to add you to *{team_name}* via `/adduser` if this is a mistake."
+                    )}},
+                ]
+
             diag = ""
-            if raw_data is not None:
-                report_id   = raw_data.get("report_id", "") or "none"
-                admin_email = raw_data.get("admin_email", "?")
-                card_count  = raw_data.get("card_count", "?")
-                has_cards   = raw_data.get("has_cards", "?")
-                detail      = raw_data.get("detail", "")
+            if raw_data:
+                report_id  = raw_data.get("report_id", "") or "none"
+                card_count = raw_data.get("card_count", "?")
+                has_cards  = raw_data.get("has_cards", "?")
+                detail     = raw_data.get("detail", "")
                 diag = (
-                    f"\n\n_Debug:_ report=`{report_id}` | admin=`{admin_email}` | "
-                    f"cards={card_count} | cards_mode={has_cards}"
+                    f"\n\n_Debug:_ report=`{report_id}` | cards={card_count} | cards_mode={has_cards}"
                     + (f" | error=`{detail}`" if detail else "")
                 )
             return [
@@ -9009,10 +9039,13 @@ class SlackSlashCommandView(APIView):
         return blocks
 
     def _format_mitigationstatus(self, vulns, team_name):
-        counts     = {"open": 0, "closed": 0, "in_progress": 0, "overdue": 0}
+        # "open/review" = team ran /retest, awaiting superadmin approval via
+        # /approvefix. Previously this fell through every bucket below (the
+        # "/" was never stripped) and silently vanished from the stats.
+        counts     = {"open": 0, "closed": 0, "in_progress": 0, "overdue": 0, "open_review": 0}
         sev_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
         for v in vulns:
-            st  = (v.get("status") or "open").lower().replace(" ", "_").replace("-", "_")
+            st = (v.get("status") or "open").strip().lower().replace(" ", "_").replace("/", "_").replace("-", "_")
             if st in counts:
                 counts[st] += 1
             sev = (v.get("risk_factor") or v.get("sev_label") or "").strip().title()
@@ -9023,7 +9056,7 @@ class SlackSlashCommandView(APIView):
         bar   = self._bar(counts["closed"], max(total, 1), width=10)
         return [
             {"type": "header", "text": {"type": "plain_text", "text": f"📊 {team_name} — Mitigation Status", "emoji": True}},
-            self._ctx("Current fix progress for all your team's vulnerabilities — open, closed, in-progress, overdue counts"),
+            self._ctx("Current fix progress for all your team's vulnerabilities — open, closed, in-progress, overdue, open/review counts"),
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*Total*\n{total}"},
                 {"type": "mrkdwn", "text": f"*Fix Rate*\n{rate}%"},
@@ -9031,6 +9064,7 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*Closed*\n{counts['closed']}"},
                 {"type": "mrkdwn", "text": f"*In Progress*\n{counts['in_progress']}"},
                 {"type": "mrkdwn", "text": f"*Overdue*\n{counts['overdue']}"},
+                {"type": "mrkdwn", "text": f"*Open/Review*\n{counts['open_review']}"},
             ]},
             {"type": "section", "text": {"type": "mrkdwn",
                 "text": f"*Progress:* `{bar}` {rate}%"}},
@@ -9286,30 +9320,66 @@ class SlackSlashCommandView(APIView):
         return blocks
 
     def _format_autofix(self, automation, script_text, vuln_id):
-        """Format the automation_scripts match + downloaded script into Slack blocks."""
-        vuln_name  = automation.get("vulnerability") or "Unknown"
-        severity   = (automation.get("severity") or "").capitalize()
-        os_v       = automation.get("os") or "—"
-        language   = automation.get("language") or "—"
+        """
+        Format the automation_scripts match + downloaded script into Slack
+        blocks — surfaces every field the API/Google-Sheet-synced document
+        provides, not just the core script content.
+        """
+        vuln_name   = automation.get("vulnerability") or "Unknown"
+        severity    = (automation.get("severity") or "").capitalize()
+        os_v        = automation.get("os") or "—"
+        available   = automation.get("available_os") or []
+        language    = automation.get("language") or "—"
         script_name = automation.get("script_name") or automation.get("fix_script_name") or "fix_script"
-        desc       = automation.get("script_description") or ""
-        before     = automation.get("considerations_before") or ""
-        after      = automation.get("considerations_after") or ""
-        run_cmd    = automation.get("command_run_script") or ""
+        desc        = automation.get("script_description") or ""
+        before      = automation.get("considerations_before") or ""
+        after       = automation.get("considerations_after") or ""
+        run_cmd     = automation.get("command_run_script") or ""
+        dl_cmd      = automation.get("command_download_libraries") or ""
+        libraries   = automation.get("libraries") or ""
+        possible    = (automation.get("automation_possible") or "").strip()
+        tested      = (automation.get("tested_manually") or "").strip()
+        can_auto    = automation.get("what_can_be_automated") or ""
+        must_manual = automation.get("what_must_remain_manual") or ""
+        approach    = automation.get("recommended_approach") or ""
+
+        possible_badge = {
+            "yes": "✅ Yes", "partial": "⚠️ Partial", "no": "❌ No",
+        }.get(possible.lower(), possible or "—")
+        tested_badge = {"yes": "✅ Yes", "no": "❌ No"}.get(tested.lower(), tested or "—")
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Automated Fix: {vuln_name[:55]}", "emoji": True}},
             self._ctx("Ready-made fix script from the automation library. Test in a safe environment first."),
             {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Severity*\n{severity}"},
+                {"type": "mrkdwn", "text": f"*Severity*\n{severity or '—'}"},
                 {"type": "mrkdwn", "text": f"*OS*\n{os_v}"},
                 {"type": "mrkdwn", "text": f"*Language*\n{language}"},
                 {"type": "mrkdwn", "text": f"*Script*\n`{script_name}`"},
+                {"type": "mrkdwn", "text": f"*Automation Possible*\n{possible_badge}"},
+                {"type": "mrkdwn", "text": f"*Tested Manually*\n{tested_badge}"},
             ]},
-            {"type": "divider"},
         ]
+        if len(available) > 1:
+            others = [o for o in available if o.lower() != (os_v or "").lower()]
+            if others:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"_A fix script is also available for: {', '.join(others)}._"}})
+        blocks.append({"type": "divider"})
+
         if desc:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*What this does:*\n{desc[:500]}"}})
+        if approach:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Recommended Approach:*\n{approach[:400]}"}})
+        if can_auto:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"✅ *What can be automated:*\n{can_auto[:400]}"}})
+        if must_manual:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"✋ *What must remain manual:*\n{must_manual[:400]}"}})
+        if libraries or dl_cmd:
+            lib_text = f"*Libraries needed:* {libraries}" if libraries else ""
+            if dl_cmd:
+                lib_text += f"\n*Install command:*\n```{dl_cmd}```"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": lib_text.strip()}})
         if before:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ *Before running:*\n{before[:400]}"}})
 
