@@ -213,6 +213,7 @@ SLACK_SCOPES = [
     'mpim:write',
     'team:read',
     'commands',
+    'files:write',
 ]
 
 JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "")
