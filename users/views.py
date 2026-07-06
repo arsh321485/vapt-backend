@@ -3366,7 +3366,7 @@ class SlackOAuthUrlView(APIView):
         slack_url = (
             f"https://slack.com/oauth/v2/authorize?"
             f"client_id={client_id}"
-            f"&scope=chat:write,channels:read,channels:manage,channels:join,groups:read,groups:write,mpim:write,im:write,users:read,users:read.email,commands"
+            f"&scope=chat:write,channels:read,channels:manage,channels:join,groups:read,groups:write,mpim:write,im:write,users:read,users:read.email,commands,files:write"
             f"&user_scope=identity.basic,identity.email,identity.avatar,identity.team"
             f"&redirect_uri={redirect_uri}"
             f"&state={state}"
@@ -6328,7 +6328,7 @@ class SlackInstallView(APIView):
         scopes = ",".join(getattr(settings, "SLACK_SCOPES", [
             "chat:write", "channels:manage", "channels:join",
             "mpim:write", "groups:write", "im:write",
-            "users:read", "users:read.email", "commands",
+            "users:read", "users:read.email", "commands", "files:write",
         ]))
         user_scopes = "identity.basic,identity.email,identity.avatar,identity.team"
 
@@ -8118,6 +8118,51 @@ class SlackSlashCommandView(APIView):
             return False
         return self._post_to_channel(bot_token, team_ch_id, message)
 
+    def _upload_file_to_slack(self, bot_token, channel_id, filename, content_bytes, initial_comment=""):
+        """
+        Upload a file to a Slack channel using the modern (2024+) external
+        upload flow — a separate feature from posting messages, requiring the
+        files:write bot scope: (1) get an upload URL, (2) POST the raw bytes
+        to it, (3) finalize the upload attaching it to the channel.
+        Returns True on success.
+        """
+        try:
+            step1 = _http_post(
+                "https://slack.com/api/files.getUploadURLExternal",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                data={"filename": filename, "length": len(content_bytes)},
+                timeout=15,
+            ).json()
+            if not step1.get("ok"):
+                logger.warning(f"[SlackUpload] getUploadURLExternal failed: {step1.get('error')}")
+                return False
+
+            upload_url = step1["upload_url"]
+            file_id = step1["file_id"]
+
+            step2 = _http_post(upload_url, files={"file": (filename, content_bytes)}, timeout=30)
+            if step2.status_code != 200:
+                logger.warning(f"[SlackUpload] upload POST failed: status={step2.status_code}")
+                return False
+
+            step3 = _http_post(
+                "https://slack.com/api/files.completeUploadExternal",
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                json={
+                    "files": [{"id": file_id, "title": filename}],
+                    "channel_id": channel_id,
+                    "initial_comment": initial_comment,
+                },
+                timeout=15,
+            ).json()
+            if not step3.get("ok"):
+                logger.warning(f"[SlackUpload] completeUploadExternal failed: {step3.get('error')}")
+                return False
+            return True
+        except Exception:
+            logger.exception("[SlackUpload] File upload failed")
+            return False
+
     def _create_support_ticket(self, team_id, slack_user_id, team_name, message):
         """
         Insert a support request document into MongoDB so it appears in
@@ -8453,13 +8498,38 @@ class SlackSlashCommandView(APIView):
         script_resp = self._call_user_api_raw(
             f"/api/user/automation-scripts/download/{plugin_id}/", team_id, user_id, params=os_params,
         )
-        script_text = ""
+        script_text  = ""
+        script_bytes = b""
         if script_resp is not None and script_resp.status_code == 200:
+            script_bytes = script_resp.content
             try:
-                script_text = script_resp.content.decode("utf-8", errors="replace")
+                script_text = script_bytes.decode("utf-8", errors="replace")
             except Exception:
                 script_text = ""
-        return self._format_autofix(automation, script_text, vuln_id)
+
+        # Upload the full (non-truncated) script as a real, downloadable
+        # file attachment in this team's channel — separate from the inline
+        # preview shown below, which stays truncated for long scripts.
+        uploaded = False
+        if script_bytes:
+            channel_name = next((cn for cn, tn in self.TEAM_CHANNELS.items() if tn == team_name), None)
+            bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
+            if channel_name and bot_token:
+                channel_id = self._get_channel_id_by_name(bot_token, channel_name)
+                if channel_id:
+                    filename = (
+                        automation.get("fix_script_name")
+                        or automation.get("script_name")
+                        or f"plugin_{plugin_id}_fix.py"
+                    )
+                    uploaded = self._upload_file_to_slack(
+                        bot_token, channel_id, filename, script_bytes,
+                        initial_comment=(
+                            f"🤖 Automated fix script for `{vuln_id}` — {automation.get('vulnerability', '')}"
+                        ),
+                    )
+
+        return self._format_autofix(automation, script_text, vuln_id, uploaded=uploaded)
 
     def _cmd_scriptfeedback(self, text, team_id, user_id, team_name):
         """
@@ -8936,7 +9006,7 @@ class SlackSlashCommandView(APIView):
         """Small context/description line shown under the header in Slack."""
         return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
-    def _format_viewassigned(self, vulns, team_name, raw_data=None):
+    def _format_viewassigned(self, vulns, team_name, raw_data=None, offset=0):
         if not vulns:
             raw_data = raw_data or {}
 
@@ -8985,9 +9055,16 @@ class SlackSlashCommandView(APIView):
                         + diag
                     )}},
             ]
+        PAGE_SIZE = 10
         total  = len(vulns)
         open_c = sum(1 for v in vulns if v.get("status") == "open")
         closed = sum(1 for v in vulns if v.get("status") == "closed")
+
+        offset = max(0, min(offset, max(total - 1, 0)))
+        page_vulns = vulns[offset:offset + PAGE_SIZE]
+        start_num  = offset + 1 if page_vulns else 0
+        end_num    = offset + len(page_vulns)
+
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"📋 {team_name} — Assigned Work", "emoji": True}},
             self._ctx("All vulnerabilities assigned to your team. Use IDs (c1, h1...) with /startfix, /mitigated, /retest, /extend"),
@@ -8997,10 +9074,10 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*Fixed*\n{closed}"},
             ]},
             {"type": "section", "text": {"type": "mrkdwn",
-                "text": "_IDs: use with `/startfix`, `/mitigated`, `/retest`, `/extend`_"}},
+                "text": f"_Showing {start_num}-{end_num} of {total}. IDs: use with `/startfix`, `/mitigated`, `/retest`, `/extend`_"}},
             {"type": "divider"},
         ]
-        for v in vulns[:12]:
+        for v in page_vulns:
             sid    = v.get("short_id", "?")
             name   = v.get("plugin_name") or "Unknown"
             host   = v.get("host_name") or "—"
@@ -9010,9 +9087,25 @@ class SlackSlashCommandView(APIView):
             st_icon = "✅" if status == "closed" else "🔓"
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": f"{icon} `{sid}` *{name}*\n      Host: `{host}` | {st_icon} {status.capitalize()}"}})
-        if total > 12:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"_...and {total - 12} more vulnerabilities._"}})
+
+        nav_buttons = []
+        if offset > 0:
+            nav_buttons.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
+                "action_id": "view_vulns_page",
+                "value": f"{team_name}|{max(0, offset - PAGE_SIZE)}",
+            })
+        if end_num < total:
+            nav_buttons.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
+                "action_id": "view_vulns_page",
+                "value": f"{team_name}|{offset + PAGE_SIZE}",
+            })
+        if nav_buttons:
+            blocks.append({"type": "actions", "elements": nav_buttons})
+
         return blocks
 
     def _format_team_assets(self, data, team_name):
@@ -9319,7 +9412,7 @@ class SlackSlashCommandView(APIView):
             })
         return blocks
 
-    def _format_autofix(self, automation, script_text, vuln_id):
+    def _format_autofix(self, automation, script_text, vuln_id, uploaded=False):
         """
         Format the automation_scripts match + downloaded script into Slack
         blocks — surfaces every field the API/Google-Sheet-synced document
@@ -9386,8 +9479,14 @@ class SlackSlashCommandView(APIView):
         if script_text:
             snippet = script_text[:2500]
             truncated = len(script_text) > 2500
+            if uploaded:
+                trailer = "\n_📎 Full script uploaded above as a downloadable file._"
+            elif truncated:
+                trailer = "\n_...truncated — full script also on the VaptFix dashboard._"
+            else:
+                trailer = ""
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"*Script (`{script_name}`):*\n```{snippet}```" + ("\n_...truncated — full script also on the VaptFix dashboard._" if truncated else "")}})
+                "text": f"*Script (`{script_name}`):*\n```{snippet}```" + trailer}})
         else:
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": "_Script file could not be fetched — download it from the VaptFix dashboard instead._"}})
@@ -9564,6 +9663,22 @@ class SlackInteractivityView(APIView):
             team_name   = parts[2] if len(parts) > 2 else ""
 
             slash = SlackSlashCommandView()
+
+            if action_id == "view_vulns_page":
+                # value format here is "team_name|offset" (no fix_vuln_id) —
+                # re-parse directly rather than reusing the generic `parts`.
+                vp = value.split("|")
+                page_team_name = vp[0] if len(vp) > 0 else ""
+                page_offset = int(vp[1]) if len(vp) > 1 and vp[1].isdigit() else 0
+                vulns, _, raw_data = slash._get_team_vulns(page_team_name, team_id, slack_user_id)
+                blocks = slash._format_viewassigned(vulns, page_team_name, raw_data, offset=page_offset)
+                if response_url:
+                    _http_post(response_url, json={
+                        "response_type": "in_channel",
+                        "replace_original": True,
+                        "blocks": blocks,
+                    }, timeout=10)
+                return
 
             if action_id == "view_more_steps":
                 offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
