@@ -8067,6 +8067,27 @@ class SlackSlashCommandView(APIView):
         fix_vuln_id = (data.get("data") or {}).get("_id")
         return fix_vuln_id, data
 
+    def _mark_fix_in_progress(self, fix_vuln_id):
+        """
+        Nothing in the backend ever sets fix_vulnerabilities.status to
+        "in_progress" — it's created as "open" and only changes on /retest
+        ("open/review") or /approvefix ("closed"). Set it here directly
+        (same direct-Mongo-write pattern used elsewhere in this file, no API
+        touched) whenever a team marks any step done, so /mitigationstatus
+        can distinguish "steps started" from "nothing touched yet". Only
+        overwrites when still "open" so it never clobbers open/review/closed.
+        """
+        try:
+            from bson import ObjectId
+            from vaptfix.mongo_client import MongoContext
+            with MongoContext() as db:
+                db["fix_vulnerabilities"].update_one(
+                    {"_id": ObjectId(fix_vuln_id), "status": "open"},
+                    {"$set": {"status": "in_progress"}},
+                )
+        except Exception:
+            logger.exception(f"[SlackCmd] _mark_fix_in_progress failed for fix_vuln_id={fix_vuln_id}")
+
     def _get_channel_id_by_name(self, bot_token, channel_name):
         """Look up a Slack channel's ID by name via the Slack API."""
         resp = _http_get(
@@ -8327,6 +8348,7 @@ class SlackSlashCommandView(APIView):
             )
             if step_resp.get("detail") and not step_resp.get("message"):
                 return self._text_block(f"❌ `{step_resp.get('detail')}`")
+            self._mark_fix_in_progress(fix_vuln_id)
             self._notify_admin(
                 team_id, user_id,
                 f"🔧 *Step Update* — *{team_name}*\n"
@@ -8346,6 +8368,7 @@ class SlackSlashCommandView(APIView):
         )
         if all_resp.get("detail") and not all_resp.get("message"):
             return self._text_block(f"❌ `{all_resp.get('detail')}`")
+        self._mark_fix_in_progress(fix_vuln_id)
 
         self._notify_admin(
             team_id, user_id,
@@ -8706,11 +8729,42 @@ class SlackSlashCommandView(APIView):
 
     def _cmd_scriptstats(self, text, team_id, user_id, team_name):
         """
-        /scriptstats — View script download stats for your team
-        /scriptstats [vuln-id] — Stats for a specific vulnerability e.g. /scriptstats h1
+        /scriptstats — View which of your team's vulns have automated fix
+        scripts available (from the real automation_scripts library).
+        /scriptstats [vuln-id] — Stats for one specific vulnerability e.g. /scriptstats h1
         """
-        data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id)
-        return self._format_scriptstats(data, team_name)
+        vuln_id = text.strip().lower()
+        vulns, _, _ = self._get_team_vulns(team_name, team_id, user_id)
+        if not vulns:
+            return self._text_block(f"✅ No vulnerabilities currently assigned to *{team_name}* team.")
+
+        if vuln_id:
+            target = next((v for v in vulns if v.get("short_id") == vuln_id), None)
+            if not target:
+                return self._text_block(
+                    f"❌ Vulnerability `{vuln_id}` not found.\n"
+                    "Use `/viewassigned vulns` to see IDs."
+                )
+            plugin_id = target.get("plugin_id")
+            if not plugin_id:
+                return self._text_block(f"❌ No Nessus plugin ID found for `{vuln_id}`.")
+            host_os = target.get("host_os")
+            automation = self._call_user_api(
+                f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
+                params={"os": host_os} if host_os else None,
+            )
+            return self._format_single_scriptstats(automation, target, vuln_id)
+
+        plugin_ids = sorted({v.get("plugin_id") for v in vulns if v.get("plugin_id")})
+        if not plugin_ids:
+            return self._text_block("No Nessus plugin IDs found for your team's vulnerabilities.")
+        bulk = self._call_user_api(
+            "/api/user/automation-scripts/match/bulk/", team_id, user_id,
+            method="post", json_body={"plugin_ids": plugin_ids},
+        )
+        results = bulk.get("results") or []
+        matched_by_pid = {r.get("plugin_id"): r for r in results if r.get("matched")}
+        return self._format_scriptstats(vulns, matched_by_pid, team_name)
 
     # ── Formatters ────────────────────────────────────────────────────────
 
@@ -9583,14 +9637,13 @@ class SlackSlashCommandView(APIView):
                 "text": f"{icon} *{vuln}* [{sev}] — +{days} days\n_Status: {st}_ | Reason: {reason}"}})
         return blocks
 
-    def _format_scriptstats(self, data, team_name):
-        items = data if isinstance(data, list) else (data.get("results") or data.get("vulnerabilities") or [])
-        team_items = [
-            v for v in items
-            if (v.get("assigned_team") or "").lower() == team_name.lower()
-        ] or items
-        auto_count = sum(1 for v in team_items if v.get("is_automated") or v.get("has_script"))
-        total      = len(team_items)
+    def _format_scriptstats(self, vulns, matched_by_pid, team_name):
+        """
+        vulns: this team's vuln list (from _get_team_vulns, has plugin_id/short_id)
+        matched_by_pid: {plugin_id: automation_doc} for plugin_ids WITH a script
+        """
+        total      = len(vulns)
+        auto_count = sum(1 for v in vulns if v.get("plugin_id") in matched_by_pid)
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🤖 {team_name} — Script Stats", "emoji": True}},
             self._ctx("Script download stats — shows which vulnerabilities have automated fix scripts available for your team"),
@@ -9601,15 +9654,40 @@ class SlackSlashCommandView(APIView):
             ]},
             {"type": "divider"},
         ]
-        if not team_items:
-            return blocks + self._text_block("No script data available for your team.")
-        for v in team_items[:8]:
-            name     = v.get("vulnerability_name") or v.get("plugin_name") or "Unknown"
-            has_scr  = v.get("is_automated") or v.get("has_script")
-            dl_count = v.get("download_count") or v.get("script_downloads") or 0
+        for v in vulns[:10]:
+            sid      = v.get("short_id", "?")
+            name     = v.get("plugin_name") or "Unknown"
+            doc      = matched_by_pid.get(v.get("plugin_id"))
+            has_scr  = bool(doc)
+            dl_count = doc.get("download_count", 0) if doc else 0
             icon     = "🤖" if has_scr else "📝"
+            detail   = f"Downloads: {dl_count}  _(`/autofix {sid}`)_" if has_scr else f"Manual fix only  _(`/manualfix {sid}`)_"
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"{icon} *{name}*\n      Downloads: {dl_count}"}})
+                "text": f"{icon} `{sid}` *{name}*\n      {detail}"}})
+        if total > 10:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...and {total - 10} more. Use `/scriptstats [vuln-id]` for a specific one._"}})
+        return blocks
+
+    def _format_single_scriptstats(self, automation, target, vuln_id):
+        name = target.get("plugin_name") or "Unknown"
+        if not automation.get("matched"):
+            return [
+                {"type": "header", "text": {"type": "plain_text", "text": f"📝 Script Stats: {name[:55]}", "emoji": True}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": (
+                    f"No automated fix script available for `{vuln_id}`.\n"
+                    f"Use `/manualfix {vuln_id}` for the step-by-step guide instead."
+                )}},
+            ]
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Script Stats: {name[:55]}", "emoji": True}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*OS*\n{automation.get('os', '—')}"},
+                {"type": "mrkdwn", "text": f"*Downloads*\n{automation.get('download_count', 0)}"},
+            ]},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"Run `/autofix {vuln_id}` to get the script."}},
+        ]
 
 
 class SlackInteractivityView(APIView):
