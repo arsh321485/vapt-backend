@@ -7494,40 +7494,42 @@ class SlackSlashCommandView(APIView):
         )
         return self._format_extension_requests(data)
 
-    def _resolve_extension_request_id(self, ident, team_id, user_id):
+    def _lookup_extension_request(self, ident, team_id, user_id):
         """
-        /approve and /reject used to only accept the raw 24-char Mongo id
-        shown in /request output — admins kept trying the vuln-style short
-        id (c1/h2/m3/l4...) they already use everywhere else (/viewassigned,
-        /startfix), which fails because that's not a valid request id.
-        Accept both: pass raw ids through unchanged, resolve short ids
-        against the current pending-requests list (same severity-bucketed
-        short-id scheme used elsewhere).
+        Resolve a /approve or /reject identifier (short id c1/h2/m3/l4... OR
+        the raw Mongo request id shown in /request) to the FULL request
+        details from the existing read-only list API — used both to find
+        the real request_id to PATCH and to build a proper confirmation
+        message (vuln name/team/days) instead of just echoing back a bare
+        Mongo id. No API file touched — this only reads the already-existing
+        list endpoint the same way /request itself does.
         """
-        ident = ident.strip()
-        if not re.fullmatch(r"[chml]\d+", ident.lower()):
-            return ident
         data = self._call_api(
             "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/",
             team_id, slack_user_id=user_id,
         )
         results = self._assign_severity_short_ids(data.get("results") or [])
-        target = next((r for r in results if r.get("short_id") == ident.lower()), None)
-        return target.get("request_id", ident) if target else ident
+        ident_clean = ident.strip()
+        return next(
+            (r for r in results
+             if r.get("short_id") == ident_clean.lower() or r.get("request_id") == ident_clean),
+            None,
+        )
 
     def _cmd_approve(self, text, team_id, user_id):
-        request_id = text.strip()
-        if not request_id:
+        display_id = text.strip()
+        if not display_id:
             return self._text_block(
                 "*Usage:* `/approve [request-id]`\n"
                 "_Approves a team's mitigation deadline extension request. Get IDs (short or full) from `/request`._"
             )
-        request_id = self._resolve_extension_request_id(request_id, team_id, user_id)
+        target = self._lookup_extension_request(display_id, team_id, user_id)
+        request_id = target.get("request_id") if target else display_id
         data = self._call_api(
             f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
             team_id, method="patch", json_body={"status": "approved"}, slack_user_id=user_id,
         )
-        return self._format_status_update(data, "approved", request_id)
+        return self._format_status_update(data, "approved", display_id, target)
 
     def _cmd_reject(self, text, team_id, user_id):
         parts = text.strip().split(None, 1)
@@ -7536,14 +7538,16 @@ class SlackSlashCommandView(APIView):
                 "*Usage:* `/reject [request-id] [reason]`\n"
                 "_Rejects a team's timeline extension request with an optional reason. Get IDs (short or full) from `/request`._"
             )
-        request_id = self._resolve_extension_request_id(parts[0], team_id, user_id)
+        display_id = parts[0]
         reason = parts[1] if len(parts) > 1 else ""
+        target = self._lookup_extension_request(display_id, team_id, user_id)
+        request_id = target.get("request_id") if target else display_id
         data = self._call_api(
             f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
             team_id, method="patch", json_body={"status": "rejected", "admin_comment": reason},
             slack_user_id=user_id,
         )
-        return self._format_status_update(data, "rejected", request_id)
+        return self._format_status_update(data, "rejected", display_id, target, reason=reason)
 
     def _cmd_externalusers(self, text, team_id, user_id):
         data = self._call_api(
@@ -9146,13 +9150,29 @@ class SlackSlashCommandView(APIView):
                 )}})
         return blocks
 
-    def _format_status_update(self, data, action, request_id):
+    def _format_status_update(self, data, action, display_id, target=None, reason=None):
         if data.get("detail"):
             return self._text_block(f"❌ {data['detail']}")
         icon  = "✅" if action == "approved" else "❌"
         label = "Approved" if action == "approved" else "Rejected"
-        return [{"type": "section", "text": {"type": "mrkdwn",
-            "text": f"{icon} Request `{request_id}` has been *{label}*."}}]
+        lines = [f"{icon} Request `{display_id}` has been *{label}*."]
+        if target:
+            vuln = target.get("vul_name") or ""
+            team = target.get("requested_by") or ""
+            sev  = (target.get("severity") or "").capitalize()
+            days = target.get("extension_days")
+            bits = []
+            if vuln:
+                bits.append(f"*{vuln}*" + (f" [{sev}]" if sev else ""))
+            if team:
+                bits.append(f"Team: {team}")
+            if days:
+                bits.append(f"+{days} days")
+            if bits:
+                lines.append(" | ".join(bits))
+        if action == "rejected" and reason:
+            lines.append(f"Reason: {reason}")
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
     def _format_vulndata_list(self, data, offset=0):
         # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
