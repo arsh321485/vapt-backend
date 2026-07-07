@@ -98,14 +98,22 @@ def _normalize_teams(teams):
 def _resolve_requester(doc):
     """
     Returns requester display name for a support_requests document.
-    - user_id present → the user who raised the request (email from auth User)
-    - admin_id only   → admin email
-    - fallback        → stored requested_by value
+    - user_id that matches a real Django User pk → that user's email
+      (web-dashboard-raised tickets store a real pk here)
+    - stored requested_by → used next, since Slack-raised tickets store
+      the raw Slack user ID (e.g. "U0BEVRYB67R") in user_id, which never
+      matches a Django pk. Falling straight through to admin_id in that
+      case wrongly displayed the admin's email as the requester for every
+      Slack-raised ticket, even though Slack had already resolved the real
+      requester's email into requested_by at creation time. (Same fix
+      applied to the duplicate of this function in adminregister/views.py.)
+    - admin_id → last-resort fallback only when nothing else is available
     """
     from django.contrib.auth import get_user_model
 
     user_id  = doc.get("user_id")
     admin_id = doc.get("admin_id")
+    stored   = doc.get("requested_by", "") or ""
 
     if user_id:
         try:
@@ -116,6 +124,9 @@ def _resolve_requester(doc):
         except Exception as e:
             logger.warning("Suppressed error: %s", e)
 
+    if stored:
+        return stored
+
     if admin_id:
         try:
             User = get_user_model()
@@ -125,7 +136,7 @@ def _resolve_requester(doc):
         except Exception as e:
             logger.warning("Suppressed error: %s", e)
 
-    return doc.get("requested_by", "")
+    return ""
 
 
 def _load_latest_report(db, admin_id, admin_email):
