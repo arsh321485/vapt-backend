@@ -1853,7 +1853,8 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
       - assigned_team       (from vulnerability_cards)
       - risk_factor         (from nessus_reports)
       - found_date          (vulnerability_cards.created_at)
-      - status              (open / closed — from fix_vulnerabilities_closed)
+      - status              (open / in_progress / open/review / closed —
+                             from fix_vulnerabilities + fix_vulnerabilities_closed)
 
     GET /api/admin/dashboard/detailed-vulnerabilities/
     """
@@ -1914,6 +1915,21 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                     if pname:
                         closed_vuln_keys.add((pname, hname))
 
+                # ── active fix status ("in_progress" / "open/review") ────────────
+                # This previously only checked the closed collection, so any vuln
+                # a team had started (or sent for verification) but wasn't closed
+                # yet showed as plain "open" — indistinguishable from untouched.
+                active_status_by_key = {}
+                for doc_a in db[FIX_VULN_COLLECTION].find(
+                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]},
+                    {"plugin_name": 1, "host_name": 1, "status": 1},
+                ):
+                    pname = (doc_a.get("plugin_name") or "").strip()
+                    hname = (doc_a.get("host_name") or "").strip()
+                    st    = (doc_a.get("status") or "").strip()
+                    if pname and st and st != "open":
+                        active_status_by_key[(pname, hname)] = st
+
                 # ── card lookup ──────────────────────────────────────────────────
                 # Primary key: (plugin_name, host_name) for exact per-host match.
                 # Fallback key: plugin_name only (for cards with empty host_name).
@@ -1963,7 +1979,10 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
 
                         found_date    = info.get("found_date")
                         risk_factor   = plugin_risk.get(plugin_name)
-                        vuln_status   = "closed" if (plugin_name, h_name) in closed_vuln_keys else "open"
+                        if (plugin_name, h_name) in closed_vuln_keys:
+                            vuln_status = "closed"
+                        else:
+                            vuln_status = active_status_by_key.get((plugin_name, h_name), "open")
                         assigned_team = (info.get("assigned_team") or "").strip()
 
                         vulnerabilities.append({
