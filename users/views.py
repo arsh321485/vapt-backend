@@ -7494,13 +7494,35 @@ class SlackSlashCommandView(APIView):
         )
         return self._format_extension_requests(data)
 
+    def _resolve_extension_request_id(self, ident, team_id, user_id):
+        """
+        /approve and /reject used to only accept the raw 24-char Mongo id
+        shown in /request output — admins kept trying the vuln-style short
+        id (c1/h2/m3/l4...) they already use everywhere else (/viewassigned,
+        /startfix), which fails because that's not a valid request id.
+        Accept both: pass raw ids through unchanged, resolve short ids
+        against the current pending-requests list (same severity-bucketed
+        short-id scheme used elsewhere).
+        """
+        ident = ident.strip()
+        if not re.fullmatch(r"[chml]\d+", ident.lower()):
+            return ident
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/",
+            team_id, slack_user_id=user_id,
+        )
+        results = self._assign_severity_short_ids(data.get("results") or [])
+        target = next((r for r in results if r.get("short_id") == ident.lower()), None)
+        return target.get("request_id", ident) if target else ident
+
     def _cmd_approve(self, text, team_id, user_id):
         request_id = text.strip()
         if not request_id:
             return self._text_block(
                 "*Usage:* `/approve [request-id]`\n"
-                "_Approves a team's mitigation deadline extension request. Get request IDs from `/request`._"
+                "_Approves a team's mitigation deadline extension request. Get IDs (short or full) from `/request`._"
             )
+        request_id = self._resolve_extension_request_id(request_id, team_id, user_id)
         data = self._call_api(
             f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
             team_id, method="patch", json_body={"status": "approved"}, slack_user_id=user_id,
@@ -7512,9 +7534,9 @@ class SlackSlashCommandView(APIView):
         if not parts:
             return self._text_block(
                 "*Usage:* `/reject [request-id] [reason]`\n"
-                "_Rejects a team's timeline extension request with an optional reason. Get IDs from `/request`._"
+                "_Rejects a team's timeline extension request with an optional reason. Get IDs (short or full) from `/request`._"
             )
-        request_id = parts[0]
+        request_id = self._resolve_extension_request_id(parts[0], team_id, user_id)
         reason = parts[1] if len(parts) > 1 else ""
         data = self._call_api(
             f"/api/admin/admindashboard/dashboard/mitigation-timeline-extension/{request_id}/status/",
@@ -7591,6 +7613,22 @@ class SlackSlashCommandView(APIView):
             data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
                                   slack_user_id=user_id)
             return self._format_vulndata_list(data, offset=(page - 1) * 10)
+        elif re.fullmatch(r"[chml]\d+", text_stripped.lower()):
+            # Short vuln ID (h1/m5/c3/l2...) — same style used everywhere
+            # else (/viewassigned, /startfix). Resolve against the full
+            # admin-wide latest-report list (not team-scoped) and show
+            # complete details instead of the near-empty result we used to
+            # get from treating it as a fix_vuln_id (a 24-char Mongo id).
+            data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
+                                  slack_user_id=user_id)
+            rows = self._assign_severity_short_ids(data.get("rows") or [])
+            target = next((r for r in rows if r.get("short_id") == text_stripped.lower()), None)
+            if not target:
+                return self._text_block(
+                    f"❌ No vulnerability found with ID `{text_stripped}`. "
+                    f"Run `/vulndata` to see the current list with IDs."
+                )
+            return self._format_vulndata_single(target)
         elif text_stripped:
             fix_vuln_id = text_stripped
             data = self._call_api(
@@ -8098,6 +8136,29 @@ class SlackSlashCommandView(APIView):
         vulns, report_id, _ = self._get_team_vulns(team_name, team_id, user_id)
         target = next((v for v in vulns if v.get("short_id") == short_id.lower()), None)
         return target, report_id
+
+    def _assign_severity_short_ids(self, items, name_key="vul_name"):
+        """
+        Assign deterministic short IDs (c1/h2/m3/l4...) grouped by severity —
+        same scheme _get_team_vulns uses for per-team vuln lists — so
+        admin-wide lists (/vulndata, /request) can be referenced the same
+        short way (e.g. `/vulndata m6`, `/approve m6`) instead of requiring
+        a 24-char Mongo id to be copy-pasted every time.
+        """
+        grouped = {"Critical": [], "High": [], "Medium": [], "Low": []}
+        for item in items:
+            sev = (item.get("severity") or "").strip().title()
+            bucket = grouped[sev] if sev in grouped else grouped["Low"]
+            bucket.append(item)
+        for sev_list in grouped.values():
+            sev_list.sort(key=lambda x: (x.get(name_key) or "").lower())
+        result = []
+        for sev, prefix in self._SEV_PREFIX:
+            for i, item in enumerate(grouped[sev], 1):
+                entry = dict(item)
+                entry["short_id"] = f"{prefix}{i}"
+                result.append(entry)
+        return result
 
     def _get_or_create_fix_vuln_id(self, vuln, report_id, team_id, user_id):
         """
@@ -9058,7 +9119,8 @@ class SlackSlashCommandView(APIView):
         return blocks
 
     def _format_extension_requests(self, data):
-        results = data.get("results") or []
+        raw_results = data.get("results") or []
+        results = self._assign_severity_short_ids(raw_results)
         count   = data.get("count", len(results))
         blocks  = [
             {"type": "header", "text": {"type": "plain_text", "text": "⏳ Timeline Extension Requests", "emoji": True}},
@@ -9068,7 +9130,7 @@ class SlackSlashCommandView(APIView):
         ]
         status_icons = {"review": "🔵", "approved": "✅", "rejected": "❌"}
         for r in results[:8]:
-            rid   = r.get("request_id", "")
+            sid   = r.get("short_id", "?")
             team  = r.get("requested_by") or "Unknown"
             vuln  = r.get("vul_name") or "Unknown"
             sev   = (r.get("severity") or "").capitalize()
@@ -9078,9 +9140,9 @@ class SlackSlashCommandView(APIView):
             icon  = status_icons.get(st, "🔵")
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": (
-                    f"{icon} *{vuln}* [{sev}]\n"
+                    f"{icon} `{sid}` *{vuln}* [{sev}]\n"
                     f"Team: {team} | +{days} days | Reason: {reason}\n"
-                    f"`/approve {rid}` or `/reject {rid} [reason]`"
+                    f"`/approve {sid}` or `/reject {sid} [reason]`"
                 )}})
         return blocks
 
@@ -9097,7 +9159,8 @@ class SlackSlashCommandView(APIView):
         # "rows" (not "results"/"vulnerabilities"), with fields vul_name/asset
         # — reading the wrong keys silently produced "Total: 0" every time.
         PAGE_SIZE = 10
-        items = data if isinstance(data, list) else (data.get("rows") or data.get("results") or data.get("vulnerabilities") or [])
+        raw_items = data if isinstance(data, list) else (data.get("rows") or data.get("results") or data.get("vulnerabilities") or [])
+        items = self._assign_severity_short_ids(raw_items)
         count = len(items)
 
         offset = max(0, min(offset, max(count - 1, 0)))
@@ -9107,19 +9170,20 @@ class SlackSlashCommandView(APIView):
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🔍 Vulnerability Data", "emoji": True}},
-            self._ctx("All vulnerabilities in your latest report. Use `/vulndata automation` for script stats."),
+            self._ctx("All vulnerabilities in your latest report. Use `/vulndata [id]` for details, `/vulndata automation` for script stats."),
             {"type": "section", "text": {"type": "mrkdwn",
                 "text": f"*Total:* {count} vulnerabilities — showing {start_num}-{end_num}"}},
             {"type": "divider"},
         ]
         for v in page_items:
+            sid  = v.get("short_id", "?")
             name = v.get("vul_name") or v.get("vulnerability_name") or v.get("plugin_name") or "Unknown"
             host = v.get("asset") or v.get("host_name") or "—"
             sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
             st   = v.get("status") or "open"
             icon = "✅" if st == "closed" else "🔓"
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"{icon} *{name}* [{sev}]\n      Host: `{host}` | Status: {st.capitalize()}"}})
+                "text": f"{icon} `{sid}` *{name}* [{sev}]\n      Host: `{host}` | Status: {st.capitalize()}"}})
 
         nav_buttons = []
         if offset > 0:
@@ -9170,6 +9234,34 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": f"{icon} *Step {i}:* {step_name}"}})
         return blocks
+
+    def _format_vulndata_single(self, v):
+        """
+        Full detail for one vuln resolved from a short ID (h1/m5/c3...) via
+        /vulndata [id] — pulled from the admin-wide latest-report row, which
+        has host/port/protocol/observation dates but no steps (those live on
+        the per-user fix_vulnerability doc, not this report-level row).
+        """
+        sid   = v.get("short_id", "?")
+        name  = v.get("vul_name", "Unknown")
+        host  = v.get("asset", "—")
+        sev   = v.get("severity", "—") or "—"
+        port  = v.get("port", "—")
+        proto = v.get("protocol", "—") or "—"
+        st    = v.get("status") or "open"
+        icon  = "✅" if st == "closed" else "🔓"
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🔍 {sid.upper()} — {name}"[:150], "emoji": True}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Severity*\n{sev}"},
+                {"type": "mrkdwn", "text": f"*Status*\n{icon} {st.capitalize()}"},
+                {"type": "mrkdwn", "text": f"*Host*\n`{host}`"},
+                {"type": "mrkdwn", "text": f"*Port / Protocol*\n{port}/{proto}"},
+            ]},
+            self._ctx(
+                f"First seen: {v.get('first_observation', '—')} | Last check: {v.get('second_observation', '—')}"
+            ),
+        ]
 
     def _format_vulndata_automation(self, data):
         items      = data if isinstance(data, list) else (data.get("results") or data.get("vulnerabilities") or [])
@@ -9950,6 +10042,10 @@ class SlackInteractivityView(APIView):
                 )
                 logger.warning(f"[SlackInteractivity] {msg}")
                 self._debug_write(msg)
+                try:
+                    self._debug_write(f"_post_response_url: action={action_id} SENT_PAYLOAD={json.dumps(payload)[:3000]}")
+                except Exception:
+                    pass
             else:
                 self._debug_write(f"_post_response_url: action={action_id} OK (Slack accepted it)")
         except Exception as exc:
