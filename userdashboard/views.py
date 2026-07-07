@@ -560,14 +560,14 @@ class UserMitigationTimelineAPIView(APIView):
             l = _parse_timeline_to_days(rc.low)
             t = c + h + m + l
 
-            # Countdown starts from report upload time (not from when criteria was saved)
-            report_uploaded_at = None
-            with MongoContext() as db:
-                report_doc = _load_latest_report_meta(db, admin_user.id, admin_user.email)
-                if report_doc:
-                    report_uploaded_at = report_doc.get("uploaded_at")
-
-            base_datetime = report_uploaded_at or rc.updated_at or rc.created_at
+            # Countdown starts from when the risk criteria was saved — same
+            # base date /api/user/risk_criteria/risks/'s _compute_realtime_remaining
+            # uses. This used to prefer report_uploaded_at instead, which made
+            # this endpoint's (and /api/user/dashboard/summary/'s, since it
+            # calls this view internally) deadlines silently diverge from
+            # risk_criteria/risks/ whenever the report was uploaded on a
+            # different day than the risk criteria was configured.
+            base_datetime = rc.updated_at or rc.created_at
             if base_datetime.tzinfo is None:
                 base_datetime = base_datetime.replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)

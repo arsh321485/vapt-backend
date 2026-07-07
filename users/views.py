@@ -7603,9 +7603,13 @@ class SlackSlashCommandView(APIView):
         /vulndata 2 — Page 2, etc. (reliable text-based paging, works
           regardless of whether the Next/Previous buttons are wired up)
         /vulndata automation — Automation breakdown stats
+        /vulndata [short-id] [page] — Full read-only detail + steps for one
+          vuln (admin can view the same steps a team member works through,
+          but never mark them done — that stays user-only)
         /vulndata [fix_vuln_id] — Step-by-step detail for one vuln
         """
         text_stripped = text.strip()
+        short_id_match = re.fullmatch(r"([chml]\d+)(?:\s+(\d+))?", text_stripped.lower())
         if text_stripped.lower() == "automation":
             data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
                                   slack_user_id=user_id)
@@ -7617,22 +7621,31 @@ class SlackSlashCommandView(APIView):
             data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
                                   slack_user_id=user_id)
             return self._format_vulndata_list(data, offset=(page - 1) * 10)
-        elif re.fullmatch(r"[chml]\d+", text_stripped.lower()):
+        elif short_id_match:
             # Short vuln ID (h1/m5/c3/l2...) — same style used everywhere
             # else (/viewassigned, /startfix). Resolve against the full
             # admin-wide latest-report list (not team-scoped) and show
             # complete details instead of the near-empty result we used to
             # get from treating it as a fix_vuln_id (a 24-char Mongo id).
+            short_id = short_id_match.group(1)
+            steps_page = max(1, int(short_id_match.group(2))) if short_id_match.group(2) else 1
             data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
                                   slack_user_id=user_id)
             rows = self._assign_severity_short_ids(data.get("rows") or [])
-            target = next((r for r in rows if r.get("short_id") == text_stripped.lower()), None)
+            target = next((r for r in rows if r.get("short_id") == short_id), None)
             if not target:
                 return self._text_block(
-                    f"❌ No vulnerability found with ID `{text_stripped}`. "
+                    f"❌ No vulnerability found with ID `{short_id}`. "
                     f"Run `/vulndata` to see the current list with IDs."
                 )
-            return self._format_vulndata_single(target)
+            steps_data = None
+            fix_vuln_id = target.get("fix_vulnerability_id")
+            if fix_vuln_id:
+                steps_data = self._call_api(
+                    f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/",
+                    team_id, slack_user_id=user_id,
+                )
+            return self._format_vulndata_single(target, steps_data, offset=(steps_page - 1) * 3)
         elif text_stripped:
             fix_vuln_id = text_stripped
             data = self._call_api(
@@ -9255,12 +9268,18 @@ class SlackSlashCommandView(APIView):
                 "text": f"{icon} *Step {i}:* {step_name}"}})
         return blocks
 
-    def _format_vulndata_single(self, v):
+    def _format_vulndata_single(self, v, steps_data=None, offset=0):
         """
         Full detail for one vuln resolved from a short ID (h1/m5/c3...) via
-        /vulndata [id] — pulled from the admin-wide latest-report row, which
-        has host/port/protocol/observation dates but no steps (those live on
-        the per-user fix_vulnerability doc, not this report-level row).
+        /vulndata [id] — the base fields come from the admin-wide
+        latest-report row (host/port/protocol/observation dates); when a fix
+        record exists (fix_vulnerability_id present on the row, added to
+        LatestSuperAdminVulnerabilityRegisterAPIView earlier), we also fetch
+        and show the same mitigation steps a team member works through —
+        VIEW ONLY. Admin can see exactly what's being done, but there are no
+        Mark Step Done / Send for Verification buttons here — the backend
+        already blocks admin POSTs to step-complete (403), and this Slack
+        view mirrors that: read-only by design, not just by omission.
         """
         sid   = v.get("short_id", "?")
         name  = v.get("vul_name", "Unknown")
@@ -9270,7 +9289,7 @@ class SlackSlashCommandView(APIView):
         proto = v.get("protocol", "—") or "—"
         st    = v.get("status") or "open"
         icon  = "✅" if st == "closed" else "🔓"
-        return [
+        blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🔍 {sid.upper()} — {name}"[:150], "emoji": True}},
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*Severity*\n{sev}"},
@@ -9282,6 +9301,46 @@ class SlackSlashCommandView(APIView):
                 f"First seen: {v.get('first_observation', '—')} | Last check: {v.get('second_observation', '—')}"
             ),
         ]
+
+        if not steps_data or steps_data.get("detail"):
+            blocks.append({"type": "divider"})
+            blocks.append(self._text_block(
+                "_No fix has been started for this vulnerability yet — no steps to show._"
+            )[0])
+            return blocks
+
+        steps     = steps_data.get("steps") or []
+        completed = steps_data.get("completed_steps", 0)
+        total     = steps_data.get("total_steps", 0)
+        os_v      = steps_data.get("operating_system") or "—"
+        os_key    = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
+
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+            "text": f"*📋 Mitigation Steps (view only)* — {completed}/{total} done | OS: {os_v}"}})
+
+        PAGE_SIZE = 3
+        page_steps = steps[offset:offset + PAGE_SIZE]
+        for step in page_steps:
+            step_num  = step.get("step_number")
+            step_name = step.get("step_name") or f"Step {step_num}"
+            status_v  = step.get("status", "pending")
+            done      = status_v == "completed"
+            badge     = "✅ Done" if done else ("🔒 Locked" if step.get("is_locked") else "▶️ Pending")
+            os_data   = step.get(os_key) or {}
+            action    = (os_data.get("action") or "").strip()
+
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*{step_num}. {step_name}* — {badge}"}})
+            if action:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Action:*\n{action[:400]}"}})
+
+        current_page = offset // PAGE_SIZE + 1
+        if offset + PAGE_SIZE < len(steps):
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_Type `/vulndata {sid} {current_page + 1}` for more steps._"}})
+
+        return blocks
 
     def _format_vulndata_automation(self, data):
         items      = data if isinstance(data, list) else (data.get("results") or data.get("vulnerabilities") or [])
