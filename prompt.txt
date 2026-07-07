@@ -1,4 +1,0 @@
-mujhe admindashboard vali channel me particular vuln ka data show hona chahihe admin bs data dekh skta hai steps fix nai kr skta hai 
-
-to admin sahit pr bhi vuln ka steps ke sath pura data show hona chahihe 
-
