@@ -7572,12 +7572,27 @@ class SlackSlashCommandView(APIView):
             )
 
     def _cmd_vulndata(self, text, team_id, user_id):
-        if text.lower() == "automation":
+        """
+        /vulndata — List all vulns in the latest report (page 1)
+        /vulndata 2 — Page 2, etc. (reliable text-based paging, works
+          regardless of whether the Next/Previous buttons are wired up)
+        /vulndata automation — Automation breakdown stats
+        /vulndata [fix_vuln_id] — Step-by-step detail for one vuln
+        """
+        text_stripped = text.strip()
+        if text_stripped.lower() == "automation":
             data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
                                   slack_user_id=user_id)
             return self._format_vulndata_automation(data)
-        elif text:
-            fix_vuln_id = text.strip()
+        elif text_stripped.isdigit() and len(text_stripped) <= 3:
+            # Short all-digit argument = page number, not a fix_vuln_id
+            # (those are 24-char Mongo ObjectIds).
+            page = max(1, int(text_stripped))
+            data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
+                                  slack_user_id=user_id)
+            return self._format_vulndata_list(data, offset=(page - 1) * 10)
+        elif text_stripped:
+            fix_vuln_id = text_stripped
             data = self._call_api(
                 f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id,
                 slack_user_id=user_id,
@@ -8264,15 +8279,24 @@ class SlackSlashCommandView(APIView):
         /viewassigned — Show all assets & vulns assigned to your team
         /viewassigned vulns — Show only vulnerabilities with IDs (c1, h1...)
         /viewassigned assets — Show only assigned assets (hosts)
+        /viewassigned vulns 2 — Page 2 (reliable text-based paging — a
+        trailing page number always works, independent of the Next/Previous
+        buttons which need Slack's separate Interactivity feature enabled).
         """
-        arg = text.strip().lower()
+        tokens = text.strip().lower().split()
+        page = 1
+        if tokens and tokens[-1].isdigit():
+            page = max(1, int(tokens[-1]))
+            tokens = tokens[:-1]
+        arg = " ".join(tokens)
+
         vulns, _, raw_data = self._get_team_vulns(team_name, team_id, user_id)
         if arg == "assets":
             # Build asset list from vulns — avoids a separate API call with wrong JWT
             hosts = sorted({v.get("host_name", "") for v in vulns if v.get("host_name")})
             data  = {"by_team": [{"team": team_name, "asset_count": len(hosts), "assets": hosts}]}
             return self._format_team_assets(data, team_name)
-        return self._format_viewassigned(vulns, team_name, raw_data)
+        return self._format_viewassigned(vulns, team_name, raw_data, offset=(page - 1) * 10)
 
     def _cmd_mitigationstatus(self, text, team_id, user_id, team_name):
         """
@@ -9115,6 +9139,16 @@ class SlackSlashCommandView(APIView):
         if nav_buttons:
             blocks.append({"type": "actions", "elements": nav_buttons})
 
+        current_page = offset // PAGE_SIZE + 1
+        page_hints = []
+        if offset > 0:
+            page_hints.append(f"`/vulndata {current_page - 1}` for previous")
+        if end_num < count:
+            page_hints.append(f"`/vulndata {current_page + 1}` for next")
+        if page_hints:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_Or type: {' | '.join(page_hints)}_"}})
+
         return blocks
 
     def _format_vulndata_detail(self, data, fix_vuln_id):
@@ -9261,6 +9295,7 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": f"{icon} `{sid}` *{name}*\n      Host: `{host}` | {st_icon} {status.capitalize()}"}})
 
+        current_page = offset // PAGE_SIZE + 1
         nav_buttons = []
         if offset > 0:
             nav_buttons.append({
@@ -9278,6 +9313,18 @@ class SlackSlashCommandView(APIView):
             })
         if nav_buttons:
             blocks.append({"type": "actions", "elements": nav_buttons})
+
+        # Reliable text-command paging alongside the buttons — buttons need
+        # Slack's Interactivity feature wired up correctly; this always works
+        # since it's just a normal slash command.
+        page_hints = []
+        if offset > 0:
+            page_hints.append(f"`/viewassigned vulns {current_page - 1}` for previous")
+        if end_num < total:
+            page_hints.append(f"`/viewassigned vulns {current_page + 1}` for next")
+        if page_hints:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_Or type: {' | '.join(page_hints)}_"}})
 
         return blocks
 
