@@ -7443,9 +7443,46 @@ class SlackSlashCommandView(APIView):
         )
         return self._format_dashboard(data)
 
+    def _get_workspace_report_id(self, team_id):
+        """
+        Find the latest report_id for this Slack workspace's admin —
+        workspace-scoped first (same fix as _get_team_vulns Step 1: don't
+        widen to all staff system-wide unless nothing found for this
+        workspace, or a multi-tenant install would leak another admin's data).
+        """
+        import pymongo as _pymongo
+        from vaptfix.mongo_client import MongoContext
+
+        workspace_users = list(User.objects.filter(slack_team_id=team_id))
+
+        def _find(users):
+            if not users:
+                return None
+            ids    = [str(u.id) for u in users]
+            emails = [e for e in (getattr(u, "email", "") for u in users) if e]
+            conds  = [{"admin_id": aid} for aid in ids] + [{"admin_email": em} for em in emails]
+            with MongoContext() as db:
+                return db["nessus_reports"].find_one(
+                    {"$or": conds}, {"report_id": 1}, sort=[("uploaded_at", _pymongo.DESCENDING)],
+                )
+
+        meta = _find(workspace_users)
+        if not meta:
+            staff_users = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
+            all_users = list({u.id: u for u in workspace_users + staff_users}.values())
+            meta = _find(all_users)
+        return meta.get("report_id") if meta else None
+
     def _cmd_supportdata(self, text, team_id, user_id):
+        """
+        /supportdata — Per-ticket support request list (who raised it, which
+        vuln, status) — not just aggregate counts.
+        """
+        report_id = self._get_workspace_report_id(team_id)
+        if not report_id:
+            return self._text_block("❌ No report found for this workspace.")
         data = self._call_api(
-            "/api/admin/admindashboard/dashboard/support-requests/", team_id,
+            f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id,
             slack_user_id=user_id,
         )
         return self._format_supportdata(data)
@@ -8164,18 +8201,20 @@ class SlackSlashCommandView(APIView):
             logger.exception("[SlackUpload] File upload failed")
             return False
 
-    def _create_support_ticket(self, team_id, slack_user_id, team_name, message):
+    def _create_support_ticket(self, team_id, slack_user_id, team_name, message,
+                                vul_name=None, host_name=None, requested_by=None):
         """
         Insert a support request document into MongoDB so it appears in
         dashboard counts and /support status. Called when a team member
-        runs /support raise via Slack.
+        runs /support raise via Slack. vul_name/host_name are set when the
+        user specified a vuln short-id; requested_by should be a resolved
+        email (falls back to the raw Slack ID if resolution failed).
         """
         from datetime import datetime as _dt
         from vaptfix.mongo_client import MongoContext
         import pymongo as _pymongo
 
         try:
-            # Search workspace users + staff to find the admin who has reports
             workspace_users = list(User.objects.filter(slack_team_id=team_id))
             staff_users     = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
             all_users       = list({u.id: u for u in workspace_users + staff_users}.values())
@@ -8189,7 +8228,6 @@ class SlackSlashCommandView(APIView):
             conditions += [{"admin_email": em} for em in all_emails]
 
             with MongoContext() as db:
-                # Find the latest report among all workspace/staff users
                 latest = db["nessus_reports"].find_one(
                     {"$or": conditions},
                     {"report_id": 1, "admin_id": 1, "admin_email": 1},
@@ -8197,20 +8235,19 @@ class SlackSlashCommandView(APIView):
                 )
                 report_id   = str(latest.get("report_id", "")) if latest else ""
                 admin_id    = latest.get("admin_id", all_ids[0]) if latest else all_ids[0]
-                admin_email = latest.get("admin_email", all_emails[0] if all_emails else "") if latest else ""
 
                 doc = {
                     "report_id":    report_id,
                     "user_id":      slack_user_id,
                     "admin_id":     admin_id,
-                    "vul_name":     None,
-                    "host_name":    None,
+                    "vul_name":     vul_name,
+                    "host_name":    host_name,
                     "assigned_team": team_name,
                     "step_number":  0,
                     "description":  message,
                     "status":       "open",
                     "source":       "slack",
-                    "requested_by": f"slack:{slack_user_id}",
+                    "requested_by": requested_by or f"slack:{slack_user_id}",
                     "requested_at": _dt.utcnow(),
                 }
                 db["support_requests"].insert_one(doc)
@@ -8587,32 +8624,74 @@ class SlackSlashCommandView(APIView):
             data = {"results": tickets}
             return self._format_team_support_status(data, team_name)
         if sub == "raise":
-            message = parts[1].strip().strip('"').strip("'") if len(parts) > 1 else ""
-            if not message:
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if not rest:
                 return self._text_block(
                     '*Usage:* `/support raise "your message here"`\n'
-                    '_Example:_ `/support raise "Need help with SSL cert fix on 192.168.1.1"`'
+                    '_Example:_ `/support raise "Need help with SSL cert fix on 192.168.1.1"`\n'
+                    '_Or tie it to a vuln:_ `/support raise m5 "Need help with this fix"`'
                 )
+
+            # Optional leading vuln short-id (e.g. "m5") so the ticket shows
+            # the real vuln/host instead of always being a generic request.
+            target = None
+            tokens = rest.split(None, 1)
+            first_token = tokens[0].lower() if tokens else ""
+            if re.fullmatch(r"[chml]\d+", first_token):
+                target, _ = self._resolve_vuln_id(first_token, team_name, team_id, user_id)
+                rest = tokens[1].strip() if len(tokens) > 1 else ""
+
+            message = rest.strip().strip('"').strip("'")
+            if not message:
+                return self._text_block(
+                    '*Usage:* `/support raise ["vuln-id"] "your message here"`\n'
+                    '_Example:_ `/support raise m5 "Need help with this fix"`'
+                )
+
+            vul_name  = target.get("plugin_name") if target else None
+            host_name = target.get("host_name") if target else None
+
+            # Resolve the caller's real email instead of storing the raw
+            # Slack user ID — matches how web-raised tickets show requester.
+            requested_by = f"slack:{user_id}"
+            bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
+            if bot_token:
+                info = _http_get(
+                    "https://slack.com/api/users.info",
+                    params={"user": user_id},
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    timeout=10,
+                ).json()
+                if info.get("ok"):
+                    email = info.get("user", {}).get("profile", {}).get("email", "")
+                    if email:
+                        requested_by = email
+
             # Write to MongoDB so it shows in dashboard counts + /support status
-            self._create_support_ticket(team_id, user_id, team_name, message)
-            # Also notify admin via Slack
+            self._create_support_ticket(
+                team_id, user_id, team_name, message,
+                vul_name=vul_name, host_name=host_name, requested_by=requested_by,
+            )
+            vuln_line = f"*Vulnerability:* {vul_name} (`{host_name}`)\n" if vul_name else ""
             self._notify_admin(
                 team_id, user_id,
                 f"🎫 *Support Request* — *{team_name}*\n"
-                f"Message: {message}\n"
+                + (f"Vulnerability: {vul_name} on `{host_name}`\n" if vul_name else "")
+                + f"Message: {message}\n"
                 f"Please review and respond via dashboard."
             )
             return [
                 {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Request Raised", "emoji": True}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": (
-                    f"*Message:* {message}\n"
+                    vuln_line
+                    + f"*Message:* {message}\n"
                     f"*Team:* {team_name}\n\n"
                     "_Admin has been notified. Use `/support status` to track updates._"
                 )}},
             ]
         return self._text_block(
             "*Support Commands:*\n"
-            '• `/support raise "message"` — Open a new support ticket\n'
+            '• `/support raise ["vuln-id"] "message"` — Open a new support ticket\n'
             "• `/support status` — View your team's support tickets"
         )
 
@@ -8916,15 +8995,43 @@ class SlackSlashCommandView(APIView):
         return blocks
 
     def _format_supportdata(self, data):
-        return [
+        # SupportRequestByReportAPIView returns individual tickets — including
+        # requested_by, already resolved to an email by the backend
+        # (_resolve_requester), not a raw Slack/user ID.
+        results = data.get("results") or []
+        total   = data.get("count", len(results))
+        pending = sum(1 for r in results if (r.get("status") or "open") != "closed")
+        closed  = sum(1 for r in results if (r.get("status") or "") == "closed")
+
+        blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Requests", "emoji": True}},
-            self._ctx("Platform-wide support ticket counts — total raised by teams, pending review, and closed by admin."),
+            self._ctx("Every support ticket raised by teams — who raised it, which vuln, and status."),
             {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Total*\n{data.get('total', 0)}"},
-                {"type": "mrkdwn", "text": f"*Pending*\n{data.get('pending', 0)}"},
-                {"type": "mrkdwn", "text": f"*Closed*\n{data.get('closed', 0)}"},
+                {"type": "mrkdwn", "text": f"*Total*\n{total}"},
+                {"type": "mrkdwn", "text": f"*Pending*\n{pending}"},
+                {"type": "mrkdwn", "text": f"*Closed*\n{closed}"},
             ]},
+            {"type": "divider"},
         ]
+        if not results:
+            return blocks + self._text_block("No support requests found.")
+        for r in results[:10]:
+            vuln      = r.get("vul_name") or "General Request"
+            host      = r.get("host_name") or "—"
+            team      = r.get("assigned_team") or "—"
+            requester = r.get("requested_by") or "Unknown"
+            st        = r.get("status") or "open"
+            icon      = "✅" if st == "closed" else "🔓"
+            desc      = (r.get("description") or "")[:100]
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"{icon} *{vuln}* ({team})\n"
+                f"      Host: `{host}` | By: {requester} | Status: {st.capitalize()}"
+                + (f"\n      _{desc}_" if desc else "")
+            )}})
+        if len(results) > 10:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...and {len(results) - 10} more._"}})
+        return blocks
 
     def _format_extension_requests(self, data):
         results = data.get("results") or []
@@ -8962,21 +9069,28 @@ class SlackSlashCommandView(APIView):
             "text": f"{icon} Request `{request_id}` has been *{label}*."}}]
 
     def _format_vulndata_list(self, data):
-        items  = data if isinstance(data, list) else (data.get("results") or data.get("vulnerabilities") or [])
+        # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
+        # "rows" (not "results"/"vulnerabilities"), with fields vul_name/asset
+        # — reading the wrong keys silently produced "Total: 0" every time.
+        items  = data if isinstance(data, list) else (data.get("rows") or data.get("results") or data.get("vulnerabilities") or [])
         count  = len(items)
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🔍 Vulnerability Data", "emoji": True}},
-            self._ctx("All registered vulnerabilities with fix steps. Use `/vulndata [id]` for step-by-step fix guide, `/vulndata automation` for script stats."),
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total:* {count} vulnerabilities\nUse `/vulndata [id]` for fix steps."}},
+            self._ctx("All vulnerabilities in your latest report. Use `/vulndata automation` for script stats."),
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total:* {count} vulnerabilities"}},
             {"type": "divider"},
         ]
-        for v in items[:8]:
-            vid  = v.get("fix_vuln_id") or v.get("plugin_id") or str(v.get("_id", ""))
-            name = v.get("vulnerability_name") or v.get("plugin_name") or v.get("name") or "Unknown"
-            sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize()
+        for v in items[:10]:
+            name = v.get("vul_name") or v.get("vulnerability_name") or v.get("plugin_name") or "Unknown"
+            host = v.get("asset") or v.get("host_name") or "—"
+            sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
             st   = v.get("status") or "open"
+            icon = "✅" if st == "closed" else "🔓"
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"*{name}* [{sev}] — `{st}`\n`/vulndata {vid}`"}})
+                "text": f"{icon} *{name}* [{sev}]\n      Host: `{host}` | Status: {st.capitalize()}"}})
+        if count > 10:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_...and {count - 10} more._"}})
         return blocks
 
     def _format_vulndata_detail(self, data, fix_vuln_id):
