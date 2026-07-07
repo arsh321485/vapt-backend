@@ -1419,6 +1419,18 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                 if _admin_id_cache:
                     _clear_admin_dashboard_cache(_admin_id_cache)
 
+                # A step was just touched (from Slack OR the web dashboard —
+                # this endpoint is the single shared code path for both) —
+                # reflect that in the vuln's own status so /mitigationstatus
+                # and the admin dashboard can distinguish "steps started"
+                # from "nothing touched yet". Only promotes from "open";
+                # never overwrites "open/review" or "closed".
+                if fix_doc.get("status", "open") == "open":
+                    fix_coll.update_one(
+                        {"_id": ObjectId(fix_vuln_id), "status": "open"},
+                        {"$set": {"status": "in_progress"}},
+                    )
+
                 if completed_steps >= total_steps:
                     _msg = (
                         f"All {total_steps} steps completed at once. Click 'Send Verification' to notify superadmin."

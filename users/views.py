@@ -8068,27 +8068,6 @@ class SlackSlashCommandView(APIView):
         fix_vuln_id = (data.get("data") or {}).get("_id")
         return fix_vuln_id, data
 
-    def _mark_fix_in_progress(self, fix_vuln_id):
-        """
-        Nothing in the backend ever sets fix_vulnerabilities.status to
-        "in_progress" — it's created as "open" and only changes on /retest
-        ("open/review") or /approvefix ("closed"). Set it here directly
-        (same direct-Mongo-write pattern used elsewhere in this file, no API
-        touched) whenever a team marks any step done, so /mitigationstatus
-        can distinguish "steps started" from "nothing touched yet". Only
-        overwrites when still "open" so it never clobbers open/review/closed.
-        """
-        try:
-            from bson import ObjectId
-            from vaptfix.mongo_client import MongoContext
-            with MongoContext() as db:
-                db["fix_vulnerabilities"].update_one(
-                    {"_id": ObjectId(fix_vuln_id), "status": "open"},
-                    {"$set": {"status": "in_progress"}},
-                )
-        except Exception:
-            logger.exception(f"[SlackCmd] _mark_fix_in_progress failed for fix_vuln_id={fix_vuln_id}")
-
     def _get_channel_id_by_name(self, bot_token, channel_name):
         """Look up a Slack channel's ID by name via the Slack API."""
         resp = _http_get(
@@ -8349,7 +8328,6 @@ class SlackSlashCommandView(APIView):
             )
             if step_resp.get("detail") and not step_resp.get("message"):
                 return self._text_block(f"❌ `{step_resp.get('detail')}`")
-            self._mark_fix_in_progress(fix_vuln_id)
             self._notify_admin(
                 team_id, user_id,
                 f"🔧 *Step Update* — *{team_name}*\n"
@@ -8369,7 +8347,6 @@ class SlackSlashCommandView(APIView):
         )
         if all_resp.get("detail") and not all_resp.get("message"):
             return self._text_block(f"❌ `{all_resp.get('detail')}`")
-        self._mark_fix_in_progress(fix_vuln_id)
 
         self._notify_admin(
             team_id, user_id,
@@ -8871,12 +8848,14 @@ class SlackSlashCommandView(APIView):
         # API returns {total, vulnerabilities: [{vulnerability_name, risk_factor, assigned_team, ...}]}
         vulns = data.get("vulnerabilities") or data.get("results") or (data if isinstance(data, list) else [])
         counts = {"critical": 0, "high": 0, "medium": 0, "low": 0,
-                  "open": 0, "in_progress": 0, "fixed": 0}
+                  "open": 0, "in_progress": 0, "open_review": 0, "fixed": 0}
         if isinstance(vulns, list):
             for v in vulns:
                 # API uses risk_factor; fallback to severity for other shapes
                 sev = (v.get("risk_factor") or v.get("severity") or "").lower()
-                st  = (v.get("status") or "").lower().replace(" ", "_")
+                # normalize: "closed" -> "fixed" (this dict's label), "open/review" -> "open_review"
+                raw_st = (v.get("status") or "open").strip().lower()
+                st = "fixed" if raw_st == "closed" else raw_st.replace(" ", "_").replace("/", "_").replace("-", "_")
                 if sev in counts:
                     counts[sev] += 1
                 if st in counts:
@@ -8898,12 +8877,13 @@ class SlackSlashCommandView(APIView):
         )
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "🛡 Vulnerability Statistics", "emoji": True}},
-            self._ctx("Total vuln counts by severity (Critical/High/Medium/Low) and by status (Open/In Progress/Fixed)."),
+            self._ctx("Total vuln counts by severity (Critical/High/Medium/Low) and by status (Open/In Progress/Open-Review/Fixed)."),
             {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*By Severity*\n{bar_text}"}},
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*Open*\n{counts['open']}"},
                 {"type": "mrkdwn", "text": f"*In Progress*\n{counts['in_progress']}"},
+                {"type": "mrkdwn", "text": f"*Open/Review*\n{counts['open_review']}"},
                 {"type": "mrkdwn", "text": f"*Fixed*\n{counts['fixed']}"},
                 {"type": "mrkdwn", "text": f"*Total*\n{total}"},
             ]},

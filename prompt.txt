@@ -1,0 +1,62 @@
+
+
+1)
+
+admin dashboard me 
+
+bharti mali  [11:35 AM]
+/supportdata
+vaptfix  [11:35 AM]
+:hourglass_flowing_sand: Processing /supportdata...[11:35 AM]:ticket: Support RequestsPlatform-wide support ticket counts — total raised by teams, pending review, and closed by admin.Total
+2Pending
+2Closed
+0
+
+supportdata pr konse user ne request raise ki hai o show hona chahihe 
+
+o slack ke plotform se kre ya website se to data proper show hona chahihe 
+
+
+2)
+team channel me 
+/support raise m5 s1 "raised issue"
+vaptfix  [11:35 AM]
+:hourglass_flowing_sand: Processing /support...
+[11:35 AM]:ticket: Support Request RaisedMessage: m5 s1 "raised issue
+Team: Configuration Management
+
+Admin has been notified. Use /support status to track updates.Ritika Bhikonde  [11:35 AM]
+/support status
+vaptfix  [11:35 AM]
+:hourglass_flowing_sand: Processing /support...[11:35 AM]:ticket: Configuration Management — Support RequestsAll support tickets raised by your team. Use /support raise "message" to open a new ticketTotal
+2Open
+2Closed
+0:large_blue_circle: General Request
+m5 s1 "raised issue
+By: slack:U0BEVRYB67R | Status: Open:large_blue_circle: SSL Self-Signed Certificate | Host: 192.168.0.6
+raised request
+By: bhikonderitika4@gmail.com | Status: Open
+
+user ne support req raise ki to uska prop[er name nai show ho rha hai to o hona chahihe 
+
+website kr rhe to o website or slack ke plotform se proper dekh rha hai lekin slack ke plotform se kiya huaa proper data show nai ho rha hai 
+
+me aapko image bhi provide krti hu
+
+
+
+3)
+admin dashboard me 
+
+/vuln data 
+
+bharti mali  [11:30 AM]
+/vulndata
+vaptfix  [11:30 AM]
+:hourglass_flowing_sand: Processing /vulndata...[11:30 AM]:mag: Vulnerability DataAll registered vulnerabilities with fix steps. Use /vulndata [id] for step-by-step fix guide, /vulndata automation for script stats.Total: 0 vulnerabilities
+Use /vulndata [id] for fix steps.
+
+
+to yha data show nai ho rha hai to vuln ka data show hona chahihe 
+
+plan btao fir code krna 
