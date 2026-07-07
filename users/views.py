@@ -9068,19 +9068,27 @@ class SlackSlashCommandView(APIView):
         return [{"type": "section", "text": {"type": "mrkdwn",
             "text": f"{icon} Request `{request_id}` has been *{label}*."}}]
 
-    def _format_vulndata_list(self, data):
+    def _format_vulndata_list(self, data, offset=0):
         # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
         # "rows" (not "results"/"vulnerabilities"), with fields vul_name/asset
         # — reading the wrong keys silently produced "Total: 0" every time.
-        items  = data if isinstance(data, list) else (data.get("rows") or data.get("results") or data.get("vulnerabilities") or [])
-        count  = len(items)
+        PAGE_SIZE = 10
+        items = data if isinstance(data, list) else (data.get("rows") or data.get("results") or data.get("vulnerabilities") or [])
+        count = len(items)
+
+        offset = max(0, min(offset, max(count - 1, 0)))
+        page_items = items[offset:offset + PAGE_SIZE]
+        start_num  = offset + 1 if page_items else 0
+        end_num    = offset + len(page_items)
+
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🔍 Vulnerability Data", "emoji": True}},
             self._ctx("All vulnerabilities in your latest report. Use `/vulndata automation` for script stats."),
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total:* {count} vulnerabilities"}},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Total:* {count} vulnerabilities — showing {start_num}-{end_num}"}},
             {"type": "divider"},
         ]
-        for v in items[:10]:
+        for v in page_items:
             name = v.get("vul_name") or v.get("vulnerability_name") or v.get("plugin_name") or "Unknown"
             host = v.get("asset") or v.get("host_name") or "—"
             sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
@@ -9088,9 +9096,25 @@ class SlackSlashCommandView(APIView):
             icon = "✅" if st == "closed" else "🔓"
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": f"{icon} *{name}* [{sev}]\n      Host: `{host}` | Status: {st.capitalize()}"}})
-        if count > 10:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"_...and {count - 10} more._"}})
+
+        nav_buttons = []
+        if offset > 0:
+            nav_buttons.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
+                "action_id": "view_vulndata_page",
+                "value": f"{max(0, offset - PAGE_SIZE)}",
+            })
+        if end_num < count:
+            nav_buttons.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
+                "action_id": "view_vulndata_page",
+                "value": f"{offset + PAGE_SIZE}",
+            })
+        if nav_buttons:
+            blocks.append({"type": "actions", "elements": nav_buttons})
+
         return blocks
 
     def _format_vulndata_detail(self, data, fix_vuln_id):
@@ -9845,6 +9869,22 @@ class SlackInteractivityView(APIView):
                 page_offset = int(vp[1]) if len(vp) > 1 and vp[1].isdigit() else 0
                 vulns, _, raw_data = slash._get_team_vulns(page_team_name, team_id, slack_user_id)
                 blocks = slash._format_viewassigned(vulns, page_team_name, raw_data, offset=page_offset)
+                if response_url:
+                    _http_post(response_url, json={
+                        "response_type": "in_channel",
+                        "replace_original": True,
+                        "blocks": blocks,
+                    }, timeout=10)
+                return
+
+            if action_id == "view_vulndata_page":
+                # value format here is just "offset" — admin-channel command,
+                # re-fetched with the admin token (not a team member token).
+                page_offset = int(value) if value.isdigit() else 0
+                vd_data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                blocks = slash._format_vulndata_list(vd_data, offset=page_offset)
                 if response_url:
                     _http_post(response_url, json={
                         "response_type": "in_channel",
