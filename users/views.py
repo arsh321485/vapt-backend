@@ -9337,8 +9337,17 @@ class SlackSlashCommandView(APIView):
 
         current_page = offset // PAGE_SIZE + 1
         if offset + PAGE_SIZE < len(steps):
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🔎 View Next Steps", "emoji": True},
+                    "action_id": "view_vulndata_steps_page",
+                    "value": f"{sid}|{current_page + 1}",
+                }],
+            })
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"_Type `/vulndata {sid} {current_page + 1}` for more steps._"}})
+                "text": f"_Or type: `/vulndata {sid} {current_page + 1}`_"}})
 
         return blocks
 
@@ -10164,6 +10173,36 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 blocks = slash._format_vulndata_list(vd_data, offset=page_offset)
+                self._post_response_url(response_url, {
+                    "response_type": "in_channel",
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id == "view_vulndata_steps_page":
+                # value format here is "short_id|page" — admin-channel
+                # read-only step pager for /vulndata [id], mirrors the text
+                # fallback (`/vulndata h1 2`) as a real button.
+                vp = value.split("|")
+                v_short_id = vp[0] if len(vp) > 0 else ""
+                v_page = int(vp[1]) if len(vp) > 1 and vp[1].isdigit() else 1
+                vd_data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
+                target = next((r for r in rows if r.get("short_id") == v_short_id), None)
+                if not target:
+                    blocks = slash._text_block(f"❌ Vulnerability `{v_short_id}` not found. Run `/vulndata` again.")
+                else:
+                    steps_data = None
+                    fix_vuln_id = target.get("fix_vulnerability_id")
+                    if fix_vuln_id:
+                        steps_data = slash._call_api(
+                            f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/",
+                            team_id, slack_user_id=slack_user_id,
+                        )
+                    blocks = slash._format_vulndata_single(target, steps_data, offset=(v_page - 1) * 3)
                 self._post_response_url(response_url, {
                     "response_type": "in_channel",
                     "replace_original": True,
