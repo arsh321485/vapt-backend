@@ -49,6 +49,32 @@ def _normalize_iso(dt):
         return d.isoformat()
     return str(dt)
 
+def _normalize_host_os(host):
+    """
+    Normalize a nessus host's host_information.OS into the canonical
+    Windows/Linux/Cisco values used elsewhere (automation-scripts API,
+    Slack bot's _get_team_vulns) — same detection, duplicated here since
+    this view builds its rows in a single pass over vulnerabilities_by_host
+    rather than sharing a helper module with users/views.py.
+    """
+    os_raw = (
+        (host.get("host_information") or {}).get("OS")
+        or (host.get("host_information") or {}).get("operating-system")
+        or (host.get("host_information") or {}).get("operating_system")
+        or (host.get("host_information") or {}).get("os")
+        or ""
+    ).strip().lower()
+    if not os_raw:
+        return None
+    if "windows" in os_raw:
+        return "Windows"
+    if "linux" in os_raw or "ubuntu" in os_raw or "unix" in os_raw:
+        return "Linux"
+    if "cisco" in os_raw or "ios" in os_raw:
+        return "Cisco"
+    return None
+
+
 def _resolve_requester(doc):
     """
     Returns requester display name for a support_requests document.
@@ -290,6 +316,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 # Show both Open and Closed vulnerabilities with correct status
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
+                    host_os = _normalize_host_os(host)
 
                     for v in host.get("vulnerabilities", []):
 
@@ -337,6 +364,13 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             "first_observation": _normalize_iso(first_obs),
                             "second_observation": _normalize_iso(second_obs),
                             "status": vuln_status,
+                            # Mongo _id of the fix_vulnerability doc (distinct from
+                            # "id" above, a throwaway UUID for list rendering only) —
+                            # the frontend needs this to call
+                            # fix-vulnerability/{fix_vulnerability_id}/step-complete/
+                            # directly instead of going through create/ first.
+                            "fix_vulnerability_id": str(_fix["_id"]) if _fix.get("_id") else None,
+                            "operating_system": host_os,
                         })
 
                 # Current user's admin info
