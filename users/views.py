@@ -9852,6 +9852,25 @@ class SlackInteractivityView(APIView):
         # Slack just needs a 200 within 3s for block_actions — no visible body needed.
         return Response({}, status=200)
 
+    def _post_response_url(self, response_url, payload, action_id=""):
+        """
+        POST to Slack's response_url and actually check the result — the
+        previous version fired-and-forgot this call, so if Slack rejected
+        the payload (e.g. invalid Block Kit structure) the button click
+        would silently do nothing with zero trace in our own logs.
+        """
+        if not response_url:
+            return
+        try:
+            resp = _http_post(response_url, json=payload, timeout=10)
+            if resp is None or resp.status_code != 200 or (resp.text or "").strip() != "ok":
+                logger.warning(
+                    f"[SlackInteractivity] response_url POST for action={action_id} "
+                    f"got status={getattr(resp, 'status_code', None)} body={getattr(resp, 'text', None)!r}"
+                )
+        except Exception:
+            logger.exception(f"[SlackInteractivity] response_url POST failed for action={action_id}")
+
     def _handle_action(self, action_id, value, team_id, slack_user_id, response_url):
         try:
             parts       = value.split("|")
@@ -9869,12 +9888,11 @@ class SlackInteractivityView(APIView):
                 page_offset = int(vp[1]) if len(vp) > 1 and vp[1].isdigit() else 0
                 vulns, _, raw_data = slash._get_team_vulns(page_team_name, team_id, slack_user_id)
                 blocks = slash._format_viewassigned(vulns, page_team_name, raw_data, offset=page_offset)
-                if response_url:
-                    _http_post(response_url, json={
-                        "response_type": "in_channel",
-                        "replace_original": True,
-                        "blocks": blocks,
-                    }, timeout=10)
+                self._post_response_url(response_url, {
+                    "response_type": "in_channel",
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
                 return
 
             if action_id == "view_vulndata_page":
@@ -9885,12 +9903,11 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 blocks = slash._format_vulndata_list(vd_data, offset=page_offset)
-                if response_url:
-                    _http_post(response_url, json={
-                        "response_type": "in_channel",
-                        "replace_original": True,
-                        "blocks": blocks,
-                    }, timeout=10)
+                self._post_response_url(response_url, {
+                    "response_type": "in_channel",
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
                 return
 
             if action_id == "view_more_steps":
@@ -9902,12 +9919,11 @@ class SlackInteractivityView(APIView):
                     blocks = slash._text_block(f"❌ `{steps_data.get('detail')}`")
                 else:
                     blocks = slash._format_steps_status(steps_data, vuln_id, fix_vuln_id, team_name, offset=offset)
-                if response_url:
-                    _http_post(response_url, json={
-                        "response_type": "in_channel",
-                        "replace_original": True,
-                        "blocks": blocks,
-                    }, timeout=10)
+                self._post_response_url(response_url, {
+                    "response_type": "in_channel",
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
                 return
 
             if action_id == "send_verification":
@@ -9916,11 +9932,10 @@ class SlackInteractivityView(APIView):
                     team_id, slack_user_id, method="post",
                 )
                 if resp.get("status") not in ("open/review", "closed"):
-                    if response_url:
-                        _http_post(response_url, json={
-                            "response_type": "ephemeral",
-                            "text": f"❌ {resp.get('message') or resp.get('detail') or 'Could not send verification.'}",
-                        }, timeout=10)
+                    self._post_response_url(response_url, {
+                        "response_type": "ephemeral",
+                        "text": f"❌ {resp.get('message') or resp.get('detail') or 'Could not send verification.'}",
+                    }, action_id)
                     return
                 if team_name:
                     slash._notify_admin(
@@ -9928,19 +9943,18 @@ class SlackInteractivityView(APIView):
                         f"🔁 *Retest Request* — *{team_name}*\n"
                         f"Vulnerability `{vuln_id}` — team requests admin verification/retesting (via button)."
                     )
-                if response_url:
-                    _http_post(response_url, json={
-                        "response_type": "in_channel",
-                        "replace_original": True,
-                        "blocks": [
-                            {"type": "header", "text": {"type": "plain_text", "text": "🔁 Retest Request Submitted", "emoji": True}},
-                            {"type": "section", "text": {"type": "mrkdwn", "text": (
-                                f"*Vulnerability ID:* `{vuln_id}`\n\n"
-                                "_Verification request recorded in VaptFix. Admin notified — "
-                                "they will schedule verification and confirm the fix._"
-                            )}},
-                        ],
-                    }, timeout=10)
+                self._post_response_url(response_url, {
+                    "response_type": "in_channel",
+                    "replace_original": True,
+                    "blocks": [
+                        {"type": "header", "text": {"type": "plain_text", "text": "🔁 Retest Request Submitted", "emoji": True}},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": (
+                            f"*Vulnerability ID:* `{vuln_id}`\n\n"
+                            "_Verification request recorded in VaptFix. Admin notified — "
+                            "they will schedule verification and confirm the fix._"
+                        )}},
+                    ],
+                }, action_id)
                 return
 
             if action_id == "mitigate_all":
@@ -9956,8 +9970,7 @@ class SlackInteractivityView(APIView):
                     f"Vulnerability `{vuln_id}` — a step was marked complete by team (via button)."
                 )
             else:
-                if response_url:
-                    _http_post(response_url, json={"response_type": "ephemeral", "text": "❌ Unknown action."}, timeout=10)
+                self._post_response_url(response_url, {"response_type": "ephemeral", "text": "❌ Unknown action."}, action_id)
                 return
 
             resp = slash._call_user_api(
@@ -9966,11 +9979,10 @@ class SlackInteractivityView(APIView):
             )
 
             if not resp.get("message"):
-                if response_url:
-                    _http_post(response_url, json={
-                        "response_type": "ephemeral",
-                        "text": f"❌ {resp.get('detail') or 'Could not update step.'}",
-                    }, timeout=10)
+                self._post_response_url(response_url, {
+                    "response_type": "ephemeral",
+                    "text": f"❌ {resp.get('detail') or 'Could not update step.'}",
+                }, action_id)
                 return
 
             if team_name:
@@ -9987,21 +9999,15 @@ class SlackInteractivityView(APIView):
             else:
                 blocks = slash._format_steps_status(steps_data, vuln_id, fix_vuln_id, team_name)
 
-            if response_url:
-                _http_post(response_url, json={
-                    "response_type": "in_channel",
-                    "replace_original": True,
-                    "blocks": blocks,
-                }, timeout=10)
+            self._post_response_url(response_url, {
+                "response_type": "in_channel",
+                "replace_original": True,
+                "blocks": blocks,
+            }, action_id)
 
         except Exception as exc:
             logger.exception(f"[SlackInteractivity] {action_id} failed: {exc}")
-            if response_url:
-                try:
-                    _http_post(response_url, json={
-                        "response_type": "ephemeral",
-                        "text": f"❌ Action failed: {exc}",
-                    }, timeout=10)
-                except Exception:
-                    pass
-        return blocks
+            self._post_response_url(response_url, {
+                "response_type": "ephemeral",
+                "text": f"❌ Action failed: {exc}",
+            }, action_id)
