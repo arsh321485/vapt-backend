@@ -9870,17 +9870,38 @@ class SlackInteractivityView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
+    DEBUG_LOG_PATH = "/tmp/slack_interactivity_debug.log"
+
+    def _debug_write(self, msg):
+        """
+        Belt-and-suspenders diagnostic: write straight to a dedicated file,
+        bypassing Django's logging config and Python's stdout entirely —
+        neither logger.warning nor print() were showing up in
+        gunicorn-error.log (likely because gunicorn wasn't started with
+        --capture-output, so worker stdout/stderr isn't routed there).
+        A plain file write can't get lost in that ambiguity.
+        """
+        try:
+            from datetime import datetime as _dt
+            with open(self.DEBUG_LOG_PATH, "a") as f:
+                f.write(f"{_dt.utcnow().isoformat()} {msg}\n")
+        except Exception:
+            pass
+
     def post(self, request):
         try:
             payload = json.loads(request.POST.get("payload", "{}"))
         except (ValueError, TypeError):
+            self._debug_write("post(): failed to parse payload JSON")
             return Response({}, status=200)
 
         if payload.get("type") != "block_actions":
+            self._debug_write(f"post(): ignored non-block_actions type={payload.get('type')}")
             return Response({}, status=200)
 
         actions = payload.get("actions") or []
         if not actions:
+            self._debug_write("post(): block_actions payload had no actions[]")
             return Response({}, status=200)
 
         action        = actions[0]
@@ -9890,6 +9911,10 @@ class SlackInteractivityView(APIView):
         slack_user_id = (payload.get("user") or {}).get("id", "")
         response_url  = payload.get("response_url", "")
 
+        self._debug_write(
+            f"post(): received action_id={action_id} value={value!r} "
+            f"team_id={team_id} user_id={slack_user_id} has_response_url={bool(response_url)}"
+        )
         print(
             f"[SlackInteractivity] received action_id={action_id} value={value!r} "
             f"team_id={team_id} user_id={slack_user_id} has_response_url={bool(response_url)}",
@@ -9913,25 +9938,26 @@ class SlackInteractivityView(APIView):
         would silently do nothing with zero trace in our own logs.
         """
         if not response_url:
-            print(f"[SlackInteractivity] action={action_id}: no response_url in payload!", flush=True)
+            self._debug_write(f"_post_response_url: action={action_id} has NO response_url!")
             return
         try:
             resp = _http_post(response_url, json=payload, timeout=10)
             ok = resp is not None and resp.status_code == 200 and (resp.text or "").strip() == "ok"
             if not ok:
                 msg = (
-                    f"[SlackInteractivity] response_url POST for action={action_id} "
+                    f"_post_response_url: action={action_id} "
                     f"got status={getattr(resp, 'status_code', None)} body={getattr(resp, 'text', None)!r}"
                 )
-                logger.warning(msg)
-                print(msg, flush=True)
+                logger.warning(f"[SlackInteractivity] {msg}")
+                self._debug_write(msg)
             else:
-                print(f"[SlackInteractivity] action={action_id}: response_url POST OK", flush=True)
+                self._debug_write(f"_post_response_url: action={action_id} OK (Slack accepted it)")
         except Exception as exc:
             logger.exception(f"[SlackInteractivity] response_url POST failed for action={action_id}")
-            print(f"[SlackInteractivity] action={action_id}: response_url POST raised {exc!r}", flush=True)
+            self._debug_write(f"_post_response_url: action={action_id} raised {exc!r}")
 
     def _handle_action(self, action_id, value, team_id, slack_user_id, response_url):
+        self._debug_write(f"_handle_action: START action={action_id} value={value!r}")
         try:
             parts       = value.split("|")
             fix_vuln_id = parts[0] if len(parts) > 0 else ""
