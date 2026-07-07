@@ -9843,6 +9843,12 @@ class SlackInteractivityView(APIView):
         slack_user_id = (payload.get("user") or {}).get("id", "")
         response_url  = payload.get("response_url", "")
 
+        print(
+            f"[SlackInteractivity] received action_id={action_id} value={value!r} "
+            f"team_id={team_id} user_id={slack_user_id} has_response_url={bool(response_url)}",
+            flush=True,
+        )
+
         threading.Thread(
             target=self._handle_action,
             args=(action_id, value, team_id, slack_user_id, response_url),
@@ -9860,16 +9866,23 @@ class SlackInteractivityView(APIView):
         would silently do nothing with zero trace in our own logs.
         """
         if not response_url:
+            print(f"[SlackInteractivity] action={action_id}: no response_url in payload!", flush=True)
             return
         try:
             resp = _http_post(response_url, json=payload, timeout=10)
-            if resp is None or resp.status_code != 200 or (resp.text or "").strip() != "ok":
-                logger.warning(
+            ok = resp is not None and resp.status_code == 200 and (resp.text or "").strip() == "ok"
+            if not ok:
+                msg = (
                     f"[SlackInteractivity] response_url POST for action={action_id} "
                     f"got status={getattr(resp, 'status_code', None)} body={getattr(resp, 'text', None)!r}"
                 )
-        except Exception:
+                logger.warning(msg)
+                print(msg, flush=True)
+            else:
+                print(f"[SlackInteractivity] action={action_id}: response_url POST OK", flush=True)
+        except Exception as exc:
             logger.exception(f"[SlackInteractivity] response_url POST failed for action={action_id}")
+            print(f"[SlackInteractivity] action={action_id}: response_url POST raised {exc!r}", flush=True)
 
     def _handle_action(self, action_id, value, team_id, slack_user_id, response_url):
         try:
