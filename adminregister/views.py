@@ -3820,15 +3820,19 @@ def _render_report_html(data):
   .content {{ position: relative; z-index: 1; }}
   .eyebrow {{ margin: 0; color: #0f696e; font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }}
   .page-title {{ margin: 2px 0 10px; color: #241447; font-size: 44px; font-weight: 800; letter-spacing: -.02em; line-height: 1.05; }}
-  .meta-items {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }}
+  .meta-items {{ display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }}
+  .meta-item {{ flex: 1 1 200px; }}
   .meta-item span {{ display: block; font-size: 10px; color: #8b95a7; text-transform: uppercase; font-weight: 700; letter-spacing: .08em; }}
   .meta-item strong {{ font-size: 14px; color: #20293a; font-weight: 700; line-height: 1.3; }}
-  .top-grid {{ display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 14px; }}
+  .top-grid {{ display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 14px; }}
+  .top-grid .card:first-child {{ flex: 2 1 380px; }}
+  .top-grid .card:last-child {{ flex: 1 1 220px; }}
   .card {{ background: #fff; border: 1px solid #e8e8ef; border-radius: 18px; padding: 18px; }}
   .card h3 {{ margin: 0 0 10px; color: #222848; font-size: 22px; font-weight: 700; }}
   .icon-mark {{ color: #0f696e; font-size: 18px; margin-right: 8px; vertical-align: middle; }}
   .executive-card p {{ margin: 0 0 10px; color: #5a6477; line-height: 1.58; font-size: 14px; }}
-  .score-grid {{ margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+  .score-grid {{ margin-top: 14px; display: flex; gap: 10px; }}
+  .score-grid .score-box {{ flex: 1 1 0; }}
   .score-box {{ background: #f4f5f8; border-radius: 10px; padding: 12px; }}
   .score-box span {{ display: block; font-size: 11px; color: #8b95a7; text-transform: uppercase; font-weight: 700; letter-spacing: .06em; }}
   .score-box strong {{ font-size: 34px; color: #1f2a42; line-height: 1.08; }}
@@ -3839,7 +3843,8 @@ def _render_report_html(data):
   .progress-ring::before {{ content: ''; width: 104px; height: 104px; border-radius: 50%; background: #25124d; }}
   .progress-text {{ position: absolute; font-size: 38px; font-weight: 800; color: #fff; }}
   .progress-meta {{ color: #d6d3e8; font-size: 13px; display: flex; justify-content: space-between; gap: 10px; }}
-  .severity-stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }}
+  .severity-stats-grid {{ display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }}
+  .severity-stats-grid .stat-card {{ flex: 1 1 140px; }}
   .stat-card {{ background: #fff; border: 1px solid #ececf2; border-radius: 14px; padding: 10px 12px; min-height: 118px;
     display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 1px 4px rgba(36,20,71,.08); }}
   .stat-card span {{ font-size: 10px; color: #8b95a7; text-transform: uppercase; font-weight: 800; letter-spacing: .07em; }}
@@ -3849,11 +3854,13 @@ def _render_report_html(data):
   .stat-card.high strong {{ color: #d97706; }}
   .stat-card.medium strong {{ color: #ca8a04; }}
   .stat-card.low {{ border-bottom: 3px solid #0f696e; }} .stat-card.low strong {{ color: #0f696e; }}
-  .chart-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }}
+  .chart-grid {{ display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }}
+  .chart-grid .card {{ flex: 1 1 300px; }}
   .mini-meta {{ margin: -4px 0 10px; font-size: 11px; color: #8b95a7; }}
-  .severity-visual {{ display: grid; grid-template-columns: minmax(180px, 1fr) minmax(160px, .9fr); align-items: center; gap: 12px; }}
-  .donut {{ width: min(100%, 220px); aspect-ratio: 1/1; border-radius: 50%; display: flex; align-items: center; justify-content: center; }}
-  .donut-center {{ width: 66%; aspect-ratio: 1/1; border-radius: 50%; background: #fff; display: flex; flex-direction: column;
+  .severity-visual {{ display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }}
+  .severity-visual > div:last-child {{ flex: 1 1 160px; }}
+  .donut {{ width: 200px; height: 200px; flex: 0 0 200px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }}
+  .donut-center {{ width: 132px; height: 132px; border-radius: 50%; background: #fff; display: flex; flex-direction: column;
     align-items: center; justify-content: center; box-shadow: inset 0 0 0 1px #e5e7eb; }}
   .donut-center strong {{ font-size: 36px; line-height: 1; color: #1f2a42; }}
   .donut-center span {{ font-size: 11px; letter-spacing: .08em; color: #8b95a7; font-weight: 700; }}
@@ -3861,9 +3868,9 @@ def _render_report_html(data):
   .legend-color {{ width: 10px; height: 10px; border-radius: 3px; display: inline-block; }}
   .legend-label {{ flex: 1; }}
   .legend-pct {{ font-size: 16px; color: #273247; }}
-  .table-wrap {{ margin-top: 10px; overflow-x: auto; max-height: 420px; overflow-y: auto; }}
+  .table-wrap {{ margin-top: 10px; overflow-x: auto; }}
   table {{ width: 100%; border-collapse: collapse; }}
-  th {{ background: #f4f5f8; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #8b95a7; font-weight: 800; padding: 12px 10px; text-align: left; position: sticky; top: 0; }}
+  th {{ background: #f4f5f8; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #8b95a7; font-weight: 800; padding: 12px 10px; text-align: left; }}
   td {{ border-bottom: 1px solid #edf0f4; padding: 12px 10px; color: #2d3748; font-size: 13px; }}
   .vname {{ font-weight: 600; color: #1f2a42; }}
   .sev-pill, .status-pill {{ font-size: 10px; font-weight: 800; border-radius: 6px; padding: 4px 8px; text-transform: uppercase; }}
@@ -3876,7 +3883,8 @@ def _render_report_html(data):
   .team-pill-patch {{ color: #8a4f00; background: #fff3dd; border-color: #ffd089; }}
   .team-pill-configuration {{ color: #0f696e; background: #e6f7f8; border-color: #8dd9dd; }}
   .team-pill-architectural {{ color: #6b21a8; background: #f3e8ff; border-color: #d8b4fe; }}
-  @media (max-width: 900px) {{ .top-grid, .chart-grid, .severity-stats-grid {{ grid-template-columns: 1fr; }} }}
+  @media (max-width: 900px) {{ .top-grid, .chart-grid, .severity-stats-grid {{ flex-direction: column; }} }}
+  @media print {{ .wrap {{ padding: 24px; }} table {{ page-break-inside: auto; }} tr {{ page-break-inside: avoid; page-break-after: auto; }} }}
 </style>
 </head>
 <body>
@@ -3948,12 +3956,27 @@ def _render_report_html(data):
 </html>"""
 
 
+def _render_report_pdf(html):
+    """
+    Converts the same HTML _render_report_html() produces into PDF bytes
+    using WeasyPrint — no new heavy dependency (it's already pinned in
+    requirements.txt). Requires WeasyPrint's system libs (Pango/Cairo/
+    GDK-Pixbuf) to be installed on the host; raises on import/render
+    failure so callers can surface a clear error instead of a silent 500.
+    """
+    from weasyprint import HTML as WeasyHTML
+    return WeasyHTML(string=html).write_pdf()
+
+
 class AdminReportDownloadAPIView(APIView):
     """
-    GET /api/admin/adminregister/report/download/
-    Returns the report as a downloadable, self-contained HTML file —
-    same data as download-data/ above, rendered server-side (no browser
-    needed) so it can also be generated for Slack's /downloadreport.
+    GET /api/admin/adminregister/report/download/?type=html|pdf
+    Returns the report as a downloadable, self-contained file — same data
+    as download-data/ above, rendered server-side (no browser needed) so
+    it can also be generated for Slack's /downloadreport. Defaults to
+    html (unchanged from before) when ?type= is omitted. Deliberately not
+    named "format" — that's a reserved DRF query param for its own
+    renderer content-negotiation and silently breaks if reused.
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -3965,6 +3988,27 @@ class AdminReportDownloadAPIView(APIView):
             return Response({"detail": "No reports found for your account"}, status=status.HTTP_404_NOT_FOUND)
 
         html = _render_report_html(data)
+        # NOTE: intentionally "type", not "format" — DRF reserves ?format=
+        # for its own renderer content-negotiation (e.g. ?format=json),
+        # which silently swallowed our custom value and produced a bare
+        # "Not found" before this view's code ever ran.
+        fmt = (request.query_params.get("type") or "html").strip().lower()
+
+        if fmt == "pdf":
+            try:
+                pdf_bytes = _render_report_pdf(html)
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                return Response(
+                    {"detail": "PDF generation unavailable on this server", "error": str(exc)},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+            response = HttpResponse(pdf_bytes, content_type="application/pdf")
+            filename = f"vaptfix-report-{data['report_id'] or 'latest'}.pdf"
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+
         response = HttpResponse(html, content_type="text/html")
         filename = f"vaptfix-report-{data['report_id'] or 'latest'}.html"
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
