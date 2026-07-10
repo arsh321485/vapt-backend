@@ -7308,7 +7308,7 @@ class SlackSlashCommandView(APIView):
     # auto-post-on-join handler (SlackEventsView) and the click handler
     # (SlackInteractivityView) build an identical, consistent set.
     _NAV_ITEMS = [
-        ("nav_home",     "🏠 Home"),
+        ("nav_home",     "📊 Dashboard"),
         ("nav_fix",      "🔧 Fix"),
         ("nav_register", "📋 Register"),
         ("nav_team",     "👥 Team"),
@@ -9231,16 +9231,38 @@ class SlackSlashCommandView(APIView):
             f"```"
         )
 
+        total_fixed = fixed.get("total_fixed", 0)
+        fixed_legend = "\n".join([
+            f"• 🔴 Critical: {fixed.get('critical_fixed', 0)}",
+            f"• 🟠 High: {fixed.get('high_fixed', 0)}",
+            f"• 🟡 Medium: {fixed.get('medium_fixed', 0)}",
+            f"• 🔵 Low: {fixed.get('low_fixed', 0)}",
+        ])
+
+        risk_bucket = "🔴 High" if avg_score >= 7 else ("🟡 Moderate" if avg_score >= 4 else "🟢 Low")
+
+        # Block Kit has no custom CSS/SVG (no literal gauge circles or donut
+        # charts like dashboard.html) — this mirrors the same card groupings
+        # and data via dividers + fields instead, which is the closest a
+        # Slack message can get to that bento-grid look.
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "📊 VaptFix Admin Dashboard", "emoji": True}},
             self._ctx("Overall summary — assets, vuln severity, mitigation timeline, mean fix time, and support tickets."),
             {"type": "divider"},
             {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Total Assets*\n{total_assets}"},
-                {"type": "mrkdwn", "text": f"*Avg Risk Score*\n{avg_score} / 10"},
+                {"type": "mrkdwn", "text": f"*🏢 Total Assets*\n{total_assets}"},
+                {"type": "mrkdwn", "text": f"*⚠️ Avg Risk Score*\n{avg_score} / 10 — {risk_bucket}"},
+                {"type": "mrkdwn", "text": f"*⚡ Mean Time to Remediate*\n{mtr.get('label', 'N/A')}"},
             ]},
+            {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn",
                 "text": "*🔴 Vulnerabilities by Severity*\n" + vuln_chart}},
+            {"type": "divider"},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*🔧 Vulns Fixed*\n{total_fixed} / {total_vulns}"},
+                {"type": "mrkdwn", "text": f"*Breakdown*\n{fixed_legend}"},
+            ]},
+            {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn", "text": (
                 "*⏱ Mitigation Timeline*\n"
                 + "\n".join([
@@ -9250,10 +9272,7 @@ class SlackSlashCommandView(APIView):
                     tl_line("low",      timeline.get("low")),
                 ])
             )}},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*⚡ Mean Time to Remediate*\n{mtr.get('label', 'N/A')}"},
-                {"type": "mrkdwn", "text": f"*🔧 Vulns Fixed*\n{fixed.get('total_fixed', 0)} / {total_vulns}"},
-            ]},
+            {"type": "divider"},
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*🎫 Support Requests*\n{support.get('total', 0)} total"},
                 {"type": "mrkdwn", "text": f"*Pending / Closed*\n{support.get('pending', 0)} / {support.get('closed', 0)}"},
