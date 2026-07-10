@@ -3839,7 +3839,7 @@ def _render_report_html(data):
   .dark-card {{ background: #25124d; color: #fff; text-align: center; display: flex; flex-direction: column; gap: 10px; justify-content: center; }}
   .dark-card h3 {{ color: #fff; font-size: 22px; }}
   .progress-ring {{ margin: 8px auto; width: 140px; height: 140px; border-radius: 50%;
-    background: conic-gradient(#0f696e calc(var(--p, 0) * 1%), rgba(255,255,255,.2) 0); display: flex; align-items: center; justify-content: center; position: relative; }}
+    display: flex; align-items: center; justify-content: center; position: relative; }}
   .progress-ring::before {{ content: ''; width: 104px; height: 104px; border-radius: 50%; background: #25124d; }}
   .progress-text {{ position: absolute; font-size: 38px; font-weight: 800; color: #fff; }}
   .progress-meta {{ color: #d6d3e8; font-size: 13px; display: flex; justify-content: space-between; gap: 10px; }}
@@ -3910,7 +3910,7 @@ def _render_report_html(data):
       </div>
       <div class="card dark-card">
         <h3>Remediation Progress</h3>
-        <div class="progress-ring" style="--p:{remediation_pct}"><span class="progress-text">{remediation_pct}%</span></div>
+        <div class="progress-ring" style="background: conic-gradient(#0f696e {remediation_pct}%, rgba(255,255,255,.2) 0);"><span class="progress-text">{remediation_pct}%</span></div>
         <div class="progress-meta"><span>Closed: {closed}</span><span>Open: {total - closed}</span></div>
       </div>
     </div>
