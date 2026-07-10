@@ -58,3 +58,6 @@ slack-sdk>=3.27.0
 
 # PDF report generation (optional — needed for download-report?format=pdf)
 weasyprint>=60.0
+
+# Headless-Chromium screenshot rendering (Slack dashboard-image endpoint)
+playwright>=1.40.0
