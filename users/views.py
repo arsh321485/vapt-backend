@@ -3197,12 +3197,18 @@ VAPTFIX_CHANNELS = [
 ADMIN_DASHBOARD_CHANNEL = "vaptfix-admin-dashboard"
 
 
-def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False):
+def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_id=None):
     """
     Ensures VaptFix Slack channels exist.
     Admins get all 5 channels (admin dashboard + 4 team channels).
     Regular users get only the 4 team channels.
     Returns dict of {channel_name: channel_id}.
+
+    When #vaptfix-admin-dashboard is genuinely being created for the first
+    time (not just re-verified on an existing workspace), also auto-posts
+    the clickable navbar + Home dashboard into it — the one-time trigger
+    that lets a new admin skip ever typing /dashboard. Needs team_id to
+    resolve an admin token for the dashboard data calls.
     """
     channels_to_handle = list(VAPTFIX_CHANNELS)
     if is_admin:
@@ -3219,6 +3225,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False):
     existing = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
 
     channel_ids = {}
+    newly_created_admin_channel = False
     for name in channels_to_handle:
         # VAPTFIX_CHANNELS are already lowercase; Slack lowercases names automatically
         if name in existing:
@@ -3232,6 +3239,8 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False):
             ch_data = create_resp.json()
             if ch_data.get("ok"):
                 channel_ids[name] = ch_data.get("channel", {}).get("id")
+                if name == ADMIN_DASHBOARD_CHANNEL:
+                    newly_created_admin_channel = True
             elif ch_data.get("error") == "name_taken":
                 # Already exists but not in listing (e.g. archived) — re-fetch
                 retry_resp = _http_get(
@@ -3255,6 +3264,12 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False):
             headers=headers,
             json={"channel": channel_id}, timeout=15
         )
+
+        if name == ADMIN_DASHBOARD_CHANNEL and newly_created_admin_channel and team_id:
+            try:
+                SlackEventsView()._post_admin_navbar_message(bot_token, channel_id, team_id)
+            except Exception:
+                logger.warning("[ensure_vaptfix_channels] Failed to auto-post navbar", exc_info=True)
 
         # Invite the logged-in Slack user
         if slack_user_id:
@@ -3519,7 +3534,9 @@ class SlackOAuthCallbackView(APIView):
             # ✅ Step 4b: Ensure vaptfix channels exist and invite user
             channels = {}
             try:
-                channels = ensure_vaptfix_channels(bot_token, slack_user_id=user_id, is_admin=True)
+                channels = ensure_vaptfix_channels(
+                    bot_token, slack_user_id=user_id, is_admin=True, team_id=team_info.get("id"),
+                )
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in callback", exc_info=True)
 
@@ -3790,7 +3807,9 @@ class SlackLoginView(APIView):
             # 3b. Ensure vaptfix channels exist and invite user
             channels = {}
             try:
-                channels = ensure_vaptfix_channels(bot_token, slack_user_id=slack_user_id, is_admin=True)
+                channels = ensure_vaptfix_channels(
+                    bot_token, slack_user_id=slack_user_id, is_admin=True, team_id=slack_team.get("id"),
+                )
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in login", exc_info=True)
 
@@ -7346,6 +7365,7 @@ class SlackSlashCommandView(APIView):
                 "/vaptcheck":      self._cmd_vaptcheck,
                 "/verifications":  self._cmd_verifications,
                 "/approvefix":     self._cmd_verify,
+                "/postnavbar":     self._cmd_postnavbar,
             }
             team_name = None
         elif channel_name in self.TEAM_CHANNELS:
@@ -7539,6 +7559,17 @@ class SlackSlashCommandView(APIView):
             slack_user_id=user_id,
         )
         return self._format_dashboard(data)
+
+    def _cmd_postnavbar(self, text, team_id, user_id):
+        """
+        /postnavbar — manually (re)posts the clickable navbar + Home
+        dashboard message. Only needed for workspaces whose admin channel
+        already existed before this feature shipped — new admin installs
+        get this automatically the moment their #vaptfix-admin-dashboard
+        channel is created (see ensure_vaptfix_channels).
+        """
+        section_blocks = self._nav_section_blocks("nav_home", team_id, user_id)
+        return [self._nav_buttons_block(active_action_id="nav_home")] + section_blocks
 
     def _nav_buttons_block(self, active_action_id=None):
         """
