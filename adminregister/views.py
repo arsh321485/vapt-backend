@@ -3999,9 +3999,10 @@ class AdminReportDownloadAPIView(APIView):
                 pdf_bytes = _render_report_pdf(html)
             except Exception as exc:
                 import traceback
+                tb = traceback.format_exc()
                 traceback.print_exc()
                 return Response(
-                    {"detail": "PDF generation unavailable on this server", "error": str(exc)},
+                    {"detail": "PDF generation unavailable on this server", "error": str(exc), "traceback": tb},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
             response = HttpResponse(pdf_bytes, content_type="application/pdf")

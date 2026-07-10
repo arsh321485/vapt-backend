@@ -1,0 +1,63 @@
+secureitlab@support:/var/www/backend/vapt-backend$ /var/www/backend/venv/bin/pip show weasyprint
+WARNING: Package(s) not found: weasyprint
+secureitlab@support:/var/www/backend/vapt-backend$ /var/www/backend/venv/bin/pip install weasyprint
+Collecting weasyprint
+  Downloading weasyprint-66.0-py3-none-any.whl.metadata (3.7 kB)
+Collecting pydyf>=0.11.0 (from weasyprint)
+  Downloading pydyf-0.11.0-py3-none-any.whl.metadata (2.5 kB)
+Requirement already satisfied: cffi>=0.6 in /var/www/backend/venv/lib/python3.9/site-packages (from weasyprint) (2.0.0)
+Collecting tinyhtml5>=2.0.0b1 (from weasyprint)
+  Downloading tinyhtml5-2.0.0-py3-none-any.whl.metadata (2.9 kB)
+Collecting tinycss2>=1.4.0 (from weasyprint)
+  Downloading tinycss2-1.4.0-py3-none-any.whl.metadata (3.0 kB)
+Collecting cssselect2>=0.8.0 (from weasyprint)
+  Downloading cssselect2-0.8.0-py3-none-any.whl.metadata (2.9 kB)
+Collecting Pyphen>=0.9.1 (from weasyprint)
+  Downloading pyphen-0.17.2-py3-none-any.whl.metadata (3.2 kB)
+Requirement already satisfied: Pillow>=9.1.0 in /var/www/backend/venv/lib/python3.9/site-packages (from weasyprint) (11.3.0)
+Collecting fonttools>=4.0.0 (from fonttools[woff]>=4.0.0->weasyprint)
+  Downloading fonttools-4.60.2-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (113 kB)
+Requirement already satisfied: pycparser in /var/www/backend/venv/lib/python3.9/site-packages (from cffi>=0.6->weasyprint) (2.23)
+Collecting webencodings (from cssselect2>=0.8.0->weasyprint)
+  Downloading webencodings-0.5.1-py2.py3-none-any.whl.metadata (2.1 kB)
+Collecting brotli>=1.0.1 (from fonttools[woff]>=4.0.0->weasyprint)
+  Downloading brotli-1.2.0-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (6.1 kB)
+Collecting zopfli>=0.1.4 (from fonttools[woff]>=4.0.0->weasyprint)
+  Downloading zopfli-0.2.3.post1-cp39-cp39-manylinux_2_5_x86_64.manylinux1_x86_64.whl.metadata (2.9 kB)
+Downloading weasyprint-66.0-py3-none-any.whl (301 kB)
+Downloading cssselect2-0.8.0-py3-none-any.whl (15 kB)
+Downloading fonttools-4.60.2-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (4.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.8/4.8 MB 62.5 MB/s  0:00:00
+Downloading brotli-1.2.0-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (1.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 52.5 MB/s  0:00:00
+Downloading pydyf-0.11.0-py3-none-any.whl (8.1 kB)
+Downloading pyphen-0.17.2-py3-none-any.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 48.1 MB/s  0:00:00
+Downloading tinycss2-1.4.0-py3-none-any.whl (26 kB)
+Downloading tinyhtml5-2.0.0-py3-none-any.whl (39 kB)
+Downloading webencodings-0.5.1-py2.py3-none-any.whl (11 kB)
+Downloading zopfli-0.2.3.post1-cp39-cp39-manylinux_2_5_x86_64.manylinux1_x86_64.whl (704 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 704.1/704.1 kB 36.2 MB/s  0:00:00
+Installing collected packages: webencodings, brotli, zopfli, tinyhtml5, tinycss2, Pyphen, pydyf, fonttools, cssselect2, weasyprint
+ERROR: Could not install packages due to an OSError: [Errno 13] Permission denied: '/var/www/backend/venv/lib/python3.9/site-packages/webencodings'
+Check the permissions.
+
+
+[notice] A new release of pip is available: 25.3 -> 26.0.1
+[notice] To update, run: /var/www/backend/venv/bin/python3.9 -m pip install --upgrade pip
+secureitlab@support:/var/www/backend/vapt-backend$ dpkg -l | grep libpango
+ii  libpango-1.0-0:amd64                  1.44.7-2ubuntu4                              amd64        Layout and rendering of internationalized text
+ii  libpango-perl                         1.227-3build1                                amd64        Perl module to layout and render international text
+ii  libpangocairo-1.0-0:amd64             1.44.7-2ubuntu4                              amd64        Layout and rendering of internationalized text
+ii  libpangoft2-1.0-0:amd64               1.44.7-2ubuntu4                              amd64        Layout and rendering of internationalized text
+ii  libpangomm-1.4-1v5:amd64              2.42.0-2build1                               amd64        C++ Wrapper for pango (shared libraries)
+ii  libpangoxft-1.0-0:amd64               1.44.7-2ubuntu4                              amd64        Layout and rendering of internationalized text
+secureitlab@support:/var/www/backend/vapt-backend$ dpkg -l | grep libgdk-pixbuf
+ii  libgdk-pixbuf2.0-0:amd64              2.40.0+dfsg-3ubuntu0.5                       amd64        GDK Pixbuf library
+ii  libgdk-pixbuf2.0-bin                  2.40.0+dfsg-3ubuntu0.5                       amd64        GDK Pixbuf library (thumbnailer)
+ii  libgdk-pixbuf2.0-common               2.40.0+dfsg-3ubuntu0.5                       all          GDK Pixbuf library - data files
+secureitlab@support:/var/www/backend/vapt-backend$ /var/www/backend/venv/bin/python -c "import weasyprint; print('OK', weasyprint.__version__)"
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'weasyprint'
+secureitlab@support:/var/www/backend/vapt-backend$
