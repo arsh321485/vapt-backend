@@ -3620,3 +3620,352 @@ class VulnerabilityTimelineAPIView(APIView):
                 },
                 status=status.HTTP_200_OK
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Download Report — consolidated JSON + standalone HTML file
+# ─────────────────────────────────────────────────────────────────────────
+
+# Approximate the same palette as the website's team-pill CSS classes
+# (team-pill-network/patch/configuration/architectural) so the server-
+# rendered team-distribution donut looks consistent with the dashboard.
+_REPORT_TEAM_COLORS = {
+    "Network Security":         "#0f696e",
+    "Patch Management":         "#c98a1f",
+    "Configuration Management": "#0f696e",
+    "Architectural Flaws":      "#7c3aed",
+    "Unassigned":               "#9ca3af",
+}
+_REPORT_SEVERITY_COLORS = {
+    "critical": "#b91c1c",
+    "high":     "#f2994a",
+    "medium":   "#e3b124",
+    "low":      "#0f696e",
+}
+
+
+def _build_report_data(request):
+    """
+    Aggregates everything the downloadable report needs by calling the
+    existing admin dashboard views in-process (no HTTP round trip) — reuses
+    the same data/queries the website's own dashboard already relies on,
+    so the numbers are always consistent with what the admin sees on-screen.
+    """
+    from admindashboard.views import (
+        AdminDashboardSummaryAPIView,
+        AdminDistributionByTeamAPIView,
+        AdminDetailedVulnerabilitiesAPIView,
+    )
+    from upload_report.views import AdminLatestReportAPIView
+
+    admin_email = request.user.email
+    admin_id = str(request.user.id)
+
+    with MongoContext() as db:
+        latest_doc = db[NESSUS_COLLECTION].find_one(
+            {"$or": [{"admin_id": admin_id}, {"admin_email": admin_email}]},
+            {"report_id": 1, "uploaded_at": 1, "file_name": 1},
+            sort=[("uploaded_at", pymongo.DESCENDING)],
+        )
+
+    if not latest_doc:
+        return None
+
+    # The nessus_reports doc's own "file_name" field isn't reliably populated —
+    # the website's own report page treats /api/admin/upload_report/latest-report/
+    # (the real uploaded file's Django-tracked name) as the highest-priority
+    # source for the displayed file name, so we match that here too.
+    latest_upload = AdminLatestReportAPIView().get(request).data
+
+    summary = AdminDashboardSummaryAPIView().get(request).data
+    distribution_data = AdminDistributionByTeamAPIView().get(request).data
+    detailed_data = AdminDetailedVulnerabilitiesAPIView().get(request).data
+
+    vulns = summary.get("vulnerabilities") or {}
+    critical = int(vulns.get("critical") or 0)
+    high = int(vulns.get("high") or 0)
+    medium = int(vulns.get("medium") or 0)
+    low = int(vulns.get("low") or 0)
+    total = critical + high + medium + low
+
+    weighted = critical * 8 + high * 5 + medium * 3 + low * 1
+    risk_score = round((weighted / (total * 8)) * 100) if total else 0
+
+    return {
+        "report_id": str(latest_upload.get("report_id") or latest_doc.get("report_id", "")),
+        "report_generated_on": _normalize_iso(latest_upload.get("uploaded_at") or latest_doc.get("uploaded_at")),
+        "vul_management_program": latest_upload.get("file_name") or latest_doc.get("file_name") or "—",
+        "total_assets": (summary.get("total_assets") or {}).get("total_assets", 0),
+        "risk_score": risk_score,
+        "vulnerabilities": {"critical": critical, "high": high, "medium": medium, "low": low},
+        "vulnerabilities_fixed": summary.get("vulnerabilities_fixed") or {},
+        "team_distribution": distribution_data.get("distribution") or [],
+        "vulnerabilities_detail": detailed_data.get("vulnerabilities") or [],
+    }
+
+
+class AdminReportDownloadDataAPIView(APIView):
+    """
+    GET /api/admin/adminregister/report/download-data/
+    Consolidated JSON for the downloadable report — same figures the
+    dashboard already shows, aggregated into one call.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        data = _build_report_data(request)
+        if data is None:
+            return Response({"detail": "No reports found for your account"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+def _render_report_html(data):
+    total = sum(data["vulnerabilities"].values())
+    crit, high, med, low = (
+        data["vulnerabilities"]["critical"], data["vulnerabilities"]["high"],
+        data["vulnerabilities"]["medium"], data["vulnerabilities"]["low"],
+    )
+
+    # Same running-percentage conic-gradient formula the Vue page uses for
+    # its severity donut — kept identical so this looks the same as the
+    # in-browser "Download as HTML" export.
+    def _pct(n):
+        return (n / total * 100) if total else 0
+    c1 = _pct(crit)
+    c2 = c1 + _pct(high)
+    c3 = c2 + _pct(med)
+    severity_gradient = (
+        f"conic-gradient({_REPORT_SEVERITY_COLORS['critical']} 0% {c1:.2f}%, "
+        f"{_REPORT_SEVERITY_COLORS['high']} {c1:.2f}% {c2:.2f}%, "
+        f"{_REPORT_SEVERITY_COLORS['medium']} {c2:.2f}% {c3:.2f}%, "
+        f"{_REPORT_SEVERITY_COLORS['low']} {c3:.2f}% 100%)"
+    )
+
+    team_dist = [d for d in data["team_distribution"] if d.get("count")]
+    team_total = sum(d.get("count", 0) for d in team_dist) or 1
+    running = 0
+    team_stops = []
+    for d in team_dist:
+        start = running / team_total * 100
+        running += d.get("count", 0)
+        end = running / team_total * 100
+        color = _REPORT_TEAM_COLORS.get(d.get("team"), "#9ca3af")
+        team_stops.append(f"{color} {start:.2f}% {end:.2f}%")
+    team_gradient = f"conic-gradient({', '.join(team_stops)})" if team_stops else "#e5e7eb"
+
+    closed = int((data["vulnerabilities_fixed"] or {}).get("total_fixed") or 0)
+    remediation_pct = round((closed / total) * 100) if total else 0
+
+    severity_legend_rows = "".join(
+        f'<div class="legend-row"><span class="legend-color" style="background:{_REPORT_SEVERITY_COLORS[sev]}"></span>'
+        f'<span class="legend-label">{sev.capitalize()}</span>'
+        f'<strong class="legend-pct">{round(_pct(n))}%</strong></div>'
+        for sev, n in [("critical", crit), ("high", high), ("medium", med), ("low", low)]
+    )
+
+    def esc(v):
+        return str(v if v is not None else "—").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def team_pill_class(team_name):
+        key = (team_name or "").strip().lower()
+        if "network" in key:
+            return "team-pill-network"
+        if "patch" in key:
+            return "team-pill-patch"
+        if "configuration" in key:
+            return "team-pill-configuration"
+        if "architectural" in key:
+            return "team-pill-architectural"
+        return "team-pill-configuration"
+
+    table_rows = "".join(
+        f'<tr><td>{i + 1}</td><td class="vname">{esc(v.get("vulnerability_name"))}</td>'
+        f'<td>{esc(v.get("assets"))}</td>'
+        f'<td><span class="team-pill {team_pill_class(v.get("assigned_team"))}">{esc(v.get("assigned_team") or "Unassigned")}</span></td>'
+        f'<td><span class="sev-pill sev-{esc(v.get("risk_factor")).lower()}">{esc(v.get("risk_factor"))}</span></td>'
+        f'<td>{esc((v.get("found_date") or "—")[:10] if v.get("found_date") else "—")}</td>'
+        f'<td><span class="status-pill status-{esc(v.get("status")).lower().replace("/", "-")}">{esc(v.get("status"))}</span></td></tr>'
+        for i, v in enumerate(data["vulnerabilities_detail"])
+    )
+
+    team_legend_rows = "".join(
+        f'<div class="legend-row"><span class="legend-color" style="background:{_REPORT_TEAM_COLORS.get(d.get("team"), "#9ca3af")}"></span>'
+        f'<span class="legend-label">{esc(d.get("team"))}</span>'
+        f'<strong class="legend-pct">{d.get("count", 0)}</strong></div>'
+        for d in team_dist
+    ) or '<div class="legend-row"><span class="legend-label">No team-assigned vulnerabilities yet.</span></div>'
+
+    watermark_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="580" height="420" viewBox="0 0 580 420">'
+        '<text x="290" y="210" transform="rotate(-38 290 210)" font-family="Inter,Arial,sans-serif" '
+        'font-size="52" font-weight="700" fill="rgba(140,145,155,0.135)" text-anchor="middle" '
+        'dominant-baseline="middle">vaptfix.ai</text></svg>'
+    )
+    import base64
+    watermark_data_uri = "data:image/svg+xml;base64," + base64.b64encode(watermark_svg.encode()).decode()
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vulnerability Management Report</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: 'Inter', sans-serif; background: #f8f9fc; margin: 0; padding: 0; }}
+  .wrap {{ max-width: 1400px; margin: 0 auto; padding: 48px 56px; position: relative; }}
+  .watermark {{ position: absolute; inset: 0; z-index: 50; pointer-events: none;
+    background-image: url("{watermark_data_uri}"); background-repeat: repeat; background-size: 580px 420px; }}
+  .content {{ position: relative; z-index: 1; }}
+  .eyebrow {{ margin: 0; color: #0f696e; font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }}
+  .page-title {{ margin: 2px 0 10px; color: #241447; font-size: 44px; font-weight: 800; letter-spacing: -.02em; line-height: 1.05; }}
+  .meta-items {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }}
+  .meta-item span {{ display: block; font-size: 10px; color: #8b95a7; text-transform: uppercase; font-weight: 700; letter-spacing: .08em; }}
+  .meta-item strong {{ font-size: 14px; color: #20293a; font-weight: 700; line-height: 1.3; }}
+  .top-grid {{ display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 14px; }}
+  .card {{ background: #fff; border: 1px solid #e8e8ef; border-radius: 18px; padding: 18px; }}
+  .card h3 {{ margin: 0 0 10px; color: #222848; font-size: 22px; font-weight: 700; }}
+  .icon-mark {{ color: #0f696e; font-size: 18px; margin-right: 8px; vertical-align: middle; }}
+  .executive-card p {{ margin: 0 0 10px; color: #5a6477; line-height: 1.58; font-size: 14px; }}
+  .score-grid {{ margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+  .score-box {{ background: #f4f5f8; border-radius: 10px; padding: 12px; }}
+  .score-box span {{ display: block; font-size: 11px; color: #8b95a7; text-transform: uppercase; font-weight: 700; letter-spacing: .06em; }}
+  .score-box strong {{ font-size: 34px; color: #1f2a42; line-height: 1.08; }}
+  .dark-card {{ background: #25124d; color: #fff; text-align: center; display: flex; flex-direction: column; gap: 10px; justify-content: center; }}
+  .dark-card h3 {{ color: #fff; font-size: 22px; }}
+  .progress-ring {{ margin: 8px auto; width: 140px; height: 140px; border-radius: 50%;
+    background: conic-gradient(#0f696e calc(var(--p, 0) * 1%), rgba(255,255,255,.2) 0); display: flex; align-items: center; justify-content: center; position: relative; }}
+  .progress-ring::before {{ content: ''; width: 104px; height: 104px; border-radius: 50%; background: #25124d; }}
+  .progress-text {{ position: absolute; font-size: 38px; font-weight: 800; color: #fff; }}
+  .progress-meta {{ color: #d6d3e8; font-size: 13px; display: flex; justify-content: space-between; gap: 10px; }}
+  .severity-stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }}
+  .stat-card {{ background: #fff; border: 1px solid #ececf2; border-radius: 14px; padding: 10px 12px; min-height: 118px;
+    display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 1px 4px rgba(36,20,71,.08); }}
+  .stat-card span {{ font-size: 10px; color: #8b95a7; text-transform: uppercase; font-weight: 800; letter-spacing: .07em; }}
+  .stat-card strong {{ font-size: 36px; font-weight: 800; line-height: 1; }}
+  .stat-card small {{ color: #8b95a7; font-size: 11px; }}
+  .stat-card.critical {{ border-bottom: 3px solid #b91c1c; }} .stat-card.critical strong {{ color: #b91c1c; }}
+  .stat-card.high strong {{ color: #d97706; }}
+  .stat-card.medium strong {{ color: #ca8a04; }}
+  .stat-card.low {{ border-bottom: 3px solid #0f696e; }} .stat-card.low strong {{ color: #0f696e; }}
+  .chart-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }}
+  .mini-meta {{ margin: -4px 0 10px; font-size: 11px; color: #8b95a7; }}
+  .severity-visual {{ display: grid; grid-template-columns: minmax(180px, 1fr) minmax(160px, .9fr); align-items: center; gap: 12px; }}
+  .donut {{ width: min(100%, 220px); aspect-ratio: 1/1; border-radius: 50%; display: flex; align-items: center; justify-content: center; }}
+  .donut-center {{ width: 66%; aspect-ratio: 1/1; border-radius: 50%; background: #fff; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; box-shadow: inset 0 0 0 1px #e5e7eb; }}
+  .donut-center strong {{ font-size: 36px; line-height: 1; color: #1f2a42; }}
+  .donut-center span {{ font-size: 11px; letter-spacing: .08em; color: #8b95a7; font-weight: 700; }}
+  .legend-row {{ display: flex; align-items: center; gap: 8px; font-size: 13px; color: #2e3648; margin-bottom: 8px; }}
+  .legend-color {{ width: 10px; height: 10px; border-radius: 3px; display: inline-block; }}
+  .legend-label {{ flex: 1; }}
+  .legend-pct {{ font-size: 16px; color: #273247; }}
+  .table-wrap {{ margin-top: 10px; overflow-x: auto; max-height: 420px; overflow-y: auto; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  th {{ background: #f4f5f8; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #8b95a7; font-weight: 800; padding: 12px 10px; text-align: left; position: sticky; top: 0; }}
+  td {{ border-bottom: 1px solid #edf0f4; padding: 12px 10px; color: #2d3748; font-size: 13px; }}
+  .vname {{ font-weight: 600; color: #1f2a42; }}
+  .sev-pill, .status-pill {{ font-size: 10px; font-weight: 800; border-radius: 6px; padding: 4px 8px; text-transform: uppercase; }}
+  .sev-critical {{ background: #fee2e2; color: #b91c1c; }} .sev-high {{ background: #ffedd5; color: #c2410c; }}
+  .sev-medium {{ background: #fef3c7; color: #a16207; }} .sev-low {{ background: #ccfbf1; color: #0f766e; }}
+  .status-pill {{ font-weight: 700; }} .status-open {{ color: #b91c1c; }} .status-closed {{ color: #0f766e; }}
+  .status-in_progress, .status-open-review {{ color: #a16207; }}
+  .team-pill {{ font-size: 12px; font-weight: 700; border-radius: 999px; padding: 4px 10px; border: 1px solid transparent; display: inline-block; }}
+  .team-pill-network {{ color: #0f696e; background: #e6f7f8; border-color: #8dd9dd; }}
+  .team-pill-patch {{ color: #8a4f00; background: #fff3dd; border-color: #ffd089; }}
+  .team-pill-configuration {{ color: #0f696e; background: #e6f7f8; border-color: #8dd9dd; }}
+  .team-pill-architectural {{ color: #6b21a8; background: #f3e8ff; border-color: #d8b4fe; }}
+  @media (max-width: 900px) {{ .top-grid, .chart-grid, .severity-stats-grid {{ grid-template-columns: 1fr; }} }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="watermark"></div>
+  <div class="content">
+    <p class="eyebrow">Comprehensive Audit</p>
+    <h1 class="page-title">Vulnerability Management Program Report</h1>
+    <div class="meta-items">
+      <div class="meta-item"><span>Report Generated On</span><strong>{esc(data['report_generated_on'])}</strong></div>
+      <div class="meta-item"><span>Vul Management Program</span><strong>{esc(data['vul_management_program'])}</strong></div>
+      <div class="meta-item"><span>Total Assets</span><strong>{esc(data['total_assets'])}</strong></div>
+    </div>
+
+    <div class="top-grid">
+      <div class="card">
+        <h3><span class="icon-mark">◫</span> Executive Summary</h3>
+        <p>The security assessment identified a total of {total} distinct security findings across {esc(data['total_assets'])} assets.</p>
+        <div class="score-grid">
+          <div class="score-box"><span>Risk Score</span><strong>{data['risk_score']}/100</strong></div>
+          <div class="score-box"><span>Sensitivity</span><strong>{'HIGH' if (crit or high or med) else 'MODERATE'}</strong></div>
+        </div>
+      </div>
+      <div class="card dark-card">
+        <h3>Remediation Progress</h3>
+        <div class="progress-ring" style="--p:{remediation_pct}"><span class="progress-text">{remediation_pct}%</span></div>
+        <div class="progress-meta"><span>Closed: {closed}</span><span>Open: {total - closed}</span></div>
+      </div>
+    </div>
+
+    <div class="severity-stats-grid">
+      <div class="stat-card critical"><span>Critical</span><strong>{crit}</strong></div>
+      <div class="stat-card high"><span>High</span><strong>{high}</strong></div>
+      <div class="stat-card medium"><span>Medium</span><strong>{med}</strong></div>
+      <div class="stat-card low"><span>Low</span><strong>{low}</strong></div>
+    </div>
+
+    <div class="chart-grid">
+      <div class="card">
+        <h3>Severity Distribution</h3>
+        <p class="mini-meta">Total Findings: {total}</p>
+        <div class="severity-visual">
+          <div class="donut" style="background:{severity_gradient}"><div class="donut-center"><strong>{total}</strong><span>ISSUES</span></div></div>
+          <div>{severity_legend_rows}</div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Findings by Team</h3>
+        <p class="mini-meta">Assigned: {team_total if team_dist else 0}</p>
+        <div class="severity-visual">
+          <div class="donut" style="background:{team_gradient}"><div class="donut-center"><strong>{team_total if team_dist else 0}</strong><span>ASSIGNED</span></div></div>
+          <div>{team_legend_rows}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Detailed Vulnerability Log</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Vulnerability</th><th>Asset</th><th>Team</th><th>Severity</th><th>Found Date</th><th>Status</th></tr></thead>
+          <tbody>{table_rows or '<tr><td colspan="7">No vulnerabilities found.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>"""
+
+
+class AdminReportDownloadAPIView(APIView):
+    """
+    GET /api/admin/adminregister/report/download/
+    Returns the report as a downloadable, self-contained HTML file —
+    same data as download-data/ above, rendered server-side (no browser
+    needed) so it can also be generated for Slack's /downloadreport.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from django.http import HttpResponse
+
+        data = _build_report_data(request)
+        if data is None:
+            return Response({"detail": "No reports found for your account"}, status=status.HTTP_404_NOT_FOUND)
+
+        html = _render_report_html(data)
+        response = HttpResponse(html, content_type="text/html")
+        filename = f"vaptfix-report-{data['report_id'] or 'latest'}.html"
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response

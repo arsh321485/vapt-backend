@@ -1170,7 +1170,15 @@ class UserDetailListView(generics.ListAPIView):
 
     def get_queryset(self):
         # Restrict to only the logged-in admin's own team members
-        return UserDetail.objects.filter(admin=self.request.user).select_related("admin").order_by("-created_at")
+        qs = UserDetail.objects.filter(admin=self.request.user).select_related("admin").order_by("-created_at")
+        # Optional ?user_type=internal|external filter — e.g. the Slack bot's
+        # /externalusers command needs only external users, but this endpoint
+        # used to ignore the param entirely and return everyone regardless.
+        # Case-insensitive since stored values aren't guaranteed consistent case.
+        user_type = (self.request.query_params.get("user_type") or "").strip()
+        if user_type:
+            qs = qs.filter(user_type__iexact=user_type)
+        return qs
 
 
 class UserDetailView(generics.RetrieveAPIView):

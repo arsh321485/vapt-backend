@@ -1,0 +1,27 @@
+http://127.0.0.1:8000/api/admin/adminregister/report/download/
+
+ye vale api se html vali report download (html) me download hota hai 
+
+
+
+
+PDF Plan:
+
+Haan ban sakta hai. Do options:
+
+Option	Kaisे	Fidelity	Deployment cost
+WeasyPrint (pure Python HTML→PDF)	pip install weasyprint + system libs (Pango/Cairo/GDK)	Medium — flexbox/grid ka support partial hai, kuch layout thoda off aa sakta hai	Medium (system packages chahiye Linux server pe)
+Playwright headless Chromium (recommend)	Real Chromium browser se HTML ko render karke "print to PDF"	Pixel-perfect — bilkul wahi jo browser me "Export PDF" dikhata hai, saara CSS (flexbox/grid/conic-gradient) sahi chalega, chart bhi real render hoga	Bhaari (~300-400MB Chromium install), playwright install chromium ek baar server pe
+Recommendation: Playwright — kyunki humara HTML flexbox/grid heavily use karta hai (WeasyPrint isko theek se render nahi karta), aur "same design" jo tumhe chahiye, wo sirf real browser render se hi guarantee hota hai.
+
+Implementation: naya endpoint GET /api/admin/adminregister/report/download-pdf/ jo _render_report_html() se HTML banake, Playwright se headless Chromium open karega, HTML load karega, aur page.pdf() se PDF nikalega. Slack ke /downloadreport me bhi ek option add ho sakta hai: HTML ki jagah ya sath PDF bhi upload kare.
+
+Confirm karo to implement karu?
+
+
+
+mujhe pdf vala bhi krna hai 
+
+
+
+to mujhe slack ke plotform se bhi pdf vala krna hai to mujhe abhi plan btao 
