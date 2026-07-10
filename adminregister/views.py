@@ -3884,7 +3884,27 @@ def _render_report_html(data):
   .team-pill-configuration {{ color: #0f696e; background: #e6f7f8; border-color: #8dd9dd; }}
   .team-pill-architectural {{ color: #6b21a8; background: #f3e8ff; border-color: #d8b4fe; }}
   @media (max-width: 900px) {{ .top-grid, .chart-grid, .severity-stats-grid {{ flex-direction: column; }} }}
-  @media print {{ .wrap {{ padding: 24px; }} table {{ page-break-inside: auto; }} tr {{ page-break-inside: avoid; page-break-after: auto; }} }}
+  @media print {{
+    .wrap {{ padding: 20px; max-width: none; }}
+    table {{ page-break-inside: auto; }}
+    tr {{ page-break-inside: avoid; page-break-after: auto; }}
+    /* A4 print width is much narrower than the 1400px browser layout was
+       designed for — flex-wrap's content-based wrapping (fine in a browser)
+       collapses these to a single column here. Force them to stay in their
+       intended columns by wrapping off + flex-basis:0 (divide available
+       width purely by the grow ratio, regardless of content size). */
+    .top-grid {{ flex-wrap: nowrap; }}
+    .top-grid .card:first-child {{ flex: 2 1 0; min-width: 0; }}
+    .top-grid .card:last-child {{ flex: 1 1 0; min-width: 0; }}
+    .severity-stats-grid {{ flex-wrap: nowrap; }}
+    .severity-stats-grid .stat-card {{ flex: 1 1 0; min-width: 0; }}
+    .chart-grid {{ flex-wrap: nowrap; }}
+    .chart-grid .card {{ flex: 1 1 0; min-width: 0; }}
+    .severity-visual {{ flex-wrap: nowrap; }}
+    .donut {{ width: 130px; height: 130px; flex: 0 0 130px; }}
+    .donut-center {{ width: 86px; height: 86px; }}
+    .donut-center strong {{ font-size: 26px; }}
+  }}
 </style>
 </head>
 <body>
