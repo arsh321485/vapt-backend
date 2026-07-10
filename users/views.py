@@ -7601,12 +7601,16 @@ class SlackSlashCommandView(APIView):
     def _cmd_downloadreport(self, text, team_id, user_id):
         """
         /downloadreport — generates the full vulnerability report as a
-        self-contained HTML file and uploads it to this channel. Pulls the
-        same consolidated data (report/download-data/) the website's report
-        page shows, then renders it with the exact same HTML builder the
-        browser-triggered download uses (adminregister.views._render_report_html)
+        self-contained HTML file and uploads it to this channel.
+        /downloadreport pdf — same report, as a PDF instead.
+        Pulls the same consolidated data (report/download-data/) the
+        website's report page shows, then renders it with the exact same
+        builders the browser-triggered download uses
+        (adminregister.views._render_report_html / _render_report_pdf)
         — so the file looks the same regardless of where it was requested from.
         """
+        as_pdf = text.strip().lower() == "pdf"
+
         data = self._call_api(
             "/api/admin/adminregister/report/download-data/", team_id, slack_user_id=user_id,
         )
@@ -7614,16 +7618,29 @@ class SlackSlashCommandView(APIView):
             return self._text_block(f"❌ {data['detail']}")
 
         from adminregister.views import _render_report_html
-        html_bytes = _render_report_html(data).encode("utf-8")
+        html = _render_report_html(data)
+
+        pdf_error = None
+        if as_pdf:
+            from adminregister.views import _render_report_pdf
+            try:
+                file_bytes = _render_report_pdf(html)
+                filename = f"vaptfix-report-{data.get('report_id', 'latest')}.pdf"
+            except Exception as exc:
+                pdf_error = str(exc)
+                file_bytes = html.encode("utf-8")
+                filename = f"vaptfix-report-{data.get('report_id', 'latest')}.html"
+        else:
+            file_bytes = html.encode("utf-8")
+            filename = f"vaptfix-report-{data.get('report_id', 'latest')}.html"
 
         bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
         uploaded = False
         if bot_token:
             admin_ch_id = self._get_admin_channel_id(bot_token)
             if admin_ch_id:
-                filename = f"vaptfix-report-{data.get('report_id', 'latest')}.html"
                 uploaded = self._upload_file_to_slack(
-                    bot_token, admin_ch_id, filename, html_bytes,
+                    bot_token, admin_ch_id, filename, file_bytes,
                     initial_comment="📄 Vulnerability Management Report",
                 )
 
@@ -7644,8 +7661,11 @@ class SlackSlashCommandView(APIView):
                     f"🟡 {vulns.get('medium', 0)} Medium | 🔵 {vulns.get('low', 0)} Low"
                 )}},
         ]
-        if uploaded:
-            blocks.append(self._ctx("📎 Full HTML report uploaded above — open it in a browser to view or print."))
+        if pdf_error:
+            blocks.append(self._ctx(f"⚠️ PDF generation failed ({pdf_error[:150]}) — uploaded HTML instead."))
+        elif uploaded:
+            ftype = "PDF" if as_pdf else "HTML"
+            blocks.append(self._ctx(f"📎 Full {ftype} report uploaded above — open it to view or print."))
         else:
             blocks.append(self._ctx("⚠️ Could not upload the file (check the bot's `files:write` scope) — summary shown above only."))
         return blocks
