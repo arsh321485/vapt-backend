@@ -6009,6 +6009,18 @@ class SlackEventsView(APIView):
                 logger.info(f"[SlackEvent] member_joined_channel: slack_user_id={slack_user_id} channel_id={channel_id} tid={tid}")
                 self._save_slack_member_to_user_detail(slack_user_id, tid, channel_id=channel_id)
 
+                # If it's the BOT itself joining #vaptfix-admin-dashboard (not
+                # a human member), auto-post the clickable navbar+dashboard
+                # message — this is the one-time trigger that replaces
+                # needing to type /dashboard at all.
+                admin = User.objects.filter(slack_team_id=tid).first()
+                if admin and admin.slack_bot_token:
+                    bot_user_id = self._get_bot_user_id(admin.slack_bot_token)
+                    if bot_user_id and slack_user_id == bot_user_id:
+                        channel_name = self._get_channel_name(admin.slack_bot_token, channel_id)
+                        if channel_name == SlackSlashCommandView.ADMIN_CHANNEL:
+                            self._post_admin_navbar_message(admin.slack_bot_token, channel_id, tid)
+
             elif etype == "member_left_channel":
                 logger.info(f"[SlackEvent] member_left_channel: user={event.get('user')} channel={event.get('channel')}")
 
@@ -6037,6 +6049,76 @@ class SlackEventsView(APIView):
 
         except Exception as _exc:
             logger.exception(f"[SlackEvent] UNHANDLED EXCEPTION in _handle_event: etype={event.get('type')} error={_exc}")
+
+    def _get_bot_user_id(self, bot_token):
+        """
+        Resolves the bot's own Slack user ID via auth.test — needed to tell
+        apart "the bot itself joined this channel" from "a human teammate
+        joined this channel" in member_joined_channel, since Slack's event
+        payload only gives a user ID, not who/what that ID belongs to.
+        """
+        try:
+            resp = _http_get(
+                "https://slack.com/api/auth.test",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                timeout=10,
+            )
+            data = resp.json() if resp else {}
+            return data.get("user_id") if data.get("ok") else None
+        except Exception:
+            logger.exception("[SlackEvent] _get_bot_user_id failed")
+            return None
+
+    def _get_channel_name(self, bot_token, channel_id):
+        """Resolves a channel ID to its name (member_joined_channel only gives the ID)."""
+        try:
+            resp = _http_get(
+                "https://slack.com/api/conversations.info",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                params={"channel": channel_id},
+                timeout=10,
+            )
+            data = resp.json() if resp else {}
+            return (data.get("channel") or {}).get("name") if data.get("ok") else None
+        except Exception:
+            logger.exception("[SlackEvent] _get_channel_name failed")
+            return None
+
+    def _post_admin_navbar_message(self, bot_token, channel_id, team_id):
+        """
+        Auto-posts the clickable navbar + default "Home" dashboard content
+        into #vaptfix-admin-dashboard the moment the bot is added to that
+        channel — this is the one-time trigger that replaces needing to
+        type /dashboard. Reuses SlackSlashCommandView's nav helpers so the
+        content always matches the equivalent slash commands exactly.
+        """
+        slash = SlackSlashCommandView()
+        try:
+            section_blocks = slash._nav_section_blocks("nav_home", team_id, user_id=None)
+            blocks = [slash._nav_buttons_block(active_action_id="nav_home")] + section_blocks
+            resp = _http_post(
+                "https://slack.com/api/chat.postMessage",
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                json={"channel": channel_id, "blocks": blocks, "text": "VaptFix Admin Dashboard"},
+                timeout=15,
+            )
+            data = resp.json() if resp else {}
+            if data.get("ok") and data.get("ts"):
+                # Pin it so it's always easy to find at the top of the channel —
+                # best-effort, a failure here shouldn't block the dashboard post.
+                try:
+                    _http_post(
+                        "https://slack.com/api/pins.add",
+                        headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                        json={"channel": channel_id, "timestamp": data["ts"]},
+                        timeout=10,
+                    )
+                except Exception:
+                    logger.exception("[SlackEvent] Failed to pin navbar message")
+            elif not data.get("ok"):
+                logger.warning(f"[SlackEvent] chat.postMessage for navbar failed: {data.get('error')}")
+        except Exception:
+            logger.exception("[SlackEvent] _post_admin_navbar_message failed")
 
     def _publish_app_home(self, bot_token, slack_user_id):
         """Publish a welcome App Home tab view when user opens VaptFix in Slack sidebar."""
@@ -7201,6 +7283,20 @@ class SlackSlashCommandView(APIView):
     _SEV_PREFIX = [("Critical", "c"), ("High", "h"), ("Medium", "m"), ("Low", "l")]
     _SEV_ICONS  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🔵"}
 
+    # Admin-dashboard-channel navbar — clicking these updates the SAME
+    # message in place (like a tab switcher) instead of requiring the
+    # admin to type a slash command. Kept in one place so both the
+    # auto-post-on-join handler (SlackEventsView) and the click handler
+    # (SlackInteractivityView) build an identical, consistent set.
+    _NAV_ITEMS = [
+        ("nav_home",     "🏠 Home"),
+        ("nav_fix",      "🔧 Fix"),
+        ("nav_register", "📋 Register"),
+        ("nav_team",     "👥 Team"),
+        ("nav_teamperf", "📈 Team Performance"),
+        ("nav_support",  "🎫 Support"),
+    ]
+
     def post(self, request):
         # Verify signature FIRST — before request.POST is accessed.
         # Accessing request.POST causes DRF to consume the body stream, after which
@@ -7438,6 +7534,71 @@ class SlackSlashCommandView(APIView):
         return self._format_vulnstats(data)
 
     def _cmd_dashboard(self, text, team_id, user_id):
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/summary/", team_id,
+            slack_user_id=user_id,
+        )
+        return self._format_dashboard(data)
+
+    def _nav_buttons_block(self, active_action_id=None):
+        """
+        The clickable navbar row for the admin-dashboard-channel dashboard
+        message — same button set every time so re-clicking after an update
+        still shows all options. The active section gets a "primary" style
+        so it's visually clear which tab is currently open.
+        """
+        return {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label, "emoji": True},
+                    "action_id": action_id,
+                    **({"style": "primary"} if action_id == active_action_id else {}),
+                }
+                for action_id, label in self._NAV_ITEMS
+            ],
+        }
+
+    def _nav_section_blocks(self, action_id, team_id, user_id):
+        """
+        Resolves a nav button click to its section's content blocks — reuses
+        the exact same data + formatters the equivalent slash command already
+        uses, so the navbar never drifts out of sync with /dashboard,
+        /vulnstats, /vulndata, /teamoverview, /supportdata.
+        """
+        if action_id == "nav_fix":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/detailed-vulnerabilities/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_vulnstats(data)
+
+        if action_id == "nav_register":
+            data = self._call_api(
+                "/api/admin/adminregister/register/latest/vulns/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_vulndata_list(data)
+
+        if action_id in ("nav_team", "nav_teamperf"):
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_teamoverview(data)
+
+        if action_id == "nav_support":
+            report_id = self._get_workspace_report_id(team_id)
+            if not report_id:
+                return self._text_block("❌ No report found for this workspace.")
+            data = self._call_api(
+                f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_supportdata(data)
+
+        # nav_home (default)
         data = self._call_api(
             "/api/admin/admindashboard/dashboard/summary/", team_id,
             slack_user_id=user_id,
@@ -10278,6 +10439,19 @@ class SlackInteractivityView(APIView):
                     blocks = slash._format_vulndata_single(target, steps_data, offset=(v_page - 1) * 3)
                 self._post_response_url(response_url, {
                     "response_type": "in_channel",
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in dict(slash._NAV_ITEMS):
+                # Admin-dashboard-channel navbar — clicking a tab replaces
+                # THIS SAME message with that section's content, nav row
+                # rebuilt on top so it stays clickable for further navigation
+                # (no need to ever type /dashboard, /vulnstats, etc. again).
+                section_blocks = slash._nav_section_blocks(action_id, team_id, slack_user_id)
+                blocks = [slash._nav_buttons_block(active_action_id=action_id)] + section_blocks
+                self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
