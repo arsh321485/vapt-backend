@@ -7246,6 +7246,7 @@ class SlackSlashCommandView(APIView):
                 "/reject":         self._cmd_reject,
                 "/request":        self._cmd_request,
                 "/report":         self._cmd_report,
+                "/downloadreport": self._cmd_downloadreport,
                 "/vaptcheck":      self._cmd_vaptcheck,
                 "/verifications":  self._cmd_verifications,
                 "/approvefix":     self._cmd_verify,
@@ -7596,6 +7597,58 @@ class SlackSlashCommandView(APIView):
                 "• `/report team [team-name]` — Team filtered report\n"
                 "• `/report vuln [vuln-id]` — Specific vulnerability report"
             )
+
+    def _cmd_downloadreport(self, text, team_id, user_id):
+        """
+        /downloadreport — generates the full vulnerability report as a
+        self-contained HTML file and uploads it to this channel. Pulls the
+        same consolidated data (report/download-data/) the website's report
+        page shows, then renders it with the exact same HTML builder the
+        browser-triggered download uses (adminregister.views._render_report_html)
+        — so the file looks the same regardless of where it was requested from.
+        """
+        data = self._call_api(
+            "/api/admin/adminregister/report/download-data/", team_id, slack_user_id=user_id,
+        )
+        if data.get("detail"):
+            return self._text_block(f"❌ {data['detail']}")
+
+        from adminregister.views import _render_report_html
+        html_bytes = _render_report_html(data).encode("utf-8")
+
+        bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
+        uploaded = False
+        if bot_token:
+            admin_ch_id = self._get_admin_channel_id(bot_token)
+            if admin_ch_id:
+                filename = f"vaptfix-report-{data.get('report_id', 'latest')}.html"
+                uploaded = self._upload_file_to_slack(
+                    bot_token, admin_ch_id, filename, html_bytes,
+                    initial_comment="📄 Vulnerability Management Report",
+                )
+
+        vulns = data.get("vulnerabilities") or {}
+        total = sum(vulns.values())
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "📄 Download Report", "emoji": True}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Report*\n{data.get('vul_management_program', '—')}"},
+                {"type": "mrkdwn", "text": f"*Generated On*\n{data.get('report_generated_on', '—')}"},
+                {"type": "mrkdwn", "text": f"*Total Assets*\n{data.get('total_assets', 0)}"},
+                {"type": "mrkdwn", "text": f"*Risk Score*\n{data.get('risk_score', 0)}/100"},
+            ]},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": (
+                    f"*Findings:* {total} total — "
+                    f"🔴 {vulns.get('critical', 0)} Critical | 🟠 {vulns.get('high', 0)} High | "
+                    f"🟡 {vulns.get('medium', 0)} Medium | 🔵 {vulns.get('low', 0)} Low"
+                )}},
+        ]
+        if uploaded:
+            blocks.append(self._ctx("📎 Full HTML report uploaded above — open it in a browser to view or print."))
+        else:
+            blocks.append(self._ctx("⚠️ Could not upload the file (check the bot's `files:write` scope) — summary shown above only."))
+        return blocks
 
     def _cmd_vulndata(self, text, team_id, user_id):
         """

@@ -22,11 +22,17 @@ from .views import (
     TicketClosedListAPIView,
     TicketDetailAPIView,
     VulnerabilityTimelineAPIView,
+    AdminReportDownloadDataAPIView,
+    AdminReportDownloadAPIView,
  )
                     
 urlpatterns = [
     # Fetch vulnerabilities from the LATEST Super Admin upload (no report_id needed)
     path('register/latest/vulns/', LatestSuperAdminVulnerabilityRegisterAPIView.as_view(), name='latest-superadmin-vulns'),
+
+    # Downloadable report — consolidated JSON, and a self-contained HTML file
+    path('report/download-data/', AdminReportDownloadDataAPIView.as_view(), name='admin-report-download-data'),
+    path('report/download/', AdminReportDownloadAPIView.as_view(), name='admin-report-download'),
 
     # Get list of hosts with vulnerability counts by risk factor
     # path('register/hosts/', VulnerabilitiesByHostListAPIView.as_view(), name='vulnerabilities-by-host-list'),
