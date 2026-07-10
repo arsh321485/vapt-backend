@@ -7282,6 +7282,448 @@ def teams_webhook_handler(request):
     return TeamsWebhookView.as_view()(request)
 
 
+# ── Dashboard image rendering (real dashboard.html design, not Block Kit) ──
+#
+# Slack's `image` block can only point at a URL that Slack's own servers
+# fetch directly (no auth headers from us) — so the dashboard PNG is served
+# by SlackDashboardImageView below, gated by a short-lived signed token
+# instead of login, and rendered fresh (live data) on every fetch via a
+# headless-Chromium screenshot of dashboard.html with real values baked in.
+
+_DASHBOARD_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VaptFix Admin Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --slack-text: #1d1c1d;
+      --slack-sub: #616061;
+      --slack-border: #e8e8e8;
+      --accent: rgb(14, 106, 111);
+      --critical: #e01e5a;
+      --high: #e8912d;
+      --medium: #ecb22e;
+      --low: #2eb67d;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Lato", sans-serif;
+      background: #f4f6f8;
+      color: var(--slack-text);
+      font-size: 15px;
+      min-height: 100vh;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+
+    .dash {
+      width: 100%;
+      max-width: 740px;
+      border: 1px solid var(--slack-border);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,.05);
+      background: #fff;
+    }
+
+    .dash-top {
+      padding: 18px 22px;
+      background: #fff;
+      border-bottom: 1px solid var(--slack-border);
+    }
+    .dash-top h2 { font-size: 19px; font-weight: 900; }
+    .dash-top p { font-size: 13px; color: var(--slack-sub); margin-top: 2px; }
+
+    .bento {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      grid-template-rows: auto auto auto;
+      gap: 12px;
+      padding: 16px;
+      background: #f4f6f8;
+    }
+
+    .bento-card {
+      background: #fff;
+      border-radius: 12px;
+      border: 1px solid var(--slack-border);
+      padding: 16px 18px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    }
+
+    .bento-card.span2 { grid-column: span 2; }
+    .bento-card.span3 { grid-column: span 3; }
+    .bento-card.span6 { grid-column: span 6; }
+
+    .bento-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .05em; color: var(--slack-sub); margin-bottom: 6px;
+    }
+
+    .bento-value { font-size: 28px; font-weight: 900; line-height: 1.1; }
+    .bento-sub { font-size: 12px; color: var(--slack-sub); margin-top: 4px; }
+
+    .gauge-wrap { display: flex; align-items: center; gap: 16px; }
+
+    .gauge {
+      width: 80px; height: 80px; border-radius: 50%;
+      display: grid; place-items: center; position: relative; flex-shrink: 0;
+    }
+
+    .gauge::after {
+      content: ""; width: 58px; height: 58px; border-radius: 50%; background: #fff;
+    }
+
+    .gauge span {
+      position: absolute; font-size: 18px; font-weight: 900; z-index: 1;
+    }
+
+    .gauge-info .bento-value { font-size: 22px; }
+
+    .chart-card .chart-title {
+      font-size: 14px; font-weight: 900; margin-bottom: 14px;
+    }
+    .chart-card .chart-sub {
+      display: inline-block;
+      font-size: 12px; font-weight: 400; color: var(--slack-sub); margin-left: 6px;
+    }
+
+    .vbars {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-around;
+      height: 160px;
+      padding-top: 10px;
+    }
+
+    .vcol {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 6px; flex: 1;
+    }
+
+    .vcol .num {
+      font-size: 13px; font-weight: 900;
+      background: #f0f0f0;
+      padding: 2px 8px; border-radius: 10px;
+    }
+
+    .vcol .col {
+      width: 36px;
+      border-radius: 8px 8px 4px 4px;
+    }
+
+    .vcol .col.critical { background: var(--critical); box-shadow: 0 4px 12px rgba(224,30,90,.3); }
+    .vcol .col.high { background: var(--high); box-shadow: 0 4px 12px rgba(232,145,45,.3); }
+    .vcol .col.medium { background: var(--medium); box-shadow: 0 4px 12px rgba(236,178,46,.3); }
+    .vcol .col.low { background: var(--low); box-shadow: 0 4px 12px rgba(46,182,125,.3); }
+
+    .vcol .lbl {
+      font-size: 11px; font-weight: 700; color: var(--slack-sub);
+    }
+
+    .donut-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      padding-top: 4px;
+    }
+
+    .donut {
+      width: 118px;
+      height: 118px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .donut::after {
+      content: "";
+      width: 74px;
+      height: 74px;
+      border-radius: 50%;
+      background: #fff;
+    }
+
+    .donut-center {
+      position: absolute;
+      text-align: center;
+      z-index: 1;
+      line-height: 1.15;
+    }
+
+    .donut-center .big { font-size: 26px; font-weight: 900; }
+    .donut-center .small { font-size: 11px; color: var(--slack-sub); font-weight: 700; }
+
+    .donut-legend {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .legend-row .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .legend-row .dot.critical { background: var(--critical); }
+    .legend-row .dot.high { background: var(--high); }
+    .legend-row .dot.medium { background: var(--medium); }
+    .legend-row .dot.low { background: var(--low); }
+
+    .legend-row .name { flex: 1; font-weight: 700; }
+    .legend-row .pct { font-weight: 900; color: var(--slack-sub); min-width: 36px; text-align: right; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+
+    .chip {
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 12px; border-radius: 8px;
+      font-size: 13px; font-weight: 700;
+      border: 1px solid var(--slack-border);
+      background: #fafbfc;
+    }
+
+    .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+    .chip .dot.red { background: var(--critical); }
+    .chip .dot.yellow { background: var(--medium); }
+
+    .chip.danger { border-color: #f5c6cb; background: #fff5f5; }
+
+    .support-row { display: flex; gap: 12px; }
+
+    .support-stat {
+      flex: 1; text-align: center;
+      padding: 12px; border-radius: 10px;
+      background: linear-gradient(135deg, #f8f9ff, #fff);
+      border: 1px solid #e0e7ff;
+    }
+
+    .support-stat .num { font-size: 24px; font-weight: 900; color: var(--accent); }
+    .support-stat .txt { font-size: 11px; color: var(--slack-sub); font-weight: 700; margin-top: 2px; }
+  </style>
+</head>
+<body>
+"""
+
+
+def _dashboard_bar_height(n, m):
+    return round(max((n / m) * 130, 8) if n > 0 else 4)
+
+
+def _dashboard_gauge_gradient(score):
+    score = max(0, min(10, score or 0))
+    deg = (score / 10) * 360
+    color = "#e01e5a" if score >= 7 else ("#e8912d" if score >= 4 else "#2eb67d")
+    return f"conic-gradient({color} 0deg {deg}deg, #eee {deg}deg 360deg)"
+
+
+def _dashboard_donut_gradient(counts):
+    colors = {"critical": "#e01e5a", "high": "#e8912d", "medium": "#ecb22e", "low": "#2eb67d"}
+    order = ["medium", "low", "high", "critical"]
+    total = sum(counts.values())
+    if total == 0:
+        return "#eee", 0
+    deg = 0
+    stops = []
+    for k in order:
+        n = counts.get(k, 0)
+        if n > 0:
+            slice_deg = (n / total) * 360
+            stops.append(f"{colors[k]} {deg}deg {deg + slice_deg}deg")
+            deg += slice_deg
+    return f"conic-gradient({', '.join(stops)})", total
+
+
+def _build_dashboard_html(data):
+    total_assets = (data.get("total_assets") or {}).get("total_assets", 0)
+    avg_score    = (data.get("avg_score") or {}).get("avg_score", 0) or 0
+    vulns        = data.get("vulnerabilities") or {}
+    critical = vulns.get("critical", 0)
+    high     = vulns.get("high", 0)
+    medium   = vulns.get("medium", 0)
+    low      = vulns.get("low", 0)
+    total_vulns = critical + high + medium + low
+    max_v = max(critical, high, medium, low, 1)
+
+    timeline = data.get("mitigation_timeline") or {}
+    mtr      = (data.get("mean_time_remediate") or {}).get("mean_time_to_remediate") or {}
+    fixed    = data.get("vulnerabilities_fixed") or {}
+    support  = data.get("support_requests") or {}
+
+    risk_label = "High risk level" if avg_score >= 7 else ("Moderate risk level" if avg_score >= 4 else "Low risk level")
+    gauge_bg = _dashboard_gauge_gradient(avg_score)
+
+    fixed_counts = {
+        "critical": fixed.get("critical_fixed", 0),
+        "high": fixed.get("high_fixed", 0),
+        "medium": fixed.get("medium_fixed", 0),
+        "low": fixed.get("low_fixed", 0),
+    }
+    donut_bg, fixed_total = _dashboard_donut_gradient(fixed_counts)
+    legend_labels = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
+    legend_html = "".join(
+        f'<div class="legend-row"><span class="dot {k}"></span>'
+        f'<span class="name">{legend_labels[k]}</span>'
+        f'<span class="pct">{fixed_counts[k]}</span></div>'
+        for k in ["medium", "low", "high", "critical"]
+    )
+
+    def chip(label, info):
+        if not info:
+            return f'<div class="chip"><span class="dot yellow"></span> {label} — N/A</div>'
+        overdue = info.get("status") == "overdue"
+        dot = "red" if overdue else "yellow"
+        cls = "chip danger" if overdue else "chip"
+        status_txt = "Overdue" if overdue else info.get("remaining_label", "")
+        return f'<div class="{cls}"><span class="dot {dot}"></span> {label} — {status_txt}</div>'
+
+    chips_html = "".join([
+        chip("Critical", timeline.get("critical")),
+        chip("High",     timeline.get("high")),
+        chip("Medium",   timeline.get("medium")),
+        chip("Low",      timeline.get("low")),
+    ])
+
+    bars_html = "".join(
+        f'<div class="vcol"><span class="num">{n}</span>'
+        f'<div class="col {k}" style="height:{_dashboard_bar_height(n, max_v)}px"></div>'
+        f'<span class="lbl">{lbl}</span></div>'
+        for k, lbl, n in [
+            ("critical", "Critical", critical),
+            ("high", "High", high),
+            ("medium", "Medium", medium),
+            ("low", "Low", low),
+        ]
+    )
+
+    body = f"""  <div class="dash">
+    <div class="dash-top">
+      <h2>📊 VaptFix Admin Dashboard</h2>
+      <p>Overall summary — assets, vuln severity, mitigation timeline, mean fix time, and support tickets.</p>
+    </div>
+
+    <div class="bento">
+      <div class="bento-card span2">
+        <div class="bento-label">🏢 Total Assets</div>
+        <div class="bento-value">{total_assets}</div>
+        <div class="bento-sub">Monitored endpoints</div>
+      </div>
+
+      <div class="bento-card span2">
+        <div class="gauge-wrap">
+          <div class="gauge" style="background:{gauge_bg}"><span>{avg_score}</span></div>
+          <div class="gauge-info">
+            <div class="bento-label">⚠️ Avg Risk Score</div>
+            <div class="bento-value">{avg_score} <span style="font-size:14px;font-weight:400;color:var(--slack-sub)">/ 10</span></div>
+            <div class="bento-sub">{risk_label}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bento-card span2">
+        <div class="bento-label">⚡ Mean Time to Remediate</div>
+        <div class="bento-value">{mtr.get('label', 'N/A')}</div>
+        <div class="bento-sub">Average resolution time</div>
+      </div>
+
+      <div class="bento-card span3 chart-card">
+        <div class="chart-title">🔴 Vulnerabilities by Severity</div>
+        <div class="vbars">{bars_html}</div>
+      </div>
+
+      <div class="bento-card span3 chart-card">
+        <div class="chart-title">🔧 Vulns Fixed<span class="chart-sub">{fixed.get('total_fixed', 0)} / {total_vulns}</span></div>
+        <div class="donut-wrap">
+          <div class="donut" style="background:{donut_bg}">
+            <div class="donut-center"><div class="big">{fixed_total}</div><div class="small">fixed</div></div>
+          </div>
+          <div class="donut-legend">{legend_html}</div>
+        </div>
+      </div>
+
+      <div class="bento-card span6">
+        <div class="bento-label">⏱️ Mitigation Timeline</div>
+        <div class="chips">{chips_html}</div>
+      </div>
+
+      <div class="bento-card span6">
+        <div class="bento-label">🎫 Support Requests</div>
+        <div class="support-row">
+          <div class="support-stat"><div class="num">{support.get('total', 0)}</div><div class="txt">Total Requests</div></div>
+          <div class="support-stat"><div class="num">{support.get('pending', 0)}</div><div class="txt">Pending</div></div>
+          <div class="support-stat"><div class="num">{support.get('closed', 0)}</div><div class="txt">Closed</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+"""
+    return _DASHBOARD_HTML_HEAD + body + "</body>\n</html>"
+
+
+def _dashboard_png_bytes(html):
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox"])
+        try:
+            page = browser.new_page(viewport={"width": 800, "height": 200})
+            page.set_content(html, wait_until="networkidle")
+            el = page.query_selector(".dash")
+            png_bytes = el.screenshot()
+        finally:
+            browser.close()
+    return png_bytes
+
+
+def _dashboard_image_signer():
+    from django.core.signing import TimestampSigner
+    return TimestampSigner(salt="vaptfix-dashboard-image")
+
+
+class SlackDashboardImageView(APIView):
+    """
+    GET /api/admin/users/slack/dashboard-image/?token=...
+
+    Public (token-gated, not login-gated) — Slack's own servers fetch this
+    URL directly when rendering an `image` block, without any of our auth
+    headers, so it can't require IsAuthenticated. Instead the token is a
+    short-lived signed team_id (see _dashboard_image_signer), minted fresh
+    every time the navbar/dashboard message is (re)built.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        token = request.query_params.get("token", "")
+        try:
+            team_id = _dashboard_image_signer().unsign(token, max_age=600)
+        except Exception:
+            return HttpResponse(status=403)
+
+        slash = SlackSlashCommandView()
+        data = slash._call_api("/api/admin/admindashboard/dashboard/summary/", team_id)
+        html = _build_dashboard_html(data)
+
+        try:
+            png_bytes = _dashboard_png_bytes(html)
+        except Exception:
+            logger.exception("[SlackDashboardImageView] PNG render failed")
+            return HttpResponse(status=500)
+
+        return HttpResponse(png_bytes, content_type="image/png")
+
+
 class SlackSlashCommandView(APIView):
     """
     Handles all VaptFix Slack slash commands.
@@ -7554,11 +7996,25 @@ class SlackSlashCommandView(APIView):
         return self._format_vulnstats(data)
 
     def _cmd_dashboard(self, text, team_id, user_id):
-        data = self._call_api(
-            "/api/admin/admindashboard/dashboard/summary/", team_id,
-            slack_user_id=user_id,
-        )
-        return self._format_dashboard(data)
+        return [self._dashboard_image_block(team_id)]
+
+    def _dashboard_image_block(self, team_id):
+        """
+        Real dashboard.html design (gauge/donut/bento cards) rendered as a
+        PNG via SlackDashboardImageView — Block Kit can't do custom CSS, so
+        this is the only way to show the actual design instead of a
+        text/emoji approximation. Token is short-lived (10 min); `t=` just
+        cache-busts so re-posting the navbar always shows fresh data.
+        """
+        import time
+        token = _dashboard_image_signer().sign(team_id)
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+        url = f"{backend}/api/admin/users/slack/dashboard-image/?token={quote(token)}&t={int(time.time())}"
+        return {
+            "type": "image",
+            "image_url": url,
+            "alt_text": "VaptFix Admin Dashboard",
+        }
 
     def _cmd_postnavbar(self, text, team_id, user_id):
         """
@@ -7629,12 +8085,8 @@ class SlackSlashCommandView(APIView):
             )
             return self._format_supportdata(data)
 
-        # nav_home (default)
-        data = self._call_api(
-            "/api/admin/admindashboard/dashboard/summary/", team_id,
-            slack_user_id=user_id,
-        )
-        return self._format_dashboard(data)
+        # nav_home (default) — real bento-grid design, rendered as an image
+        return [self._dashboard_image_block(team_id)]
 
     def _get_workspace_report_id(self, team_id):
         """
@@ -9199,85 +9651,6 @@ class SlackSlashCommandView(APIView):
         filled = round((value / max_val) * width) if max_val else 0
         return "█" * filled + "░" * (width - filled)
 
-    def _format_dashboard(self, data):
-        total_assets = (data.get("total_assets") or {}).get("total_assets", 0)
-        avg_score    = (data.get("avg_score") or {}).get("avg_score", 0)
-        vulns        = data.get("vulnerabilities") or {}
-        critical     = vulns.get("critical", 0)
-        high         = vulns.get("high", 0)
-        medium       = vulns.get("medium", 0)
-        low          = vulns.get("low", 0)
-        total_vulns  = critical + high + medium + low
-        max_v        = max(total_vulns, 1)
-
-        timeline = data.get("mitigation_timeline") or {}
-        mtr      = (data.get("mean_time_remediate") or {}).get("mean_time_to_remediate") or {}
-        fixed    = data.get("vulnerabilities_fixed") or {}
-        support  = data.get("support_requests") or {}
-
-        def tl_line(sev, info):
-            if not info:
-                return f"• {sev.capitalize()}: N/A"
-            icon  = "🔴" if info.get("status") == "overdue" else "🟡"
-            label = info.get("remaining_label", "")
-            return f"• {sev.capitalize()}: {icon} {label}"
-
-        vuln_chart = (
-            f"```"
-            f"\nCritical  {self._bar(critical, max_v)}  {critical}"
-            f"\nHigh      {self._bar(high, max_v)}  {high}"
-            f"\nMedium    {self._bar(medium, max_v)}  {medium}"
-            f"\nLow       {self._bar(low, max_v)}  {low}"
-            f"```"
-        )
-
-        total_fixed = fixed.get("total_fixed", 0)
-        fixed_legend = "\n".join([
-            f"• 🔴 Critical: {fixed.get('critical_fixed', 0)}",
-            f"• 🟠 High: {fixed.get('high_fixed', 0)}",
-            f"• 🟡 Medium: {fixed.get('medium_fixed', 0)}",
-            f"• 🔵 Low: {fixed.get('low_fixed', 0)}",
-        ])
-
-        risk_bucket = "🔴 High" if avg_score >= 7 else ("🟡 Moderate" if avg_score >= 4 else "🟢 Low")
-
-        # Block Kit has no custom CSS/SVG (no literal gauge circles or donut
-        # charts like dashboard.html) — this mirrors the same card groupings
-        # and data via dividers + fields instead, which is the closest a
-        # Slack message can get to that bento-grid look.
-        return [
-            {"type": "header", "text": {"type": "plain_text", "text": "📊 VaptFix Admin Dashboard", "emoji": True}},
-            self._ctx("Overall summary — assets, vuln severity, mitigation timeline, mean fix time, and support tickets."),
-            {"type": "divider"},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*🏢 Total Assets*\n{total_assets}"},
-                {"type": "mrkdwn", "text": f"*⚠️ Avg Risk Score*\n{avg_score} / 10 — {risk_bucket}"},
-                {"type": "mrkdwn", "text": f"*⚡ Mean Time to Remediate*\n{mtr.get('label', 'N/A')}"},
-            ]},
-            {"type": "divider"},
-            {"type": "section", "text": {"type": "mrkdwn",
-                "text": "*🔴 Vulnerabilities by Severity*\n" + vuln_chart}},
-            {"type": "divider"},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*🔧 Vulns Fixed*\n{total_fixed} / {total_vulns}"},
-                {"type": "mrkdwn", "text": f"*Breakdown*\n{fixed_legend}"},
-            ]},
-            {"type": "divider"},
-            {"type": "section", "text": {"type": "mrkdwn", "text": (
-                "*⏱ Mitigation Timeline*\n"
-                + "\n".join([
-                    tl_line("critical", timeline.get("critical")),
-                    tl_line("high",     timeline.get("high")),
-                    tl_line("medium",   timeline.get("medium")),
-                    tl_line("low",      timeline.get("low")),
-                ])
-            )}},
-            {"type": "divider"},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*🎫 Support Requests*\n{support.get('total', 0)} total"},
-                {"type": "mrkdwn", "text": f"*Pending / Closed*\n{support.get('pending', 0)} / {support.get('closed', 0)}"},
-            ]},
-        ]
 
     def _format_teamoverview(self, data):
         # API returns teams as a dict {"Team Name": {total, open, closed, by_risk}} or list
