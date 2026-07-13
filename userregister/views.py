@@ -2546,8 +2546,13 @@ class UserSupportRequestsByReportAPIView(APIView):
                     "vul_name":           support_doc.get("vul_name"),
                     "host_name":          support_doc.get("host_name"),
                 }
-                _title = f"New reply on support request: {support_doc.get('vul_name', '')}"
-                _msg = f"{request.user.email}: {text}"
+                _vul_name = support_doc.get('vul_name') or 'a vulnerability'
+                _host_name = support_doc.get('host_name') or 'an asset'
+                _title = f"New reply on support request: {_vul_name}"
+                _msg = (
+                    f"{request.user.email} replied on the support request for "
+                    f"'{_vul_name}' on {_host_name}: {text}"
+                )
                 create_notification(admin_user, 'admin', 'support_request_reply', _title, _msg, _n_meta)
             except Exception as _e:
                 logger.warning("support_request_reply notification failed: %s", _e)

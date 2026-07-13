@@ -3051,10 +3051,16 @@ class SupportRequestByReportAPIView(APIView):
                             "vul_name":           support_doc.get("vul_name"),
                             "host_name":          support_doc.get("host_name"),
                         }
-                        _title = f"New reply on your support request: {support_doc.get('vul_name', '')}"
+                        _vul_name = support_doc.get('vul_name') or 'your vulnerability'
+                        _host_name = support_doc.get('host_name') or 'the reported asset'
+                        _title = f"New reply on your support request: {_vul_name}"
+                        _msg = (
+                            f"Admin replied on your support request for '{_vul_name}' "
+                            f"on {_host_name}: {text}"
+                        )
                         create_notification(
                             request.user, 'user', 'support_request_reply',
-                            _title, text, _n_meta, recipient_email=recipient_email
+                            _title, _msg, _n_meta, recipient_email=recipient_email
                         )
                     except Exception as _e:
                         import logging as _log
