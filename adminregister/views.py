@@ -2948,6 +2948,16 @@ class SupportRequestByReportAPIView(APIView):
                     "closed" if vulnerability_id in closed_vuln_ids
                     else doc.get("status")
                 )
+                messages = []
+                for m in doc.get("messages", []):
+                    messages.append({
+                        "_id": str(m.get("_id", "")),
+                        "sender": m.get("sender"),
+                        "sender_email": m.get("sender_email"),
+                        "text": m.get("text"),
+                        "visibility": m.get("visibility"),
+                        "sent_at": _normalize_iso(m.get("sent_at")),
+                    })
                 results.append({
                     "_id": str(doc.get("_id")),
                     "report_id": doc.get("report_id"),
@@ -2964,7 +2974,7 @@ class SupportRequestByReportAPIView(APIView):
                     "status": effective_status,
                     "requested_by": _resolve_requester(doc),
                     "requested_at": doc.get("requested_at"),
-                    "messages": doc.get("messages", []),
+                    "messages": messages,
                 })
 
             return Response(
