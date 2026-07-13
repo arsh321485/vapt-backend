@@ -9025,17 +9025,14 @@ class SlackSlashCommandView(APIView):
         import pymongo as _pymongo
 
         try:
-            workspace_users = list(User.objects.filter(slack_team_id=team_id))
-            staff_users     = [u for u in User.objects.all() if getattr(u, "is_staff", False)]
-            all_users       = list({u.id: u for u in workspace_users + staff_users}.values())
-            if not all_users:
-                logger.warning("[SlackCmd] _create_support_ticket: no users found")
+            admin = User.objects.filter(slack_team_id=team_id).first()
+            if not admin:
+                logger.warning("[SlackCmd] _create_support_ticket: no admin found for team_id=%s", team_id)
                 return False
 
-            all_ids    = [str(u.id) for u in all_users]
-            all_emails = [e for e in (getattr(u, "email", "") for u in all_users) if e]
-            conditions = [{"admin_id": aid} for aid in all_ids]
-            conditions += [{"admin_email": em} for em in all_emails]
+            conditions = [{"admin_id": str(admin.id)}]
+            if admin.email:
+                conditions.append({"admin_email": admin.email})
 
             with MongoContext() as db:
                 latest = db["nessus_reports"].find_one(
@@ -9044,7 +9041,7 @@ class SlackSlashCommandView(APIView):
                     sort=[("uploaded_at", _pymongo.DESCENDING)],
                 )
                 report_id   = str(latest.get("report_id", "")) if latest else ""
-                admin_id    = latest.get("admin_id", all_ids[0]) if latest else all_ids[0]
+                admin_id    = str(admin.id)
 
                 doc = {
                     "report_id":    report_id,
