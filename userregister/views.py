@@ -2436,6 +2436,13 @@ class UserSupportRequestsByReportAPIView(APIView):
                 "closed" if vulnerability_id in closed_vuln_ids
                 else doc.get("status")
             )
+            visible_messages = [
+                m for m in doc.get("messages", [])
+                if m.get("visibility", "customer") == "customer"
+            ]
+            for m in visible_messages:
+                m["_id"] = str(m.get("_id", ""))
+                m["sent_at"] = _normalize_iso(m.get("sent_at"))
             results.append({
                 "_id":                   str(doc.get("_id")),
                 "report_id":             doc.get("report_id"),
@@ -2450,6 +2457,7 @@ class UserSupportRequestsByReportAPIView(APIView):
                 "status":                effective_status,
                 "requested_by":          requester_name,
                 "requested_at":          _normalize_iso(doc.get("requested_at")),
+                "messages":              visible_messages,
             })
 
         return Response(
@@ -2461,6 +2469,99 @@ class UserSupportRequestsByReportAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+    def post(self, request, report_id):
+        """
+        User sends a message/reply on their own support request.
+        Body: {"request_id": "<support request _id>", "text": "..."}
+        """
+        teams, admin_user = _get_user_context(request.user.email)
+        if not teams:
+            return Response(
+                {"detail": "No team assigned to this user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not admin_user:
+            return Response(
+                {"detail": "No admin assigned to this user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        teams_lower_set = {t.lower() for t in teams}
+        admin_id = str(admin_user.id)
+
+        request_id = str(request.data.get("request_id", "")).strip()
+        text = str(request.data.get("text", "")).strip()
+        if not request_id or not text:
+            return Response(
+                {"detail": "request_id and text are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            request_obj_id = ObjectId(request_id)
+        except Exception:
+            return Response(
+                {"detail": "Invalid request_id"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with MongoContext() as db:
+            support_coll = db[SUPPORT_REQUEST_COLLECTION]
+
+            support_doc = support_coll.find_one({
+                "_id": request_obj_id,
+                "report_id": str(report_id),
+                "admin_id": admin_id,
+            })
+            if not support_doc:
+                return Response(
+                    {"detail": "Support request not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            doc_team = (support_doc.get("assigned_team") or "").strip().lower()
+            if doc_team not in teams_lower_set:
+                return Response(
+                    {"detail": "Support request not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            message_entry = {
+                "_id": ObjectId(),
+                "sender": "user",
+                "sender_email": request.user.email,
+                "text": text,
+                "visibility": "customer",
+                "sent_at": datetime.utcnow(),
+            }
+            support_coll.update_one(
+                {"_id": request_obj_id},
+                {"$push": {"messages": message_entry}}
+            )
+
+            try:
+                from notifications.utils import create_notification
+                _n_meta = {
+                    "support_request_id": request_id,
+                    "vulnerability_id":   support_doc.get("vulnerability_id"),
+                    "vul_name":           support_doc.get("vul_name"),
+                    "host_name":          support_doc.get("host_name"),
+                }
+                _title = f"New reply on support request: {support_doc.get('vul_name', '')}"
+                _msg = f"{request.user.email}: {text}"
+                create_notification(admin_user, 'admin', 'support_request_reply', _title, _msg, _n_meta)
+            except Exception as _e:
+                logger.warning("support_request_reply notification failed: %s", _e)
+
+            message_entry["_id"] = str(message_entry["_id"])
+            message_entry["sent_at"] = _normalize_iso(message_entry["sent_at"])
+
+            return Response(
+                {
+                    "message": "Message sent successfully",
+                    "data": message_entry,
+                },
+                status=status.HTTP_201_CREATED,
+            )
 
 
 class UserSupportRequestsByHostAPIView(APIView):
