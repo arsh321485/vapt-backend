@@ -1,44 +1,4 @@
-This is a **backend error**, not a frontend issue. The error is:
+jo user or admin dono jgh jo notification ja rha hai konse vuln ke liye asset or kisne user ke liye to o proper aana chahihe 
 
-```
-TypeError at /api/admin/adminregister/support-requests/report/6a3d5e18c4db1c02e31fb63d/
-Object of type ObjectId is not JSON serializable
-```
-
-This means the Django backend is returning a MongoDB ObjectId that hasn't been converted to a string before JSON serialization. This is a backend bug that needs to be fixed in the Django views.
-
-The user needs to fix this in their Django backend code. I need to tell them this is a backend issue and what to fix.
-The fix involves converting ObjectId values to strings when building the response—either by explicitly calling `str()` on the `_id` field before returning it, or by implementing a custom JSON encoder that handles ObjectId serialization.
-Haan — yeh **naya backend bug hai** jo tab aaya jab backend developer ne GET response mein `messages: [...]` array add kiya.
-
-**Reason:** Pehle sirf basic fields return hoti thin (strings/dates) jo JSON serialize ho jaati thin. Ab `messages` array add hua jisme kisi field ka `_id` MongoDB `ObjectId` type mein hai — wo serialize nahi ho raha.
-
-**Backend developer ko specifically yeh check karna hai:**
-
-```python
-# messages array mein har message ki _id convert karo
-for message in doc.get("messages", []):
-    if "_id" in message:
-        message["_id"] = str(message["_id"])
-```
-
-**Ya pura document walk karo:**
-```python
-import json
-from bson import ObjectId
-
-class MongoEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, ObjectId):
-            return str(obj)
-        return super().default(obj)
-```
-
-**Short mein:** Backend developer se kaho ki **`messages` array ke andar jo bhi `ObjectId` fields hain unhe `str()` kar ke return karein** — bas wahi ek jagah hai jo naya add hua hai. Baaki sab pehle se theek tha.
-
-Frontend meri taraf se bilkul ready hai — jaise hi backend fix deploy hoga, admin side pe support requests aur messages dono properly kaam karenge. ✅
-
-
-admin side pr support request show nai ho rha hai to o check kro 
-
-or btao ki kya issue hai 
+vuln name
+asset etc..
