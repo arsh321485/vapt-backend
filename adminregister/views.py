@@ -2964,16 +2964,101 @@ class SupportRequestByReportAPIView(APIView):
                     "status": effective_status,
                     "requested_by": _resolve_requester(doc),
                     "requested_at": doc.get("requested_at"),
+                    "messages": doc.get("messages", []),
                 })
 
             return Response(
                 {
                     "message": "Support requests fetched successfully",
                     "report_id": report_id,
-                    "count": len(results),  
+                    "count": len(results),
                     "results": results
                 },
                 status=status.HTTP_200_OK
+            )
+
+    def post(self, request, report_id):
+        """
+        Admin sends a message/reply on a support request belonging to this report.
+        Body: {"request_id": "<support request _id>", "text": "...", "visibility": "customer"|"internal"}
+        """
+        admin_id = str(request.user.id)
+        request_id = str(request.data.get("request_id", "")).strip()
+        text = str(request.data.get("text", "")).strip()
+        visibility = request.data.get("visibility") or "customer"
+        if visibility not in ("customer", "internal"):
+            visibility = "customer"
+
+        if not request_id or not text:
+            return Response(
+                {"detail": "request_id and text are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            request_obj_id = ObjectId(request_id)
+        except Exception:
+            return Response(
+                {"detail": "Invalid request_id"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with MongoContext() as db:
+            support_coll = db["support_requests"]
+
+            support_doc = support_coll.find_one({
+                "_id": request_obj_id,
+                "report_id": str(report_id),
+                "admin_id": admin_id,
+            })
+            if not support_doc:
+                return Response(
+                    {"detail": "Support request not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            message_entry = {
+                "_id": ObjectId(),
+                "sender": "admin",
+                "sender_email": getattr(request.user, "email", ""),
+                "text": text,
+                "visibility": visibility,
+                "sent_at": datetime.utcnow(),
+            }
+            support_coll.update_one(
+                {"_id": request_obj_id},
+                {"$push": {"messages": message_entry}}
+            )
+
+            if visibility == "customer":
+                recipient_email = support_doc.get("requested_by") or ""
+                if "@" in recipient_email:
+                    try:
+                        from notifications.utils import create_notification
+                        _n_meta = {
+                            "support_request_id": request_id,
+                            "vulnerability_id":   support_doc.get("vulnerability_id"),
+                            "vul_name":           support_doc.get("vul_name"),
+                            "host_name":          support_doc.get("host_name"),
+                        }
+                        _title = f"New reply on your support request: {support_doc.get('vul_name', '')}"
+                        create_notification(
+                            request.user, 'user', 'support_request_reply',
+                            _title, text, _n_meta, recipient_email=recipient_email
+                        )
+                    except Exception as _e:
+                        import logging as _log
+                        _log.getLogger(__name__).warning("support_request_reply notification failed: %s", _e)
+
+            message_entry["_id"] = str(message_entry["_id"])
+            message_entry["sent_at"] = message_entry["sent_at"].isoformat()
+
+            return Response(
+                {
+                    "message": "Message sent successfully",
+                    "data": message_entry
+                },
+                status=status.HTTP_201_CREATED
             )
 
 
