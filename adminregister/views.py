@@ -2857,9 +2857,33 @@ class SupportRequestByReportAPIView(APIView):
 
     def get(self, request, report_id):
         admin_id = str(request.user.id)
+        admin_email = getattr(request.user, 'email', None)
 
         with MongoContext() as db:
+            nessus_coll = db[NESSUS_COLLECTION]
             support_coll = db["support_requests"]
+
+            query_conditions = [{"admin_id": admin_id}]
+            if admin_email:
+                query_conditions.append({"admin_email": admin_email})
+
+            latest_doc = nessus_coll.find_one(
+                {"$or": query_conditions},
+                sort=[("uploaded_at", pymongo.DESCENDING)]
+            )
+            if not latest_doc:
+                return Response(
+                    {"detail": "No reports found for your account"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            if latest_doc.get("report_id") != str(report_id):
+                return Response(
+                    {
+                        "detail": "Data must come from the latest uploaded report only",
+                        "latest_report_id": latest_doc.get("report_id")
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
             cursor = support_coll.find(
                 {
@@ -2958,14 +2982,32 @@ class SupportRequestByHostNameAPIView(APIView):
 
     def get(self, request, host_name):
         admin_id = str(request.user.id)
+        admin_email = getattr(request.user, 'email', None)
 
         with MongoContext() as db:
+            nessus_coll = db[NESSUS_COLLECTION]
             support_coll = db["support_requests"]
+
+            query_conditions = [{"admin_id": admin_id}]
+            if admin_email:
+                query_conditions.append({"admin_email": admin_email})
+
+            latest_doc = nessus_coll.find_one(
+                {"$or": query_conditions},
+                sort=[("uploaded_at", pymongo.DESCENDING)]
+            )
+            if not latest_doc:
+                return Response(
+                    {"detail": "No reports found for your account"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            latest_report_id = latest_doc.get("report_id")
 
             cursor = support_coll.find(
                 {
                     "host_name": host_name,
-                    "admin_id": admin_id
+                    "admin_id": admin_id,
+                    "report_id": latest_report_id
                 }
             ).sort("requested_at", -1)
 

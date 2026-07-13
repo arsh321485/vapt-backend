@@ -1,0 +1,90 @@
+https://vaptbackend.secureitlab.com/api/user/register/support-requests/report/6a3d5e18c4db1c02e31fb63d/
+
+
+
+{
+    "message": "Support requests fetched successfully",
+    "report_id": "6a3d5e18c4db1c02e31fb63d",
+    "count": 4,
+    "results": [
+        {
+            "_id": "6a547ed5f13f55c7eb8d4b0b",
+            "report_id": "6a3d5e18c4db1c02e31fb63d",
+            "vulnerability_id": "6a547eb25be48eb97b13abba",
+            "vul_name": "OpenSSH < 10.0 DisableForwarding",
+            "host_name": "192.168.0.101",
+            "severity": "Low",
+            "assigned_team": "Configuration Management",
+            "assigned_team_members": [
+                {
+                    "user_id": "6a4c8c774c86d3abfa63000e",
+                    "name": "Dikshika Manker",
+                    "email": "dikshika2019@gmail.com"
+                }
+            ],
+            "step_requested": null,
+            "description": "abc",
+            "status": "open",
+            "requested_by": "dikshika2019@gmail.com",
+            "requested_at": "2026-07-13T05:59:49.713000-05:00"
+        },
+        {
+            "_id": "6a47e992e4c19438236288ed",
+            "report_id": "6a3d5e18c4db1c02e31fb63d",
+            "vulnerability_id": null,
+            "vul_name": null,
+            "host_name": null,
+            "severity": "",
+            "assigned_team": "Configuration Management",
+            "assigned_team_members": [],
+            "step_requested": null,
+            "description": "message\" m4",
+            "status": "open",
+            "requested_by": "slack:U0BB02DC5T5",
+            "requested_at": "2026-07-03T16:55:46.858000-05:00"
+        },
+        {
+            "_id": "6a47e96e862252f5eac74780",
+            "report_id": "6a3d5e18c4db1c02e31fb63d",
+            "vulnerability_id": null,
+            "vul_name": null,
+            "host_name": null,
+            "severity": "",
+            "assigned_team": "Configuration Management",
+            "assigned_team_members": [],
+            "step_requested": null,
+            "description": "message",
+            "status": "open",
+            "requested_by": "slack:U0BB02DC5T5",
+            "requested_at": "2026-07-03T16:55:10.329000-05:00"
+        },
+        {
+            "_id": "6a3e11edf3ec8d10e5af5be4",
+            "report_id": "6a3d5e18c4db1c02e31fb63d",
+            "vulnerability_id": "6a3e11aff4573d18f6d79331",
+            "vul_name": "SSL Certificate Cannot Be Trusted",
+            "host_name": "192.168.0.2",
+            "severity": "",
+            "assigned_team": "Configuration Management",
+            "assigned_team_members": [
+                {
+                    "user_id": "6a3e1146f3ec8d10e5af5be3",
+                    "name": "Ritu Bhikonde",
+                    "email": "ritubhikonde23@gmail.com"
+                }
+            ],
+            "step_requested": null,
+            "description": "ISUUE RAISED",
+            "status": "closed",
+            "requested_by": "ritubhikonde23@gmail.com",
+            "requested_at": "2026-06-26T05:45:17.664000-05:00"
+        }
+    ]
+}
+
+
+mujhe ye vale me bhi jo lateset report admin or user side hai jo user ne raise ki hai uski hai aani chahihe 
+
+durse adminki nai ya koe old report ki nai 
+
+to plan btao fir code krna
