@@ -79,6 +79,7 @@ INSTALLED_APPS = [
     "userrisk_criteria",
     "notifications",
     "automation_scripts_api",
+    "partners",
 ]
 
 MIDDLEWARE = [
