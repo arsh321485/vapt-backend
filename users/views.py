@@ -7753,9 +7753,17 @@ class SlackSlashCommandView(APIView):
         ("nav_home",     "📊 Dashboard"),
         ("nav_fix",      "🔧 Fix"),
         ("nav_register", "📋 Register"),
-        ("nav_team",     "👥 Team"),
+        ("nav_team",     "👥 Team Overview"),
         ("nav_teamperf", "📈 Team Performance"),
         ("nav_support",  "🎫 Support"),
+    ]
+
+    # Sub-tabs shown under the "Team Overview" nav tab specifically.
+    _TEAM_SUBTABS = [
+        ("team_sub_team",         "Team"),
+        ("team_sub_adduser",      "➕ Add User"),
+        ("team_sub_deleteuser",   "🗑️ Delete User"),
+        ("team_sub_externaluser", "🌐 External User"),
     ]
 
     def post(self, request):
@@ -8068,7 +8076,11 @@ class SlackSlashCommandView(APIView):
             )
             return self._format_vulndata_list(data)
 
-        if action_id in ("nav_team", "nav_teamperf"):
+        if action_id == "nav_team":
+            return [self._team_subnav_block(active_sub="team_sub_team")] + \
+                self._team_subtab_blocks("team_sub_team", team_id, user_id)
+
+        if action_id == "nav_teamperf":
             data = self._call_api(
                 "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
                 slack_user_id=user_id,
@@ -8087,6 +8099,104 @@ class SlackSlashCommandView(APIView):
 
         # nav_home (default) — real bento-grid design, rendered as an image
         return [self._dashboard_image_block(team_id)]
+
+    def _team_subnav_block(self, active_sub=None):
+        """Second-level button row shown under the 'Team Overview' nav tab."""
+        return {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label, "emoji": True},
+                    "action_id": action_id,
+                    **({"style": "primary"} if action_id == active_sub else {}),
+                }
+                for action_id, label in self._TEAM_SUBTABS
+            ],
+        }
+
+    def _team_subtab_blocks(self, sub_action_id, team_id, user_id):
+        """
+        Content for the 'Team Overview' sub-tabs. Add User / Delete User are
+        NOT handled here — those open a modal instead (see
+        SlackInteractivityView._handle_action), since they need input.
+        """
+        if sub_action_id == "team_sub_externaluser":
+            data = self._call_api(
+                "/api/admin/users_details/list-user-details/", team_id,
+                params={"user_type": "external"}, slack_user_id=user_id,
+            )
+            return self._format_externalusers(data)
+
+        # team_sub_team (default)
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
+            slack_user_id=user_id,
+        )
+        return self._format_teamoverview(data)
+
+    def _build_adduser_modal(self, channel_id):
+        return {
+            "type": "modal",
+            "callback_id": "modal_adduser_submit",
+            "private_metadata": channel_id,
+            "title": {"type": "plain_text", "text": "Add User"},
+            "submit": {"type": "plain_text", "text": "Add User"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "user_block",
+                    "label": {"type": "plain_text", "text": "User"},
+                    "element": {"type": "users_select", "action_id": "user_select"},
+                },
+                {
+                    "type": "input",
+                    "block_id": "type_block",
+                    "label": {"type": "plain_text", "text": "Type"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "type_select",
+                        "initial_option": {"text": {"type": "plain_text", "text": "external"}, "value": "external"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "external"}, "value": "external"},
+                            {"text": {"type": "plain_text", "text": "internal"}, "value": "internal"},
+                        ],
+                    },
+                },
+                {
+                    "type": "input",
+                    "block_id": "team_block",
+                    "label": {"type": "plain_text", "text": "Team(s)"},
+                    "element": {
+                        "type": "checkboxes",
+                        "action_id": "team_checks",
+                        "options": [
+                            {"text": {"type": "plain_text", "text": name}, "value": code}
+                            for code, name in self._TEAM_MAP.items()
+                        ],
+                    },
+                },
+            ],
+        }
+
+    def _build_deleteuser_modal(self, channel_id):
+        return {
+            "type": "modal",
+            "callback_id": "modal_deleteuser_submit",
+            "private_metadata": channel_id,
+            "title": {"type": "plain_text", "text": "Delete User"},
+            "submit": {"type": "plain_text", "text": "Deactivate"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "user_block",
+                    "label": {"type": "plain_text", "text": "User"},
+                    "element": {"type": "users_select", "action_id": "user_select"},
+                },
+            ],
+        }
 
     def _get_workspace_report_id(self, team_id):
         """
@@ -10729,8 +10839,21 @@ class SlackInteractivityView(APIView):
             self._debug_write("post(): failed to parse payload JSON")
             return Response({}, status=200)
 
-        if payload.get("type") != "block_actions":
-            self._debug_write(f"post(): ignored non-block_actions type={payload.get('type')}")
+        ptype = payload.get("type")
+
+        if ptype == "view_submission":
+            # Add User / Delete User modal submits — ack empty (closes the
+            # modal) and do the real work in the background, same
+            # ack-then-async pattern as block_actions below.
+            threading.Thread(
+                target=self._handle_view_submission,
+                args=(payload,),
+                daemon=True,
+            ).start()
+            return Response({}, status=200)
+
+        if ptype != "block_actions":
+            self._debug_write(f"post(): ignored type={ptype}")
             return Response({}, status=200)
 
         actions = payload.get("actions") or []
@@ -10744,6 +10867,8 @@ class SlackInteractivityView(APIView):
         team_id       = (payload.get("team") or {}).get("id", "")
         slack_user_id = (payload.get("user") or {}).get("id", "")
         response_url  = payload.get("response_url", "")
+        trigger_id    = payload.get("trigger_id", "")
+        channel_id    = (payload.get("channel") or {}).get("id", "")
 
         self._debug_write(
             f"post(): received action_id={action_id} value={value!r} "
@@ -10757,7 +10882,7 @@ class SlackInteractivityView(APIView):
 
         threading.Thread(
             target=self._handle_action,
-            args=(action_id, value, team_id, slack_user_id, response_url),
+            args=(action_id, value, team_id, slack_user_id, response_url, trigger_id, channel_id),
             daemon=True,
         ).start()
 
@@ -10794,7 +10919,7 @@ class SlackInteractivityView(APIView):
             logger.exception(f"[SlackInteractivity] response_url POST failed for action={action_id}")
             self._debug_write(f"_post_response_url: action={action_id} raised {exc!r}")
 
-    def _handle_action(self, action_id, value, team_id, slack_user_id, response_url):
+    def _handle_action(self, action_id, value, team_id, slack_user_id, response_url, trigger_id="", channel_id=""):
         self._debug_write(f"_handle_action: START action={action_id} value={value!r}")
         try:
             parts       = value.split("|")
@@ -10871,6 +10996,41 @@ class SlackInteractivityView(APIView):
                 # (no need to ever type /dashboard, /vulnstats, etc. again).
                 section_blocks = slash._nav_section_blocks(action_id, team_id, slack_user_id)
                 blocks = [slash._nav_buttons_block(active_action_id=action_id)] + section_blocks
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in ("team_sub_adduser", "team_sub_deleteuser"):
+                # These need input, so they open a modal instead of replacing
+                # the message. trigger_id is only valid for a few seconds —
+                # this thread starts right after Slack's own ack, so it's fine.
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
+                    return
+                view = (
+                    slash._build_adduser_modal(channel_id) if action_id == "team_sub_adduser"
+                    else slash._build_deleteuser_modal(channel_id)
+                )
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
+                return
+
+            if action_id in dict(slash._TEAM_SUBTABS):
+                # team_sub_team / team_sub_externaluser — plain content swap,
+                # keeping both nav rows (top-level + sub-tabs) on top.
+                content_blocks = slash._team_subtab_blocks(action_id, team_id, slack_user_id)
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_team"),
+                    slash._team_subnav_block(active_sub=action_id),
+                ] + content_blocks
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -10978,3 +11138,56 @@ class SlackInteractivityView(APIView):
                 "response_type": "ephemeral",
                 "text": f"❌ Action failed: {exc}",
             }, action_id)
+
+    def _handle_view_submission(self, payload):
+        """
+        Handles the Add User / Delete User modal submits — reuses the exact
+        same _cmd_adduser/_cmd_deleteuser logic the text commands use, then
+        posts the result into the channel the modal was opened from (stashed
+        in view.private_metadata, since view_submission payloads have no
+        channel context of their own).
+        """
+        view          = payload.get("view") or {}
+        callback_id   = view.get("callback_id", "")
+        channel_id    = view.get("private_metadata", "")
+        team_id       = (payload.get("team") or {}).get("id", "")
+        slack_user_id = (payload.get("user") or {}).get("id", "")
+        values        = (view.get("state") or {}).get("values") or {}
+
+        if callback_id not in ("modal_adduser_submit", "modal_deleteuser_submit"):
+            return
+
+        slash = SlackSlashCommandView()
+        bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+        if not bot_token or not channel_id:
+            self._debug_write(f"_handle_view_submission: {callback_id} missing bot_token or channel_id")
+            return
+
+        try:
+            if callback_id == "modal_adduser_submit":
+                target_uid = ((values.get("user_block") or {}).get("user_select") or {}).get("selected_user", "")
+                user_type = ((values.get("type_block") or {}).get("type_select") or {}).get(
+                    "selected_option", {}).get("value", "external")
+                selected = ((values.get("team_block") or {}).get("team_checks") or {}).get("selected_options") or []
+                team_codes = [o.get("value") for o in selected if o.get("value")]
+                if not target_uid or not team_codes:
+                    blocks = slash._text_block("❌ User and at least one team are required.")
+                else:
+                    text = f"<@{target_uid}> {user_type} " + " ".join(team_codes)
+                    blocks = slash._cmd_adduser(text, team_id, slack_user_id)
+            else:
+                target_uid = ((values.get("user_block") or {}).get("user_select") or {}).get("selected_user", "")
+                if not target_uid:
+                    blocks = slash._text_block("❌ User is required.")
+                else:
+                    blocks = slash._cmd_deleteuser(f"<@{target_uid}>", team_id, slack_user_id)
+        except Exception:
+            logger.exception(f"[SlackInteractivity] view_submission {callback_id} failed")
+            blocks = slash._text_block("❌ Something went wrong processing this request.")
+
+        _http_post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            json={"channel": channel_id, "blocks": blocks, "text": "VaptFix"},
+            timeout=10,
+        )
