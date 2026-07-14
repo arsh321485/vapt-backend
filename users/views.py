@@ -7673,14 +7673,179 @@ def _build_dashboard_html(data):
     return _DASHBOARD_HTML_HEAD + body + "</body>\n</html>"
 
 
-def _dashboard_png_bytes(html):
+_TEAM_OVERVIEW_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Team Overview</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', 'Segoe UI', sans-serif; background: #f4f5f8; padding: 32px; }
+
+    .wrapper {
+      background: #fff;
+      border-radius: 16px;
+      padding: 28px;
+      max-width: 900px;
+      margin: 0 auto;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+    }
+
+    .header { margin-bottom: 24px; }
+    .header h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #1e1b4b;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .header h2 .icon { font-size: 1.2rem; }
+    .header p { font-size: 0.82rem; color: #6b7280; }
+
+    .grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .card {
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 20px;
+      background: #fff;
+      flex: 1 1 calc(50% - 8px);
+      min-width: 300px;
+    }
+
+    .card-title {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #111827;
+      margin-bottom: 14px;
+    }
+
+    .badges {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .badge {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #374151;
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      border-radius: 999px;
+      padding: 4px 12px;
+    }
+    .badge.fixed { color: #0f696e; }
+
+    .severities {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .sev {
+      font-size: 0.78rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .dot-critical { background: #dc2626; }
+    .dot-high     { background: #f59e0b; }
+    .dot-medium   { background: #f59e0b; }
+    .dot-low      { background: #10b981; }
+
+    .no-vuln {
+      font-size: 0.8rem;
+      color: #9ca3af;
+      margin-top: 8px;
+    }
+
+    .full-width { flex-basis: 100%; }
+  </style>
+</head>
+<body>
+"""
+
+
+def _build_team_overview_html(data):
+    teams_raw = data.get("teams") or data.get("results") or (data if isinstance(data, list) else None)
+    if isinstance(teams_raw, dict):
+        teams_list = list(teams_raw.items())[:10]
+    elif isinstance(teams_raw, list):
+        teams_list = [(t.get("team_name") or t.get("name") or "Unknown", t) for t in teams_raw[:10]]
+    else:
+        teams_list = []
+
+    dot_class = {"critical": "dot-critical", "high": "dot-high", "medium": "dot-medium", "low": "dot-low"}
+    cards_html = ""
+    for i, (name, stats) in enumerate(teams_list):
+        total  = stats.get("total", 0)
+        open_v = stats.get("open", 0)
+        closed = stats.get("closed", 0)
+        rate   = round((closed / total) * 100) if total else 0
+        by_risk = stats.get("by_risk") or {}
+
+        if total == 0:
+            body_html = '<p class="no-vuln">No vulnerabilities</p>'
+        else:
+            sev_html = "".join(
+                f'<span class="sev"><span class="dot {dot_class.get(sev, "dot-low")}"></span> '
+                f'{sev.capitalize()}: {cnt}</span>'
+                for sev, cnt in by_risk.items() if cnt
+            )
+            body_html = f'<div class="severities">{sev_html}</div>'
+
+        full_width = " full-width" if (i == len(teams_list) - 1 and len(teams_list) % 2 == 1) else ""
+        cards_html += f"""
+    <div class="card{full_width}">
+      <div class="card-title">{name}</div>
+      <div class="badges">
+        <span class="badge">Total: {total}</span>
+        <span class="badge">Open: {open_v}</span>
+        <span class="badge fixed">Fixed: {closed} ({rate}%)</span>
+      </div>
+      {body_html}
+    </div>"""
+
+    if not teams_list:
+        cards_html = '<p class="no-vuln">No team data available.</p>'
+
+    body = f"""  <div class="wrapper">
+    <div class="header">
+      <h2><span class="icon">👥</span> Team Overview</h2>
+      <p>Per-team breakdown — total, open, and fixed vulns with severity distribution across all teams.</p>
+    </div>
+    <div class="grid">{cards_html}
+    </div>
+  </div>
+"""
+    return _TEAM_OVERVIEW_HTML_HEAD + body + "</body>\n</html>"
+
+
+def _dashboard_png_bytes(html, selector=".dash"):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         try:
-            page = browser.new_page(viewport={"width": 800, "height": 200})
+            page = browser.new_page(viewport={"width": 900, "height": 200})
             page.set_content(html, wait_until="networkidle")
-            el = page.query_selector(".dash")
+            el = page.query_selector(selector)
             png_bytes = el.screenshot()
         finally:
             browser.close()
@@ -7711,12 +7876,21 @@ class SlackDashboardImageView(APIView):
         except Exception:
             return HttpResponse(status=403)
 
+        kind = request.query_params.get("kind", "dashboard")
         slash = SlackSlashCommandView()
-        data = slash._call_api("/api/admin/admindashboard/dashboard/summary/", team_id)
-        html = _build_dashboard_html(data)
+        if kind == "team":
+            data = slash._call_api(
+                "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
+            )
+            html = _build_team_overview_html(data)
+            selector = ".wrapper"
+        else:
+            data = slash._call_api("/api/admin/admindashboard/dashboard/summary/", team_id)
+            html = _build_dashboard_html(data)
+            selector = ".dash"
 
         try:
-            png_bytes = _dashboard_png_bytes(html)
+            png_bytes = _dashboard_png_bytes(html, selector=selector)
         except Exception:
             logger.exception("[SlackDashboardImageView] PNG render failed")
             return HttpResponse(status=500)
@@ -8008,22 +8182,26 @@ class SlackSlashCommandView(APIView):
     def _cmd_dashboard(self, text, team_id, user_id):
         return [self._dashboard_image_block(team_id)]
 
-    def _dashboard_image_block(self, team_id):
+    def _dashboard_image_block(self, team_id, kind="dashboard", alt_text="VaptFix Admin Dashboard"):
         """
-        Real dashboard.html design (gauge/donut/bento cards) rendered as a
-        PNG via SlackDashboardImageView — Block Kit can't do custom CSS, so
-        this is the only way to show the actual design instead of a
-        text/emoji approximation. Token is short-lived (10 min); `t=` just
-        cache-busts so re-posting the navbar always shows fresh data.
+        Real dashboard.html/team.html design (gauge/donut/bento cards)
+        rendered as a PNG via SlackDashboardImageView — Block Kit can't do
+        custom CSS, so this is the only way to show the actual design
+        instead of a text/emoji approximation. Token is short-lived
+        (10 min); `t=` just cache-busts so re-posting always shows fresh
+        data.
         """
         import time
         token = _dashboard_image_signer().sign(team_id)
         backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
-        url = f"{backend}/api/admin/users/slack/dashboard-image/?token={quote(token)}&t={int(time.time())}"
+        url = (
+            f"{backend}/api/admin/users/slack/dashboard-image/"
+            f"?token={quote(token)}&kind={kind}&t={int(time.time())}"
+        )
         return {
             "type": "image",
             "image_url": url,
-            "alt_text": "VaptFix Admin Dashboard",
+            "alt_text": alt_text,
         }
 
     def _cmd_postnavbar(self, text, team_id, user_id):
@@ -8130,12 +8308,8 @@ class SlackSlashCommandView(APIView):
             )
             return self._format_externalusers(data)
 
-        # team_sub_team (default)
-        data = self._call_api(
-            "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
-            slack_user_id=user_id,
-        )
-        return self._format_teamoverview(data)
+        # team_sub_team (default) — real team.html bento-card design, rendered as an image
+        return [self._dashboard_image_block(team_id, kind="team", alt_text="Team Overview")]
 
     def _build_adduser_modal(self):
         return {
