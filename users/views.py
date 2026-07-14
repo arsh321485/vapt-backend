@@ -7911,6 +7911,8 @@ class SlackSlashCommandView(APIView):
             resp = _http_post(url, headers=headers, json=json_body, timeout=15)
         elif method == "patch":
             resp = _http_patch(url, headers=headers, json=json_body, timeout=15)
+        elif method == "delete":
+            resp = _http_delete(url, headers=headers, json=json_body, timeout=15)
         else:
             resp = _http_get(url, headers=headers, timeout=15)
         return resp.json()
@@ -8135,11 +8137,10 @@ class SlackSlashCommandView(APIView):
         )
         return self._format_teamoverview(data)
 
-    def _build_adduser_modal(self, channel_id):
+    def _build_adduser_modal(self):
         return {
             "type": "modal",
             "callback_id": "modal_adduser_submit",
-            "private_metadata": channel_id,
             "title": {"type": "plain_text", "text": "Add User"},
             "submit": {"type": "plain_text", "text": "Add User"},
             "close": {"type": "plain_text", "text": "Cancel"},
@@ -8180,13 +8181,12 @@ class SlackSlashCommandView(APIView):
             ],
         }
 
-    def _build_deleteuser_modal(self, channel_id):
+    def _build_deleteuser_modal(self):
         return {
             "type": "modal",
             "callback_id": "modal_deleteuser_submit",
-            "private_metadata": channel_id,
             "title": {"type": "plain_text", "text": "Delete User"},
-            "submit": {"type": "plain_text", "text": "Deactivate"},
+            "submit": {"type": "plain_text", "text": "Confirm"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "blocks": [
                 {
@@ -8195,7 +8195,35 @@ class SlackSlashCommandView(APIView):
                     "label": {"type": "plain_text", "text": "User"},
                     "element": {"type": "users_select", "action_id": "user_select"},
                 },
+                {
+                    "type": "input",
+                    "block_id": "action_block",
+                    "label": {"type": "plain_text", "text": "Action"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "action_select",
+                        "initial_option": {
+                            "text": {"type": "plain_text", "text": "Deactivate (reversible)"},
+                            "value": "deactivate",
+                        },
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "Deactivate (reversible)"}, "value": "deactivate"},
+                            {"text": {"type": "plain_text", "text": "Delete permanently (cannot be undone)"}, "value": "delete_permanent"},
+                        ],
+                    },
+                },
             ],
+        }
+
+    def _build_result_modal(self, title, blocks):
+        """A read-only modal used to show a command's result INSIDE the popup
+        itself (matching the design's inline success-box), instead of
+        posting a separate message to the channel."""
+        return {
+            "type": "modal",
+            "title": {"type": "plain_text", "text": title[:24]},
+            "close": {"type": "plain_text", "text": "Done"},
+            "blocks": blocks[:100],
         }
 
     def _get_workspace_report_id(self, team_id):
@@ -8826,6 +8854,53 @@ class SlackSlashCommandView(APIView):
                 "text": f"✅ User *{email}* has been deactivated from VaptFix."}}]
         except User.DoesNotExist:
             return self._text_block(f"❌ No VaptFix account found for `{email}`.")
+
+    def _cmd_deleteuser_permanent(self, text, team_id, user_id):
+        """
+        Permanently removes the team-member record — distinct from
+        _cmd_deleteuser, which only deactivates (is_active=False, reversible).
+        Reuses the same UserDetailCompleteDeleteView the website's own admin
+        panel uses for "delete member", instead of inventing new delete logic.
+        """
+        mention = text.strip()
+        if not mention:
+            return self._text_block("Usage: pick a user to delete permanently.")
+
+        slack_uid = mention.lstrip("<@").split("|")[0].rstrip(">") if mention.startswith("<@") else mention.lstrip("@")
+
+        bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
+        if not bot_token:
+            return self._text_block("❌ Bot token not found.")
+
+        resp = _http_get(
+            "https://slack.com/api/users.info",
+            params={"user": slack_uid},
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=10,
+        ).json()
+        if not resp.get("ok"):
+            return self._text_block(f"❌ Slack user lookup failed: {resp.get('error')}")
+
+        email = resp.get("user", {}).get("profile", {}).get("email", "")
+        if not email:
+            return self._text_block("❌ Email not found for this Slack user.")
+
+        listing = self._call_api(
+            "/api/admin/users_details/list-user-details/", team_id, slack_user_id=user_id,
+        )
+        results = listing if isinstance(listing, list) else (listing.get("results") or [])
+        target = next((r for r in results if (r.get("email") or "").lower() == email.lower()), None)
+        if not target or not target.get("_id"):
+            return self._text_block(f"❌ No VaptFix member record found for `{email}`.")
+
+        resp2 = self._call_api(
+            f"/api/admin/users_details/user-detail/{target['_id']}/delete/", team_id,
+            method="delete", json_body={"confirm": True}, slack_user_id=user_id,
+        )
+        if resp2.get("message"):
+            return [{"type": "section", "text": {"type": "mrkdwn",
+                "text": f"🗑️ User *{email}* has been *permanently deleted* from VaptFix. This cannot be undone."}}]
+        return self._text_block(f"❌ {resp2.get('detail') or 'Delete failed.'}")
 
     # ── Team command helpers ───────────────────────────────────────────────
 
@@ -10842,15 +10917,23 @@ class SlackInteractivityView(APIView):
         ptype = payload.get("type")
 
         if ptype == "view_submission":
-            # Add User / Delete User modal submits — ack empty (closes the
-            # modal) and do the real work in the background, same
-            # ack-then-async pattern as block_actions below.
-            threading.Thread(
-                target=self._handle_view_submission,
-                args=(payload,),
-                daemon=True,
-            ).start()
-            return Response({}, status=200)
+            # Add User / Delete User modal submits. Ack immediately with a
+            # "Processing…" view (must happen within Slack's ~3s window),
+            # then do the real work (Slack user lookup + backend API calls —
+            # too slow to guarantee inside that window) in a background
+            # thread and swap the modal's content via views.update once
+            # done — same ack-then-async pattern as block_actions below,
+            # just using views.update instead of response_url.
+            view = payload.get("view") or {}
+            callback_id = view.get("callback_id", "")
+            if callback_id not in ("modal_adduser_submit", "modal_deleteuser_submit"):
+                return Response({}, status=200)
+            title = "Add User" if callback_id == "modal_adduser_submit" else "Delete User"
+            processing_view = SlackSlashCommandView()._build_result_modal(
+                title, [{"type": "section", "text": {"type": "mrkdwn", "text": "⏳ Processing…"}}]
+            )
+            threading.Thread(target=self._handle_view_submission, args=(payload,), daemon=True).start()
+            return Response({"response_action": "update", "view": processing_view}, status=200)
 
         if ptype != "block_actions":
             self._debug_write(f"post(): ignored type={ptype}")
@@ -11011,8 +11094,8 @@ class SlackInteractivityView(APIView):
                     self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
                     return
                 view = (
-                    slash._build_adduser_modal(channel_id) if action_id == "team_sub_adduser"
-                    else slash._build_deleteuser_modal(channel_id)
+                    slash._build_adduser_modal() if action_id == "team_sub_adduser"
+                    else slash._build_deleteuser_modal()
                 )
                 resp = _http_post(
                     "https://slack.com/api/views.open",
@@ -11142,14 +11225,15 @@ class SlackInteractivityView(APIView):
     def _handle_view_submission(self, payload):
         """
         Handles the Add User / Delete User modal submits — reuses the exact
-        same _cmd_adduser/_cmd_deleteuser logic the text commands use, then
-        posts the result into the channel the modal was opened from (stashed
-        in view.private_metadata, since view_submission payloads have no
-        channel context of their own).
+        same _cmd_adduser/_cmd_deleteuser(_permanent) logic the text commands
+        use, then swaps the modal (still open, showing "Processing…") over
+        to the result via views.update — matches the design's inline
+        success-box, instead of posting a separate channel message.
         """
         view          = payload.get("view") or {}
         callback_id   = view.get("callback_id", "")
-        channel_id    = view.get("private_metadata", "")
+        view_id       = view.get("id", "")
+        view_hash     = view.get("hash", "")
         team_id       = (payload.get("team") or {}).get("id", "")
         slack_user_id = (payload.get("user") or {}).get("id", "")
         values        = (view.get("state") or {}).get("values") or {}
@@ -11158,10 +11242,7 @@ class SlackInteractivityView(APIView):
             return
 
         slash = SlackSlashCommandView()
-        bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
-        if not bot_token or not channel_id:
-            self._debug_write(f"_handle_view_submission: {callback_id} missing bot_token or channel_id")
-            return
+        title = "Add User" if callback_id == "modal_adduser_submit" else "Delete User"
 
         try:
             if callback_id == "modal_adduser_submit":
@@ -11177,17 +11258,30 @@ class SlackInteractivityView(APIView):
                     blocks = slash._cmd_adduser(text, team_id, slack_user_id)
             else:
                 target_uid = ((values.get("user_block") or {}).get("user_select") or {}).get("selected_user", "")
+                action = ((values.get("action_block") or {}).get("action_select") or {}).get(
+                    "selected_option", {}).get("value", "deactivate")
                 if not target_uid:
                     blocks = slash._text_block("❌ User is required.")
+                elif action == "delete_permanent":
+                    blocks = slash._cmd_deleteuser_permanent(f"<@{target_uid}>", team_id, slack_user_id)
                 else:
                     blocks = slash._cmd_deleteuser(f"<@{target_uid}>", team_id, slack_user_id)
         except Exception:
             logger.exception(f"[SlackInteractivity] view_submission {callback_id} failed")
             blocks = slash._text_block("❌ Something went wrong processing this request.")
 
-        _http_post(
-            "https://slack.com/api/chat.postMessage",
+        bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+        if not bot_token or not view_id:
+            self._debug_write(f"_handle_view_submission: {callback_id} missing bot_token or view_id")
+            return
+        resp = _http_post(
+            "https://slack.com/api/views.update",
             headers={"Authorization": f"Bearer {bot_token}"},
-            json={"channel": channel_id, "blocks": blocks, "text": "VaptFix"},
+            json={
+                "view_id": view_id,
+                "hash": view_hash,
+                "view": slash._build_result_modal(title, blocks),
+            },
             timeout=10,
         )
+        self._debug_write(f"_handle_view_submission: {callback_id} views.update -> {getattr(resp, 'text', None)}")
