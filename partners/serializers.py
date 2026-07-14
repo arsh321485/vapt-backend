@@ -4,10 +4,10 @@ from location.serializers import VALID_COUNTRIES
 COMPANY_SIZE_CHOICES = ["1-50", "51-200", "201-500", "500+"]
 
 PARTNER_TYPE_CHOICES = [
-    "Referral Partner",
     "Reseller",
-    "Managed Service Provider (MSP)",
-    "Consulting Partner",
+    "Gold",
+    "Premium",
+    "Strategic",
 ]
 
 

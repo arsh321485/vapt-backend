@@ -7702,12 +7702,11 @@ _TEAM_OVERVIEW_HTML_HEAD = """<!DOCTYPE html>
       gap: 10px;
       margin-bottom: 6px;
     }
-    .header h2 .icon { font-size: 1.2rem; }
     .header p { font-size: 0.82rem; color: #6b7280; }
 
     .grid {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
       gap: 16px;
     }
 
@@ -7716,8 +7715,6 @@ _TEAM_OVERVIEW_HTML_HEAD = """<!DOCTYPE html>
       border-radius: 14px;
       padding: 20px;
       background: #fff;
-      flex: 1 1 calc(50% - 8px);
-      min-width: 300px;
     }
 
     .card-title {
@@ -7755,28 +7752,33 @@ _TEAM_OVERVIEW_HTML_HEAD = """<!DOCTYPE html>
     .sev {
       font-size: 0.78rem;
       font-weight: 600;
-      display: flex;
+      display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
     }
 
-    .dot {
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      display: inline-block;
-    }
-    .dot-critical { background: #dc2626; }
-    .dot-high     { background: #f59e0b; }
-    .dot-medium   { background: #f59e0b; }
-    .dot-low      { background: #10b981; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
 
-    .no-vuln {
-      font-size: 0.8rem;
-      color: #9ca3af;
-      margin-top: 8px;
-    }
+    /* Critical */
+    .sev.critical { color: #b42318; background: #fee2e2; }
+    .dot-critical { background: #b42318; }
 
-    .full-width { flex-basis: 100%; }
+    /* High */
+    .sev.high { color: #dc2626; background: #fee2e2; }
+    .dot-high { background: #dc2626; }
+
+    /* Medium */
+    .sev.medium { color: rgb(245, 158, 11); background: #fef3c7; }
+    .dot-medium { background: rgb(245, 158, 11); }
+
+    /* Low */
+    .sev.low { color: #16a34a; background: #dcfce7; }
+    .dot-low { background: #16a34a; }
+
+    .no-vuln { font-size: 0.8rem; color: #9ca3af; margin-top: 8px; }
+    .full-width { grid-column: 1 / -1; }
   </style>
 </head>
 <body>
@@ -7792,22 +7794,21 @@ def _build_team_overview_html(data):
     else:
         teams_list = []
 
-    dot_class = {"critical": "dot-critical", "high": "dot-high", "medium": "dot-medium", "low": "dot-low"}
+    sev_order = ["critical", "high", "medium", "low"]
     cards_html = ""
     for i, (name, stats) in enumerate(teams_list):
         total  = stats.get("total", 0)
         open_v = stats.get("open", 0)
         closed = stats.get("closed", 0)
         rate   = round((closed / total) * 100) if total else 0
-        by_risk = stats.get("by_risk") or {}
+        by_risk = {(k or "").lower(): v for k, v in (stats.get("by_risk") or {}).items()}
 
         if total == 0:
             body_html = '<p class="no-vuln">No vulnerabilities</p>'
         else:
             sev_html = "".join(
-                f'<span class="sev"><span class="dot {dot_class.get(sev, "dot-low")}"></span> '
-                f'{sev.capitalize()}: {cnt}</span>'
-                for sev, cnt in by_risk.items() if cnt
+                f'<span class="sev {sev}"><span class="dot dot-{sev}"></span> {sev.capitalize()}: {by_risk[sev]}</span>'
+                for sev in sev_order if by_risk.get(sev)
             )
             body_html = f'<div class="severities">{sev_html}</div>'
 
@@ -7828,7 +7829,7 @@ def _build_team_overview_html(data):
 
     body = f"""  <div class="wrapper">
     <div class="header">
-      <h2><span class="icon">👥</span> Team Overview</h2>
+      <h2>👥 Team Overview</h2>
       <p>Per-team breakdown — total, open, and fixed vulns with severity distribution across all teams.</p>
     </div>
     <div class="grid">{cards_html}
