@@ -11429,7 +11429,6 @@ class SlackInteractivityView(APIView):
                 vulns, _, raw_data = slash._get_team_vulns(page_team_name, team_id, slack_user_id)
                 blocks = slash._format_viewassigned(vulns, page_team_name, raw_data, offset=page_offset)
                 self._post_response_url(response_url, {
-                    "response_type": "in_channel",
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
@@ -11450,7 +11449,6 @@ class SlackInteractivityView(APIView):
                     slash._allvuln_subnav_block(active_sub="av_sub_list"),
                 ] + slash._format_vulndata_list(vd_data, offset=page_offset)
                 self._post_response_url(response_url, {
-                    "response_type": "in_channel",
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
@@ -11480,7 +11478,6 @@ class SlackInteractivityView(APIView):
                         )
                     blocks = slash._format_vulndata_single(target, steps_data, offset=(v_page - 1) * 3)
                 self._post_response_url(response_url, {
-                    "response_type": "in_channel",
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
@@ -11629,7 +11626,6 @@ class SlackInteractivityView(APIView):
                 else:
                     blocks = slash._format_steps_status(steps_data, vuln_id, fix_vuln_id, team_name, offset=offset)
                 self._post_response_url(response_url, {
-                    "response_type": "in_channel",
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
@@ -11653,7 +11649,6 @@ class SlackInteractivityView(APIView):
                         f"Vulnerability `{vuln_id}` — team requests admin verification/retesting (via button)."
                     )
                 self._post_response_url(response_url, {
-                    "response_type": "in_channel",
                     "replace_original": True,
                     "blocks": [
                         {"type": "header", "text": {"type": "plain_text", "text": "🔁 Retest Request Submitted", "emoji": True}},
@@ -11709,7 +11704,6 @@ class SlackInteractivityView(APIView):
                 blocks = slash._format_steps_status(steps_data, vuln_id, fix_vuln_id, team_name)
 
             self._post_response_url(response_url, {
-                "response_type": "in_channel",
                 "replace_original": True,
                 "blocks": blocks,
             }, action_id)
