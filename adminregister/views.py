@@ -1677,9 +1677,13 @@ class FixVulnerabilityStepsAPIView(APIView):
             status_value = "open"
 
             if not fix_doc:
-                fix_doc = closed_coll.find_one(
-                    {"fix_vulnerability_id": fix_vuln_id}
-                )
+                # Callers (e.g. LatestSuperAdminVulnerabilityRegisterAPIView's
+                # "fix_vulnerability_id" field) always pass the closed doc's
+                # OWN _id here — matching on a "fix_vulnerability_id" field
+                # inside the closed doc was the wrong key and made every
+                # closed vulnerability 404 as "not found" instead of showing
+                # its (completed) steps.
+                fix_doc = closed_coll.find_one({"_id": ObjectId(fix_vuln_id)})
                 if not fix_doc:
                     return Response(
                         {"detail": "Fix vulnerability not found"},

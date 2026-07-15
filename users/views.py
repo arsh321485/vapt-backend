@@ -7839,6 +7839,87 @@ def _build_team_overview_html(data):
     return _TEAM_OVERVIEW_HTML_HEAD + body + "</body>\n</html>"
 
 
+_SUPPORT_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Support Requests | VaptFix</title>
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
+  <style>
+    :root{--slack-text:#1d1c1d;--slack-sub:#616061;--slack-border:#e8e8e8;--accent:rgb(14,106,111)}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:"Lato",sans-serif;background:#f4f6f8;color:var(--slack-text);font-size:15px;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:24px 16px}
+    .dash{width:100%;max-width:760px;border:1px solid var(--slack-border);border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.05);background:#fff}
+    .dash-top{padding:18px 22px;border-bottom:1px solid var(--slack-border)}
+    .dash-top h2{font-size:19px;font-weight:900}
+    .dash-top p{font-size:13px;color:var(--slack-sub);margin-top:2px}
+    .panel-body{padding:16px;background:#f4f6f8}
+    .card{background:#fff;border-radius:12px;border:1px solid var(--slack-border);padding:16px 18px}
+    .support-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+    .mini-stat{text-align:center;background:#fafbfc;border:1px solid var(--slack-border);border-radius:10px;padding:12px}
+    .mini-stat .n{font-size:24px;font-weight:900;color:var(--accent)}
+    .mini-stat .t{font-size:11px;font-weight:700;color:var(--slack-sub);margin-top:2px}
+    .req-item{border:1px solid var(--slack-border);border-radius:10px;padding:12px 14px;background:#fafbfc;margin-bottom:10px}
+    .req-item:last-child{margin-bottom:0}
+    .req-title{font-size:14px;font-weight:900;margin-bottom:6px}
+    .req-meta{font-size:12px;font-weight:700;color:var(--slack-sub);line-height:1.55}
+    .req-note{font-size:13px;margin-top:6px;font-style:italic}
+    .code-tag{display:inline-block;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:#f8f8f8;border:1px solid var(--slack-border);border-radius:4px;padding:1px 6px;color:#c41e3a}
+    .no-vuln{font-size:0.8rem;color:#9ca3af}
+  </style>
+</head>
+<body>
+"""
+
+
+def _build_support_html(data):
+    results = data.get("results") or []
+    total   = data.get("count", len(results))
+    pending = sum(1 for r in results if (r.get("status") or "open") != "closed")
+    closed  = sum(1 for r in results if (r.get("status") or "") == "closed")
+
+    if not results:
+        items_html = '<p class="no-vuln">No support requests found.</p>'
+    else:
+        rows = []
+        for r in results[:10]:
+            vuln      = r.get("vul_name") or "General Request"
+            host      = r.get("host_name") or "—"
+            team      = r.get("assigned_team") or "—"
+            requester = r.get("requested_by") or "Unknown"
+            st        = r.get("status") or "open"
+            icon      = "✅" if st == "closed" else "🔓"
+            desc      = (r.get("description") or "")[:150]
+            note_html = f'<div class="req-note">{desc}</div>' if desc else ""
+            rows.append(f"""
+        <div class="req-item">
+          <div class="req-title">{icon} {vuln} ({team})</div>
+          <div class="req-meta">Host: <span class="code-tag">{host}</span> | By: {requester} | Status: {st.capitalize()}</div>
+          {note_html}
+        </div>""")
+        items_html = "".join(rows)
+
+    body = f"""  <div class="dash">
+    <div class="dash-top">
+      <h2>🎫 Support Requests</h2>
+      <p>Every support ticket raised by teams — who raised it, which vuln, and status.</p>
+    </div>
+    <div class="panel-body">
+      <div class="card">
+        <div class="support-stats">
+          <div class="mini-stat"><div class="n">{total}</div><div class="t">Total</div></div>
+          <div class="mini-stat"><div class="n">{pending}</div><div class="t">Pending</div></div>
+          <div class="mini-stat"><div class="n">{closed}</div><div class="t">Closed</div></div>
+        </div>
+        {items_html}
+      </div>
+    </div>
+  </div>
+"""
+    return _SUPPORT_HTML_HEAD + body + "</body>\n</html>"
+
+
 def _dashboard_png_bytes(html, selector=".dash"):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
@@ -7885,6 +7966,14 @@ class SlackDashboardImageView(APIView):
             )
             html = _build_team_overview_html(data)
             selector = ".wrapper"
+        elif kind == "support":
+            report_id = slash._get_workspace_report_id(team_id)
+            data = (
+                slash._call_api(f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id)
+                if report_id else {}
+            )
+            html = _build_support_html(data)
+            selector = ".dash"
         else:
             data = slash._call_api("/api/admin/admindashboard/dashboard/summary/", team_id)
             html = _build_dashboard_html(data)
@@ -8349,14 +8438,9 @@ class SlackSlashCommandView(APIView):
             return self._format_vulnstats(data)
 
         if sub_action_id == "av_sub_support":
-            report_id = self._get_workspace_report_id(team_id)
-            if not report_id:
-                return self._text_block("❌ No report found for this workspace.")
-            data = self._call_api(
-                f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_supportdata(data)
+            # Real support-requests.html design, rendered as an image — pure
+            # display, no per-row input needed, so no interactivity is lost.
+            return [self._dashboard_image_block(team_id, kind="support", alt_text="Support Requests")]
 
         if sub_action_id == "av_sub_timeline":
             data = self._call_api(
@@ -11537,10 +11621,12 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id in ("av_sub_approve", "av_sub_reject", "av_reject_row"):
+            if action_id in ("av_sub_approve", "av_sub_reject", "av_approve_row", "av_reject_row"):
                 # Approve/Reject need input (which request + optional reason),
                 # so they open a modal — pre-filled with the pending request
-                # if triggered from a specific row's "Reject" button.
+                # if triggered from a specific row's Approve/Reject button
+                # (matches the design: click a row's Approve/Reject and land
+                # on that same tab/form with the request pre-selected).
                 bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
                 if not bot_token or not trigger_id:
                     self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
@@ -11553,10 +11639,10 @@ class SlackInteractivityView(APIView):
                     r for r in slash._assign_severity_short_ids(ext_data.get("results") or [])
                     if r.get("status", "review") == "review"
                 ]
-                preselect = value if action_id == "av_reject_row" else None
+                preselect = value if action_id in ("av_approve_row", "av_reject_row") else None
                 view = (
                     slash._build_reject_modal(pending, preselect=preselect) if action_id in ("av_sub_reject", "av_reject_row")
-                    else slash._build_approve_modal(pending)
+                    else slash._build_approve_modal(pending, preselect=preselect)
                 )
                 resp = _http_post(
                     "https://slack.com/api/views.open",
@@ -11565,24 +11651,6 @@ class SlackInteractivityView(APIView):
                     timeout=10,
                 )
                 self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
-                return
-
-            if action_id == "av_approve_row":
-                # Approve doesn't need a reason — do it immediately and
-                # refresh the Timeline Extension list in place.
-                slash._cmd_approve(value, team_id, slack_user_id)
-                ext_data = slash._call_api(
-                    "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
-                    slack_user_id=slack_user_id,
-                )
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_register"),
-                    slash._allvuln_subnav_block(active_sub="av_sub_timeline"),
-                ] + slash._format_extension_requests(ext_data)
-                self._post_response_url(response_url, {
-                    "replace_original": True,
-                    "blocks": blocks,
-                }, action_id)
                 return
 
             if action_id in ("view_allvuln_detail", "av_detail_manual", "av_detail_automation"):
