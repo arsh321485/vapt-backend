@@ -11401,7 +11401,7 @@ class SlackInteractivityView(APIView):
                 logger.warning(f"[SlackInteractivity] {msg}")
                 self._debug_write(msg)
                 try:
-                    self._debug_write(f"_post_response_url: action={action_id} SENT_PAYLOAD={json.dumps(payload)[:3000]}")
+                    self._debug_write(f"_post_response_url: action={action_id} SENT_PAYLOAD={json.dumps(payload)}")
                 except Exception:
                     pass
             else:
