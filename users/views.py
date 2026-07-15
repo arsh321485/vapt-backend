@@ -7927,7 +7927,7 @@ class SlackSlashCommandView(APIView):
     _NAV_ITEMS = [
         ("nav_home",     "📊 Dashboard"),
         ("nav_fix",      "🔧 Fix"),
-        ("nav_register", "📋 Register"),
+        ("nav_register", "📋 All Vulnerabilities"),
         ("nav_team",     "👥 Team Overview"),
         ("nav_teamperf", "📈 Team Performance"),
         ("nav_support",  "🎫 Support"),
@@ -7939,6 +7939,17 @@ class SlackSlashCommandView(APIView):
         ("team_sub_adduser",      "➕ Add User"),
         ("team_sub_deleteuser",   "🗑️ Delete User"),
         ("team_sub_externaluser", "🌐 External User"),
+    ]
+
+    # Sub-tabs shown under the "All Vulnerabilities" nav tab specifically.
+    _ALLVULN_SUBTABS = [
+        ("av_sub_list",     "📋 All Vulns"),
+        ("av_sub_stats",    "📊 Statistics"),
+        ("av_sub_details",  "🔍 Vuln Details"),
+        ("av_sub_support",  "🎫 Support"),
+        ("av_sub_timeline", "⌛ Timeline Ext."),
+        ("av_sub_approve",  "✅ Approve"),
+        ("av_sub_reject",   "❌ Reject"),
     ]
 
     def post(self, request):
@@ -8251,11 +8262,8 @@ class SlackSlashCommandView(APIView):
             return self._format_vulnstats(data)
 
         if action_id == "nav_register":
-            data = self._call_api(
-                "/api/admin/adminregister/register/latest/vulns/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_vulndata_list(data)
+            return [self._allvuln_subnav_block(active_sub="av_sub_list")] + \
+                self._allvuln_subtab_blocks("av_sub_list", team_id, user_id)
 
         if action_id == "nav_team":
             return [self._team_subnav_block(active_sub="team_sub_team")] + \
@@ -8311,6 +8319,154 @@ class SlackSlashCommandView(APIView):
 
         # team_sub_team (default) — real team.html bento-card design, rendered as an image
         return [self._dashboard_image_block(team_id, kind="team", alt_text="Team Overview")]
+
+    def _allvuln_subnav_block(self, active_sub=None):
+        """Second-level button row shown under the 'All Vulnerabilities' nav tab."""
+        return {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label, "emoji": True},
+                    "action_id": action_id,
+                    **({"style": "primary"} if action_id == active_sub else {}),
+                }
+                for action_id, label in self._ALLVULN_SUBTABS
+            ],
+        }
+
+    def _allvuln_subtab_blocks(self, sub_action_id, team_id, user_id):
+        """
+        Content for the 'All Vulnerabilities' sub-tabs. Approve / Reject are
+        NOT handled here — those open a modal instead (see
+        SlackInteractivityView._handle_action), since they need input.
+        """
+        if sub_action_id == "av_sub_stats":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/detailed-vulnerabilities/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_vulnstats(data)
+
+        if sub_action_id == "av_sub_support":
+            report_id = self._get_workspace_report_id(team_id)
+            if not report_id:
+                return self._text_block("❌ No report found for this workspace.")
+            data = self._call_api(
+                f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_supportdata(data)
+
+        if sub_action_id == "av_sub_timeline":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_extension_requests(data)
+
+        # av_sub_list / av_sub_details (default) — same paginated list; a
+        # vuln clicked from either one lands on the same detail view.
+        data = self._call_api(
+            "/api/admin/adminregister/register/latest/vulns/", team_id,
+            slack_user_id=user_id,
+        )
+        return self._format_vulndata_list(data)
+
+    def _allvuln_detail_blocks(self, v, sub, team_id):
+        """Manual / Automation Fix toggle for one specific vulnerability —
+        both sides are strictly read-only for admins (no fix/run actions),
+        matching the website's own admin-is-read-only behavior; whatever the
+        assigned team actually does shows up here live on next view."""
+        sid = v.get("short_id", "?")
+        toggle = {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🛠 Manual", "emoji": True},
+                    "action_id": "av_detail_manual",
+                    "value": sid,
+                    **({"style": "primary"} if sub == "manual" else {}),
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🤖 Automation Fix", "emoji": True},
+                    "action_id": "av_detail_automation",
+                    "value": sid,
+                    **({"style": "primary"} if sub == "automation" else {}),
+                },
+            ],
+        }
+        if sub == "automation":
+            plugin_id = v.get("plugin_id")
+            if not plugin_id:
+                content = self._text_block("_No plugin ID available for this vulnerability — automation lookup not possible._")
+            else:
+                os_param = v.get("operating_system")
+                automation = self._call_api(
+                    f"/api/admin/automation-scripts/match/{plugin_id}/", team_id,
+                    params={"os": os_param} if os_param else None,
+                )
+                content = self._format_vulndata_automation_detail(v, automation)
+        else:
+            steps_data = None
+            fix_vuln_id = v.get("fix_vulnerability_id")
+            if fix_vuln_id:
+                steps_data = self._call_api(
+                    f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id,
+                )
+            content = self._format_vulndata_single(v, steps_data)
+        return [toggle] + content
+
+    def _build_approve_reject_modal(self, callback_id, title, submit_label, pending, preselect=None, with_reason=False):
+        options = [
+            {
+                "text": {"type": "plain_text", "text": (
+                    f"{r.get('short_id', '?')} — {r.get('vul_name') or 'Unknown'} (+{r.get('extension_days', 0)} days)"
+                )[:75]},
+                "value": r.get("short_id", "?"),
+            }
+            for r in pending[:90]
+        ] or [{"text": {"type": "plain_text", "text": "No pending requests"}, "value": "none"}]
+
+        select_element = {"type": "static_select", "action_id": "request_select", "options": options}
+        match = next((o for o in options if o["value"] == preselect), None)
+        if match:
+            select_element["initial_option"] = match
+
+        blocks = [{
+            "type": "input",
+            "block_id": "request_block",
+            "label": {"type": "plain_text", "text": "Request ID"},
+            "element": select_element,
+        }]
+        if with_reason:
+            blocks.append({
+                "type": "input",
+                "block_id": "reason_block",
+                "label": {"type": "plain_text", "text": "Reason"},
+                "optional": True,
+                "element": {"type": "plain_text_input", "action_id": "reason_input"},
+            })
+        return {
+            "type": "modal",
+            "callback_id": callback_id,
+            "title": {"type": "plain_text", "text": title},
+            "submit": {"type": "plain_text", "text": submit_label},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": blocks,
+        }
+
+    def _build_approve_modal(self, pending, preselect=None):
+        return self._build_approve_reject_modal(
+            "modal_approve_submit", "Approve Request", "Approve", pending, preselect=preselect, with_reason=False,
+        )
+
+    def _build_reject_modal(self, pending, preselect=None):
+        return self._build_approve_reject_modal(
+            "modal_reject_submit", "Reject Request", "Reject", pending, preselect=preselect, with_reason=True,
+        )
 
     def _build_adduser_modal(self):
         return {
@@ -10172,9 +10328,27 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": (
                     f"{icon} `{sid}` *{vuln}* [{sev}]\n"
-                    f"Team: {team} | +{days} days | Reason: {reason}\n"
-                    f"`/approve {sid}` or `/reject {sid} [reason]`"
+                    f"Team: {team} | +{days} days | Reason: {reason}"
                 )}})
+            if st == "review":
+                blocks.append({
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "✅ Approve", "emoji": True},
+                            "action_id": "av_approve_row", "value": sid, "style": "primary",
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "❌ Reject", "emoji": True},
+                            "action_id": "av_reject_row", "value": sid, "style": "danger",
+                        },
+                    ],
+                })
+            else:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"_`/approve {sid}` or `/reject {sid} [reason]`_"}})
         return blocks
 
     def _format_status_update(self, data, action, display_id, target=None, reason=None):
@@ -10229,8 +10403,17 @@ class SlackSlashCommandView(APIView):
             sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
             st   = v.get("status") or "open"
             icon = "✅" if st == "closed" else "🔓"
-            blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"{icon} `{sid}` *{name}* [{sev}]\n      Host: `{host}` | Status: {st.capitalize()}"}})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn",
+                    "text": f"{icon} `{sid}` *{name}* [{sev}]\n      Host: `{host}` | Status: {st.capitalize()}"},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "action_id": "view_allvuln_detail",
+                    "value": sid,
+                },
+            })
 
         nav_buttons = []
         if offset > 0:
@@ -10363,6 +10546,60 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": f"_Or type: `/vulndata {sid} {current_page + 1}`_"}})
 
+        return blocks
+
+    def _format_vulndata_automation_detail(self, v, automation):
+        """
+        Automation Fix side of the Vuln Details toggle — read-only, matches
+        Manual's "view only" rule (no run/mark-fixed actions for admins).
+        Uses the admin-only /api/admin/automation-scripts/match/<plugin_id>/
+        endpoint, which has the same rich fields as the website. The actual
+        script file isn't embedded here (no admin download route exists) —
+        `/autofix` is still the way to get it, same as the team-facing view.
+        """
+        sid  = v.get("short_id", "?")
+        name = v.get("vul_name", "Unknown")
+        if not automation.get("matched"):
+            return [
+                {"type": "header", "text": {"type": "plain_text", "text": f"🤖 {sid.upper()} — {name}"[:150], "emoji": True}},
+                {"type": "section", "text": {"type": "mrkdwn",
+                    "text": "_No automated fix script available for this vulnerability._"}},
+            ]
+
+        libs = automation.get("libraries") or []
+        libs_str = ", ".join(f"`{l}`" for l in libs) if isinstance(libs, list) else str(libs or "—")
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Automated Fix: {name}"[:150], "emoji": True}},
+            self._ctx("Read-only — ready-made fix script from the automation library. Use `/autofix` to download it."),
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Severity*\n{automation.get('severity') or '—'}"},
+                {"type": "mrkdwn", "text": f"*OS*\n{automation.get('os') or '—'}"},
+                {"type": "mrkdwn", "text": f"*Language*\n{automation.get('language') or '—'}"},
+                {"type": "mrkdwn", "text": f"*Automation Possible*\n{automation.get('automation_possible') or '—'}"},
+            ]},
+            {"type": "divider"},
+        ]
+
+        def add_section(label, key):
+            val = automation.get(key)
+            if val:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{label}*\n{str(val)[:800]}"}})
+
+        add_section("What this does", "script_description")
+        add_section("Recommended Approach", "recommended_approach")
+        add_section("What can be automated", "what_can_be_automated")
+        add_section("What must remain manual", "what_must_remain_manual")
+        if libs:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Libraries needed*\n{libs_str}"}})
+        if automation.get("command_download_libraries"):
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Install command*\n`{automation['command_download_libraries']}`"}})
+        add_section("Before running", "considerations_before")
+
+        blocks.append(self._ctx(
+            f"Script: `{automation.get('fix_script_name') or '—'}` — run `/autofix {sid}` to get it."
+        ))
         return blocks
 
     def _format_vulndata_automation(self, data):
@@ -11101,9 +11338,15 @@ class SlackInteractivityView(APIView):
             # just using views.update instead of response_url.
             view = payload.get("view") or {}
             callback_id = view.get("callback_id", "")
-            if callback_id not in ("modal_adduser_submit", "modal_deleteuser_submit"):
+            titles = {
+                "modal_adduser_submit": "Add User",
+                "modal_deleteuser_submit": "Delete User",
+                "modal_approve_submit": "Approve Request",
+                "modal_reject_submit": "Reject Request",
+            }
+            if callback_id not in titles:
                 return Response({}, status=200)
-            title = "Add User" if callback_id == "modal_adduser_submit" else "Delete User"
+            title = titles[callback_id]
             processing_view = SlackSlashCommandView()._build_result_modal(
                 title, [{"type": "section", "text": {"type": "mrkdwn", "text": "⏳ Processing…"}}]
             )
@@ -11295,6 +11538,91 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
+            if action_id in ("av_sub_approve", "av_sub_reject", "av_reject_row"):
+                # Approve/Reject need input (which request + optional reason),
+                # so they open a modal — pre-filled with the pending request
+                # if triggered from a specific row's "Reject" button.
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
+                    return
+                ext_data = slash._call_api(
+                    "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                    slack_user_id=slack_user_id,
+                )
+                pending = [
+                    r for r in slash._assign_severity_short_ids(ext_data.get("results") or [])
+                    if r.get("status", "review") == "review"
+                ]
+                preselect = value if action_id == "av_reject_row" else None
+                view = (
+                    slash._build_reject_modal(pending, preselect=preselect) if action_id in ("av_sub_reject", "av_reject_row")
+                    else slash._build_approve_modal(pending)
+                )
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
+                return
+
+            if action_id == "av_approve_row":
+                # Approve doesn't need a reason — do it immediately and
+                # refresh the Timeline Extension list in place.
+                slash._cmd_approve(value, team_id, slack_user_id)
+                ext_data = slash._call_api(
+                    "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                    slack_user_id=slack_user_id,
+                )
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_register"),
+                    slash._allvuln_subnav_block(active_sub="av_sub_timeline"),
+                ] + slash._format_extension_requests(ext_data)
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in ("view_allvuln_detail", "av_detail_manual", "av_detail_automation"):
+                sid = value
+                vd_data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
+                target = next((r for r in rows if r.get("short_id") == sid), None)
+                if not target:
+                    content = slash._text_block(f"❌ Vulnerability `{sid}` not found. Reopen All Vulnerabilities and try again.")
+                else:
+                    sub = "automation" if action_id == "av_detail_automation" else "manual"
+                    content = slash._allvuln_detail_blocks(target, sub, team_id)
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_register"),
+                    slash._allvuln_subnav_block(active_sub="av_sub_details"),
+                ] + content
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in dict(slash._ALLVULN_SUBTABS):
+                # av_sub_list / av_sub_stats / av_sub_details / av_sub_support /
+                # av_sub_timeline — plain content swap, keeping both nav rows
+                # (top-level + sub-tabs) on top.
+                content_blocks = slash._allvuln_subtab_blocks(action_id, team_id, slack_user_id)
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_register"),
+                    slash._allvuln_subnav_block(active_sub=action_id),
+                ] + content_blocks
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
             if action_id == "view_more_steps":
                 offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
                 steps_data = slash._call_user_api(
@@ -11412,11 +11740,17 @@ class SlackInteractivityView(APIView):
         slack_user_id = (payload.get("user") or {}).get("id", "")
         values        = (view.get("state") or {}).get("values") or {}
 
-        if callback_id not in ("modal_adduser_submit", "modal_deleteuser_submit"):
+        titles = {
+            "modal_adduser_submit": "Add User",
+            "modal_deleteuser_submit": "Delete User",
+            "modal_approve_submit": "Approve Request",
+            "modal_reject_submit": "Reject Request",
+        }
+        if callback_id not in titles:
             return
 
         slash = SlackSlashCommandView()
-        title = "Add User" if callback_id == "modal_adduser_submit" else "Delete User"
+        title = titles[callback_id]
 
         try:
             if callback_id == "modal_adduser_submit":
@@ -11430,7 +11764,7 @@ class SlackInteractivityView(APIView):
                 else:
                     text = f"<@{target_uid}> {user_type} " + " ".join(team_codes)
                     blocks = slash._cmd_adduser(text, team_id, slack_user_id)
-            else:
+            elif callback_id == "modal_deleteuser_submit":
                 target_uid = ((values.get("user_block") or {}).get("user_select") or {}).get("selected_user", "")
                 action = ((values.get("action_block") or {}).get("action_select") or {}).get(
                     "selected_option", {}).get("value", "deactivate")
@@ -11440,6 +11774,16 @@ class SlackInteractivityView(APIView):
                     blocks = slash._cmd_deleteuser_permanent(f"<@{target_uid}>", team_id, slack_user_id)
                 else:
                     blocks = slash._cmd_deleteuser(f"<@{target_uid}>", team_id, slack_user_id)
+            else:
+                sid = ((values.get("request_block") or {}).get("request_select") or {}).get(
+                    "selected_option", {}).get("value", "")
+                if not sid or sid == "none":
+                    blocks = slash._text_block("❌ Please select a request.")
+                elif callback_id == "modal_approve_submit":
+                    blocks = slash._cmd_approve(sid, team_id, slack_user_id)
+                else:
+                    reason = ((values.get("reason_block") or {}).get("reason_input") or {}).get("value") or ""
+                    blocks = slash._cmd_reject(f"{sid} {reason}".strip(), team_id, slack_user_id)
         except Exception:
             logger.exception(f"[SlackInteractivity] view_submission {callback_id} failed")
             blocks = slash._text_block("❌ Something went wrong processing this request.")
