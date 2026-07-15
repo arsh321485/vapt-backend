@@ -10420,14 +10420,17 @@ class SlackSlashCommandView(APIView):
             nav_buttons.append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
-                "action_id": "view_vulndata_page",
+                # Distinct action_id from "Next" — Slack rejects the whole
+                # message with "invalid_blocks" when two buttons in the same
+                # actions block share an action_id (only differing by value).
+                "action_id": "view_vulndata_prev",
                 "value": f"{max(0, offset - PAGE_SIZE)}",
             })
         if end_num < count:
             nav_buttons.append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
-                "action_id": "view_vulndata_page",
+                "action_id": "view_vulndata_next",
                 "value": f"{offset + PAGE_SIZE}",
             })
         if nav_buttons:
@@ -10722,14 +10725,17 @@ class SlackSlashCommandView(APIView):
             nav_buttons.append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
-                "action_id": "view_vulns_page",
+                # Distinct action_id from "Next" — Slack rejects the whole
+                # message with "invalid_blocks" when two buttons in the same
+                # actions block share an action_id (only differing by value).
+                "action_id": "view_vulns_prev",
                 "value": f"{team_name}|{max(0, offset - PAGE_SIZE)}",
             })
         if end_num < total:
             nav_buttons.append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
-                "action_id": "view_vulns_page",
+                "action_id": "view_vulns_next",
                 "value": f"{team_name}|{offset + PAGE_SIZE}",
             })
         if nav_buttons:
@@ -11420,7 +11426,7 @@ class SlackInteractivityView(APIView):
 
             slash = SlackSlashCommandView()
 
-            if action_id == "view_vulns_page":
+            if action_id in ("view_vulns_prev", "view_vulns_next"):
                 # value format here is "team_name|offset" (no fix_vuln_id) —
                 # re-parse directly rather than reusing the generic `parts`.
                 vp = value.split("|")
@@ -11434,7 +11440,7 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id == "view_vulndata_page":
+            if action_id in ("view_vulndata_prev", "view_vulndata_next"):
                 # value format here is just "offset" — admin-channel command,
                 # re-fetched with the admin token (not a team member token).
                 # Nav rows are prepended so paginating from the All
