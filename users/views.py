@@ -10433,16 +10433,6 @@ class SlackSlashCommandView(APIView):
         if nav_buttons:
             blocks.append({"type": "actions", "elements": nav_buttons})
 
-        current_page = offset // PAGE_SIZE + 1
-        page_hints = []
-        if offset > 0:
-            page_hints.append(f"`/vulndata {current_page - 1}` for previous")
-        if end_num < count:
-            page_hints.append(f"`/vulndata {current_page + 1}` for next")
-        if page_hints:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"_Or type: {' | '.join(page_hints)}_"}})
-
         return blocks
 
     def _format_vulndata_detail(self, data, fix_vuln_id):
@@ -11448,11 +11438,17 @@ class SlackInteractivityView(APIView):
             if action_id == "view_vulndata_page":
                 # value format here is just "offset" — admin-channel command,
                 # re-fetched with the admin token (not a team member token).
+                # Nav rows are prepended so paginating from the All
+                # Vulnerabilities tab doesn't wipe out the tab bar — harmless
+                # when reached via plain /vulndata too.
                 page_offset = int(value) if value.isdigit() else 0
                 vd_data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
-                blocks = slash._format_vulndata_list(vd_data, offset=page_offset)
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_register"),
+                    slash._allvuln_subnav_block(active_sub="av_sub_list"),
+                ] + slash._format_vulndata_list(vd_data, offset=page_offset)
                 self._post_response_url(response_url, {
                     "response_type": "in_channel",
                     "replace_original": True,
