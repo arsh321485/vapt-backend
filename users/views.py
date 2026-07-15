@@ -10503,25 +10503,24 @@ class SlackSlashCommandView(APIView):
                     f"{icon} `{sid}` *{vuln}* [{sev}]\n"
                     f"Team: {team} | +{days} days | Reason: {reason}"
                 )}})
-            if st == "review":
-                blocks.append({
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "✅ Approve", "emoji": True},
-                            "action_id": "av_approve_row", "value": sid, "style": "primary",
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "❌ Reject", "emoji": True},
-                            "action_id": "av_reject_row", "value": sid, "style": "danger",
-                        },
-                    ],
-                })
-            else:
-                blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                    "text": f"_`/approve {sid}` or `/reject {sid} [reason]`_"}})
+            # Buttons always shown (matches the design — even an
+            # already-approved/rejected row keeps its Approve/Reject
+            # actions, letting the admin change their decision).
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "✅ Approve", "emoji": True},
+                        "action_id": "av_approve_row", "value": sid, "style": "primary",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "❌ Reject", "emoji": True},
+                        "action_id": "av_reject_row", "value": sid, "style": "danger",
+                    },
+                ],
+            })
         return blocks
 
     def _format_status_update(self, data, action, display_id, target=None, reason=None):
@@ -10667,9 +10666,18 @@ class SlackSlashCommandView(APIView):
 
         if not steps_data or steps_data.get("detail"):
             blocks.append({"type": "divider"})
-            blocks.append(self._text_block(
-                "_No fix has been started for this vulnerability yet — no steps to show._"
-            )[0])
+            if v.get("fix_vulnerability_id") and steps_data and steps_data.get("detail"):
+                # A fix record DOES exist (team has been assigned/started) but
+                # the steps lookup itself failed — surface the real reason
+                # instead of the generic "not started" message, which was
+                # misleading here.
+                blocks.append(self._text_block(
+                    f"_Could not load mitigation steps: {steps_data.get('detail')}_"
+                )[0])
+            else:
+                blocks.append(self._text_block(
+                    "_No fix has been started for this vulnerability yet — no steps to show._"
+                )[0])
             return blocks
 
         steps     = steps_data.get("steps") or []
@@ -10709,8 +10717,6 @@ class SlackSlashCommandView(APIView):
                     "value": f"{sid}|{current_page + 1}",
                 }],
             })
-            blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"_Or type: `/vulndata {sid} {current_page + 1}`_"}})
 
         return blocks
 
@@ -11724,11 +11730,16 @@ class SlackInteractivityView(APIView):
                     "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
                     slack_user_id=slack_user_id,
                 )
-                pending = [
-                    r for r in slash._assign_severity_short_ids(ext_data.get("results") or [])
-                    if r.get("status", "review") == "review"
-                ]
+                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
                 preselect = value if action_id in ("av_approve_row", "av_reject_row") else None
+                # Dropdown = still-pending requests, plus whichever specific
+                # request the row's own Approve/Reject button was clicked
+                # for — even if already resolved, since the buttons now
+                # always show (re-approving/re-rejecting is allowed).
+                pending = [
+                    r for r in all_requests
+                    if r.get("status", "review") == "review" or r.get("short_id") == preselect
+                ]
                 view = (
                     slash._build_reject_modal(pending, preselect=preselect) if action_id in ("av_sub_reject", "av_reject_row")
                     else slash._build_approve_modal(pending, preselect=preselect)
