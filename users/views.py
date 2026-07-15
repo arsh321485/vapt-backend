@@ -11408,7 +11408,6 @@ class SlackInteractivityView(APIView):
         view          = payload.get("view") or {}
         callback_id   = view.get("callback_id", "")
         view_id       = view.get("id", "")
-        view_hash     = view.get("hash", "")
         team_id       = (payload.get("team") or {}).get("id", "")
         slack_user_id = (payload.get("user") or {}).get("id", "")
         values        = (view.get("state") or {}).get("values") or {}
@@ -11453,8 +11452,12 @@ class SlackInteractivityView(APIView):
             "https://slack.com/api/views.update",
             headers={"Authorization": f"Bearer {bot_token}"},
             json={
+                # No "hash" here on purpose: the payload's view.hash is for
+                # the view as it looked BEFORE our own response_action:
+                # "update" swapped it to "Processing…" — reusing it makes
+                # Slack reject this call with hash_conflict, which was
+                # silently leaving the modal stuck on "Processing…" forever.
                 "view_id": view_id,
-                "hash": view_hash,
                 "view": slash._build_result_modal(title, blocks),
             },
             timeout=10,
