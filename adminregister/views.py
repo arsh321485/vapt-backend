@@ -371,6 +371,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             # directly instead of going through create/ first.
                             "fix_vulnerability_id": str(_fix["_id"]) if _fix.get("_id") else None,
                             "operating_system": host_os,
+                            "plugin_id": v.get("plugin_id"),
                         })
 
                 # Current user's admin info
