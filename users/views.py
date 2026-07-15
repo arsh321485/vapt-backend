@@ -7920,6 +7920,91 @@ def _build_support_html(data):
     return _SUPPORT_HTML_HEAD + body + "</body>\n</html>"
 
 
+_VULNSTATS_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vulnerability Statistics | VaptFix</title>
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
+  <style>
+    :root{--slack-text:#1d1c1d;--slack-sub:#616061;--slack-border:#e8e8e8;--accent:rgb(14,106,111);--critical:#e01e5a;--high:#e8912d;--medium:#ecb22e;--low:#2eb67d}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:"Lato",sans-serif;background:#f4f6f8;color:var(--slack-text);font-size:15px;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:24px 16px}
+    .dash{width:100%;max-width:760px;border:1px solid var(--slack-border);border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.05);background:#fff}
+    .dash-top{padding:18px 22px;border-bottom:1px solid var(--slack-border)}
+    .dash-top h2{font-size:19px;font-weight:900}
+    .dash-top p{font-size:13px;color:var(--slack-sub);margin-top:2px}
+    .panel-body{padding:16px;background:#f4f6f8}
+    .card{background:#fff;border-radius:12px;border:1px solid var(--slack-border);padding:16px 18px}
+    .stat-bars{background:#f8f8f8;border-radius:10px;border:1px solid var(--slack-border);padding:14px 16px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.9}
+    .bar-row{display:grid;grid-template-columns:72px 1fr 36px;align-items:center;gap:10px}
+    .bar-track{height:10px;background:#e8e8e8;border-radius:4px;overflow:hidden}
+    .bar-fill{height:100%;border-radius:4px}
+    .bar-fill.critical{background:var(--critical)}
+    .bar-fill.high{background:var(--high)}
+    .bar-fill.medium{background:var(--medium)}
+    .bar-fill.low{background:var(--low)}
+    .status-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+    .status-box{background:#fafbfc;border:1px solid var(--slack-border);border-radius:10px;padding:12px 14px}
+    .status-box .k{font-size:12px;font-weight:700;color:var(--slack-sub)}
+    .status-box .v{font-size:24px;font-weight:900;margin-top:2px}
+  </style>
+</head>
+<body>
+"""
+
+
+def _build_vulnstats_html(data):
+    vulns = data.get("vulnerabilities") or data.get("results") or (data if isinstance(data, list) else [])
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0,
+              "open": 0, "in_progress": 0, "open_review": 0, "fixed": 0}
+    if isinstance(vulns, list):
+        for v in vulns:
+            sev = (v.get("risk_factor") or v.get("severity") or "").lower()
+            raw_st = (v.get("status") or "open").strip().lower()
+            st = "fixed" if raw_st == "closed" else raw_st.replace(" ", "_").replace("/", "_").replace("-", "_")
+            if sev in counts:
+                counts[sev] += 1
+            if st in counts:
+                counts[st] += 1
+    else:
+        for k in counts:
+            counts[k] = data.get(k, 0)
+
+    total = data.get("total") or counts["critical"] + counts["high"] + counts["medium"] + counts["low"] or 0
+    max_v = max(total, 1)
+
+    bar_rows = "".join(
+        f'<div class="bar-row"><span>{label}</span>'
+        f'<div class="bar-track"><div class="bar-fill {key}" style="width:{round(counts[key] / max_v * 100)}%"></div></div>'
+        f'<strong>{counts[key]}</strong></div>'
+        for key, label in [("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")]
+    )
+
+    body = f"""  <div class="dash">
+    <div class="dash-top">
+      <h2>🛡️ Vulnerability Statistics</h2>
+      <p>Total vuln counts by severity (Critical/High/Medium/Low) and by status (Open/In Progress/Open-Review/Fixed).</p>
+    </div>
+    <div class="panel-body">
+      <div class="card">
+        <div style="font-weight:900;margin-bottom:8px">By Severity</div>
+        <div class="stat-bars">{bar_rows}</div>
+        <div class="status-grid">
+          <div class="status-box"><div class="k">Open</div><div class="v">{counts['open']}</div></div>
+          <div class="status-box"><div class="k">In Progress</div><div class="v">{counts['in_progress']}</div></div>
+          <div class="status-box"><div class="k">Open/Review</div><div class="v">{counts['open_review']}</div></div>
+          <div class="status-box"><div class="k">Fixed</div><div class="v">{counts['fixed']}</div></div>
+          <div class="status-box" style="grid-column:1/-1"><div class="k">Total</div><div class="v">{total}</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+"""
+    return _VULNSTATS_HTML_HEAD + body + "</body>\n</html>"
+
+
 def _dashboard_png_bytes(html, selector=".dash"):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
@@ -7973,6 +8058,12 @@ class SlackDashboardImageView(APIView):
                 if report_id else {}
             )
             html = _build_support_html(data)
+            selector = ".dash"
+        elif kind == "stats":
+            data = slash._call_api(
+                "/api/admin/admindashboard/dashboard/detailed-vulnerabilities/", team_id,
+            )
+            html = _build_vulnstats_html(data)
             selector = ".dash"
         else:
             data = slash._call_api("/api/admin/admindashboard/dashboard/summary/", team_id)
@@ -8431,11 +8522,9 @@ class SlackSlashCommandView(APIView):
         SlackInteractivityView._handle_action), since they need input.
         """
         if sub_action_id == "av_sub_stats":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/detailed-vulnerabilities/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_vulnstats(data)
+            # Real vulnerability-stats.html design, rendered as an image —
+            # pure display, no per-row input needed.
+            return [self._dashboard_image_block(team_id, kind="stats", alt_text="Vulnerability Statistics")]
 
         if sub_action_id == "av_sub_support":
             # Real support-requests.html design, rendered as an image — pure
