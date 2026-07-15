@@ -8010,7 +8010,10 @@ def _dashboard_png_bytes(html, selector=".dash"):
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
         try:
-            page = browser.new_page(viewport={"width": 900, "height": 200})
+            # device_scale_factor=2 renders at 2x pixel density (retina-style)
+            # — Slack still displays the image at the same on-screen width,
+            # but the text is twice as sharp instead of looking blurry/small.
+            page = browser.new_page(viewport={"width": 900, "height": 200}, device_scale_factor=2)
             page.set_content(html, wait_until="networkidle")
             el = page.query_selector(selector)
             png_bytes = el.screenshot()
@@ -11730,16 +11733,13 @@ class SlackInteractivityView(APIView):
                     "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
                     slack_user_id=slack_user_id,
                 )
-                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
+                # Dropdown lists every extension request for this admin's
+                # latest report (not just still-pending ones) — matches the
+                # row buttons always showing, so a decision can be changed
+                # any time (already scoped to admin + latest report by
+                # AdminMitigationTimelineExtensionReportAPIView itself).
+                pending = slash._assign_severity_short_ids(ext_data.get("results") or [])
                 preselect = value if action_id in ("av_approve_row", "av_reject_row") else None
-                # Dropdown = still-pending requests, plus whichever specific
-                # request the row's own Approve/Reject button was clicked
-                # for — even if already resolved, since the buttons now
-                # always show (re-approving/re-rejecting is allowed).
-                pending = [
-                    r for r in all_requests
-                    if r.get("status", "review") == "review" or r.get("short_id") == preselect
-                ]
                 view = (
                     slash._build_reject_modal(pending, preselect=preselect) if action_id in ("av_sub_reject", "av_reject_row")
                     else slash._build_approve_modal(pending, preselect=preselect)
