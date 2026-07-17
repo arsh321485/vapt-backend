@@ -1,6 +1,3 @@
-🛑 Open
-👀 Open/Review
-🔄 In Progress
-✅ Closed
+all vulnerabilities tab ka name Register krna hai
 
-mujhe esa icon chahihe satus ke according 
+team overview ka name Team rkhna hai 
