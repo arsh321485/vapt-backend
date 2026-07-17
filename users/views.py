@@ -8699,8 +8699,14 @@ class SlackSlashCommandView(APIView):
 
         return {"type": "actions", "elements": elements} if len(elements) > 1 or total_pages > 1 else None
 
+    # Severity emoji — Block Kit has no custom colors, this is the closest
+    # Slack-native approximation to the design's exact RGB pills
+    # (critical rgb(180,35,24), high rgb(220,38,38), medium rgb(245,158,11),
+    # low rgb(16,185,129)).
+    _ASSET_SEV_EMOJI = [("critical", "🔴", "Critical"), ("high", "🟠", "High"), ("medium", "🟡", "Medium"), ("low", "🟢", "Low")]
+
     def _format_asset_list(self, rows, offset=0):
-        PAGE_SIZE = 10
+        PAGE_SIZE = 5
         assets = self._group_assets_from_vulns(rows)
         count = len(assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
@@ -8717,12 +8723,12 @@ class SlackSlashCommandView(APIView):
             return blocks + self._text_block("No assets found.")
 
         for host, c in page_items:
-            counts_txt = " | ".join(
-                f"{label}: {c[key]}" for key, label in [("critical", "C"), ("high", "H"), ("medium", "M"), ("low", "L")] if c[key]
+            counts_txt = "  ".join(
+                f"{emoji} {label}: {c[key]}" for key, emoji, label in self._ASSET_SEV_EMOJI if c[key]
             ) or "No open vulnerabilities"
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"🖥 `{host}`\n      Total: {c['total']} | {counts_txt}"},
+                "text": {"type": "mrkdwn", "text": f"🖥 `{host}`\n      {c['total']} Vulns\n      {counts_txt}"},
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
