@@ -8448,7 +8448,11 @@ class SlackSlashCommandView(APIView):
         of blocks (see _button_row_blocks) — callers must concatenate, not
         wrap in another list.
         """
-        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id)
+        # chunk_size=4 (not the 5 default) so the split lands as
+        # [Home, Fix, All Vulnerabilities, Team Overview] /
+        # [Team Performance, Support, Download Report] — Team Performance
+        # ends up on the same row as Support/Download Report as requested.
+        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id, chunk_size=4)
 
     def _nav_section_blocks(self, action_id, team_id, user_id):
         """
@@ -8647,6 +8651,51 @@ class SlackSlashCommandView(APIView):
                 entry[sev] += 1
         return sorted(assets.items(), key=lambda kv: kv[0])
 
+    def _numbered_pagination_block(self, offset, page_size, total, base_action_id, value_prefix=""):
+        """
+        Design-style pagination (‹ 1 2 3 › instead of plain Previous/Next
+        text) — used for the Fix tab's asset/vuln lists. Each page-number
+        button needs its OWN action_id (Slack rejects a block where two
+        buttons share one action_id — confirmed empirically with the
+        earlier Prev/Next "invalid_blocks" bug), so the page number is
+        baked into the action_id itself: f"{base_action_id}_p{page_num}".
+        `value_prefix` lets callers carry extra context (e.g. "host|") —
+        the actual offset is appended after it.
+        """
+        total_pages = max(1, -(-total // page_size)) if total else 1
+        current_page = offset // page_size + 1
+
+        elements = []
+        if current_page > 1:
+            elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "‹", "emoji": True},
+                "action_id": f"{base_action_id}_p{current_page - 1}",
+                "value": f"{value_prefix}{(current_page - 2) * page_size}",
+            })
+
+        window = 5
+        start_p = max(1, min(current_page - window // 2, total_pages - window + 1))
+        end_p = min(total_pages, start_p + window - 1)
+        for p in range(start_p, end_p + 1):
+            elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": str(p), "emoji": True},
+                "action_id": f"{base_action_id}_p{p}",
+                "value": f"{value_prefix}{(p - 1) * page_size}",
+                **({"style": "primary"} if p == current_page else {}),
+            })
+
+        if current_page < total_pages:
+            elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "›", "emoji": True},
+                "action_id": f"{base_action_id}_p{current_page + 1}",
+                "value": f"{value_prefix}{current_page * page_size}",
+            })
+
+        return {"type": "actions", "elements": elements} if len(elements) > 1 or total_pages > 1 else None
+
     def _format_asset_list(self, rows, offset=0):
         PAGE_SIZE = 10
         assets = self._group_assets_from_vulns(rows)
@@ -8679,19 +8728,9 @@ class SlackSlashCommandView(APIView):
                 },
             })
 
-        nav_buttons = []
-        if offset > 0:
-            nav_buttons.append({
-                "type": "button", "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
-                "action_id": "view_fix_assets_prev", "value": f"{max(0, offset - PAGE_SIZE)}",
-            })
-        if end_num < count:
-            nav_buttons.append({
-                "type": "button", "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
-                "action_id": "view_fix_assets_next", "value": f"{offset + PAGE_SIZE}",
-            })
-        if nav_buttons:
-            blocks.append({"type": "actions", "elements": nav_buttons})
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "view_fix_assets_pg")
+        if pg_block:
+            blocks.append(pg_block)
         return blocks
 
     def _format_asset_vulns(self, rows, host, offset=0):
@@ -8735,19 +8774,11 @@ class SlackSlashCommandView(APIView):
                 },
             })
 
-        nav_buttons = []
-        if offset > 0:
-            nav_buttons.append({
-                "type": "button", "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
-                "action_id": "view_fix_asset_vulns_prev", "value": f"{host}|{max(0, offset - PAGE_SIZE)}",
-            })
-        if end_num < count:
-            nav_buttons.append({
-                "type": "button", "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
-                "action_id": "view_fix_asset_vulns_next", "value": f"{host}|{offset + PAGE_SIZE}",
-            })
-        if nav_buttons:
-            blocks.append({"type": "actions", "elements": nav_buttons})
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, "view_fix_asset_vulns_pg", value_prefix=f"{host}|",
+        )
+        if pg_block:
+            blocks.append(pg_block)
         return blocks
 
     def _build_reject_modal(self, sid, vuln_label):
@@ -8782,6 +8813,9 @@ class SlackSlashCommandView(APIView):
         return (idx // page_size) * page_size
 
     def _build_approve_list_blocks(self, results, offset=0):
+        # Only pending + already-approved — an already-rejected request has
+        # no business showing up (with an Approve button) on this tab.
+        results = [r for r in results if r.get("status", "review") != "rejected"]
         PAGE_SIZE = 4
         count = len(results)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
@@ -8831,6 +8865,9 @@ class SlackSlashCommandView(APIView):
         return blocks
 
     def _build_reject_list_blocks(self, results, offset=0):
+        # Only pending + already-rejected — an already-approved request has
+        # no business showing up (with a Reject button) on this tab.
+        results = [r for r in results if r.get("status", "review") != "approved"]
         PAGE_SIZE = 4
         count = len(results)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
@@ -11965,8 +12002,13 @@ class SlackInteractivityView(APIView):
                     slack_user_id=slack_user_id,
                 )
                 all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
-                page_offset = slash._extension_page_for_sid(all_requests, value)
                 is_approve = action_id == "av_approve_row"
+                # Page offset must be computed against the SAME filtered
+                # list the builder below will actually paginate (it drops
+                # rejected/approved opposite-status items) — otherwise the
+                # jump lands on the wrong page.
+                filtered = [r for r in all_requests if r.get("status", "review") != ("rejected" if is_approve else "approved")]
+                page_offset = slash._extension_page_for_sid(filtered, value)
                 content = (
                     slash._build_approve_list_blocks(all_requests, offset=page_offset) if is_approve
                     else slash._build_reject_list_blocks(all_requests, offset=page_offset)
@@ -12108,8 +12150,8 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id in ("view_fix_asset", "view_fix_asset_vulns_prev", "view_fix_asset_vulns_next"):
-                # value is "host|offset" for all three.
+            if action_id == "view_fix_asset" or action_id.startswith("view_fix_asset_vulns_pg_p"):
+                # value is "host|offset" for both.
                 parts_v = value.split("|", 1)
                 host = parts_v[0] if parts_v else value
                 page_offset = int(parts_v[1]) if len(parts_v) > 1 and parts_v[1].isdigit() else 0
@@ -12145,7 +12187,7 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id in ("view_fix_assets_prev", "view_fix_assets_next"):
+            if action_id.startswith("view_fix_assets_pg_p"):
                 page_offset = int(value) if value.isdigit() else 0
                 data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
