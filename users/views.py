@@ -8110,8 +8110,8 @@ class SlackSlashCommandView(APIView):
     _NAV_ITEMS = [
         ("nav_home",     "🏠 Home"),
         ("nav_fix",      "🔧 Fix"),
-        ("nav_register", "📋 All Vulnerabilities"),
-        ("nav_team",     "👥 Team Overview"),
+        ("nav_register", "📋 Register"),
+        ("nav_team",     "👥 Team"),
         ("nav_teamperf", "📈 Team Performance"),
         ("nav_support",  "🎫 Support"),
         ("nav_download", "📥 Download Report"),
