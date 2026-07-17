@@ -8448,11 +8448,10 @@ class SlackSlashCommandView(APIView):
         of blocks (see _button_row_blocks) — callers must concatenate, not
         wrap in another list.
         """
-        # chunk_size=4 (not the 5 default) so the split lands as
-        # [Home, Fix, All Vulnerabilities, Team Overview] /
-        # [Team Performance, Support, Download Report] — Team Performance
-        # ends up on the same row as Support/Download Report as requested.
-        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id, chunk_size=4)
+        # All 7 in a single actions block — Slack's own client still decides
+        # how many buttons actually fit on one visual line before wrapping;
+        # this just stops US from pre-splitting it into forced separate rows.
+        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id, chunk_size=len(self._NAV_ITEMS))
 
     def _nav_section_blocks(self, action_id, team_id, user_id):
         """
@@ -8670,7 +8669,11 @@ class SlackSlashCommandView(APIView):
             elements.append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "‹", "emoji": True},
-                "action_id": f"{base_action_id}_p{current_page - 1}",
+                # "_prevp"/"_nextp" (not just "_p{N}") so these can never
+                # collide with a numbered page button landing on the same
+                # target page — two buttons sharing an action_id is exactly
+                # what caused the earlier "invalid_blocks" silent-failure bug.
+                "action_id": f"{base_action_id}_prevp{current_page - 1}",
                 "value": f"{value_prefix}{(current_page - 2) * page_size}",
             })
 
@@ -8690,7 +8693,7 @@ class SlackSlashCommandView(APIView):
             elements.append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "›", "emoji": True},
-                "action_id": f"{base_action_id}_p{current_page + 1}",
+                "action_id": f"{base_action_id}_nextp{current_page + 1}",
                 "value": f"{value_prefix}{current_page * page_size}",
             })
 
