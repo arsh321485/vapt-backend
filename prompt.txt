@@ -1,27 +1,6 @@
+🛑 Open
+👀 Open/Review
+🔄 In Progress
+✅ Closed
 
-critical  = rgb(180, 35, 24)  C
-high  = rgb(220, 38, 38) H
-medium =  rgb(245, 158, 11) M
-low  = rgb(16, 185, 129) L
-  
-
-
-1)all vulns tab me bhi pagination de do or 5 hi dena ek page me 
-
- 2)mene aapko all vulns ka tab ka ss bheja hai vha jo vuln show hota hai 
-
-for example : h1 Redis Server Unprotected by Password Authentication [High] 
-h1 aa rha hai to vha high ke according color do or jo last me [high ] aa rha hai usko bhi high ke according color do 
-
-
-3)jo all vulns me jo status aa rha hai to usko ase color dena hai 
-Open – 🔴 Red (New issue, needs attention)
-Open/Review – 🟠 Orange (Under review)
-In Progress – 🔵 Blue (Work in progress)
-Closed – 🟢 Green (Resolved/Completed)
-
-status ke according jo vuln ke starting me jo icon hai to o bhi change hona chahihe 
-
-
-
-plan btao fir krna code
+mujhe esa icon chahihe satus ke according 

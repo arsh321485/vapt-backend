@@ -8771,7 +8771,7 @@ class SlackSlashCommandView(APIView):
             name = v.get("vul_name") or "Unknown"
             sev  = (v.get("severity") or "").capitalize() or "—"
             st   = v.get("status") or "open"
-            icon = "✅" if st == "closed" else "🔓"
+            icon = self._status_icon_for(st)
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"{icon} `{sid}` *{name}* [{sev}]\n      Status: {st.capitalize()}"},
@@ -10837,16 +10837,16 @@ class SlackSlashCommandView(APIView):
     # RGB severity pills).
     _SEV_EMOJI_MAP = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 
-    def _status_emoji_for(self, st):
-        """Open=red / Open-Review=orange / In Progress=blue / Closed=green."""
+    def _status_icon_for(self, st):
+        """Open=🛑 / Open-Review=👀 / In Progress=🔄 / Closed=✅"""
         st_norm = (st or "open").strip().lower()
         if st_norm == "closed":
-            return "🟢"
+            return "✅"
         if "progress" in st_norm:
-            return "🔵"
+            return "🔄"
         if "review" in st_norm:
-            return "🟠"
-        return "🔴"
+            return "👀"
+        return "🛑"
 
     def _format_vulndata_list(self, data, offset=0):
         # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
@@ -10875,12 +10875,12 @@ class SlackSlashCommandView(APIView):
             host = v.get("asset") or v.get("host_name") or "—"
             sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
             st   = v.get("status") or "open"
-            status_icon = self._status_emoji_for(st)
             sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
+            icon = self._status_icon_for(st)
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn",
-                    "text": f"{status_icon} {sev_icon} `{sid}` *{name}* [{sev_icon} {sev}]\n      Host: `{host}` | Status: {st.capitalize()}"},
+                    "text": f"{icon} `{sid}` *{name}* [{sev_icon} {sev}]\n      Host: `{host}` | Status: {st.capitalize()}"},
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
@@ -10935,7 +10935,7 @@ class SlackSlashCommandView(APIView):
         port  = v.get("port", "—")
         proto = v.get("protocol", "—") or "—"
         st    = v.get("status") or "open"
-        icon  = "✅" if st == "closed" else "🔓"
+        icon  = self._status_icon_for(st)
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🔍 {sid.upper()} — {name}"[:150], "emoji": True}},
             {"type": "section", "fields": [
