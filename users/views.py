@@ -8743,7 +8743,7 @@ class SlackSlashCommandView(APIView):
         return blocks
 
     def _format_asset_vulns(self, rows, host, offset=0):
-        PAGE_SIZE = 10
+        PAGE_SIZE = 5
         matching = self._assign_severity_short_ids([v for v in rows if (v.get("asset") or v.get("host_name")) == host])
         count = len(matching)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
