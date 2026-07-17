@@ -6114,7 +6114,7 @@ class SlackEventsView(APIView):
         slash = SlackSlashCommandView()
         try:
             section_blocks = slash._nav_section_blocks("nav_home", team_id, user_id=None)
-            blocks = [slash._nav_buttons_block(active_action_id="nav_home")] + section_blocks
+            blocks = slash._nav_buttons_block(active_action_id="nav_home") + section_blocks
             resp = _http_post(
                 "https://slack.com/api/chat.postMessage",
                 headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
@@ -8415,27 +8415,40 @@ class SlackSlashCommandView(APIView):
         channel is created (see ensure_vaptfix_channels).
         """
         section_blocks = self._nav_section_blocks("nav_home", team_id, user_id)
-        return [self._nav_buttons_block(active_action_id="nav_home")] + section_blocks
+        return self._nav_buttons_block(active_action_id="nav_home") + section_blocks
+
+    def _button_row_blocks(self, items, active_action_id=None, chunk_size=5):
+        """
+        Builds one or more "actions" blocks from (action_id, label) pairs —
+        split into chunks of at most `chunk_size` buttons each. Slack's
+        client collapses a single actions block with more than ~5 buttons
+        into a "+N more" overflow instead of showing them all; splitting
+        into several same-row-worth blocks avoids that entirely.
+        """
+        buttons = [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": label, "emoji": True},
+                "action_id": action_id,
+                **({"style": "primary"} if action_id == active_action_id else {}),
+            }
+            for action_id, label in items
+        ]
+        return [
+            {"type": "actions", "elements": buttons[i:i + chunk_size]}
+            for i in range(0, len(buttons), chunk_size)
+        ]
 
     def _nav_buttons_block(self, active_action_id=None):
         """
-        The clickable navbar row for the admin-dashboard-channel dashboard
+        The clickable navbar row(s) for the admin-dashboard-channel dashboard
         message — same button set every time so re-clicking after an update
         still shows all options. The active section gets a "primary" style
-        so it's visually clear which tab is currently open.
+        so it's visually clear which tab is currently open. Returns a LIST
+        of blocks (see _button_row_blocks) — callers must concatenate, not
+        wrap in another list.
         """
-        return {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": label, "emoji": True},
-                    "action_id": action_id,
-                    **({"style": "primary"} if action_id == active_action_id else {}),
-                }
-                for action_id, label in self._NAV_ITEMS
-            ],
-        }
+        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id)
 
     def _nav_section_blocks(self, action_id, team_id, user_id):
         """
@@ -8445,15 +8458,15 @@ class SlackSlashCommandView(APIView):
         /vulnstats, /vulndata, /teamoverview, /supportdata.
         """
         if action_id == "nav_fix":
-            return [self._fix_subnav_block(active_sub="fix_sub_assets")] + \
+            return self._fix_subnav_block(active_sub="fix_sub_assets") + \
                 self._fix_subtab_blocks("fix_sub_assets", team_id, user_id)
 
         if action_id == "nav_register":
-            return [self._allvuln_subnav_block(active_sub="av_sub_list")] + \
+            return self._allvuln_subnav_block(active_sub="av_sub_list") + \
                 self._allvuln_subtab_blocks("av_sub_list", team_id, user_id)
 
         if action_id == "nav_team":
-            return [self._team_subnav_block(active_sub="team_sub_team")] + \
+            return self._team_subnav_block(active_sub="team_sub_team") + \
                 self._team_subtab_blocks("team_sub_team", team_id, user_id)
 
         if action_id == "nav_teamperf":
@@ -8482,19 +8495,8 @@ class SlackSlashCommandView(APIView):
         return [self._dashboard_image_block(team_id)]
 
     def _team_subnav_block(self, active_sub=None):
-        """Second-level button row shown under the 'Team Overview' nav tab."""
-        return {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": label, "emoji": True},
-                    "action_id": action_id,
-                    **({"style": "primary"} if action_id == active_sub else {}),
-                }
-                for action_id, label in self._TEAM_SUBTABS
-            ],
-        }
+        """Second-level button row(s) shown under the 'Team Overview' nav tab."""
+        return self._button_row_blocks(self._TEAM_SUBTABS, active_action_id=active_sub)
 
     def _team_subtab_blocks(self, sub_action_id, team_id, user_id):
         """
@@ -8513,19 +8515,8 @@ class SlackSlashCommandView(APIView):
         return [self._dashboard_image_block(team_id, kind="team", alt_text="Team Overview")]
 
     def _allvuln_subnav_block(self, active_sub=None):
-        """Second-level button row shown under the 'All Vulnerabilities' nav tab."""
-        return {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": label, "emoji": True},
-                    "action_id": action_id,
-                    **({"style": "primary"} if action_id == active_sub else {}),
-                }
-                for action_id, label in self._ALLVULN_SUBTABS
-            ],
-        }
+        """Second-level button row(s) shown under the 'All Vulnerabilities' nav tab."""
+        return self._button_row_blocks(self._ALLVULN_SUBTABS, active_action_id=active_sub)
 
     def _allvuln_subtab_blocks(self, sub_action_id, team_id, user_id):
         """
@@ -8619,19 +8610,8 @@ class SlackSlashCommandView(APIView):
         return [toggle] + content
 
     def _fix_subnav_block(self, active_sub=None):
-        """Second-level button row shown under the 'Fix' nav tab."""
-        return {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": label, "emoji": True},
-                    "action_id": action_id,
-                    **({"style": "primary"} if action_id == active_sub else {}),
-                }
-                for action_id, label in self._FIX_SUBTABS
-            ],
-        }
+        """Second-level button row(s) shown under the 'Fix' nav tab."""
+        return self._button_row_blocks(self._FIX_SUBTABS, active_action_id=active_sub)
 
     def _fix_subtab_blocks(self, sub_action_id, team_id, user_id):
         """Content for the 'Fix' sub-tabs — All Assets (grouped by host from
@@ -11887,10 +11867,11 @@ class SlackInteractivityView(APIView):
                 vd_data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_register"),
-                    slash._allvuln_subnav_block(active_sub="av_sub_list"),
-                ] + slash._format_vulndata_list(vd_data, offset=page_offset)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._allvuln_subnav_block(active_sub="av_sub_list")
+                    + slash._format_vulndata_list(vd_data, offset=page_offset)
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -11932,7 +11913,7 @@ class SlackInteractivityView(APIView):
                 # rebuilt on top so it stays clickable for further navigation
                 # (no need to ever type /dashboard, /vulnstats, etc. again).
                 section_blocks = slash._nav_section_blocks(action_id, team_id, slack_user_id)
-                blocks = [slash._nav_buttons_block(active_action_id=action_id)] + section_blocks
+                blocks = slash._nav_buttons_block(active_action_id=action_id) + section_blocks
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -11964,10 +11945,11 @@ class SlackInteractivityView(APIView):
                 # team_sub_team / team_sub_externaluser — plain content swap,
                 # keeping both nav rows (top-level + sub-tabs) on top.
                 content_blocks = slash._team_subtab_blocks(action_id, team_id, slack_user_id)
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_team"),
-                    slash._team_subnav_block(active_sub=action_id),
-                ] + content_blocks
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_team")
+                    + slash._team_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -11989,10 +11971,11 @@ class SlackInteractivityView(APIView):
                     slash._build_approve_list_blocks(all_requests, offset=page_offset) if is_approve
                     else slash._build_reject_list_blocks(all_requests, offset=page_offset)
                 )
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_register"),
-                    slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject"),
-                ] + content
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject")
+                    + content
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -12011,10 +11994,11 @@ class SlackInteractivityView(APIView):
                     slash._build_approve_list_blocks(all_requests, offset=page_offset) if is_approve
                     else slash._build_reject_list_blocks(all_requests, offset=page_offset)
                 )
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_register"),
-                    slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject"),
-                ] + content
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject")
+                    + content
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -12033,10 +12017,11 @@ class SlackInteractivityView(APIView):
                     slack_user_id=slack_user_id,
                 )
                 all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_register"),
-                    slash._allvuln_subnav_block(active_sub="av_sub_approve"),
-                ] + slash._build_approve_list_blocks(all_requests, offset=page_offset)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._allvuln_subnav_block(active_sub="av_sub_approve")
+                    + slash._build_approve_list_blocks(all_requests, offset=page_offset)
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -12082,10 +12067,11 @@ class SlackInteractivityView(APIView):
                 else:
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
                     content = slash._allvuln_detail_blocks(target, sub, team_id)
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_register"),
-                    slash._allvuln_subnav_block(active_sub="av_sub_details"),
-                ] + content
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._allvuln_subnav_block(active_sub="av_sub_details")
+                    + content
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -12097,10 +12083,11 @@ class SlackInteractivityView(APIView):
                 # av_sub_timeline — plain content swap, keeping both nav rows
                 # (top-level + sub-tabs) on top.
                 content_blocks = slash._allvuln_subtab_blocks(action_id, team_id, slack_user_id)
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_register"),
-                    slash._allvuln_subnav_block(active_sub=action_id),
-                ] + content_blocks
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._allvuln_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -12110,10 +12097,11 @@ class SlackInteractivityView(APIView):
             if action_id in dict(slash._FIX_SUBTABS):
                 # fix_sub_assets / fix_sub_vulns — plain content swap.
                 content_blocks = slash._fix_subtab_blocks(action_id, team_id, slack_user_id)
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_fix"),
-                    slash._fix_subnav_block(active_sub=action_id),
-                ] + content_blocks
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -12130,10 +12118,11 @@ class SlackInteractivityView(APIView):
                 )
                 rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
                 content = slash._format_asset_vulns(rows, host, offset=page_offset)
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_fix"),
-                    slash._fix_subnav_block(active_sub="fix_sub_assets"),
-                ] + content
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_assets")
+                    + content
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -12145,10 +12134,11 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_fix"),
-                    slash._fix_subnav_block(active_sub="fix_sub_assets"),
-                ] + slash._format_asset_list(rows)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_assets")
+                    + slash._format_asset_list(rows)
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -12161,10 +12151,11 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
-                blocks = [
-                    slash._nav_buttons_block(active_action_id="nav_fix"),
-                    slash._fix_subnav_block(active_sub="fix_sub_assets"),
-                ] + slash._format_asset_list(rows, offset=page_offset)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_assets")
+                    + slash._format_asset_list(rows, offset=page_offset)
+                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,

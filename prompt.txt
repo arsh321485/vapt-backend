@@ -1,0 +1,8 @@
+1) slack ke folder me fix tab ke liye jeshi design di hai na veshi hi chahihe mujhe or design me jese paganins hai vese hi chahihe mujhe 
+
+2) approve ke tab pr jo extension req approve hue hai vhi show krna hai 
+
+3) reject tab pr jo req reject hue hai vhi krna hai 
+
+plan fir code 
+mene aapko slack ke ss diya hai to mujhe vese nai chahihe jo approve hue hai approve tab me or jo rejwct hue hai reject tab me
