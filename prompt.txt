@@ -1,0 +1,13 @@
+first screen shot me jo usme jo color hai vese chahihe 
+critical  = rgb(180, 35, 24)
+medium  = rgb(220, 38, 38)
+high =  rgb(245, 158, 11)
+low  = rgb(16, 185, 129)
+ke according chahihe color chahihe or for example medium to M nai to pura Medium work show hona chahihe or color ke sath 
+
+to last me pagination diya hai o mujhe < 1 2 3 >  mujhe ek page me 5 hi chahihe to mujhe o kr ke do 
+
+JO total work ko change krke mujhe Vulns kr do 
+
+
+plan btao fir krna
