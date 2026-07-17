@@ -10832,11 +10832,27 @@ class SlackSlashCommandView(APIView):
             lines.append(f"Reason: {reason}")
         return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
+    # Same emoji-approximation convention as _ASSET_SEV_EMOJI (Block Kit has
+    # no custom colors — closest Slack-native match to the design's exact
+    # RGB severity pills).
+    _SEV_EMOJI_MAP = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
+
+    def _status_emoji_for(self, st):
+        """Open=red / Open-Review=orange / In Progress=blue / Closed=green."""
+        st_norm = (st or "open").strip().lower()
+        if st_norm == "closed":
+            return "🟢"
+        if "progress" in st_norm:
+            return "🔵"
+        if "review" in st_norm:
+            return "🟠"
+        return "🔴"
+
     def _format_vulndata_list(self, data, offset=0):
         # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
         # "rows" (not "results"/"vulnerabilities"), with fields vul_name/asset
         # — reading the wrong keys silently produced "Total: 0" every time.
-        PAGE_SIZE = 10
+        PAGE_SIZE = 5
         raw_items = data if isinstance(data, list) else (data.get("rows") or data.get("results") or data.get("vulnerabilities") or [])
         items = self._assign_severity_short_ids(raw_items)
         count = len(items)
@@ -10859,11 +10875,12 @@ class SlackSlashCommandView(APIView):
             host = v.get("asset") or v.get("host_name") or "—"
             sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
             st   = v.get("status") or "open"
-            icon = "✅" if st == "closed" else "🔓"
+            status_icon = self._status_emoji_for(st)
+            sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn",
-                    "text": f"{icon} `{sid}` *{name}* [{sev}]\n      Host: `{host}` | Status: {st.capitalize()}"},
+                    "text": f"{status_icon} {sev_icon} `{sid}` *{name}* [{sev_icon} {sev}]\n      Host: `{host}` | Status: {st.capitalize()}"},
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
@@ -10872,26 +10889,9 @@ class SlackSlashCommandView(APIView):
                 },
             })
 
-        nav_buttons = []
-        if offset > 0:
-            nav_buttons.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
-                # Distinct action_id from "Next" — Slack rejects the whole
-                # message with "invalid_blocks" when two buttons in the same
-                # actions block share an action_id (only differing by value).
-                "action_id": "view_vulndata_prev",
-                "value": f"{max(0, offset - PAGE_SIZE)}",
-            })
-        if end_num < count:
-            nav_buttons.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
-                "action_id": "view_vulndata_next",
-                "value": f"{offset + PAGE_SIZE}",
-            })
-        if nav_buttons:
-            blocks.append({"type": "actions", "elements": nav_buttons})
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "view_vulndata_pg")
+        if pg_block:
+            blocks.append(pg_block)
 
         return blocks
 
@@ -11903,7 +11903,7 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id in ("view_vulndata_prev", "view_vulndata_next"):
+            if action_id.startswith("view_vulndata_pg_p"):
                 # value format here is just "offset" — admin-channel command,
                 # re-fetched with the admin token (not a team member token).
                 # Nav rows are prepended so paginating from the All
