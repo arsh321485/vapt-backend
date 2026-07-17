@@ -8108,12 +8108,13 @@ class SlackSlashCommandView(APIView):
     # auto-post-on-join handler (SlackEventsView) and the click handler
     # (SlackInteractivityView) build an identical, consistent set.
     _NAV_ITEMS = [
-        ("nav_home",     "📊 Dashboard"),
+        ("nav_home",     "🏠 Home"),
         ("nav_fix",      "🔧 Fix"),
         ("nav_register", "📋 All Vulnerabilities"),
         ("nav_team",     "👥 Team Overview"),
         ("nav_teamperf", "📈 Team Performance"),
         ("nav_support",  "🎫 Support"),
+        ("nav_download", "📥 Download Report"),
     ]
 
     # Sub-tabs shown under the "Team Overview" nav tab specifically.
@@ -8133,6 +8134,12 @@ class SlackSlashCommandView(APIView):
         ("av_sub_timeline", "⌛ Timeline Ext."),
         ("av_sub_approve",  "✅ Approve"),
         ("av_sub_reject",   "❌ Reject"),
+    ]
+
+    # Sub-tabs shown under the "Fix" nav tab specifically.
+    _FIX_SUBTABS = [
+        ("fix_sub_assets", "🖥 All Assets"),
+        ("fix_sub_vulns",  "📋 All Vulnerabilities"),
     ]
 
     def post(self, request):
@@ -8438,11 +8445,8 @@ class SlackSlashCommandView(APIView):
         /vulnstats, /vulndata, /teamoverview, /supportdata.
         """
         if action_id == "nav_fix":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/detailed-vulnerabilities/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_vulnstats(data)
+            return [self._fix_subnav_block(active_sub="fix_sub_assets")] + \
+                self._fix_subtab_blocks("fix_sub_assets", team_id, user_id)
 
         if action_id == "nav_register":
             return [self._allvuln_subnav_block(active_sub="av_sub_list")] + \
@@ -8468,6 +8472,11 @@ class SlackSlashCommandView(APIView):
                 slack_user_id=user_id,
             )
             return self._format_supportdata(data)
+
+        if action_id == "nav_download":
+            # Uploads the report file to the channel as a side effect (same
+            # as /downloadreport) and shows its confirmation card here too.
+            return self._cmd_downloadreport("", team_id, user_id)
 
         # nav_home (default) — real bento-grid design, rendered as an image
         return [self._dashboard_image_block(team_id)]
@@ -8520,10 +8529,24 @@ class SlackSlashCommandView(APIView):
 
     def _allvuln_subtab_blocks(self, sub_action_id, team_id, user_id):
         """
-        Content for the 'All Vulnerabilities' sub-tabs. Approve / Reject are
-        NOT handled here — those open a modal instead (see
-        SlackInteractivityView._handle_action), since they need input.
+        Content for the 'All Vulnerabilities' sub-tabs.
         """
+        if sub_action_id == "av_sub_approve":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                slack_user_id=user_id,
+            )
+            results = self._assign_severity_short_ids(data.get("results") or [])
+            return self._build_approve_list_blocks(results)
+
+        if sub_action_id == "av_sub_reject":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                slack_user_id=user_id,
+            )
+            results = self._assign_severity_short_ids(data.get("results") or [])
+            return self._build_reject_list_blocks(results)
+
         if sub_action_id == "av_sub_stats":
             # Real vulnerability-stats.html design, rendered as an image —
             # pure display, no per-row input needed.
@@ -8595,54 +8618,287 @@ class SlackSlashCommandView(APIView):
             content = self._format_vulndata_single(v, steps_data)
         return [toggle] + content
 
-    def _build_approve_reject_modal(self, callback_id, title, submit_label, pending, preselect=None, with_reason=False):
-        options = [
-            {
-                "text": {"type": "plain_text", "text": (
-                    f"{r.get('short_id', '?')} — {r.get('vul_name') or 'Unknown'} (+{r.get('extension_days', 0)} days)"
-                )[:75]},
-                "value": r.get("short_id", "?"),
-            }
-            for r in pending[:90]
-        ] or [{"text": {"type": "plain_text", "text": "No pending requests"}, "value": "none"}]
-
-        select_element = {"type": "static_select", "action_id": "request_select", "options": options}
-        match = next((o for o in options if o["value"] == preselect), None)
-        if match:
-            select_element["initial_option"] = match
-
-        blocks = [{
-            "type": "input",
-            "block_id": "request_block",
-            "label": {"type": "plain_text", "text": "Request ID"},
-            "element": select_element,
-        }]
-        if with_reason:
-            blocks.append({
-                "type": "input",
-                "block_id": "reason_block",
-                "label": {"type": "plain_text", "text": "Reason"},
-                "optional": True,
-                "element": {"type": "plain_text_input", "action_id": "reason_input"},
-            })
+    def _fix_subnav_block(self, active_sub=None):
+        """Second-level button row shown under the 'Fix' nav tab."""
         return {
-            "type": "modal",
-            "callback_id": callback_id,
-            "title": {"type": "plain_text", "text": title},
-            "submit": {"type": "plain_text", "text": submit_label},
-            "close": {"type": "plain_text", "text": "Cancel"},
-            "blocks": blocks,
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label, "emoji": True},
+                    "action_id": action_id,
+                    **({"style": "primary"} if action_id == active_sub else {}),
+                }
+                for action_id, label in self._FIX_SUBTABS
+            ],
         }
 
-    def _build_approve_modal(self, pending, preselect=None):
-        return self._build_approve_reject_modal(
-            "modal_approve_submit", "Approve Request", "Approve", pending, preselect=preselect, with_reason=False,
-        )
+    def _fix_subtab_blocks(self, sub_action_id, team_id, user_id):
+        """Content for the 'Fix' sub-tabs — All Assets (grouped by host from
+        the same latest-vulns list, no new backend endpoint needed) and All
+        Vulnerabilities (identical list to the All Vulnerabilities nav tab).
+        Clicking "View" on any row lands on the same shared Manual/Automation
+        detail view the All Vulnerabilities tab uses."""
+        if sub_action_id == "fix_sub_vulns":
+            data = self._call_api(
+                "/api/admin/adminregister/register/latest/vulns/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_vulndata_list(data)
 
-    def _build_reject_modal(self, pending, preselect=None):
-        return self._build_approve_reject_modal(
-            "modal_reject_submit", "Reject Request", "Reject", pending, preselect=preselect, with_reason=True,
+        # fix_sub_assets (default)
+        data = self._call_api(
+            "/api/admin/adminregister/register/latest/vulns/", team_id,
+            slack_user_id=user_id,
         )
+        rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
+        return self._format_asset_list(rows)
+
+    def _group_assets_from_vulns(self, rows):
+        """Groups the flat vuln list by host/asset — total + severity counts
+        per asset. No new backend aggregation endpoint needed."""
+        assets = {}
+        for v in rows:
+            host = v.get("asset") or v.get("host_name") or "Unknown"
+            sev = (v.get("severity") or v.get("risk_factor") or "").strip().lower()
+            entry = assets.setdefault(host, {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0})
+            entry["total"] += 1
+            if sev in ("critical", "high", "medium", "low"):
+                entry[sev] += 1
+        return sorted(assets.items(), key=lambda kv: kv[0])
+
+    def _format_asset_list(self, rows, offset=0):
+        PAGE_SIZE = 10
+        assets = self._group_assets_from_vulns(rows)
+        count = len(assets)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = assets[offset:offset + PAGE_SIZE]
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🖥 All Assets", "emoji": True}},
+            self._ctx("Every asset in your latest report. Click one to see its vulnerabilities."),
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total:* {count} assets — showing {offset + 1 if page_items else 0}-{end_num}"}},
+            {"type": "divider"},
+        ]
+        if not page_items:
+            return blocks + self._text_block("No assets found.")
+
+        for host, c in page_items:
+            counts_txt = " | ".join(
+                f"{label}: {c[key]}" for key, label in [("critical", "C"), ("high", "H"), ("medium", "M"), ("low", "L")] if c[key]
+            ) or "No open vulnerabilities"
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"🖥 `{host}`\n      Total: {c['total']} | {counts_txt}"},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "action_id": "view_fix_asset",
+                    "value": f"{host}|0",
+                },
+            })
+
+        nav_buttons = []
+        if offset > 0:
+            nav_buttons.append({
+                "type": "button", "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
+                "action_id": "view_fix_assets_prev", "value": f"{max(0, offset - PAGE_SIZE)}",
+            })
+        if end_num < count:
+            nav_buttons.append({
+                "type": "button", "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
+                "action_id": "view_fix_assets_next", "value": f"{offset + PAGE_SIZE}",
+            })
+        if nav_buttons:
+            blocks.append({"type": "actions", "elements": nav_buttons})
+        return blocks
+
+    def _format_asset_vulns(self, rows, host, offset=0):
+        PAGE_SIZE = 10
+        matching = self._assign_severity_short_ids([v for v in rows if (v.get("asset") or v.get("host_name")) == host])
+        count = len(matching)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = matching[offset:offset + PAGE_SIZE]
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"🖥 {host}"[:150], "emoji": True}},
+            self._ctx(f"Vulnerabilities on this asset — {count} total."),
+            {
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "← Back to All Assets", "emoji": True},
+                    "action_id": "view_fix_asset_back",
+                }],
+            },
+            {"type": "divider"},
+        ]
+        if not page_items:
+            return blocks + self._text_block("No vulnerabilities found for this asset.")
+
+        for v in page_items:
+            sid  = v.get("short_id", "?")
+            name = v.get("vul_name") or "Unknown"
+            sev  = (v.get("severity") or "").capitalize() or "—"
+            st   = v.get("status") or "open"
+            icon = "✅" if st == "closed" else "🔓"
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"{icon} `{sid}` *{name}* [{sev}]\n      Status: {st.capitalize()}"},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "action_id": "view_allvuln_detail",
+                    "value": sid,
+                },
+            })
+
+        nav_buttons = []
+        if offset > 0:
+            nav_buttons.append({
+                "type": "button", "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
+                "action_id": "view_fix_asset_vulns_prev", "value": f"{host}|{max(0, offset - PAGE_SIZE)}",
+            })
+        if end_num < count:
+            nav_buttons.append({
+                "type": "button", "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
+                "action_id": "view_fix_asset_vulns_next", "value": f"{host}|{offset + PAGE_SIZE}",
+            })
+        if nav_buttons:
+            blocks.append({"type": "actions", "elements": nav_buttons})
+        return blocks
+
+    def _build_reject_modal(self, sid, vuln_label):
+        """
+        Reject always needs a reason, and Slack can't do an inline text
+        input in a regular message — so "Reject Request" on a specific row
+        opens this small modal just for the reason, already knowing exactly
+        which request (sid carried via private_metadata, no dropdown needed
+        since the row itself already identified the target).
+        """
+        return {
+            "type": "modal",
+            "callback_id": "modal_reject_submit",
+            "private_metadata": sid,
+            "title": {"type": "plain_text", "text": "Reject Request"},
+            "submit": {"type": "plain_text", "text": "Reject"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"Rejecting `{sid}` — *{vuln_label}*"}},
+                {
+                    "type": "input",
+                    "block_id": "reason_block",
+                    "label": {"type": "plain_text", "text": "Reason"},
+                    "optional": True,
+                    "element": {"type": "plain_text_input", "action_id": "reason_input"},
+                },
+            ],
+        }
+
+    def _extension_page_for_sid(self, results, sid, page_size=4):
+        idx = next((i for i, r in enumerate(results) if r.get("short_id") == sid), 0)
+        return (idx // page_size) * page_size
+
+    def _build_approve_list_blocks(self, results, offset=0):
+        PAGE_SIZE = 4
+        count = len(results)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = results[offset:offset + PAGE_SIZE]
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "✅ Approve Timeline Extension", "emoji": True}},
+            self._ctx("Pick a request to approve its mitigation-deadline extension."),
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Requests:* {count}"}},
+            {"type": "divider"},
+        ]
+        if not page_items:
+            return blocks + self._text_block("No timeline extension requests found.")
+
+        for r in page_items:
+            sid  = r.get("short_id", "?")
+            vuln = r.get("vul_name") or "Unknown"
+            days = r.get("extension_days", 0)
+            st   = r.get("status", "review")
+            section = {"type": "section", "text": {"type": "mrkdwn", "text": f"`{sid}` *{vuln}*\n+{days} days"}}
+            if st == "approved":
+                section["text"]["text"] += "\n✅ *Approved*"
+            else:
+                section["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Approve Request", "emoji": True},
+                    "action_id": "av_list_approve_row",
+                    "value": f"{sid}|{offset}",
+                    "style": "primary",
+                }
+            blocks.append(section)
+
+        nav_buttons = []
+        if offset > 0:
+            nav_buttons.append({
+                "type": "button", "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
+                "action_id": "av_approve_list_prev", "value": f"{max(0, offset - PAGE_SIZE)}",
+            })
+        if end_num < count:
+            nav_buttons.append({
+                "type": "button", "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
+                "action_id": "av_approve_list_next", "value": f"{offset + PAGE_SIZE}",
+            })
+        if nav_buttons:
+            blocks.append({"type": "actions", "elements": nav_buttons})
+        return blocks
+
+    def _build_reject_list_blocks(self, results, offset=0):
+        PAGE_SIZE = 4
+        count = len(results)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = results[offset:offset + PAGE_SIZE]
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "❌ Reject Timeline Extension", "emoji": True}},
+            self._ctx("Pick a request to reject, with an optional reason."),
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Requests:* {count}"}},
+            {"type": "divider"},
+        ]
+        if not page_items:
+            return blocks + self._text_block("No timeline extension requests found.")
+
+        for r in page_items:
+            sid  = r.get("short_id", "?")
+            vuln = r.get("vul_name") or "Unknown"
+            days = r.get("extension_days", 0)
+            st   = r.get("status", "review")
+            section = {"type": "section", "text": {"type": "mrkdwn", "text": f"`{sid}` *{vuln}*\n+{days} days"}}
+            if st == "rejected":
+                reason = r.get("reason") or "—"
+                section["text"]["text"] += f"\n❌ *Rejected* — Reason: {reason}"
+            else:
+                section["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Reject Request", "emoji": True},
+                    "action_id": "av_list_reject_row",
+                    "value": f"{sid}|{offset}",
+                    "style": "danger",
+                }
+            blocks.append(section)
+
+        nav_buttons = []
+        if offset > 0:
+            nav_buttons.append({
+                "type": "button", "text": {"type": "plain_text", "text": "◀ Previous", "emoji": True},
+                "action_id": "av_reject_list_prev", "value": f"{max(0, offset - PAGE_SIZE)}",
+            })
+        if end_num < count:
+            nav_buttons.append({
+                "type": "button", "text": {"type": "plain_text", "text": "Next ▶", "emoji": True},
+                "action_id": "av_reject_list_next", "value": f"{offset + PAGE_SIZE}",
+            })
+        if nav_buttons:
+            blocks.append({"type": "actions", "elements": nav_buttons})
+        return blocks
 
     def _build_adduser_modal(self):
         return {
@@ -11519,7 +11775,6 @@ class SlackInteractivityView(APIView):
             titles = {
                 "modal_adduser_submit": "Add User",
                 "modal_deleteuser_submit": "Delete User",
-                "modal_approve_submit": "Approve Request",
                 "modal_reject_submit": "Reject Request",
             }
             if callback_id not in titles:
@@ -11719,12 +11974,81 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id in ("av_sub_approve", "av_sub_reject", "av_approve_row", "av_reject_row"):
-                # Approve/Reject need input (which request + optional reason),
-                # so they open a modal — pre-filled with the pending request
-                # if triggered from a specific row's Approve/Reject button
-                # (matches the design: click a row's Approve/Reject and land
-                # on that same tab/form with the request pre-selected).
+            if action_id in ("av_approve_row", "av_reject_row"):
+                # Timeline Extension row's Approve/Reject click — navigate to
+                # that tab's own paginated list, landing on the page that
+                # actually contains this specific request.
+                ext_data = slash._call_api(
+                    "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                    slack_user_id=slack_user_id,
+                )
+                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
+                page_offset = slash._extension_page_for_sid(all_requests, value)
+                is_approve = action_id == "av_approve_row"
+                content = (
+                    slash._build_approve_list_blocks(all_requests, offset=page_offset) if is_approve
+                    else slash._build_reject_list_blocks(all_requests, offset=page_offset)
+                )
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_register"),
+                    slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject"),
+                ] + content
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in ("av_approve_list_prev", "av_approve_list_next", "av_reject_list_prev", "av_reject_list_next"):
+                page_offset = int(value) if value.isdigit() else 0
+                ext_data = slash._call_api(
+                    "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                    slack_user_id=slack_user_id,
+                )
+                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
+                is_approve = action_id.startswith("av_approve_list")
+                content = (
+                    slash._build_approve_list_blocks(all_requests, offset=page_offset) if is_approve
+                    else slash._build_reject_list_blocks(all_requests, offset=page_offset)
+                )
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_register"),
+                    slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject"),
+                ] + content
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id == "av_list_approve_row":
+                # Approve needs no extra input — do it immediately and
+                # redraw the same Approve-list page.
+                parts_v = value.split("|")
+                sid = parts_v[0] if parts_v else value
+                page_offset = int(parts_v[1]) if len(parts_v) > 1 and parts_v[1].isdigit() else 0
+                slash._cmd_approve(sid, team_id, slack_user_id)
+                ext_data = slash._call_api(
+                    "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                    slack_user_id=slack_user_id,
+                )
+                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_register"),
+                    slash._allvuln_subnav_block(active_sub="av_sub_approve"),
+                ] + slash._build_approve_list_blocks(all_requests, offset=page_offset)
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id == "av_list_reject_row":
+                # Reject needs a reason — Slack can't do an inline text input
+                # in a message, so this opens a small modal already knowing
+                # exactly which request (no dropdown needed).
+                parts_v = value.split("|")
+                sid = parts_v[0] if parts_v else value
                 bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
                 if not bot_token or not trigger_id:
                     self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
@@ -11733,17 +12057,10 @@ class SlackInteractivityView(APIView):
                     "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
                     slack_user_id=slack_user_id,
                 )
-                # Dropdown lists every extension request for this admin's
-                # latest report (not just still-pending ones) — matches the
-                # row buttons always showing, so a decision can be changed
-                # any time (already scoped to admin + latest report by
-                # AdminMitigationTimelineExtensionReportAPIView itself).
-                pending = slash._assign_severity_short_ids(ext_data.get("results") or [])
-                preselect = value if action_id in ("av_approve_row", "av_reject_row") else None
-                view = (
-                    slash._build_reject_modal(pending, preselect=preselect) if action_id in ("av_sub_reject", "av_reject_row")
-                    else slash._build_approve_modal(pending, preselect=preselect)
-                )
+                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
+                target = next((r for r in all_requests if r.get("short_id") == sid), None)
+                vuln_label = (target.get("vul_name") if target else None) or sid
+                view = slash._build_reject_modal(sid, vuln_label)
                 resp = _http_post(
                     "https://slack.com/api/views.open",
                     headers={"Authorization": f"Bearer {bot_token}"},
@@ -11784,6 +12101,70 @@ class SlackInteractivityView(APIView):
                     slash._nav_buttons_block(active_action_id="nav_register"),
                     slash._allvuln_subnav_block(active_sub=action_id),
                 ] + content_blocks
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in dict(slash._FIX_SUBTABS):
+                # fix_sub_assets / fix_sub_vulns — plain content swap.
+                content_blocks = slash._fix_subtab_blocks(action_id, team_id, slack_user_id)
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_fix"),
+                    slash._fix_subnav_block(active_sub=action_id),
+                ] + content_blocks
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in ("view_fix_asset", "view_fix_asset_vulns_prev", "view_fix_asset_vulns_next"):
+                # value is "host|offset" for all three.
+                parts_v = value.split("|", 1)
+                host = parts_v[0] if parts_v else value
+                page_offset = int(parts_v[1]) if len(parts_v) > 1 and parts_v[1].isdigit() else 0
+                data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
+                content = slash._format_asset_vulns(rows, host, offset=page_offset)
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_fix"),
+                    slash._fix_subnav_block(active_sub="fix_sub_assets"),
+                ] + content
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id == "view_fix_asset_back":
+                data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_fix"),
+                    slash._fix_subnav_block(active_sub="fix_sub_assets"),
+                ] + slash._format_asset_list(rows)
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in ("view_fix_assets_prev", "view_fix_assets_next"):
+                page_offset = int(value) if value.isdigit() else 0
+                data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
+                blocks = [
+                    slash._nav_buttons_block(active_action_id="nav_fix"),
+                    slash._fix_subnav_block(active_sub="fix_sub_assets"),
+                ] + slash._format_asset_list(rows, offset=page_offset)
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -11907,7 +12288,6 @@ class SlackInteractivityView(APIView):
         titles = {
             "modal_adduser_submit": "Add User",
             "modal_deleteuser_submit": "Delete User",
-            "modal_approve_submit": "Approve Request",
             "modal_reject_submit": "Reject Request",
         }
         if callback_id not in titles:
@@ -11939,12 +12319,12 @@ class SlackInteractivityView(APIView):
                 else:
                     blocks = slash._cmd_deleteuser(f"<@{target_uid}>", team_id, slack_user_id)
             else:
-                sid = ((values.get("request_block") or {}).get("request_select") or {}).get(
-                    "selected_option", {}).get("value", "")
-                if not sid or sid == "none":
-                    blocks = slash._text_block("❌ Please select a request.")
-                elif callback_id == "modal_approve_submit":
-                    blocks = slash._cmd_approve(sid, team_id, slack_user_id)
+                # modal_reject_submit — sid was already known when the modal
+                # was opened (from the clicked row), carried via
+                # private_metadata since there's no dropdown anymore.
+                sid = view.get("private_metadata", "")
+                if not sid:
+                    blocks = slash._text_block("❌ Missing request id.")
                 else:
                     reason = ((values.get("reason_block") or {}).get("reason_input") or {}).get("value") or ""
                     blocks = slash._cmd_reject(f"{sid} {reason}".strip(), team_id, slack_user_id)
