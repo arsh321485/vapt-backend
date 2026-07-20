@@ -8173,6 +8173,12 @@ class SlackSlashCommandView(APIView):
         ("fix_sub_vulns",  "📋 All Vulnerabilities"),
     ]
 
+    # Sub-tabs shown under the "Register" nav tab specifically.
+    _REGISTER_SUBTABS = [
+        ("reg_sub_register", "📋 Register"),
+        ("reg_sub_script",   "📜 Script"),
+    ]
+
     def post(self, request):
         # Verify signature FIRST — before request.POST is accessed.
         # Accessing request.POST causes DRF to consume the body stream, after which
@@ -8500,21 +8506,8 @@ class SlackSlashCommandView(APIView):
                 self._allvuln_subtab_blocks("av_sub_list", team_id, user_id)
 
         if action_id == "nav_register":
-            try:
-                vd_data = self._call_api(
-                    "/api/admin/adminregister/register/latest/vulns/", team_id,
-                    slack_user_id=user_id,
-                )
-            except Exception as exc:
-                logger.exception("[nav_register] latest vulns fetch failed: %s", exc)
-                return self._text_block(f"❌ Could not load Register data: `{exc}`")
-            if not isinstance(vd_data, (dict, list)):
-                return self._text_block("❌ Could not load Register data (invalid API response).")
-            if isinstance(vd_data, dict) and vd_data.get("detail") and not (
-                vd_data.get("rows") or vd_data.get("results") or vd_data.get("vulnerabilities")
-            ):
-                return self._text_block(f"❌ {vd_data.get('detail')}")
-            return self._format_register_tab(vd_data, sev_filter="all", st_filter="all", offset=0)
+            return self._register_subnav_block(active_sub="reg_sub_register") + \
+                self._register_subtab_blocks("reg_sub_register", team_id, user_id)
 
         if action_id == "nav_team":
             return self._team_subnav_block(active_sub="team_sub_team") + \
@@ -8663,6 +8656,44 @@ class SlackSlashCommandView(APIView):
     def _fix_subnav_block(self, active_sub=None):
         """Second-level button row(s) shown under the 'Fix' nav tab."""
         return self._button_row_blocks(self._FIX_SUBTABS, active_action_id=active_sub)
+
+    def _register_subnav_block(self, active_sub=None):
+        """Second-level button row under the 'Register' nav tab: Register | Script."""
+        return self._button_row_blocks(self._REGISTER_SUBTABS, active_action_id=active_sub)
+
+    def _register_subtab_blocks(self, sub_action_id, team_id, user_id):
+        """Content for Register sub-tabs — Register (default vuln list) or Script stats."""
+        if sub_action_id == "reg_sub_script":
+            try:
+                data = self._call_api(
+                    "/api/admin/automation-scripts/stats/", team_id,
+                    slack_user_id=user_id,
+                )
+            except Exception as exc:
+                logger.exception("[reg_sub_script] stats fetch failed: %s", exc)
+                return self._text_block(f"❌ Could not load Script data: `{exc}`")
+            if not isinstance(data, dict):
+                return self._text_block("❌ Could not load Script data (invalid API response).")
+            if data.get("detail") and not data.get("stats"):
+                return self._text_block(f"❌ {data.get('detail')}")
+            return self._format_script_tab(data, offset=0)
+
+        # reg_sub_register (default) — existing Register UI
+        try:
+            vd_data = self._call_api(
+                "/api/admin/adminregister/register/latest/vulns/", team_id,
+                slack_user_id=user_id,
+            )
+        except Exception as exc:
+            logger.exception("[reg_sub_register] latest vulns fetch failed: %s", exc)
+            return self._text_block(f"❌ Could not load Register data: `{exc}`")
+        if not isinstance(vd_data, (dict, list)):
+            return self._text_block("❌ Could not load Register data (invalid API response).")
+        if isinstance(vd_data, dict) and vd_data.get("detail") and not (
+            vd_data.get("rows") or vd_data.get("results") or vd_data.get("vulnerabilities")
+        ):
+            return self._text_block(f"❌ {vd_data.get('detail')}")
+        return self._format_register_tab(vd_data, sev_filter="all", st_filter="all", offset=0)
 
     def _fix_subtab_blocks(self, sub_action_id, team_id, user_id):
         """Content for the 'Fix' sub-tabs — All Assets (grouped by host from
@@ -11221,6 +11252,76 @@ class SlackSlashCommandView(APIView):
 
         return blocks
 
+    def _format_script_tab(self, data, offset=0):
+        """
+        Script sub-tab under Register — mirrors slack/script.html:
+        S.No | Vulnerability Name | Severity | Downloads | Team + pagination.
+        Data from GET /api/admin/automation-scripts/stats/
+        """
+        PAGE_SIZE = 5
+        raw = data.get("stats") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        items = raw or []
+        count = len(items)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = items[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        def sev_icon(sev):
+            s = (sev or "").strip().lower()
+            return self._SEV_EMOJI_MAP.get(s, "⚪")
+
+        def team_label(team):
+            t = (team or "").strip() or "—"
+            return t
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "📜 Script", "emoji": True}},
+            self._ctx("Automation scripts library — downloads and assigned team."),
+            {"type": "divider"},
+        ]
+
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No scripts found.*"}})
+        else:
+            for idx, s in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sno = str(start_num + idx).zfill(2)
+                name = s.get("vulnerability") or "Unknown"
+                sev = (s.get("severity") or "").strip() or "—"
+                sev_u = sev.upper() if sev != "—" else "—"
+                downloads = s.get("download_count", 0)
+                team = team_label(s.get("team"))
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"*`{sno}`*  *{name}*\n"
+                                f"{sev_icon(sev)} *{sev_u}*  |  "
+                                f"*Downloads:* {downloads}  |  "
+                                f"*Team:* {team}"
+                            ),
+                        },
+                    }
+                )
+
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Showing {start_num}-{end_num} of {count} results",
+                },
+            }
+        )
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "script_list_pg")
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
     def _format_vulndata_detail(self, data, fix_vuln_id):
         name  = data.get("vulnerability_name") or data.get("name") or fix_vuln_id
         sev   = (data.get("severity") or "").capitalize()
@@ -12266,7 +12367,11 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 section = slash._format_register_tab(vd_data, sev_filter=sev_filter, st_filter=st_filter, offset=page_offset)
-                blocks = slash._nav_buttons_block(active_action_id="nav_register") + section
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._register_subnav_block(active_sub="reg_sub_register")
+                    + section
+                )
                 self._post_response_url(
                     response_url,
                     {"replace_original": True, "blocks": blocks},
@@ -12289,7 +12394,29 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 section = slash._format_register_tab(vd_data, sev_filter=sev_filter, st_filter=st_filter, offset=page_offset)
-                blocks = slash._nav_buttons_block(active_action_id="nav_register") + section
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._register_subnav_block(active_sub="reg_sub_register")
+                    + section
+                )
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            if action_id.startswith("script_list_pg_"):
+                page_offset = int(value) if value.isdigit() else 0
+                data = slash._call_api(
+                    "/api/admin/automation-scripts/stats/", team_id, slack_user_id=slack_user_id,
+                )
+                section = slash._format_script_tab(data if isinstance(data, dict) else {}, offset=page_offset)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._register_subnav_block(active_sub="reg_sub_script")
+                    + section
+                )
                 self._post_response_url(
                     response_url,
                     {"replace_original": True, "blocks": blocks},
@@ -12309,7 +12436,25 @@ class SlackInteractivityView(APIView):
                     content = slash._text_block(f"❌ Vulnerability `{sid}` not found.")
                 else:
                     content = slash._allvuln_detail_blocks(target, "manual", team_id)
-                blocks = slash._nav_buttons_block(active_action_id="nav_register") + content
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._register_subnav_block(active_sub="reg_sub_register")
+                    + content
+                )
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            if action_id in dict(slash._REGISTER_SUBTABS):
+                content_blocks = slash._register_subtab_blocks(action_id, team_id, slack_user_id)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_register")
+                    + slash._register_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
                 self._post_response_url(
                     response_url,
                     {"replace_original": True, "blocks": blocks},
