@@ -11116,26 +11116,14 @@ class SlackSlashCommandView(APIView):
 
         blocks.append({"type": "divider"})
 
-        # Bold column header (Slack has no real HTML table — this is the
-        # closest Block Kit approximation; FIX/VIEW sits as section accessory
-        # so it lands on the RIGHT of each row).
-        blocks.append(
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        "*S.No.*  |  *Vulnerability Name*  |  *Asset*  |  "
-                        "*Severity*  |  *First Obs*  |  *Second Obs*  |  *Status*  |  *Action*"
-                    ),
-                },
-            }
-        )
-
         if not page_items:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No vulnerabilities found.*"}})
         else:
             for idx, v in enumerate(page_items):
+                # Line bar above every vulnerability except the first
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+
                 sno = start_num + idx
                 sno_txt = str(sno).zfill(2)
                 sid = v.get("short_id", "?")
@@ -11152,19 +11140,21 @@ class SlackSlashCommandView(APIView):
                 action_text = "FIX" if has_fix else "VIEW"
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
-                # Status icon on the left (context), row body + FIX/VIEW on the RIGHT (section accessory).
-                blocks.append(
-                    {
-                        "type": "context",
-                        "elements": [
-                            self._status_icon_image_element(st),
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*`{sno_txt}`*  `{sid}`  *{truncate(name, 42)}*",
-                            },
-                        ],
-                    }
-                )
+                # Format long dates short (date only) so one row fits better
+                def _short_date(val):
+                    s = str(val or "—").strip()
+                    if not s or s == "—":
+                        return "—"
+                    # ISO-like: 2025-07-10T... or 10/07/2025
+                    if "T" in s:
+                        return s.split("T", 1)[0]
+                    if " " in s and len(s) > 10:
+                        return s.split(" ", 1)[0]
+                    return s
+
+                first_s = _short_date(first_obs)
+                second_s = _short_date(second_obs)
+
                 btn = {
                     "type": "button",
                     "text": {"type": "plain_text", "text": action_text, "emoji": True},
@@ -11173,17 +11163,22 @@ class SlackSlashCommandView(APIView):
                 }
                 if action_text == "FIX":
                     btn["style"] = "primary"
+
+                # Single-row record: all columns in one line, FIX/VIEW on the RIGHT.
+                # (Slack Block Kit has no real table; section+accessory is the
+                # only way to keep the action button on the right in one row.)
                 blocks.append(
                     {
                         "type": "section",
-                        "fields": [
-                            {"type": "mrkdwn", "text": f"*Asset*\n`{asset}`"},
-                            {"type": "mrkdwn", "text": f"*Severity*\n{sev_icon_for(sev_norm)} *{sev_label}*"},
-                            {"type": "mrkdwn", "text": f"*First Obs*\n{first_obs}"},
-                            {"type": "mrkdwn", "text": f"*Second Obs*\n{second_obs}"},
-                            {"type": "mrkdwn", "text": f"*Status*\n*{st_display}*"},
-                            {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
-                        ],
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"{self._status_icon_for(st)} *`{sno_txt}`*  `{sid}`  "
+                                f"*{truncate(name, 36)}*  |  `{asset}`  |  "
+                                f"{sev_icon_for(sev_norm)} *{sev_label}*  |  "
+                                f"{first_s}  |  {second_s}  |  *{st_display}*"
+                            ),
+                        },
                         "accessory": btn,
                     }
                 )
