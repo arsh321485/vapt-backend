@@ -8130,7 +8130,7 @@ class SlackSlashCommandView(APIView):
         "vaptfix-architectural-flaws-team":      "Architectural Flaws",
     }
     _SEV_PREFIX = [("Critical", "c"), ("High", "h"), ("Medium", "m"), ("Low", "l")]
-    _SEV_ICONS  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🔵"}
+    _SEV_ICONS  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}
 
     # Admin-dashboard-channel navbar — clicking these updates the SAME
     # message in place (like a tab switcher) instead of requiring the
@@ -9283,7 +9283,7 @@ class SlackSlashCommandView(APIView):
                 "text": (
                     f"*Findings:* {total} total — "
                     f"🔴 {vulns.get('critical', 0)} Critical | 🟠 {vulns.get('high', 0)} High | "
-                    f"🟡 {vulns.get('medium', 0)} Medium | 🔵 {vulns.get('low', 0)} Low"
+                    f"🟡 {vulns.get('medium', 0)} Medium | 🟢 {vulns.get('low', 0)} Low"
                 )}},
         ]
         if pdf_error:
@@ -11059,7 +11059,7 @@ class SlackSlashCommandView(APIView):
             return (s[: max_len - 3] + "...") if len(s) > max_len else s
 
         def sev_icon_for(sev_norm):
-            return {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}.get(sev_norm, "⚪")
+            return {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(sev_norm, "⚪")
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "📋 Register", "emoji": True}},
@@ -11603,7 +11603,7 @@ class SlackSlashCommandView(APIView):
                 f"🔴 Critical: {sev_counts['Critical']} | "
                 f"🟠 High: {sev_counts['High']} | "
                 f"🟡 Medium: {sev_counts['Medium']} | "
-                f"🔵 Low: {sev_counts['Low']}"
+                f"🟢 Low: {sev_counts['Low']}"
             )}},
         ]
 
