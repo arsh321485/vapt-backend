@@ -8110,6 +8110,7 @@ class SlackSlashCommandView(APIView):
     _NAV_ITEMS = [
         ("nav_home",     "🏠 Home"),
         ("nav_fix",      "🔧 Fix"),
+        ("nav_admin_demo", "🧪 Admin Demo"),
         ("nav_register", "📋 Register"),
         ("nav_team",     "👥 Team"),
         ("nav_teamperf", "📈 Team Performance"),
@@ -8448,10 +8449,9 @@ class SlackSlashCommandView(APIView):
         of blocks (see _button_row_blocks) — callers must concatenate, not
         wrap in another list.
         """
-        # All 7 in a single actions block — Slack's own client still decides
-        # how many buttons actually fit on one visual line before wrapping;
-        # this just stops US from pre-splitting it into forced separate rows.
-        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id, chunk_size=len(self._NAV_ITEMS))
+        # Keep at most 5 navbar buttons per actions block so Slack never
+        # collapses them into a "+N more" overflow.
+        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id, chunk_size=5)
 
     def _nav_section_blocks(self, action_id, team_id, user_id):
         """
@@ -8464,9 +8464,16 @@ class SlackSlashCommandView(APIView):
             return self._fix_subnav_block(active_sub="fix_sub_assets") + \
                 self._fix_subtab_blocks("fix_sub_assets", team_id, user_id)
 
-        if action_id == "nav_register":
+        if action_id == "nav_admin_demo":
             return self._allvuln_subnav_block(active_sub="av_sub_list") + \
                 self._allvuln_subtab_blocks("av_sub_list", team_id, user_id)
+
+        if action_id == "nav_register":
+            vd_data = self._call_api(
+                "/api/admin/adminregister/register/latest/vulns/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_register_tab(vd_data, sev_filter="all", st_filter="all", offset=0)
 
         if action_id == "nav_team":
             return self._team_subnav_block(active_sub="team_sub_team") + \
@@ -10838,15 +10845,15 @@ class SlackSlashCommandView(APIView):
     _SEV_EMOJI_MAP = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 
     def _status_icon_for(self, st):
-        """Open=🛑 / Open-Review=👀 / In Progress=🔄 / Closed=✅"""
+        """Open=❗ / Open-Review=👀 / In Progress=🔄 / Closed=🔒"""
         st_norm = (st or "open").strip().lower()
         if st_norm == "closed":
-            return "✅"
+            return "🔒"
         if "progress" in st_norm:
             return "🔄"
         if "review" in st_norm:
             return "👀"
-        return "🛑"
+        return "❗"
 
     def _format_vulndata_list(self, data, offset=0):
         # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
@@ -10890,6 +10897,210 @@ class SlackSlashCommandView(APIView):
             })
 
         pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "view_vulndata_pg")
+        if pg_block:
+            blocks.append(pg_block)
+
+        return blocks
+
+    def _format_register_tab(self, data, sev_filter="all", st_filter="all", offset=0):
+        """
+        New "Register" tab UI (Slack Block Kit) — severity + status filters,
+        FIX/VIEW buttons, and pagination (5 rows per page).
+        """
+        PAGE_SIZE = 5
+
+        raw_items = (
+            data
+            if isinstance(data, list)
+            else (data.get("rows") or data.get("results") or data.get("vulnerabilities") or [])
+        )
+
+        def _norm_sev(v):
+            return (v.get("severity") or v.get("risk_factor") or "").strip().lower()
+
+        def _norm_status(v):
+            return (v.get("status") or "open").strip().lower()
+
+        def _match_sev(v):
+            return True if sev_filter == "all" else (_norm_sev(v) == sev_filter)
+
+        def _match_status(v):
+            st = _norm_status(v)
+            if st_filter == "all":
+                return True
+            if st_filter == "in_progress":
+                return "progress" in st
+            if st_filter == "open":
+                # Covers "open" and "open/review"
+                return st == "open" or st.startswith("open/")
+            if st_filter == "closed":
+                return st == "closed"
+            return st == st_filter
+
+        # Counts for filter buttons:
+        # - Severity counts based on active status filter
+        # - Status counts based on active severity filter
+        sev_base = [v for v in raw_items if _match_status(v)]
+        st_base = [v for v in raw_items if _match_sev(v)]
+
+        def _count_by(predicate):
+            return sum(1 for v in predicate)
+
+        sev_counts = {
+            "all": len(sev_base),
+            "critical": sum(1 for v in sev_base if _norm_sev(v) == "critical"),
+            "high": sum(1 for v in sev_base if _norm_sev(v) == "high"),
+            "medium": sum(1 for v in sev_base if _norm_sev(v) == "medium"),
+            "low": sum(1 for v in sev_base if _norm_sev(v) == "low"),
+        }
+        st_counts = {
+            "all": len(st_base),
+            "open": sum(1 for v in st_base if (_norm_status(v) == "open" or _norm_status(v).startswith("open/"))),
+            "closed": sum(1 for v in st_base if _norm_status(v) == "closed"),
+            "in_progress": sum(1 for v in st_base if "progress" in _norm_status(v)),
+        }
+
+        # Assign short IDs ONCE on the FULL unfiltered dataset so that a
+        # clicked row always resolves to the same record even after applying
+        # filters/pagination.
+        normalized_all = [
+            dict(v, severity=(v.get("severity") or v.get("risk_factor") or ""))
+            for v in raw_items
+        ]
+        all_items = self._assign_severity_short_ids(normalized_all, name_key="vul_name")
+
+        filtered = [v for v in all_items if _match_sev(v) and _match_status(v)]
+        count = len(filtered)
+
+        offset = max(0, min(offset, max(count - 1, 0)))
+        page_items = filtered[offset : offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        def truncate(s, max_len=28):
+            s = (s or "").strip()
+            return (s[: max_len - 3] + "...") if len(s) > max_len else s
+
+        def sev_icon_for(sev_norm):
+            return {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}.get(sev_norm, "⚪")
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "📋 Register", "emoji": True}},
+            {"type": "divider"},
+        ]
+
+        # Severity filter row
+        sev_buttons = [
+            ("all", "All", sev_counts["all"]),
+            ("critical", "Critical", sev_counts["critical"]),
+            ("high", "High", sev_counts["high"]),
+            ("medium", "Medium", sev_counts["medium"]),
+            ("low", "Low", sev_counts["low"]),
+        ]
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": label, "emoji": True},
+                        "action_id": "reg_set_filter",
+                        "value": f"{k}|{st_filter}|0",
+                        **({"style": "primary"} if k == sev_filter else {}),
+                    }
+                    for (k, label, _) in sev_buttons
+                ],
+            }
+        )
+
+        # Status filter row (with counts)
+        st_buttons = [
+            ("all", f"All {st_counts['all']}", st_counts["all"]),
+            ("open", f"Open {st_counts['open']}", st_counts["open"]),
+            ("closed", f"Closed {st_counts['closed']}", st_counts["closed"]),
+            ("in_progress", f"In Progress {st_counts['in_progress']}", st_counts["in_progress"]),
+        ]
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": label, "emoji": True},
+                        "action_id": "reg_set_filter",
+                        "value": f"{sev_filter}|{k}|0",
+                        **({"style": "primary"} if k == st_filter else {}),
+                    }
+                    for (k, label, _) in st_buttons
+                ],
+            }
+        )
+
+        blocks.append({"type": "divider"})
+
+        # Table header (approximate)
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*S.No.*  *Vulnerability Name*  *Asset*  *Severity*  *First Obs*  *Second Obs*  *Status*  *Action*",
+                },
+            }
+        )
+
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "No vulnerabilities found."}})
+        else:
+            for idx, v in enumerate(page_items):
+                sno = start_num + idx
+                sno_txt = str(sno).zfill(2)
+                sid = v.get("short_id", "?")
+                name = v.get("vul_name") or v.get("vulnerability_name") or v.get("plugin_name") or "Unknown"
+                asset = v.get("asset") or v.get("host_name") or "—"
+                sev_norm = _norm_sev(v)
+                sev_label = (v.get("severity") or v.get("risk_factor") or sev_norm).strip().upper() or "—"
+                first_obs = v.get("first_observation") or v.get("firstObs") or "—"
+                second_obs = v.get("second_observation") or v.get("secondObs") or "—"
+                st_norm = _norm_status(v)
+                status_icon = self._status_icon_for(v.get("status") or "open")
+
+                has_fix = bool(v.get("fix_vulnerability_id") or v.get("hasFix"))
+                action_text = "FIX" if has_fix else "VIEW"
+
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"*{sno_txt}.* {status_icon} `{sid}` `{truncate(name, 30)}`\n"
+                                f"Asset: `{asset}`\n"
+                                f"{sev_icon_for(sev_norm)} {sev_label} | First: {first_obs} | Second: {second_obs}\n"
+                                f"Status: {st_norm.replace('_', ' ').capitalize()}"
+                            ),
+                        },
+                        "accessory": {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": action_text, "emoji": True},
+                            "action_id": "reg_view_vuln_detail",
+                            "value": sid,
+                        },
+                    }
+                )
+
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Showing {start_num}-{end_num} of {count} results",
+                },
+            }
+        )
+
+        value_prefix = f"{sev_filter}|{st_filter}|"
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "reg_list_pg", value_prefix=value_prefix)
         if pg_block:
             blocks.append(pg_block)
 
@@ -11903,7 +12114,7 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id.startswith("view_vulndata_pg_p"):
+            if action_id.startswith("view_vulndata_pg_"):
                 # value format here is just "offset" — admin-channel command,
                 # re-fetched with the admin token (not a team member token).
                 # Nav rows are prepended so paginating from the All
@@ -11914,7 +12125,7 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_register")
+                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
                     + slash._allvuln_subnav_block(active_sub="av_sub_list")
                     + slash._format_vulndata_list(vd_data, offset=page_offset)
                 )
@@ -11922,6 +12133,53 @@ class SlackInteractivityView(APIView):
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
+                return
+
+            # ── Register tab (new design) filters + pagination ────────────────
+            if action_id == "reg_set_filter":
+                # value format: "<sev>|<status>|0"
+                parts = value.split("|")
+                if len(parts) >= 3:
+                    sev_filter = parts[0] or "all"
+                    st_filter = parts[1] or "all"
+                    page_offset = int(parts[2]) if parts[2].isdigit() else 0
+                else:
+                    sev_filter = "all"
+                    st_filter = "all"
+                    page_offset = 0
+                vd_data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                section = slash._format_register_tab(vd_data, sev_filter=sev_filter, st_filter=st_filter, offset=page_offset)
+                blocks = slash._nav_buttons_block(active_action_id="nav_register") + section
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            if action_id.startswith("reg_list_pg_"):
+                # value format: "<sev>|<status>|<offset>"
+                parts = value.split("|")
+                if len(parts) >= 3:
+                    sev_filter = parts[0] or "all"
+                    st_filter = parts[1] or "all"
+                    page_offset = int(parts[2]) if parts[2].isdigit() else 0
+                else:
+                    sev_filter = "all"
+                    st_filter = "all"
+                    page_offset = 0
+                vd_data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                section = slash._format_register_tab(vd_data, sev_filter=sev_filter, st_filter=st_filter, offset=page_offset)
+                blocks = slash._nav_buttons_block(active_action_id="nav_register") + section
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
                 return
 
             if action_id == "view_vulndata_steps_page":
@@ -12023,7 +12281,7 @@ class SlackInteractivityView(APIView):
                     else slash._build_reject_list_blocks(all_requests, offset=page_offset)
                 )
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_register")
+                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
                     + slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject")
                     + content
                 )
@@ -12046,7 +12304,7 @@ class SlackInteractivityView(APIView):
                     else slash._build_reject_list_blocks(all_requests, offset=page_offset)
                 )
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_register")
+                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
                     + slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject")
                     + content
                 )
@@ -12069,7 +12327,7 @@ class SlackInteractivityView(APIView):
                 )
                 all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_register")
+                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
                     + slash._allvuln_subnav_block(active_sub="av_sub_approve")
                     + slash._build_approve_list_blocks(all_requests, offset=page_offset)
                 )
@@ -12106,6 +12364,26 @@ class SlackInteractivityView(APIView):
                 self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
                 return
 
+            if action_id == "reg_view_vuln_detail":
+                # value is the short_id (c1/h2/m3/l4...)
+                sid = value
+                vd_data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
+                target = next((r for r in rows if r.get("short_id") == sid), None)
+                if not target:
+                    content = slash._text_block(f"❌ Vulnerability `{sid}` not found.")
+                else:
+                    content = slash._allvuln_detail_blocks(target, "manual", team_id)
+                blocks = slash._nav_buttons_block(active_action_id="nav_register") + content
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
             if action_id in ("view_allvuln_detail", "av_detail_manual", "av_detail_automation"):
                 sid = value
                 vd_data = slash._call_api(
@@ -12119,7 +12397,7 @@ class SlackInteractivityView(APIView):
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
                     content = slash._allvuln_detail_blocks(target, sub, team_id)
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_register")
+                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
                     + slash._allvuln_subnav_block(active_sub="av_sub_details")
                     + content
                 )
@@ -12135,7 +12413,7 @@ class SlackInteractivityView(APIView):
                 # (top-level + sub-tabs) on top.
                 content_blocks = slash._allvuln_subtab_blocks(action_id, team_id, slack_user_id)
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_register")
+                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
                     + slash._allvuln_subnav_block(active_sub=action_id)
                     + content_blocks
                 )
@@ -12159,7 +12437,7 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id == "view_fix_asset" or action_id.startswith("view_fix_asset_vulns_pg_p"):
+            if action_id == "view_fix_asset" or action_id.startswith("view_fix_asset_vulns_pg_"):
                 # value is "host|offset" for both.
                 parts_v = value.split("|", 1)
                 host = parts_v[0] if parts_v else value
@@ -12196,7 +12474,7 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id.startswith("view_fix_assets_pg_p"):
+            if action_id.startswith("view_fix_assets_pg_"):
                 page_offset = int(value) if value.isdigit() else 0
                 data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
