@@ -11140,12 +11140,10 @@ class SlackSlashCommandView(APIView):
                 action_text = "FIX" if has_fix else "VIEW"
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
-                # Format long dates short (date only) so one row fits better
                 def _short_date(val):
                     s = str(val or "—").strip()
                     if not s or s == "—":
                         return "—"
-                    # ISO-like: 2025-07-10T... or 10/07/2025
                     if "T" in s:
                         return s.split("T", 1)[0]
                     if " " in s and len(s) > 10:
@@ -11164,22 +11162,45 @@ class SlackSlashCommandView(APIView):
                 if action_text == "FIX":
                     btn["style"] = "primary"
 
-                # Single-row record: all columns in one line, FIX/VIEW on the RIGHT.
-                # (Slack Block Kit has no real table; section+accessory is the
-                # only way to keep the action button on the right in one row.)
+                # Top: Fix-tab style PNG status icon + S.No + id + FULL vuln name
+                # (no "..." truncate — full name is always readable here)
+                blocks.append(
+                    {
+                        "type": "context",
+                        "elements": [
+                            self._status_icon_image_element(st),
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*`{sno_txt}`*  `{sid}`  *{name}*",
+                            },
+                        ],
+                    }
+                )
+                # Middle: asset + severity, FIX/VIEW on the RIGHT
                 blocks.append(
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": (
-                                f"{self._status_icon_for(st)} *`{sno_txt}`*  `{sid}`  "
-                                f"*{truncate(name, 36)}*  |  `{asset}`  |  "
-                                f"{sev_icon_for(sev_norm)} *{sev_label}*  |  "
-                                f"{first_s}  |  {second_s}  |  *{st_display}*"
-                            ),
+                            "text": f"`{asset}`  |  {sev_icon_for(sev_norm)} *{sev_label}*",
                         },
                         "accessory": btn,
+                    }
+                )
+                # Bottom (niche): First Obs | Second Obs | Status
+                blocks.append(
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f"*First Obs:* {first_s}  |  "
+                                    f"*Second Obs:* {second_s}  |  "
+                                    f"*Status:* *{st_display}*"
+                                ),
+                            },
+                        ],
                     }
                 )
 
