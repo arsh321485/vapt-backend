@@ -8027,6 +8027,36 @@ def _dashboard_image_signer():
     return TimestampSigner(salt="vaptfix-dashboard-image")
 
 
+class SlackStatusIconView(APIView):
+    """
+    GET /api/admin/users/slack/status-icon/<kind>/
+
+    Public (no auth) — Slack fetches image_url directly for Block Kit
+    context/image elements. kind: open | closed | progress | review
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    _KIND_FILES = {
+        "open": "status-open.png",
+        "closed": "status-closed.png",
+        "progress": "status-progress.png",
+        "review": "status-open.png",
+    }
+
+    def get(self, request, kind="open"):
+        filename = self._KIND_FILES.get((kind or "open").strip().lower())
+        if not filename:
+            return HttpResponse(status=404)
+        path = os.path.join(
+            settings.BASE_DIR, "users", "static", "users", "icons", filename,
+        )
+        if not os.path.isfile(path):
+            return HttpResponse(status=404)
+        with open(path, "rb") as f:
+            return HttpResponse(f.read(), content_type="image/png")
+
+
 class SlackDashboardImageView(APIView):
     """
     GET /api/admin/users/slack/dashboard-image/?token=...
@@ -8449,9 +8479,10 @@ class SlackSlashCommandView(APIView):
         of blocks (see _button_row_blocks) — callers must concatenate, not
         wrap in another list.
         """
-        # Keep at most 5 navbar buttons per actions block so Slack never
-        # collapses them into a "+N more" overflow.
-        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id, chunk_size=5)
+        # All navbar tabs in ONE actions block so Slack shows a single row
+        # (not 5+3 wrapped rows). Slack client may still wrap on very narrow
+        # screens, but we no longer force a second block.
+        return self._button_row_blocks(self._NAV_ITEMS, active_action_id=active_action_id, chunk_size=len(self._NAV_ITEMS))
 
     def _nav_section_blocks(self, action_id, team_id, user_id):
         """
@@ -8469,10 +8500,20 @@ class SlackSlashCommandView(APIView):
                 self._allvuln_subtab_blocks("av_sub_list", team_id, user_id)
 
         if action_id == "nav_register":
-            vd_data = self._call_api(
-                "/api/admin/adminregister/register/latest/vulns/", team_id,
-                slack_user_id=user_id,
-            )
+            try:
+                vd_data = self._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id,
+                    slack_user_id=user_id,
+                )
+            except Exception as exc:
+                logger.exception("[nav_register] latest vulns fetch failed: %s", exc)
+                return self._text_block(f"❌ Could not load Register data: `{exc}`")
+            if not isinstance(vd_data, (dict, list)):
+                return self._text_block("❌ Could not load Register data (invalid API response).")
+            if isinstance(vd_data, dict) and vd_data.get("detail") and not (
+                vd_data.get("rows") or vd_data.get("results") or vd_data.get("vulnerabilities")
+            ):
+                return self._text_block(f"❌ {vd_data.get('detail')}")
             return self._format_register_tab(vd_data, sev_filter="all", st_filter="all", offset=0)
 
         if action_id == "nav_team":
@@ -8778,16 +8819,22 @@ class SlackSlashCommandView(APIView):
             name = v.get("vul_name") or "Unknown"
             sev  = (v.get("severity") or "").capitalize() or "—"
             st   = v.get("status") or "open"
-            icon = self._status_icon_for(st)
             blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"{icon} `{sid}` *{name}* [{sev}]\n      Status: {st.capitalize()}"},
-                "accessory": {
+                "type": "context",
+                "elements": [
+                    self._status_icon_image_element(st),
+                    {"type": "mrkdwn", "text": f"`{sid}` *{name}* [{sev}]\nStatus: {st.capitalize()}"},
+                ],
+            })
+            safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
+            blocks.append({
+                "type": "actions",
+                "elements": [{
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
-                    "action_id": "view_allvuln_detail",
+                    "action_id": f"view_allvuln_detail_{safe_sid}",
                     "value": sid,
-                },
+                }],
             })
 
         pg_block = self._numbered_pagination_block(
@@ -10844,16 +10891,40 @@ class SlackSlashCommandView(APIView):
     # RGB severity pills).
     _SEV_EMOJI_MAP = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 
-    def _status_icon_for(self, st):
-        """Open=❗ / Open-Review=👀 / In Progress=🔄 / Closed=🔒"""
+    def _status_icon_kind(self, st):
         st_norm = (st or "open").strip().lower()
         if st_norm == "closed":
-            return "🔒"
+            return "closed"
         if "progress" in st_norm:
-            return "🔄"
+            return "progress"
         if "review" in st_norm:
-            return "👀"
-        return "❗"
+            return "review"
+        return "open"
+
+    def _status_icon_for(self, st):
+        """Emoji fallback — Open=❗ / Open-Review=👀 / In Progress=🔄 / Closed=🔒"""
+        kind = self._status_icon_kind(st)
+        return {
+            "closed": "🔒",
+            "progress": "🔄",
+            "review": "👀",
+            "open": "❗",
+        }.get(kind, "❗")
+
+    def _status_icon_image_url(self, st):
+        """Public PNG URL Slack can fetch for context/image elements."""
+        kind = self._status_icon_kind(st)
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", None) or getattr(
+            settings, "BACKEND_BASE_URL", "https://vaptbackend.secureitlab.com"
+        )
+        return f"{backend.rstrip('/')}/api/admin/users/slack/status-icon/{kind}/"
+
+    def _status_icon_image_element(self, st):
+        return {
+            "type": "image",
+            "image_url": self._status_icon_image_url(st),
+            "alt_text": self._status_icon_kind(st),
+        }
 
     def _format_vulndata_list(self, data, offset=0):
         # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
@@ -10883,17 +10954,23 @@ class SlackSlashCommandView(APIView):
             sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
             st   = v.get("status") or "open"
             sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
-            icon = self._status_icon_for(st)
             blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn",
-                    "text": f"{icon} `{sid}` *{name}* [{sev_icon} {sev}]\n      Host: `{host}` | Status: {st.capitalize()}"},
-                "accessory": {
+                "type": "context",
+                "elements": [
+                    self._status_icon_image_element(st),
+                    {"type": "mrkdwn", "text": f"`{sid}` *{name}* [{sev_icon} {sev}]\nHost: `{host}` | Status: {st.capitalize()}"},
+                ],
+            })
+            # Unique action_id per row — Slack rejects duplicate action_ids in one message.
+            safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
+            blocks.append({
+                "type": "actions",
+                "elements": [{
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
-                    "action_id": "view_allvuln_detail",
+                    "action_id": f"view_allvuln_detail_{safe_sid}",
                     "value": sid,
-                },
+                }],
             })
 
         pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "view_vulndata_pg")
@@ -10989,13 +11066,14 @@ class SlackSlashCommandView(APIView):
             {"type": "divider"},
         ]
 
-        # Severity filter row
+        # Severity filter row — EACH button needs a UNIQUE action_id
+        # (Slack rejects an actions block where buttons share action_id).
         sev_buttons = [
-            ("all", "All", sev_counts["all"]),
-            ("critical", "Critical", sev_counts["critical"]),
-            ("high", "High", sev_counts["high"]),
-            ("medium", "Medium", sev_counts["medium"]),
-            ("low", "Low", sev_counts["low"]),
+            ("all", "All"),
+            ("critical", "Critical"),
+            ("high", "High"),
+            ("medium", "Medium"),
+            ("low", "Low"),
         ]
         blocks.append(
             {
@@ -11004,21 +11082,21 @@ class SlackSlashCommandView(APIView):
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": label, "emoji": True},
-                        "action_id": "reg_set_filter",
+                        "action_id": f"reg_sev_{k}",
                         "value": f"{k}|{st_filter}|0",
                         **({"style": "primary"} if k == sev_filter else {}),
                     }
-                    for (k, label, _) in sev_buttons
+                    for (k, label) in sev_buttons
                 ],
             }
         )
 
-        # Status filter row (with counts)
+        # Status filter row (with counts) — unique action_ids
         st_buttons = [
-            ("all", f"All {st_counts['all']}", st_counts["all"]),
-            ("open", f"Open {st_counts['open']}", st_counts["open"]),
-            ("closed", f"Closed {st_counts['closed']}", st_counts["closed"]),
-            ("in_progress", f"In Progress {st_counts['in_progress']}", st_counts["in_progress"]),
+            ("all", f"All {st_counts['all']}"),
+            ("open", f"Open {st_counts['open']}"),
+            ("closed", f"Closed {st_counts['closed']}"),
+            ("in_progress", f"In Progress {st_counts['in_progress']}"),
         ]
         blocks.append(
             {
@@ -11027,11 +11105,11 @@ class SlackSlashCommandView(APIView):
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": label, "emoji": True},
-                        "action_id": "reg_set_filter",
+                        "action_id": f"reg_st_{k}",
                         "value": f"{sev_filter}|{k}|0",
                         **({"style": "primary"} if k == st_filter else {}),
                     }
-                    for (k, label, _) in st_buttons
+                    for (k, label) in st_buttons
                 ],
             }
         )
@@ -11044,7 +11122,7 @@ class SlackSlashCommandView(APIView):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*S.No.*  *Vulnerability Name*  *Asset*  *Severity*  *First Obs*  *Second Obs*  *Status*  *Action*",
+                    "text": "*S.No.* · *Vulnerability* · *Asset* · *Severity* · *Obs* · *Status* · *Action*",
                 },
             }
         )
@@ -11063,29 +11141,38 @@ class SlackSlashCommandView(APIView):
                 first_obs = v.get("first_observation") or v.get("firstObs") or "—"
                 second_obs = v.get("second_observation") or v.get("secondObs") or "—"
                 st_norm = _norm_status(v)
-                status_icon = self._status_icon_for(v.get("status") or "open")
+                st = v.get("status") or "open"
 
                 has_fix = bool(v.get("fix_vulnerability_id") or v.get("hasFix"))
                 action_text = "FIX" if has_fix else "VIEW"
+                safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
                 blocks.append(
                     {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                f"*{sno_txt}.* {status_icon} `{sid}` `{truncate(name, 30)}`\n"
-                                f"Asset: `{asset}`\n"
-                                f"{sev_icon_for(sev_norm)} {sev_label} | First: {first_obs} | Second: {second_obs}\n"
-                                f"Status: {st_norm.replace('_', ' ').capitalize()}"
-                            ),
-                        },
-                        "accessory": {
+                        "type": "context",
+                        "elements": [
+                            self._status_icon_image_element(st),
+                            {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f"*{sno_txt}.* `{sid}` *{truncate(name, 34)}*\n"
+                                    f"Asset: `{asset}` · {sev_icon_for(sev_norm)} {sev_label}\n"
+                                    f"First: {first_obs} · Second: {second_obs} · "
+                                    f"Status: {st_norm.replace('_', ' ').capitalize()}"
+                                ),
+                            },
+                        ],
+                    }
+                )
+                blocks.append(
+                    {
+                        "type": "actions",
+                        "elements": [{
                             "type": "button",
                             "text": {"type": "plain_text", "text": action_text, "emoji": True},
-                            "action_id": "reg_view_vuln_detail",
+                            "action_id": f"reg_view_{safe_sid}",
                             "value": sid,
-                        },
+                        }],
                     }
                 )
 
@@ -12136,8 +12223,8 @@ class SlackInteractivityView(APIView):
                 return
 
             # ── Register tab (new design) filters + pagination ────────────────
-            if action_id == "reg_set_filter":
-                # value format: "<sev>|<status>|0"
+            if action_id.startswith("reg_sev_") or action_id.startswith("reg_st_"):
+                # value format: "<sev>|<status>|0" — each button has unique action_id
                 parts = value.split("|")
                 if len(parts) >= 3:
                     sev_filter = parts[0] or "all"
@@ -12175,6 +12262,26 @@ class SlackInteractivityView(APIView):
                 )
                 section = slash._format_register_tab(vd_data, sev_filter=sev_filter, st_filter=st_filter, offset=page_offset)
                 blocks = slash._nav_buttons_block(active_action_id="nav_register") + section
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            if action_id.startswith("reg_view_"):
+                # value is the short_id (c1/h2/m3/l4...)
+                sid = value
+                vd_data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
+                )
+                rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
+                target = next((r for r in rows if r.get("short_id") == sid), None)
+                if not target:
+                    content = slash._text_block(f"❌ Vulnerability `{sid}` not found.")
+                else:
+                    content = slash._allvuln_detail_blocks(target, "manual", team_id)
+                blocks = slash._nav_buttons_block(active_action_id="nav_register") + content
                 self._post_response_url(
                     response_url,
                     {"replace_original": True, "blocks": blocks},
@@ -12364,27 +12471,10 @@ class SlackInteractivityView(APIView):
                 self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
                 return
 
-            if action_id == "reg_view_vuln_detail":
-                # value is the short_id (c1/h2/m3/l4...)
-                sid = value
-                vd_data = slash._call_api(
-                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
-                )
-                rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
-                target = next((r for r in rows if r.get("short_id") == sid), None)
-                if not target:
-                    content = slash._text_block(f"❌ Vulnerability `{sid}` not found.")
-                else:
-                    content = slash._allvuln_detail_blocks(target, "manual", team_id)
-                blocks = slash._nav_buttons_block(active_action_id="nav_register") + content
-                self._post_response_url(
-                    response_url,
-                    {"replace_original": True, "blocks": blocks},
-                    action_id,
-                )
-                return
-
-            if action_id in ("view_allvuln_detail", "av_detail_manual", "av_detail_automation"):
+            if (
+                action_id in ("view_allvuln_detail", "av_detail_manual", "av_detail_automation")
+                or action_id.startswith("view_allvuln_detail_")
+            ):
                 sid = value
                 vd_data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
