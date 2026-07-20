@@ -11116,19 +11116,24 @@ class SlackSlashCommandView(APIView):
 
         blocks.append({"type": "divider"})
 
-        # Table header (approximate)
+        # Bold column header (Slack has no real HTML table — this is the
+        # closest Block Kit approximation; FIX/VIEW sits as section accessory
+        # so it lands on the RIGHT of each row).
         blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*S.No.* · *Vulnerability* · *Asset* · *Severity* · *Obs* · *Status* · *Action*",
+                    "text": (
+                        "*S.No.*  |  *Vulnerability Name*  |  *Asset*  |  "
+                        "*Severity*  |  *First Obs*  |  *Second Obs*  |  *Status*  |  *Action*"
+                    ),
                 },
             }
         )
 
         if not page_items:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "No vulnerabilities found."}})
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No vulnerabilities found.*"}})
         else:
             for idx, v in enumerate(page_items):
                 sno = start_num + idx
@@ -11140,13 +11145,14 @@ class SlackSlashCommandView(APIView):
                 sev_label = (v.get("severity") or v.get("risk_factor") or sev_norm).strip().upper() or "—"
                 first_obs = v.get("first_observation") or v.get("firstObs") or "—"
                 second_obs = v.get("second_observation") or v.get("secondObs") or "—"
-                st_norm = _norm_status(v)
                 st = v.get("status") or "open"
+                st_display = _norm_status(v).replace("_", " ").capitalize()
 
                 has_fix = bool(v.get("fix_vulnerability_id") or v.get("hasFix"))
                 action_text = "FIX" if has_fix else "VIEW"
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
+                # Status icon on the left (context), row body + FIX/VIEW on the RIGHT (section accessory).
                 blocks.append(
                     {
                         "type": "context",
@@ -11154,25 +11160,31 @@ class SlackSlashCommandView(APIView):
                             self._status_icon_image_element(st),
                             {
                                 "type": "mrkdwn",
-                                "text": (
-                                    f"*{sno_txt}.* `{sid}` *{truncate(name, 34)}*\n"
-                                    f"Asset: `{asset}` · {sev_icon_for(sev_norm)} {sev_label}\n"
-                                    f"First: {first_obs} · Second: {second_obs} · "
-                                    f"Status: {st_norm.replace('_', ' ').capitalize()}"
-                                ),
+                                "text": f"*`{sno_txt}`*  `{sid}`  *{truncate(name, 42)}*",
                             },
                         ],
                     }
                 )
+                btn = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": action_text, "emoji": True},
+                    "action_id": f"reg_view_{safe_sid}",
+                    "value": sid,
+                }
+                if action_text == "FIX":
+                    btn["style"] = "primary"
                 blocks.append(
                     {
-                        "type": "actions",
-                        "elements": [{
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": action_text, "emoji": True},
-                            "action_id": f"reg_view_{safe_sid}",
-                            "value": sid,
-                        }],
+                        "type": "section",
+                        "fields": [
+                            {"type": "mrkdwn", "text": f"*Asset*\n`{asset}`"},
+                            {"type": "mrkdwn", "text": f"*Severity*\n{sev_icon_for(sev_norm)} *{sev_label}*"},
+                            {"type": "mrkdwn", "text": f"*First Obs*\n{first_obs}"},
+                            {"type": "mrkdwn", "text": f"*Second Obs*\n{second_obs}"},
+                            {"type": "mrkdwn", "text": f"*Status*\n*{st_display}*"},
+                            {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
+                        ],
+                        "accessory": btn,
                     }
                 )
 
