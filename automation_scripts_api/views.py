@@ -17,6 +17,86 @@ _SLUG_TO_TEAM = {
     "configuration-management": "Configuration Management",
 }
 
+# Same keyword order as mitigation_tool — used when no vulnerability_card match.
+_TEAM_KEYWORDS = {
+    "patch-management": [
+        "missing patch", "missing patches", "unpatched", "outdated",
+        "end of life", "eol", "kernel", "cve-", "upgrade", "obsolete",
+        "out of date", "security update", "hotfix", "service pack",
+        "out-of-date", "needs update", "vulnerable version", "patches",
+        "cisco ios", "ios xe", "rce", "denial of service", " dos",
+    ],
+    "architectural-flaws": [
+        "default credential", "default credentials", "credential",
+        "default password", "weak password", "weak credential",
+        "authentication bypass", "privilege escalation", "broken auth",
+        "insecure design", "access control", "authorization", "default login",
+        "hardcoded", "no authentication", "improper authentication",
+    ],
+    "network-security": [
+        "ssl/tls", "weak cipher", "rc4", "3des", "tls 1.0", "tls 1.1",
+        "open port", "telnet", "ftp ", "snmp", "firewall", "port scan",
+        "smb", "rdp", "exposed service", "unnecessary service",
+        "cipher suite", "ssl cipher", "tls cipher", "icmp", "nla",
+        "network level authentication", "ssh ", "terrapin",
+    ],
+    "configuration-management": [
+        "misconfigur", "missing header", "security header",
+        "hsts", "csp", "x-frame", "cors", "default setting",
+        "permission", "directory listing", "information disclosure",
+        "banner", "version disclosure", "debug mode", "clickjacking",
+        "ssl certificate", "self-signed", "autocomplete", "cleartext",
+    ],
+}
+
+
+def _normalize_team_display(raw):
+    """Map slug or display name → canonical team display name."""
+    if not raw:
+        return ""
+    text = str(raw).strip()
+    key = text.lower().replace(" ", "-")
+    if key in _SLUG_TO_TEAM:
+        return _SLUG_TO_TEAM[key]
+    for display in _SLUG_TO_TEAM.values():
+        if display.lower() == text.lower():
+            return display
+    return text
+
+
+def _infer_team_from_name(vuln_name):
+    """Keyword-based team when no vulnerability_cards match exists."""
+    combined = (vuln_name or "").lower()
+    for team_slug, keywords in _TEAM_KEYWORDS.items():
+        if any(kw in combined for kw in keywords):
+            return _SLUG_TO_TEAM[team_slug]
+    return _SLUG_TO_TEAM["configuration-management"]
+
+
+def _vuln_name_lookup_keys(vuln):
+    """Exact name + stripped 'Fix — …' / leading plugin-id variants for card match."""
+    name = (vuln or "").strip()
+    if not name:
+        return []
+    keys = [name]
+    for marker in (" Fix —", " Fix –", " Fix -", " Fix:"):
+        if marker in name:
+            keys.append(name.split(marker, 1)[0].strip())
+            break
+    # "51192 - SSL Certificate…" / "Starting TLS 1.0 fix…"
+    if " - " in name:
+        left, right = name.split(" - ", 1)
+        if left.strip().isdigit() and right.strip():
+            keys.append(right.strip())
+    # Dedupe while preserving order
+    seen = set()
+    out = []
+    for k in keys:
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -118,32 +198,105 @@ def _not_found_response(plugin_id):
 
 
 def _build_stats(docs):
+    """
+    Build download-stats rows with team resolved for every script:
+      1) vulnerability_cards by exact / stripped vulnerability name
+      2) same plugin_id sibling that already resolved a team
+      3) keyword inference (never leave team blank)
+    """
     if not docs:
         return []
 
-    vuln_names = [d.get("vulnerability", "") for d in docs if d.get("vulnerability")]
+    lookup_names = []
+    seen_names = set()
+    for d in docs:
+        for key in _vuln_name_lookup_keys(d.get("vulnerability", "")):
+            if key not in seen_names:
+                seen_names.add(key)
+                lookup_names.append(key)
+
+    team_by_name = {}
+    team_by_plugin = {}
 
     with MongoContext() as db:
-        cards = db["vulnerability_cards"].find(
-            {"vulnerability_name": {"$in": vuln_names}},
-            {"vulnerability_name": 1, "assigned_team": 1, "_id": 0}
-        )
-        team_map = {}
-        for card in cards:
-            vname = card.get("vulnerability_name", "")
-            if vname and vname not in team_map:
-                raw = (card.get("assigned_team", "") or "").strip().lower()
-                team_map[vname] = _SLUG_TO_TEAM.get(raw, card.get("assigned_team", "") or "")
+        if lookup_names:
+            cards = db["vulnerability_cards"].find(
+                {"vulnerability_name": {"$in": lookup_names}},
+                {"vulnerability_name": 1, "assigned_team": 1, "plugin_id": 1, "_id": 0},
+            )
+            for card in cards:
+                vname = (card.get("vulnerability_name") or "").strip()
+                team = _normalize_team_display(card.get("assigned_team", ""))
+                if not team:
+                    continue
+                if vname and vname not in team_by_name:
+                    team_by_name[vname] = team
+                pid = card.get("plugin_id")
+                if pid is not None:
+                    try:
+                        team_by_plugin[int(pid)] = team
+                    except (TypeError, ValueError):
+                        pass
 
-    stats = []
+        # Also pull team from fix register rows that have plugin_id + assigned_team
+        plugin_ids = []
+        for d in docs:
+            try:
+                plugin_ids.append(int(d.get("plugin_id")))
+            except (TypeError, ValueError):
+                pass
+        plugin_ids = list({p for p in plugin_ids})
+        if plugin_ids:
+            # plugin_id may be stored as int or string in register collections
+            pid_query = list({*plugin_ids, *[str(p) for p in plugin_ids]})
+            for coll_name in ("fix_vulnerabilities", "fix_vulnerabilities_closed"):
+                for row in db[coll_name].find(
+                    {"plugin_id": {"$in": pid_query}},
+                    {"plugin_id": 1, "assigned_team": 1, "_id": 0},
+                ):
+                    team = _normalize_team_display(row.get("assigned_team", ""))
+                    if not team:
+                        continue
+                    try:
+                        pid = int(row.get("plugin_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    if pid not in team_by_plugin:
+                        team_by_plugin[pid] = team
+
+    # Pass 1: name match (+ seed plugin map from successful name matches)
+    provisional = []
     for d in docs:
-        vuln = d.get("vulnerability", "")
+        vuln = d.get("vulnerability", "") or ""
+        team = ""
+        for key in _vuln_name_lookup_keys(vuln):
+            team = team_by_name.get(key, "")
+            if team:
+                break
+        pid = None
+        try:
+            pid = int(d.get("plugin_id"))
+        except (TypeError, ValueError):
+            pass
+        if team and pid is not None and pid not in team_by_plugin:
+            team_by_plugin[pid] = team
+        provisional.append((d, vuln, pid, team))
+
+    # Pass 2: same plugin_id sibling team; Pass 3: keyword inference
+    stats = []
+    for d, vuln, pid, team in provisional:
+        if not team and pid is not None:
+            team = team_by_plugin.get(pid, "")
+        if not team:
+            team = _infer_team_from_name(vuln)
+            if pid is not None and pid not in team_by_plugin:
+                team_by_plugin[pid] = team
         stats.append({
             "plugin_id": d.get("plugin_id"),
             "vulnerability": vuln,
             "severity": d.get("severity", ""),
             "download_count": d.get("download_count", 0),
-            "team": team_map.get(vuln, ""),
+            "team": team,
         })
     return stats
 
