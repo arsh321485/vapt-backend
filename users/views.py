@@ -8179,6 +8179,26 @@ class SlackSlashCommandView(APIView):
         ("reg_sub_script",   "📜 Script"),
     ]
 
+    # Support tab — status + team filter keys (Slack Block Kit action values).
+    _SUPPORT_STATUS_FILTERS = [
+        ("all", "All"),
+        ("open", "Open"),
+        ("closed", "Closed"),
+    ]
+    _SUPPORT_TEAM_FILTERS = [
+        ("all", "All Teams"),
+        ("patch", "Patch Management"),
+        ("config", "Configuration Management"),
+        ("network", "Network Security"),
+        ("arch", "Architectural Flaws"),
+    ]
+    _SUPPORT_TEAM_MATCH = {
+        "patch": "patch management",
+        "config": "configuration management",
+        "network": "network security",
+        "arch": "architectural flaws",
+    }
+
     def post(self, request):
         # Verify signature FIRST — before request.POST is accessed.
         # Accessing request.POST causes DRF to consume the body stream, after which
@@ -8521,14 +8541,7 @@ class SlackSlashCommandView(APIView):
             return self._format_teamoverview(data)
 
         if action_id == "nav_support":
-            report_id = self._get_workspace_report_id(team_id)
-            if not report_id:
-                return self._text_block("❌ No report found for this workspace.")
-            data = self._call_api(
-                f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_supportdata(data)
+            return self._support_tab_blocks(team_id, user_id)
 
         if action_id == "nav_download":
             # Uploads the report file to the channel as a side effect (same
@@ -9135,14 +9148,7 @@ class SlackSlashCommandView(APIView):
         /supportdata — Per-ticket support request list (who raised it, which
         vuln, status) — not just aggregate counts.
         """
-        report_id = self._get_workspace_report_id(team_id)
-        if not report_id:
-            return self._text_block("❌ No report found for this workspace.")
-        data = self._call_api(
-            f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id,
-            slack_user_id=user_id,
-        )
-        return self._format_supportdata(data)
+        return self._support_tab_blocks(team_id, user_id)
 
     def _cmd_request(self, text, team_id, user_id):
         data = self._call_api(
@@ -10809,44 +10815,304 @@ class SlackSlashCommandView(APIView):
                 )}})
         return blocks
 
-    def _format_supportdata(self, data):
-        # SupportRequestByReportAPIView returns individual tickets — including
-        # requested_by, already resolved to an email by the backend
-        # (_resolve_requester), not a raw Slack/user ID.
-        results = data.get("results") or []
-        total   = data.get("count", len(results))
-        pending = sum(1 for r in results if (r.get("status") or "open") != "closed")
-        closed  = sum(1 for r in results if (r.get("status") or "") == "closed")
+    def _short_display_date(self, val):
+        s = str(val or "—").strip()
+        if not s or s == "—":
+            return "—"
+        if "T" in s:
+            s = s.split("T", 1)[0]
+        elif " " in s and len(s) > 10:
+            s = s.split(" ", 1)[0]
+        try:
+            from datetime import datetime
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
+                try:
+                    dt = datetime.strptime(s[:10], fmt)
+                    return dt.strftime("%b %d, %Y")
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+        return s[:10] if len(s) >= 10 else s
+
+    def _normalize_support_team(self, raw):
+        return (raw or "").strip().lower().replace("-", " ").replace("_", " ")
+
+    def _match_support_status_filter(self, record, st_filter):
+        st = (record.get("status") or "open").strip().lower()
+        if st_filter == "all":
+            return True
+        if st_filter == "open":
+            return st != "closed"
+        if st_filter == "closed":
+            return st == "closed"
+        return True
+
+    def _match_support_team_filter(self, record, team_filter):
+        if team_filter == "all":
+            return True
+        target = self._SUPPORT_TEAM_MATCH.get(team_filter, "")
+        raw = self._normalize_support_team(record.get("assigned_team"))
+        return raw == target or (target and target in raw)
+
+    def _fetch_support_report_data(self, team_id, user_id):
+        report_id = self._get_workspace_report_id(team_id)
+        if not report_id:
+            return None
+        return self._call_api(
+            f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id,
+            slack_user_id=user_id,
+        )
+
+    def _support_tab_blocks(self, team_id, user_id, st_filter="all", team_filter="all", offset=0):
+        data = self._fetch_support_report_data(team_id, user_id)
+        if not data:
+            return self._text_block("❌ No report found for this workspace.")
+        if data.get("detail"):
+            return self._text_block(f"❌ {data['detail']}")
+        return self._format_support_tab(
+            data, st_filter=st_filter, team_filter=team_filter, offset=offset,
+        )
+
+    def _format_supportdata(self, data, st_filter="all", team_filter="all", offset=0):
+        """Backward-compatible entry — renders Register-style Support tab."""
+        return self._format_support_tab(
+            data, st_filter=st_filter, team_filter=team_filter, offset=offset,
+        )
+
+    def _format_support_tab(self, data, st_filter="all", team_filter="all", offset=0):
+        """
+        Support tab UI (Slack Block Kit) — mirrors Register tab layout:
+        status + team filters, 5 rows/page, View on the right, divider after each row.
+        """
+        PAGE_SIZE = 5
+        raw_results = data.get("results") or []
+
+        st_counts = {
+            "all": len([r for r in raw_results if self._match_support_team_filter(r, team_filter)]),
+            "open": sum(
+                1 for r in raw_results
+                if self._match_support_team_filter(r, team_filter)
+                and self._match_support_status_filter(r, "open")
+            ),
+            "closed": sum(
+                1 for r in raw_results
+                if self._match_support_team_filter(r, team_filter)
+                and self._match_support_status_filter(r, "closed")
+            ),
+        }
+        team_counts = {
+            key: sum(
+                1 for r in raw_results
+                if self._match_support_status_filter(r, st_filter)
+                and (key == "all" or self._match_support_team_filter(r, key))
+            )
+            for key, _ in self._SUPPORT_TEAM_FILTERS
+        }
+
+        all_items = self._assign_severity_short_ids(raw_results)
+        filtered = [
+            r for r in all_items
+            if self._match_support_status_filter(r, st_filter)
+            and self._match_support_team_filter(r, team_filter)
+        ]
+        count = len(filtered)
+
+        offset = max(0, min(offset, max(count - 1, 0)))
+        page_items = filtered[offset: offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        def sev_icon_for(sev_raw):
+            sev_norm = (sev_raw or "").strip().lower()
+            return self._SEV_EMOJI_MAP.get(sev_norm, "⚪")
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Requests", "emoji": True}},
-            self._ctx("Every support ticket raised by teams — who raised it, which vuln, and status."),
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Total*\n{total}"},
-                {"type": "mrkdwn", "text": f"*Pending*\n{pending}"},
-                {"type": "mrkdwn", "text": f"*Closed*\n{closed}"},
-            ]},
+            self._ctx("Streamlining the resolution of critical infrastructure vulnerabilities."),
             {"type": "divider"},
         ]
-        if not results:
-            return blocks + self._text_block("No support requests found.")
-        for r in results[:10]:
-            vuln      = r.get("vul_name") or "General Request"
-            host      = r.get("host_name") or "—"
-            team      = r.get("assigned_team") or "—"
-            requester = r.get("requested_by") or "Unknown"
-            st        = r.get("status") or "open"
-            icon      = "✅" if st == "closed" else "🔓"
-            desc      = (r.get("description") or "")[:100]
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
-                f"{icon} *{vuln}* ({team})\n"
-                f"      Host: `{host}` | By: {requester} | Status: {st.capitalize()}"
-                + (f"\n      _{desc}_" if desc else "")
-            )}})
-        if len(results) > 10:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"_...and {len(results) - 10} more._"}})
+
+        # Status filter row
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"{label} {st_counts[k]}",
+                        "emoji": True,
+                    },
+                    "action_id": f"sup_st_{k}",
+                    "value": f"{k}|{team_filter}|0",
+                    **({"style": "primary"} if k == st_filter else {}),
+                }
+                for k, label in self._SUPPORT_STATUS_FILTERS
+            ],
+        })
+
+        # Team filter row
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"{label} {team_counts[k]}" if k == "all" else label,
+                        "emoji": True,
+                    },
+                    "action_id": f"sup_team_{k}",
+                    "value": f"{st_filter}|{k}|0",
+                    **({"style": "primary"} if k == team_filter else {}),
+                }
+                for k, label in self._SUPPORT_TEAM_FILTERS
+            ],
+        })
+
+        blocks.append({"type": "divider"})
+
+        if not page_items:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*No support requests found.*"},
+            })
+        else:
+            for idx, r in enumerate(page_items):
+                sno_txt = str(start_num + idx).zfill(2)
+                sid = r.get("short_id", "?")
+                vuln = r.get("vul_name") or "General Request"
+                host = r.get("host_name") or "—"
+                team = r.get("assigned_team") or "—"
+                requester = r.get("requested_by") or "Unknown"
+                st = r.get("status") or "open"
+                st_display = (st or "open").strip().lower().capitalize()
+                sev_norm = (r.get("severity") or "").strip().lower()
+                sev_label = (r.get("severity") or sev_norm).strip().upper() or "—"
+                raised = self._short_display_date(r.get("requested_at"))
+                safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
+
+                blocks.append({
+                    "type": "context",
+                    "elements": [
+                        self._status_icon_image_element(st),
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*`{sno_txt}`*  `{sid}`  *{vuln}*",
+                        },
+                    ],
+                })
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"`{host}`  |  {sev_icon_for(sev_norm)} *{sev_label}*",
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": f"sup_view_{safe_sid}",
+                        "value": f"{sid}|{st_filter}|{team_filter}|{offset}",
+                    },
+                })
+                blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*Requested By:* {requester}  |  "
+                            f"*Raised:* {raised}  |  "
+                            f"*Status:* *{st_display}*  |  "
+                            f"*Team:* {team}"
+                        ),
+                    }],
+                })
+                blocks.append({"type": "divider"})
+
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"Showing {start_num}-{end_num} of {count} results",
+            },
+        })
+
+        value_prefix = f"{st_filter}|{team_filter}|"
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, "sup_list_pg", value_prefix=value_prefix,
+        )
+        if pg_block:
+            blocks.append(pg_block)
+
         return blocks
+
+    def _format_support_detail(self, record, st_filter="all", team_filter="all", offset=0):
+        """Single support-request detail — opened from the View button."""
+        vuln = record.get("vul_name") or "General Request"
+        host = record.get("host_name") or "—"
+        team = record.get("assigned_team") or "—"
+        requester = record.get("requested_by") or "Unknown"
+        st = record.get("status") or "open"
+        sev = (record.get("severity") or "—").strip().upper() or "—"
+        desc = (record.get("description") or "—").strip() or "—"
+        raised = self._short_display_date(record.get("requested_at"))
+        sid = record.get("short_id", "?")
+        messages = record.get("messages") or []
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Request Detail", "emoji": True}},
+            {"type": "divider"},
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
+                    {"type": "mrkdwn", "text": f"*Status*\n{st.capitalize()}"},
+                    {"type": "mrkdwn", "text": f"*Vulnerability*\n{vuln}"},
+                    {"type": "mrkdwn", "text": f"*Asset*\n`{host}`"},
+                    {"type": "mrkdwn", "text": f"*Criticality*\n{sev}"},
+                    {"type": "mrkdwn", "text": f"*Team*\n{team}"},
+                    {"type": "mrkdwn", "text": f"*Requested By*\n{requester}"},
+                    {"type": "mrkdwn", "text": f"*Support Raised*\n{raised}"},
+                ],
+            },
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Description*\n_{desc}_"}},
+        ]
+
+        if messages:
+            blocks.append({"type": "divider"})
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Messages*"}})
+            for m in messages[:8]:
+                sender = m.get("sender_email") or m.get("sender") or "—"
+                text = (m.get("text") or "").strip()
+                sent = self._short_display_date(m.get("sent_at"))
+                blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": f"*{sender}* ({sent}): {text[:300]}",
+                    }],
+                })
+
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "← Back to list", "emoji": True},
+                "action_id": "sup_back_list",
+                "value": f"{st_filter}|{team_filter}|{offset}",
+            }],
+        })
+        return blocks
+
+    def _lookup_support_by_short_id(self, sid, team_id, user_id):
+        data = self._fetch_support_report_data(team_id, user_id)
+        if not data:
+            return None, data
+        rows = self._assign_severity_short_ids(data.get("results") or [])
+        target = next((r for r in rows if r.get("short_id") == sid), None)
+        return target, data
 
     def _format_extension_requests(self, data):
         raw_results = data.get("results") or []
@@ -12445,6 +12711,89 @@ class SlackInteractivityView(APIView):
                     response_url,
                     {"replace_original": True, "blocks": blocks},
                     action_id,
+                )
+                return
+
+            # ── Support tab filters, pagination, view detail ─────────────────
+            if action_id.startswith("sup_st_"):
+                parts = value.split("|")
+                st_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                team_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                section = slash._support_tab_blocks(
+                    team_id, slack_user_id,
+                    st_filter=st_filter, team_filter=team_filter, offset=page_offset,
+                )
+                blocks = slash._nav_buttons_block(active_action_id="nav_support") + section
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id.startswith("sup_team_"):
+                parts = value.split("|")
+                st_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                team_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                section = slash._support_tab_blocks(
+                    team_id, slack_user_id,
+                    st_filter=st_filter, team_filter=team_filter, offset=page_offset,
+                )
+                blocks = slash._nav_buttons_block(active_action_id="nav_support") + section
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id.startswith("sup_list_pg_"):
+                parts = value.split("|")
+                st_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                team_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                section = slash._support_tab_blocks(
+                    team_id, slack_user_id,
+                    st_filter=st_filter, team_filter=team_filter, offset=page_offset,
+                )
+                blocks = slash._nav_buttons_block(active_action_id="nav_support") + section
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id == "sup_back_list":
+                parts = value.split("|")
+                st_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                team_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                section = slash._support_tab_blocks(
+                    team_id, slack_user_id,
+                    st_filter=st_filter, team_filter=team_filter, offset=page_offset,
+                )
+                blocks = slash._nav_buttons_block(active_action_id="nav_support") + section
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id.startswith("sup_view_"):
+                parts = value.split("|")
+                sid = parts[0] if len(parts) > 0 else value
+                st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                team_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                target, _data = slash._lookup_support_by_short_id(sid, team_id, slack_user_id)
+                if not target:
+                    content = slash._text_block(f"❌ Support request `{sid}` not found.")
+                else:
+                    content = slash._format_support_detail(
+                        target,
+                        st_filter=st_filter,
+                        team_filter=team_filter,
+                        offset=page_offset,
+                    )
+                blocks = slash._nav_buttons_block(active_action_id="nav_support") + content
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
                 )
                 return
 
