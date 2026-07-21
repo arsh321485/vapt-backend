@@ -1801,7 +1801,12 @@ class ReportAssetsVulnsAPIView(APIView):
                     )
                 if not doc:
                     return Response(
-                        {"report_id": None, "role": role_filter, "assets": []},
+                        {
+                            "report_id": None, "role": role_filter,
+                            "total_assets": 0, "total_vulnerabilities": 0,
+                            "all_asset_ids": [], "all_vulnerability_ids": [],
+                            "assets": [],
+                        },
                         status=status.HTTP_200_OK,
                     )
 
@@ -1852,7 +1857,12 @@ class ReportAssetsVulnsAPIView(APIView):
                         # Filter by role if requested
                         if role_plugins is not None and plugin_name.lower() not in role_plugins:
                             continue
+                        # "id" is a stable value for a "Select All" checkbox
+                        # UI to submit back — host_name + plugin_name is
+                        # unique per report since Nessus doesn't give every
+                        # finding its own row id.
                         vulns.append({
+                            "id":          f"{host_name}||{plugin_name}",
                             "plugin_name": plugin_name,
                             "severity":    (v.get("risk_factor") or v.get("severity") or "").title(),
                             "cvss_score":  str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
@@ -1869,8 +1879,22 @@ class ReportAssetsVulnsAPIView(APIView):
                         "vulnerabilities": vulns,
                     })
 
+                # Flat id lists + counts — lets a "Select All" checkbox in the
+                # UI select everything without the frontend having to walk
+                # the nested assets->vulnerabilities structure itself.
+                all_asset_ids = [a["host_name"] for a in assets]
+                all_vulnerability_ids = [v["id"] for a in assets for v in a["vulnerabilities"]]
+
                 return Response(
-                    {"report_id": report_id, "role": role_filter or None, "assets": assets},
+                    {
+                        "report_id": report_id,
+                        "role": role_filter or None,
+                        "total_assets": len(all_asset_ids),
+                        "total_vulnerabilities": len(all_vulnerability_ids),
+                        "all_asset_ids": all_asset_ids,
+                        "all_vulnerability_ids": all_vulnerability_ids,
+                        "assets": assets,
+                    },
                     status=status.HTTP_200_OK,
                 )
 
