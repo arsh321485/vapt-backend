@@ -2857,6 +2857,111 @@ class RaiseSupportRequestByVulnerabilityAPIView(APIView):
           
 
 
+def _title_severity(raw):
+    s = (raw or "").strip()
+    return s.title() if s else ""
+
+
+def _severity_from_description(desc):
+    """Infer severity from embedded vuln short-id in description (e.g. m5, c1)."""
+    if not desc:
+        return ""
+    match = re.search(r"\b([chml])\d+\b", str(desc).lower())
+    if not match:
+        return ""
+    return {"c": "Critical", "h": "High", "m": "Medium", "l": "Low"}.get(match.group(1), "")
+
+
+def _build_support_severity_lookups(db, report_id, admin_id, admin_email, support_docs):
+    """
+    Build severity fallbacks for support requests when the stored document has
+    no severity — match by vulnerability_id, plugin_name+host, or nessus scan.
+    """
+    fix_coll = db[FIX_VULN_COLLECTION]
+    nessus_coll = db[NESSUS_COLLECTION]
+
+    fix_severity_by_id = {}
+    object_ids = []
+    for sdoc in support_docs:
+        raw_vid = str(sdoc.get("vulnerability_id") or "").strip()
+        if not raw_vid:
+            continue
+        try:
+            object_ids.append(ObjectId(raw_vid))
+        except Exception as e:
+            logger.warning("Suppressed error: %s", e)
+
+    str_ids = [str(oid) for oid in object_ids]
+    if object_ids:
+        for fdoc in fix_coll.find({"_id": {"$in": object_ids}}):
+            fid = str(fdoc.get("_id"))
+            sev = _title_severity(fdoc.get("risk_factor") or fdoc.get("severity"))
+            if sev:
+                fix_severity_by_id[fid] = sev
+        for fdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"fix_vulnerability_id": {"$in": str_ids}}):
+            fid = fdoc.get("fix_vulnerability_id", "")
+            if fid and fid not in fix_severity_by_id:
+                sev = _title_severity(fdoc.get("risk_factor") or fdoc.get("severity"))
+                if sev:
+                    fix_severity_by_id[fid] = sev
+
+    fix_severity_by_key = {}
+    for fdoc in fix_coll.find({"report_id": str(report_id), "admin_id": admin_id}):
+        pname = (fdoc.get("plugin_name") or "").strip().lower()
+        host = (fdoc.get("host_name") or "").strip().lower()
+        sev = _title_severity(fdoc.get("risk_factor") or fdoc.get("severity"))
+        if not pname or not sev:
+            continue
+        fix_severity_by_key[(pname, host)] = sev
+        fix_severity_by_key.setdefault((pname, ""), sev)
+
+    nessus_severity_by_key = {}
+    query_conditions = [{"admin_id": admin_id}]
+    if admin_email:
+        query_conditions.append({"admin_email": admin_email})
+    nessus_doc = nessus_coll.find_one({
+        "report_id": str(report_id),
+        "$or": query_conditions,
+    })
+    if nessus_doc:
+        for host in nessus_doc.get("vulnerabilities_by_host", []):
+            h_name = (host.get("host_name") or host.get("host") or "").strip().lower()
+            for vuln in host.get("vulnerabilities", []):
+                pname = (
+                    vuln.get("plugin_name")
+                    or vuln.get("pluginname")
+                    or vuln.get("name")
+                    or ""
+                ).strip().lower()
+                sev = _title_severity(
+                    vuln.get("risk_factor") or vuln.get("severity") or vuln.get("risk")
+                )
+                if not pname or not sev:
+                    continue
+                nessus_severity_by_key[(pname, h_name)] = sev
+                nessus_severity_by_key.setdefault((pname, ""), sev)
+
+    return fix_severity_by_id, fix_severity_by_key, nessus_severity_by_key
+
+
+def _resolve_support_request_severity(doc, fix_severity_by_id, fix_severity_by_key, nessus_severity_by_key):
+    vulnerability_id = str(doc.get("vulnerability_id") or "").strip()
+    vul_name = (doc.get("vul_name") or "").strip()
+    host_name = (doc.get("host_name") or "").strip()
+    key = (vul_name.lower(), host_name.lower())
+    key_name_only = (vul_name.lower(), "")
+
+    return (
+        _title_severity(doc.get("severity") or doc.get("risk_factor"))
+        or fix_severity_by_id.get(vulnerability_id, "")
+        or fix_severity_by_key.get(key, "")
+        or fix_severity_by_key.get(key_name_only, "")
+        or nessus_severity_by_key.get(key, "")
+        or nessus_severity_by_key.get(key_name_only, "")
+        or _severity_from_description(doc.get("description"))
+    )
+
+
 class SupportRequestByReportAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -2899,32 +3004,11 @@ class SupportRequestByReportAPIView(APIView):
 
             support_docs = list(cursor)
 
-            # Build vulnerability_id -> severity map from fix_vulnerabilities for fallback.
-            fix_coll = db[FIX_VULN_COLLECTION]
-            object_ids = []
-            for sdoc in support_docs:
-                raw_vid = str(sdoc.get("vulnerability_id") or "").strip()
-                if not raw_vid:
-                    continue
-                try:
-                    object_ids.append(ObjectId(raw_vid))
-                except Exception as e:
-                    logger.warning("Suppressed error: %s", e)
-
-            fix_severity_by_id = {}
-            str_ids = [str(oid) for oid in object_ids]
-            if object_ids:
-                # Check open fix_vulnerabilities
-                for fdoc in fix_coll.find({"_id": {"$in": object_ids}}):
-                    fid = str(fdoc.get("_id"))
-                    sev = (fdoc.get("risk_factor") or fdoc.get("severity") or "").strip().title()
-                    fix_severity_by_id[fid] = sev
-                # Also check fix_vulnerabilities_closed (vulns deleted from open after closing)
-                for fdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"fix_vulnerability_id": {"$in": str_ids}}):
-                    fid = fdoc.get("fix_vulnerability_id", "")
-                    if fid and fid not in fix_severity_by_id:
-                        sev = (fdoc.get("risk_factor") or fdoc.get("severity") or "").strip().title()
-                        fix_severity_by_id[fid] = sev
+            fix_severity_by_id, fix_severity_by_key, nessus_severity_by_key = (
+                _build_support_severity_lookups(
+                    db, report_id, admin_id, admin_email, support_docs,
+                )
+            )
 
             # Build closed vulnerability ID set from fix_vulnerabilities_closed
             all_vuln_ids = [
@@ -2945,9 +3029,8 @@ class SupportRequestByReportAPIView(APIView):
 
             for doc in support_docs:
                 vulnerability_id = str(doc.get("vulnerability_id") or "").strip()
-                severity = (
-                    (doc.get("severity") or doc.get("risk_factor") or "").strip().title()
-                    or fix_severity_by_id.get(vulnerability_id, "")
+                severity = _resolve_support_request_severity(
+                    doc, fix_severity_by_id, fix_severity_by_key, nessus_severity_by_key,
                 )
                 effective_status = (
                     "closed" if vulnerability_id in closed_vuln_ids

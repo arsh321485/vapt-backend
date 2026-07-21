@@ -8789,7 +8789,7 @@ class SlackSlashCommandView(APIView):
                 "value": f"{value_prefix}{current_page * page_size}",
             })
 
-        return {"type": "actions", "elements": elements} if len(elements) > 1 or total_pages > 1 else None
+        return {"type": "actions", "elements": elements} if elements else None
 
     # Severity emoji — Block Kit has no custom colors, this is the closest
     # Slack-native approximation to the design's exact RGB pills
@@ -10077,7 +10077,7 @@ class SlackSlashCommandView(APIView):
             return False
 
     def _create_support_ticket(self, team_id, slack_user_id, team_name, message,
-                                vul_name=None, host_name=None, requested_by=None):
+                                vul_name=None, host_name=None, requested_by=None, severity=None):
         """
         Insert a support request document into MongoDB so it appears in
         dashboard counts and /support status. Called when a team member
@@ -10114,6 +10114,7 @@ class SlackSlashCommandView(APIView):
                     "admin_id":     admin_id,
                     "vul_name":     vul_name,
                     "host_name":    host_name,
+                    "severity":     (severity or "").strip().title() or None,
                     "assigned_team": team_name,
                     "step_number":  0,
                     "description":  message,
@@ -10531,6 +10532,7 @@ class SlackSlashCommandView(APIView):
 
             vul_name  = target.get("plugin_name") if target else None
             host_name = target.get("host_name") if target else None
+            severity  = (target.get("risk_factor") or target.get("severity") or "") if target else ""
 
             # Resolve the caller's real email instead of storing the raw
             # Slack user ID — matches how web-raised tickets show requester.
@@ -10552,6 +10554,7 @@ class SlackSlashCommandView(APIView):
             self._create_support_ticket(
                 team_id, user_id, team_name, message,
                 vul_name=vul_name, host_name=host_name, requested_by=requested_by,
+                severity=severity,
             )
             vuln_line = f"*Vulnerability:* {vul_name} (`{host_name}`)\n" if vul_name else ""
             self._notify_admin(
@@ -10864,6 +10867,17 @@ class SlackSlashCommandView(APIView):
             slack_user_id=user_id,
         )
 
+    def _resolve_support_row_severity(self, record):
+        """Display-time severity — uses API value or description short-id fallback."""
+        sev = (record.get("severity") or record.get("risk_factor") or "").strip()
+        if sev:
+            return sev.title()
+        desc = record.get("description") or ""
+        match = re.search(r"\b([chml])\d+\b", str(desc).lower())
+        if match:
+            return {"c": "Critical", "h": "High", "m": "Medium", "l": "Low"}[match.group(1)]
+        return ""
+
     def _support_tab_blocks(self, team_id, user_id, st_filter="all", team_filter="all", offset=0):
         data = self._fetch_support_report_data(team_id, user_id)
         if not data:
@@ -10910,7 +10924,10 @@ class SlackSlashCommandView(APIView):
             for key, _ in self._SUPPORT_TEAM_FILTERS
         }
 
-        all_items = self._assign_severity_short_ids(raw_results)
+        all_items = self._assign_severity_short_ids([
+            dict(r, severity=self._resolve_support_row_severity(r) or r.get("severity", ""))
+            for r in raw_results
+        ])
         filtered = [
             r for r in all_items
             if self._match_support_status_filter(r, st_filter)
@@ -10988,8 +11005,9 @@ class SlackSlashCommandView(APIView):
                 requester = r.get("requested_by") or "Unknown"
                 st = r.get("status") or "open"
                 st_display = (st or "open").strip().lower().capitalize()
-                sev_norm = (r.get("severity") or "").strip().lower()
-                sev_label = (r.get("severity") or sev_norm).strip().upper() or "—"
+                sev_display = self._resolve_support_row_severity(r)
+                sev_norm = sev_display.lower()
+                sev_label = sev_display.upper() if sev_display else "—"
                 raised = self._short_display_date(r.get("requested_at"))
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
@@ -11054,7 +11072,8 @@ class SlackSlashCommandView(APIView):
         team = record.get("assigned_team") or "—"
         requester = record.get("requested_by") or "Unknown"
         st = record.get("status") or "open"
-        sev = (record.get("severity") or "—").strip().upper() or "—"
+        sev = self._resolve_support_row_severity(record) or (record.get("severity") or "—")
+        sev = sev.strip().upper() if sev and sev != "—" else sev
         desc = (record.get("description") or "—").strip() or "—"
         raised = self._short_display_date(record.get("requested_at"))
         sid = record.get("short_id", "?")
