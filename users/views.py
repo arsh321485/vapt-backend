@@ -9106,7 +9106,18 @@ class SlackSlashCommandView(APIView):
         a_page = state.get("asset_page", 0)
         a_total = len(assets_list)
         a_items = assets_list[a_page * PAGE_SIZE: a_page * PAGE_SIZE + PAGE_SIZE]
-        blocks.append(self._ctx(f"Assets — {len(state.get('sel_assets') or [])} selected of {a_total}"))
+        a_sel_count = len(state.get("sel_assets") or [])
+        blocks.append(self._ctx(f"Assets — {a_sel_count} selected of {a_total}"))
+        if a_total:
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": f"☑️ Select All ({a_total})", "emoji": True},
+                        "action_id": "assets_select_all", "style": "primary"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "☐ Clear All", "emoji": True},
+                        "action_id": "assets_clear_all"},
+                ],
+            })
         if a_items:
             a_options = [
                 {"text": {"type": "plain_text", "text": f"{it['label']} [{it['severity']}]"[:75]}, "value": it["id"]}
@@ -9141,7 +9152,18 @@ class SlackSlashCommandView(APIView):
         v_page = state.get("vuln_page", 0)
         v_total = len(vulns_list)
         v_items = vulns_list[v_page * PAGE_SIZE: v_page * PAGE_SIZE + PAGE_SIZE]
-        blocks.append(self._ctx(f"Vulnerabilities — {len(state.get('sel_vulns') or [])} selected of {v_total}"))
+        v_sel_count = len(state.get("sel_vulns") or [])
+        blocks.append(self._ctx(f"Vulnerabilities — {v_sel_count} selected of {v_total}"))
+        if v_total:
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": f"☑️ Select All ({v_total})", "emoji": True},
+                        "action_id": "vulns_select_all", "style": "primary"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "☐ Clear All", "emoji": True},
+                        "action_id": "vulns_clear_all"},
+                ],
+            })
         if v_items:
             v_options = [
                 {"text": {"type": "plain_text",
@@ -12688,6 +12710,7 @@ class SlackInteractivityView(APIView):
             if live_action_id in (
                 "team_checks", "assets_checks", "vulns_checks",
                 "assets_pg_prev", "assets_pg_next", "vulns_pg_prev", "vulns_pg_next",
+                "assets_select_all", "assets_clear_all", "vulns_select_all", "vulns_clear_all",
             ):
                 threading.Thread(target=self._handle_adduser_modal_live, args=(payload,), daemon=True).start()
             return Response({}, status=200)
@@ -13561,6 +13584,14 @@ class SlackInteractivityView(APIView):
                 state["sel_vulns"] = remaining + list(checked_ids)
                 if action_id != "vulns_checks":
                     state["vuln_page"] = int(live_action.get("value") or 0)
+
+            elif action_id in ("assets_select_all", "assets_clear_all"):
+                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                state["sel_assets"] = [it["id"] for it in assets_list] if action_id == "assets_select_all" else []
+
+            elif action_id in ("vulns_select_all", "vulns_clear_all"):
+                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                state["sel_vulns"] = [it["id"] for it in vulns_list] if action_id == "vulns_select_all" else []
 
             else:
                 return
