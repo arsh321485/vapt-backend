@@ -27,6 +27,19 @@ def _http_post(url, **kwargs):
     timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
     return requests.post(url, timeout=timeout, **kwargs)
 
+def _find_by_action_id(values, action_id):
+    """
+    Look up a block_actions/view_submission `values` entry by action_id
+    instead of a hardcoded block_id — several input blocks (team/assets/
+    vulns checkboxes) now use a versioned block_id (e.g. "assets_block_3")
+    to force Slack to re-render checkbox state after a live update, so the
+    block_id can no longer be relied on as a fixed lookup key.
+    """
+    for block_vals in (values or {}).values():
+        if action_id in block_vals:
+            return block_vals[action_id]
+    return {}
+
 def _http_put(url, **kwargs):
     timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
     return requests.put(url, timeout=timeout, **kwargs)
@@ -8122,6 +8135,339 @@ def _build_team_performance_html(data):
     return _TEAM_PERFORMANCE_HTML_HEAD + body + "</body>\n</html>"
 
 
+_SUPPORT_DETAIL_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Support Request Details | VaptFix</title>
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --slack-text: #1d1c1d; --slack-sub: #616061; --slack-border: #e8e8e8;
+      --accent: rgb(14,106,111); --open: #16a34a; --closed: #6b7280;
+      --critical: #e01e5a; --high: #e8912d; --medium: #ecb22e; --low: #2eb67d;
+      --purple: #5b4b8a; --line: #d1d5db;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Lato", "Segoe UI", sans-serif;
+      background: #f4f6f8; color: var(--slack-text); font-size: 15px;
+      min-height: 100vh; display: flex; align-items: flex-start;
+      justify-content: center; padding: 24px 16px;
+    }
+    .dash {
+      width: 100%; max-width: 560px; border: 1px solid var(--slack-border);
+      border-radius: 16px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.05);
+      background: #fff;
+    }
+    .dash-top { padding: 18px 22px; border-bottom: 1px solid var(--slack-border); }
+    .dash-top h2 { font-size: 19px; font-weight: 900; }
+    .dash-top p { font-size: 13px; color: var(--slack-sub); margin-top: 2px; }
+    .panel-body { padding: 16px; background: #f4f6f8; }
+    .card {
+      background: #fff; border-radius: 12px; border: 1px solid var(--slack-border);
+      box-shadow: 0 1px 2px rgba(0,0,0,.04); overflow: hidden;
+    }
+    .card::before {
+      content: ""; display: block; height: 3px;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    }
+    .card-inner { padding: 18px 18px 16px; }
+    .ticket-title { font-size: 18px; font-weight: 900; line-height: 1.3; margin-bottom: 10px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .badge {
+      font-size: 11px; font-weight: 900; letter-spacing: .04em; text-transform: uppercase;
+      padding: 5px 10px; border-radius: 999px;
+    }
+    .badge.open { background: #e8f8ef; color: var(--open); border: 1px solid #b7e4c7; }
+    .badge.closed { background: #f3f4f6; color: var(--closed); border: 1px solid #d1d5db; }
+    .badge.critical { background: #fde8ef; color: #b91c4a; border: 1px solid #f9a8c4; }
+    .badge.high { background: #fff4e6; color: #b56a1a; border: 1px solid #f5d78e; }
+    .badge.medium { background: #fff8e6; color: #b45309; border: 1px solid #f5d78e; }
+    .badge.low { background: #eefaf4; color: #1f7a52; border: 1px solid #86efac; }
+    .meta-grid {
+      display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 10px;
+      padding: 12px 14px; background: #fafbfc; border: 1px solid var(--slack-border);
+      border-radius: 10px; margin-bottom: 18px;
+    }
+    .meta-item .k {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .05em; color: var(--slack-sub); margin-bottom: 4px;
+    }
+    .meta-item .v { font-size: 13px; font-weight: 700; word-break: break-word; }
+    .meta-item .v.host {
+      font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+      background: #f0f0f0; border: 1px solid var(--slack-border); border-radius: 4px;
+      padding: 1px 6px; display: inline-block;
+    }
+    .assignee { display: flex; align-items: center; gap: 6px; }
+    .avatar {
+      width: 22px; height: 22px; border-radius: 50%; background: var(--purple);
+      color: #fff; font-size: 11px; font-weight: 900; display: inline-flex;
+      align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .assignee .email { font-size: 12px; font-weight: 700; color: var(--accent); }
+    .section-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .05em; color: var(--slack-sub); margin-bottom: 12px;
+    }
+    .timeline { display: flex; flex-direction: column; }
+    .tl-item { display: grid; grid-template-columns: 28px 1fr; gap: 10px; position: relative; }
+    .tl-item:not(:last-child) .tl-rail::after {
+      content: ""; position: absolute; left: 13px; top: 28px; bottom: -2px;
+      width: 2px; background: var(--line);
+    }
+    .tl-rail { position: relative; display: flex; justify-content: center; padding-top: 2px; }
+    .tl-icon {
+      width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center;
+      justify-content: center; font-size: 12px; font-weight: 900; z-index: 1; flex-shrink: 0;
+    }
+    .tl-icon.done { background: #e8f8ef; color: var(--open); border: 1.5px solid #86efac; }
+    .tl-icon.info { background: #eff6ff; color: #2563eb; border: 1.5px solid #93c5fd; }
+    .tl-icon.chat { background: #f5f3ff; color: #7c3aed; border: 1.5px solid #c4b5fd; }
+    .tl-body { padding-bottom: 16px; }
+    .tl-item:last-child .tl-body { padding-bottom: 0; }
+    .tl-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; margin-bottom: 4px; }
+    .tl-title { font-size: 14px; font-weight: 900; }
+    .tl-time { font-size: 11px; font-weight: 700; color: var(--slack-sub); }
+    .tl-status {
+      font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px;
+      background: #f4f6f8; color: var(--slack-sub); border: 1px solid var(--slack-border);
+    }
+    .tl-status.progress { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+    .tl-status.awaiting { background: #fff8e6; color: #b45309; border-color: #f5d78e; }
+    .tl-desc { font-size: 13px; color: var(--slack-sub); line-height: 1.45; }
+    .tl-quote {
+      margin-top: 6px; padding: 8px 10px; background: #f8f8f8;
+      border-left: 3px solid #93c5fd; border-radius: 0 8px 8px 0;
+      font-size: 13px; font-style: italic; color: var(--slack-text);
+    }
+    .tl-quote .who {
+      display: block; margin-top: 4px; font-style: normal; font-size: 10px;
+      font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--slack-sub);
+    }
+    .reply-hint {
+      border-top: 1px solid var(--slack-border); padding: 12px 18px;
+      background: #fafbfc; font-size: 12px; font-weight: 700; color: var(--slack-sub);
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+"""
+
+
+def _escape_html(text):
+    import html as _html
+    return _html.escape(str(text or ""), quote=True)
+
+
+def _format_support_datetime(val):
+    """Full datetime for lifecycle timestamps (e.g. 07/07/2026, 06:01:58 AM)."""
+    if not val:
+        return "—"
+    s = str(val).strip()
+    try:
+        from datetime import datetime
+        raw = s.replace("Z", "+00:00")
+        if "T" in raw:
+            # Truncate fractional seconds if overly long
+            if "." in raw:
+                main, rest = raw.split(".", 1)
+                frac = "".join(ch for ch in rest if ch.isdigit())[:6]
+                tz = "".join(ch for ch in rest if not ch.isdigit())
+                raw = f"{main}.{frac}{tz}" if frac else f"{main}{tz}"
+            dt = datetime.fromisoformat(raw)
+        else:
+            dt = datetime.fromisoformat(raw)
+        return dt.strftime("%m/%d/%Y, %I:%M:%S %p")
+    except Exception:
+        return s[:19]
+
+
+def _build_support_detail_html(record):
+    """
+    Render support-request-details.html with one live support ticket.
+    Reply UI is Slack-side (modal) — image shows a hint footer only.
+    """
+    if not record:
+        body = """  <div class="dash">
+    <div class="dash-top">
+      <h2>🎫 Support Request Details</h2>
+      <p>Ticket not found.</p>
+    </div>
+  </div>"""
+        return _SUPPORT_DETAIL_HTML_HEAD + body + "</body>\n</html>"
+
+    vuln = _escape_html(record.get("vul_name") or "General Request")
+    host = _escape_html(record.get("host_name") or "—")
+    requester = _escape_html(record.get("requested_by") or "Unknown")
+    st = (record.get("status") or "open").strip().lower()
+    st_label = st.capitalize()
+    st_class = "closed" if st == "closed" else "open"
+    sev_raw = (record.get("severity") or "").strip()
+    sev_norm = sev_raw.lower() if sev_raw else ""
+    sev_label = sev_raw.title() if sev_raw else "—"
+    sev_class = sev_norm if sev_norm in ("critical", "high", "medium", "low") else "medium"
+    try:
+        from datetime import datetime as _dt
+        ra = record.get("requested_at")
+        if ra and "T" in str(ra):
+            raised_short = _escape_html(
+                _dt.fromisoformat(str(ra).replace("Z", "+00:00")[:19]).strftime("%b %d, %Y")
+            )
+        elif ra:
+            raised_short = _escape_html(str(ra)[:10])
+        else:
+            raised_short = "—"
+    except Exception:
+        raised_short = _escape_html(str(record.get("requested_at") or "—")[:10])
+
+    raised_full = _escape_html(_format_support_datetime(record.get("requested_at")))
+    avatar = _escape_html((requester[0] if requester and requester != "Unknown" else "?").upper())
+    desc = (record.get("description") or "").strip()
+    step_req = (record.get("step_requested") or "").strip()
+    messages = record.get("messages") or []
+
+    timeline = []
+    # 1. Ticket Raised
+    timeline.append(f"""
+            <div class="tl-item">
+              <div class="tl-rail"><div class="tl-icon done">✓</div></div>
+              <div class="tl-body">
+                <div class="tl-head">
+                  <span class="tl-title">Ticket Raised</span>
+                  <span class="tl-time">{raised_full}</span>
+                </div>
+                <div class="tl-desc">Support request submitted by {requester}.</div>
+              </div>
+            </div>""")
+    # 2. Acknowledged
+    timeline.append("""
+            <div class="tl-item">
+              <div class="tl-rail"><div class="tl-icon done">✓</div></div>
+              <div class="tl-body">
+                <div class="tl-head">
+                  <span class="tl-title">Acknowledged</span>
+                  <span class="tl-status">Pending review</span>
+                </div>
+                <div class="tl-desc">Ticket assigned and under triage.</div>
+              </div>
+            </div>""")
+    # 3. Investigation / description quote
+    if desc:
+        timeline.append(f"""
+            <div class="tl-item">
+              <div class="tl-rail"><div class="tl-icon info">i</div></div>
+              <div class="tl-body">
+                <div class="tl-head">
+                  <span class="tl-title">Investigation Started</span>
+                  <span class="tl-status progress">In progress</span>
+                </div>
+                <div class="tl-quote">
+                  "{_escape_html(desc)}"
+                  <span class="who">— {requester}</span>
+                </div>
+              </div>
+            </div>""")
+    # 4. Messages as chat items
+    for m in messages[:6]:
+        sender = _escape_html(m.get("sender_email") or m.get("sender") or "—")
+        text = _escape_html((m.get("text") or "").strip())
+        sent = _escape_html(_format_support_datetime(m.get("sent_at")))
+        vis = (m.get("visibility") or "customer").capitalize()
+        timeline.append(f"""
+            <div class="tl-item">
+              <div class="tl-rail"><div class="tl-icon chat">💬</div></div>
+              <div class="tl-body">
+                <div class="tl-head">
+                  <span class="tl-title">Update</span>
+                  <span class="tl-time">{sent}</span>
+                  <span class="tl-status">{vis}</span>
+                </div>
+                <div class="tl-quote">
+                  "{text}"
+                  <span class="who">— {sender}</span>
+                </div>
+              </div>
+            </div>""")
+    # 5. Steps requested
+    if step_req:
+        timeline.append(f"""
+            <div class="tl-item">
+              <div class="tl-rail"><div class="tl-icon chat">💬</div></div>
+              <div class="tl-body">
+                <div class="tl-head">
+                  <span class="tl-title">Steps Requested</span>
+                  <span class="tl-status awaiting">Awaiting</span>
+                </div>
+                <div class="tl-desc">Steps: {_escape_html(step_req)}</div>
+              </div>
+            </div>""")
+    elif not messages:
+        timeline.append("""
+            <div class="tl-item">
+              <div class="tl-rail"><div class="tl-icon chat">💬</div></div>
+              <div class="tl-body">
+                <div class="tl-head">
+                  <span class="tl-title">Steps Requested</span>
+                  <span class="tl-status awaiting">Awaiting</span>
+                </div>
+                <div class="tl-desc">Awaiting admin response / next steps.</div>
+              </div>
+            </div>""")
+
+    sev_badge = (
+        f'<span class="badge {sev_class}">Criticality: {sev_label}</span>'
+        if sev_raw else ""
+    )
+
+    body = f"""  <div class="dash">
+    <div class="dash-top">
+      <h2>🎫 Support Request Details</h2>
+      <p>Ticket lifecycle, assignment, and updates for a single support request.</p>
+    </div>
+    <div class="panel-body">
+      <div class="card">
+        <div class="card-inner">
+          <div class="ticket-title">{vuln}</div>
+          <div class="badges">
+            <span class="badge {st_class}">Status: {st_label}</span>
+            {sev_badge}
+          </div>
+          <div class="meta-grid">
+            <div class="meta-item">
+              <div class="k">Date Raised</div>
+              <div class="v">{raised_short}</div>
+            </div>
+            <div class="meta-item">
+              <div class="k">Asset</div>
+              <div class="v"><span class="host">{host}</span></div>
+            </div>
+            <div class="meta-item">
+              <div class="k">Assigned To</div>
+              <div class="v">
+                <div class="assignee">
+                  <span class="avatar">{avatar}</span>
+                  <span class="email">{requester}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="section-label">Lifecycle</div>
+          <div class="timeline">
+            {"".join(timeline)}
+          </div>
+        </div>
+        <div class="reply-hint">Use the Reply button below in Slack to send an update</div>
+      </div>
+    </div>
+  </div>
+"""
+    return _SUPPORT_DETAIL_HTML_HEAD + body + "</body>\n</html>"
+
+
 _SUPPORT_HTML_HEAD = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8379,6 +8725,21 @@ class SlackDashboardImageView(APIView):
                 "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
             )
             html = _build_team_performance_html(data if isinstance(data, dict) else {})
+            selector = ".dash"
+        elif kind == "supportdetail":
+            req_id = (request.query_params.get("req_id") or "").strip()
+            report_id = slash._get_workspace_report_id(team_id)
+            data = (
+                slash._call_api(
+                    f"/api/admin/adminregister/support-requests/report/{report_id}/", team_id,
+                )
+                if report_id else {}
+            )
+            record = next(
+                (r for r in (data.get("results") or []) if str(r.get("_id")) == req_id),
+                None,
+            )
+            html = _build_support_detail_html(record or {})
             selector = ".dash"
         elif kind == "support":
             report_id = slash._get_workspace_report_id(team_id)
@@ -8735,7 +9096,7 @@ class SlackSlashCommandView(APIView):
     def _cmd_dashboard(self, text, team_id, user_id):
         return [self._dashboard_image_block(team_id)]
 
-    def _dashboard_image_block(self, team_id, kind="dashboard", alt_text="VaptFix Admin Dashboard"):
+    def _dashboard_image_block(self, team_id, kind="dashboard", alt_text="VaptFix Admin Dashboard", extra_params=None):
         """
         Real dashboard.html/team.html design (gauge/donut/bento cards)
         rendered as a PNG via SlackDashboardImageView — Block Kit can't do
@@ -8747,10 +9108,12 @@ class SlackSlashCommandView(APIView):
         import time
         token = _dashboard_image_signer().sign(team_id)
         backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
-        url = (
-            f"{backend}/api/admin/users/slack/dashboard-image/"
-            f"?token={quote(token)}&kind={kind}&t={int(time.time())}"
-        )
+        qs = f"token={quote(token)}&kind={kind}&t={int(time.time())}"
+        if extra_params:
+            for k, v in extra_params.items():
+                if v is not None and str(v) != "":
+                    qs += f"&{quote(str(k))}={quote(str(v))}"
+        url = f"{backend}/api/admin/users/slack/dashboard-image/?{qs}"
         return {
             "type": "image",
             "image_url": url,
@@ -9336,6 +9699,11 @@ class SlackSlashCommandView(APIView):
             if initial:
                 team_element["initial_options"] = initial
 
+        # Same "stuck checkbox" workaround as the assets/vulns pickers below
+        # — a fixed block_id would let the Slack client ignore updated
+        # initial_options once the user has touched this element.
+        rev = (state or {}).get("rev", 0)
+
         blocks = [
             {
                 "type": "input",
@@ -9359,7 +9727,7 @@ class SlackSlashCommandView(APIView):
             },
             {
                 "type": "input",
-                "block_id": "team_block",
+                "block_id": f"team_block_{rev}",
                 "label": {"type": "plain_text", "text": "Team(s)"},
                 # dispatch_action lets Slack fire a live block_actions the
                 # instant a checkbox is (un)checked — WITHOUT losing the
@@ -9393,6 +9761,15 @@ class SlackSlashCommandView(APIView):
         forgotten the moment the page changes.
         """
         PAGE_SIZE = self._PICKER_PAGE_SIZE
+        # Checkboxes elements get "stuck" on their first-rendered checked
+        # state once a user has directly clicked one — subsequent
+        # views.update calls with different initial_options for the SAME
+        # block_id are silently ignored by the Slack client (confirmed via
+        # debug log: server always computed + sent the right blocks, but
+        # the visual checkbox state never changed). Giving the block a
+        # fresh block_id on every render forces Slack to treat it as a
+        # brand-new widget instead of an update to the "dirty" one.
+        rev = state.get("rev", 0)
         blocks = [{"type": "divider"}]
 
         a_page = state.get("asset_page", 0)
@@ -9421,7 +9798,7 @@ class SlackSlashCommandView(APIView):
                 a_element["initial_options"] = a_initial
             blocks.append({
                 "type": "input",
-                "block_id": "assets_block",
+                "block_id": f"assets_block_{rev}",
                 "label": {"type": "plain_text", "text": "Assets"},
                 "optional": True,
                 "dispatch_action": True,
@@ -9468,7 +9845,7 @@ class SlackSlashCommandView(APIView):
                 v_element["initial_options"] = v_initial
             blocks.append({
                 "type": "input",
-                "block_id": "vulns_block",
+                "block_id": f"vulns_block_{rev}",
                 "label": {"type": "plain_text", "text": "Vulnerabilities"},
                 "optional": True,
                 "dispatch_action": True,
@@ -11524,9 +11901,15 @@ class SlackSlashCommandView(APIView):
 
         return blocks
 
-    def _format_support_detail(self, record, st_filter="all", team_filter="all", offset=0):
-        """Single support-request detail — opened from the View button."""
+    def _format_support_detail(self, record, team_id, st_filter="all", team_filter="all", offset=0):
+        """
+        Support request detail (Block Kit) — fields + messages + Back / Reply.
+        Reply opens a Slack modal (same API as website Send Update).
+        """
+        req_id = str(record.get("_id") or "")
+        sid = record.get("short_id", "?")
         vuln = record.get("vul_name") or "General Request"
+        report_id = record.get("report_id") or ""
         host = record.get("host_name") or "—"
         team = record.get("assigned_team") or "—"
         requester = record.get("requested_by") or "Unknown"
@@ -11535,8 +11918,17 @@ class SlackSlashCommandView(APIView):
         sev = sev.strip().upper() if sev and sev != "—" else sev
         desc = (record.get("description") or "—").strip() or "—"
         raised = self._short_display_date(record.get("requested_at"))
-        sid = record.get("short_id", "?")
         messages = record.get("messages") or []
+
+        meta = json.dumps({
+            "sid": sid,
+            "req_id": req_id,
+            "report_id": report_id,
+            "st_filter": st_filter,
+            "team_filter": team_filter,
+            "offset": offset,
+            "vuln": vuln,
+        })
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Request Detail", "emoji": True}},
@@ -11545,7 +11937,7 @@ class SlackSlashCommandView(APIView):
                 "type": "section",
                 "fields": [
                     {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
-                    {"type": "mrkdwn", "text": f"*Status*\n{st.capitalize()}"},
+                    {"type": "mrkdwn", "text": f"*Status*\n{(st or 'open').capitalize()}"},
                     {"type": "mrkdwn", "text": f"*Vulnerability*\n{vuln}"},
                     {"type": "mrkdwn", "text": f"*Asset*\n`{host}`"},
                     {"type": "mrkdwn", "text": f"*Criticality*\n{sev}"},
@@ -11557,38 +11949,188 @@ class SlackSlashCommandView(APIView):
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*Description*\n_{desc}_"}},
         ]
 
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Messages*"}})
         if messages:
-            blocks.append({"type": "divider"})
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Messages*"}})
-            for m in messages[:8]:
+            for m in messages[:10]:
                 sender = m.get("sender_email") or m.get("sender") or "—"
                 text = (m.get("text") or "").strip()
                 sent = self._short_display_date(m.get("sent_at"))
+                vis = (m.get("visibility") or "customer").capitalize()
                 blocks.append({
                     "type": "context",
                     "elements": [{
                         "type": "mrkdwn",
-                        "text": f"*{sender}* ({sent}): {text[:300]}",
+                        "text": f"*{sender}* ({sent}) · _{vis}_\n{text[:400]}",
                     }],
                 })
+        else:
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "_No messages yet. Use Reply to send one._"}],
+            })
 
         blocks.append({"type": "divider"})
         blocks.append({
             "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "← Back to list", "emoji": True},
-                "action_id": "sup_back_list",
-                "value": f"{st_filter}|{team_filter}|{offset}",
-            }],
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "← Back to list", "emoji": True},
+                    "action_id": "sup_back_list",
+                    "value": f"{st_filter}|{team_filter}|{offset}",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✈ Reply", "emoji": True},
+                    "action_id": "sup_reply_open",
+                    "value": meta,
+                    "style": "primary",
+                },
+            ],
         })
         return blocks
+
+    def _build_support_reply_modal(self, meta_json, vuln_label):
+        """
+        Reply modal — message + Internal Note / Customer Visible visibility.
+        private_metadata is JSON with req_id, report_id, filters, response_url.
+        """
+        return {
+            "type": "modal",
+            "callback_id": "modal_support_reply_submit",
+            "private_metadata": meta_json[:3000],
+            "title": {"type": "plain_text", "text": "Send Update"},
+            "submit": {"type": "plain_text", "text": "Send Update"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*Replying to:* {vuln_label}"},
+                },
+                {
+                    "type": "input",
+                    "block_id": "reply_text_block",
+                    "label": {"type": "plain_text", "text": "Your response"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "reply_text_input",
+                        "multiline": True,
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "Type your response or internal note...",
+                        },
+                    },
+                },
+                {
+                    "type": "input",
+                    "block_id": "reply_vis_block",
+                    "label": {"type": "plain_text", "text": "Visibility"},
+                    "element": {
+                        "type": "radio_buttons",
+                        "action_id": "reply_vis_select",
+                        "initial_option": {
+                            "text": {"type": "plain_text", "text": "Customer Visible"},
+                            "value": "customer",
+                        },
+                        "options": [
+                            {
+                                "text": {"type": "plain_text", "text": "Customer Visible"},
+                                "value": "customer",
+                            },
+                            {
+                                "text": {"type": "plain_text", "text": "Internal Note"},
+                                "value": "internal",
+                            },
+                        ],
+                    },
+                },
+            ],
+        }
+
+    def _submit_support_reply(self, meta_json, text, visibility, team_id, user_id):
+        """POST reply to SupportRequestByReportAPIView; refresh channel message if possible."""
+        try:
+            meta = json.loads(meta_json or "{}")
+        except (ValueError, TypeError):
+            meta = {}
+
+        sid = meta.get("sid") or ""
+        req_id = meta.get("req_id") or ""
+        report_id = meta.get("report_id") or ""
+        st_filter = meta.get("st_filter") or "all"
+        team_filter = meta.get("team_filter") or "all"
+        offset = int(meta.get("offset") or 0)
+        response_url = meta.get("response_url") or ""
+
+        if not text or not text.strip():
+            return self._text_block("❌ Reply text is required.")
+        if not req_id or not report_id:
+            return self._text_block("❌ Missing support request id. Open the ticket again and retry.")
+
+        vis = visibility if visibility in ("customer", "internal") else "customer"
+        resp = self._call_api(
+            f"/api/admin/adminregister/support-requests/report/{report_id}/",
+            team_id,
+            method="post",
+            json_body={
+                "request_id": req_id,
+                "text": text.strip(),
+                "visibility": vis,
+            },
+            slack_user_id=user_id,
+        )
+        if not isinstance(resp, dict):
+            return self._text_block("❌ Failed to send update.")
+        if resp.get("detail") and not resp.get("message"):
+            return self._text_block(f"❌ {resp['detail']}")
+
+        # Refresh the detail message in-channel so lifecycle shows the new reply
+        target, _ = self._lookup_support_by_short_id(sid, team_id, user_id)
+        if not target:
+            data = self._fetch_support_report_data(team_id, user_id) or {}
+            rows = self._assign_severity_short_ids([
+                dict(r, severity=self._resolve_support_row_severity(r) or r.get("severity", ""))
+                for r in (data.get("results") or [])
+            ])
+            target = next((r for r in rows if str(r.get("_id")) == req_id), None)
+
+        if response_url and target:
+            detail_blocks = (
+                self._nav_buttons_block(active_action_id="nav_support")
+                + self._format_support_detail(
+                    target, team_id,
+                    st_filter=st_filter, team_filter=team_filter, offset=offset,
+                )
+            )
+            try:
+                _http_post(
+                    response_url,
+                    json={"replace_original": True, "blocks": detail_blocks},
+                    timeout=10,
+                )
+            except Exception:
+                logger.exception("[Slack] failed to refresh support detail after reply")
+
+        return [{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"✅ Message sent (*{vis}*) on `{sid}`.\n"
+                    "_The ticket detail in the channel now shows your message._"
+                ),
+            },
+        }]
 
     def _lookup_support_by_short_id(self, sid, team_id, user_id):
         data = self._fetch_support_report_data(team_id, user_id)
         if not data:
             return None, data
-        rows = self._assign_severity_short_ids(data.get("results") or [])
+        rows = self._assign_severity_short_ids([
+            dict(r, severity=self._resolve_support_row_severity(r) or r.get("severity", ""))
+            for r in (data.get("results") or [])
+        ])
         target = next((r for r in rows if r.get("short_id") == sid), None)
         return target, data
 
@@ -12977,6 +13519,7 @@ class SlackInteractivityView(APIView):
                 "modal_adduser_submit": "Add User",
                 "modal_deleteuser_submit": "Delete User",
                 "modal_reject_submit": "Reject Request",
+                "modal_support_reply_submit": "Send Update",
             }
             if callback_id not in titles:
                 return Response({}, status=200)
@@ -13289,6 +13832,7 @@ class SlackInteractivityView(APIView):
                 else:
                     content = slash._format_support_detail(
                         target,
+                        team_id,
                         st_filter=st_filter,
                         team_filter=team_filter,
                         offset=page_offset,
@@ -13297,6 +13841,29 @@ class SlackInteractivityView(APIView):
                 self._post_response_url(
                     response_url, {"replace_original": True, "blocks": blocks}, action_id,
                 )
+                return
+
+            if action_id == "sup_reply_open":
+                # Open reply modal — merge response_url into private_metadata so
+                # after Send we can refresh the detail message in-channel.
+                try:
+                    meta = json.loads(value or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                meta["response_url"] = response_url
+                vuln_label = meta.get("vuln") or meta.get("sid") or "Support Request"
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write("sup_reply_open: missing bot_token or trigger_id")
+                    return
+                view = slash._build_support_reply_modal(json.dumps(meta), vuln_label)
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"sup_reply_open views.open -> {getattr(resp, 'text', None)}")
                 return
 
             if action_id in dict(slash._REGISTER_SUBTABS):
@@ -13723,6 +14290,7 @@ class SlackInteractivityView(APIView):
             "modal_adduser_submit": "Add User",
             "modal_deleteuser_submit": "Delete User",
             "modal_reject_submit": "Reject Request",
+            "modal_support_reply_submit": "Send Update",
         }
         if callback_id not in titles:
             return
@@ -13735,7 +14303,7 @@ class SlackInteractivityView(APIView):
                 target_uid = ((values.get("user_block") or {}).get("user_select") or {}).get("selected_user", "")
                 user_type = ((values.get("type_block") or {}).get("type_select") or {}).get(
                     "selected_option", {}).get("value", "external")
-                selected = ((values.get("team_block") or {}).get("team_checks") or {}).get("selected_options") or []
+                selected = _find_by_action_id(values, "team_checks").get("selected_options") or []
                 team_codes = [o.get("value") for o in selected if o.get("value")]
                 if not target_uid or not team_codes:
                     blocks = slash._text_block("❌ User and at least one team are required.")
@@ -13765,6 +14333,14 @@ class SlackInteractivityView(APIView):
                     blocks = slash._cmd_deleteuser_permanent(f"<@{target_uid}>", team_id, slack_user_id)
                 else:
                     blocks = slash._cmd_deleteuser(f"<@{target_uid}>", team_id, slack_user_id)
+            elif callback_id == "modal_support_reply_submit":
+                meta_json = view.get("private_metadata") or "{}"
+                reply_text = ((values.get("reply_text_block") or {}).get("reply_text_input") or {}).get("value") or ""
+                vis_opt = ((values.get("reply_vis_block") or {}).get("reply_vis_select") or {}).get("selected_option") or {}
+                visibility = vis_opt.get("value") or "customer"
+                blocks = slash._submit_support_reply(
+                    meta_json, reply_text, visibility, team_id, slack_user_id,
+                )
             else:
                 # modal_reject_submit — sid was already known when the modal
                 # was opened (from the clicked row), carried via
@@ -13830,6 +14406,9 @@ class SlackInteractivityView(APIView):
         state.setdefault("vuln_page", 0)
         state.setdefault("sel_assets", [])
         state.setdefault("sel_vulns", [])
+        # Bumped on every live update so the re-rendered checkboxes blocks
+        # get a fresh block_id — see the comment in _build_adduser_picker_blocks.
+        state["rev"] = state.get("rev", 0) + 1
 
         slash = SlackSlashCommandView()
         PAGE_SIZE = slash._PICKER_PAGE_SIZE
@@ -13857,8 +14436,9 @@ class SlackInteractivityView(APIView):
                 if action_id == "assets_checks":
                     checked = live_action.get("selected_options") or []
                 else:
-                    checked = (((view.get("state") or {}).get("values") or {})
-                        .get("assets_block", {}).get("assets_checks", {}).get("selected_options") or [])
+                    checked = _find_by_action_id(
+                        (view.get("state") or {}).get("values") or {}, "assets_checks"
+                    ).get("selected_options") or []
                 checked_ids = {o.get("value") for o in checked if o.get("value")}
                 remaining = [x for x in state["sel_assets"] if x not in page_ids]
                 state["sel_assets"] = remaining + list(checked_ids)
@@ -13871,8 +14451,9 @@ class SlackInteractivityView(APIView):
                 if action_id == "vulns_checks":
                     checked = live_action.get("selected_options") or []
                 else:
-                    checked = (((view.get("state") or {}).get("values") or {})
-                        .get("vulns_block", {}).get("vulns_checks", {}).get("selected_options") or [])
+                    checked = _find_by_action_id(
+                        (view.get("state") or {}).get("values") or {}, "vulns_checks"
+                    ).get("selected_options") or []
                 checked_ids = {o.get("value") for o in checked if o.get("value")}
                 remaining = [x for x in state["sel_vulns"] if x not in page_ids]
                 state["sel_vulns"] = remaining + list(checked_ids)
