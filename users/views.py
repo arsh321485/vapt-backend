@@ -9031,7 +9031,9 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "actions", "elements": nav_buttons})
         return blocks
 
-    def _build_adduser_modal(self, selected_teams=None, preview_blocks=None):
+    _PICKER_PAGE_SIZE = 10  # Slack's own hard cap on options per checkboxes element
+
+    def _build_adduser_modal(self, selected_teams=None, state=None, assets_list=None, vulns_list=None):
         team_options = [
             {"text": {"type": "plain_text", "text": name}, "value": code}
             for code, name in self._TEAM_MAP.items()
@@ -9074,46 +9076,135 @@ class SlackSlashCommandView(APIView):
                 "element": team_element,
             },
         ]
-        if preview_blocks:
-            blocks.extend(preview_blocks)
+        if state and state.get("teams"):
+            blocks.extend(self._build_adduser_picker_blocks(state, assets_list or [], vulns_list or []))
 
         return {
             "type": "modal",
             "callback_id": "modal_adduser_submit",
+            "private_metadata": json.dumps(state) if state else "",
             "title": {"type": "plain_text", "text": "Add User"},
             "submit": {"type": "plain_text", "text": "Add User"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "blocks": blocks,
         }
 
-    def _build_team_assets_preview_blocks(self, team_id, user_id, team_names):
+    def _build_adduser_picker_blocks(self, state, assets_list, vulns_list):
         """
-        Live preview shown under the Team(s) checkboxes as they're
-        (un)checked — pulls the exact same data the website's "Configure
-        assets & vulnerabilities" panel uses (report-assets-vulns?role=),
-        so it's real assigned_team data, not a keyword guess. Read-only
-        call — no API changes.
+        Assets + Vulnerabilities checkbox pickers, paginated at
+        _PICKER_PAGE_SIZE (Slack allows at most 10 options per checkboxes
+        element — can't show all of a team's assets/vulns at once).
+        Selections made on OTHER pages are preserved across page flips via
+        `state` (round-tripped through the modal's private_metadata by the
+        live-update handler) — Slack only reports the state of elements
+        currently rendered, so anything not on-screen would otherwise be
+        forgotten the moment the page changes.
         """
-        if not team_names:
-            return []
-        blocks = [{"type": "divider"}, self._ctx("Assets & vulnerabilities for the selected team(s):")]
+        PAGE_SIZE = self._PICKER_PAGE_SIZE
+        blocks = [{"type": "divider"}]
+
+        a_page = state.get("asset_page", 0)
+        a_total = len(assets_list)
+        a_items = assets_list[a_page * PAGE_SIZE: a_page * PAGE_SIZE + PAGE_SIZE]
+        blocks.append(self._ctx(f"Assets — {len(state.get('sel_assets') or [])} selected of {a_total}"))
+        if a_items:
+            a_options = [
+                {"text": {"type": "plain_text", "text": f"{it['label']} [{it['severity']}]"[:75]}, "value": it["id"]}
+                for it in a_items
+            ]
+            a_element = {"type": "checkboxes", "action_id": "assets_checks", "options": a_options}
+            a_initial = [o for o in a_options if o["value"] in (state.get("sel_assets") or [])]
+            if a_initial:
+                a_element["initial_options"] = a_initial
+            blocks.append({
+                "type": "input",
+                "block_id": "assets_block",
+                "label": {"type": "plain_text", "text": "Assets"},
+                "optional": True,
+                "dispatch_action": True,
+                "element": a_element,
+            })
+            a_nav = []
+            if a_page > 0:
+                a_nav.append({"type": "button", "text": {"type": "plain_text", "text": "◀ Assets", "emoji": True},
+                    "action_id": "assets_pg_prev", "value": str(a_page - 1)})
+            if (a_page + 1) * PAGE_SIZE < a_total:
+                a_nav.append({"type": "button", "text": {"type": "plain_text", "text": "Assets ▶", "emoji": True},
+                    "action_id": "assets_pg_next", "value": str(a_page + 1)})
+            if a_nav:
+                blocks.append({"type": "actions", "elements": a_nav})
+        else:
+            blocks.append(self._text_block("_No assets for the selected team(s)._")[0])
+
+        blocks.append({"type": "divider"})
+
+        v_page = state.get("vuln_page", 0)
+        v_total = len(vulns_list)
+        v_items = vulns_list[v_page * PAGE_SIZE: v_page * PAGE_SIZE + PAGE_SIZE]
+        blocks.append(self._ctx(f"Vulnerabilities — {len(state.get('sel_vulns') or [])} selected of {v_total}"))
+        if v_items:
+            v_options = [
+                {"text": {"type": "plain_text",
+                    "text": f"{it['label']} ({it['host']}) [{it['severity']}]"[:75]}, "value": it["id"]}
+                for it in v_items
+            ]
+            v_element = {"type": "checkboxes", "action_id": "vulns_checks", "options": v_options}
+            v_initial = [o for o in v_options if o["value"] in (state.get("sel_vulns") or [])]
+            if v_initial:
+                v_element["initial_options"] = v_initial
+            blocks.append({
+                "type": "input",
+                "block_id": "vulns_block",
+                "label": {"type": "plain_text", "text": "Vulnerabilities"},
+                "optional": True,
+                "dispatch_action": True,
+                "element": v_element,
+            })
+            v_nav = []
+            if v_page > 0:
+                v_nav.append({"type": "button", "text": {"type": "plain_text", "text": "◀ Vulns", "emoji": True},
+                    "action_id": "vulns_pg_prev", "value": str(v_page - 1)})
+            if (v_page + 1) * PAGE_SIZE < v_total:
+                v_nav.append({"type": "button", "text": {"type": "plain_text", "text": "Vulns ▶", "emoji": True},
+                    "action_id": "vulns_pg_next", "value": str(v_page + 1)})
+            if v_nav:
+                blocks.append({"type": "actions", "elements": v_nav})
+        else:
+            blocks.append(self._text_block("_No vulnerabilities for the selected team(s)._")[0])
+
+        return blocks
+
+    def _get_team_assets_vulns_combined(self, team_id, user_id, team_names):
+        """
+        Real assigned_team data — same source as the website's "Configure
+        assets & vulnerabilities" panel (report-assets-vulns?role=), not a
+        keyword guess. Merges + dedupes across multiple selected teams.
+        Read-only call — no API changes.
+        """
+        assets_by_id = {}
+        vulns_by_id = {}
         for team_name in team_names:
             data = self._call_api(
                 "/api/admin/users_details/report-assets-vulns/", team_id,
                 params={"role": team_name}, slack_user_id=user_id,
             )
-            assets = data.get("assets") or []
-            total_vulns = sum(a.get("vuln_count", 0) for a in assets)
-            lines = [f"*{team_name}* — {len(assets)} assets, {total_vulns} vulns"]
-            for a in assets[:5]:
-                vnames = ", ".join(v.get("plugin_name", "") for v in (a.get("vulnerabilities") or [])[:3])
-                lines.append(f"  • `{a.get('host_name')}` ({a.get('vuln_count')}): {vnames}")
-            if len(assets) > 5:
-                lines.append(f"  _...and {len(assets) - 5} more assets_")
-            if not assets:
-                lines.append("  _No assets/vulns assigned to this team yet._")
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)[:2900]}})
-        return blocks[:8]  # modals cap at 100 blocks total; keep the preview bounded regardless
+            for a in (data.get("assets") or []):
+                host = a.get("host_name")
+                if not host:
+                    continue
+                a_vulns = a.get("vulnerabilities") or []
+                if host not in assets_by_id:
+                    top_sev = a_vulns[0].get("severity") if a_vulns else "—"
+                    assets_by_id[host] = {"id": host, "label": host, "severity": top_sev}
+                for v in a_vulns:
+                    pname = v.get("plugin_name") or "Unknown"
+                    vid = f"{host}||{pname}"
+                    if vid not in vulns_by_id:
+                        vulns_by_id[vid] = {
+                            "id": vid, "label": pname, "host": host,
+                            "severity": v.get("severity") or "—",
+                        }
+        return list(assets_by_id.values()), list(vulns_by_id.values())
 
     def _build_deleteuser_modal(self):
         return {
@@ -9619,7 +9710,7 @@ class SlackSlashCommandView(APIView):
         "af": "Architectural Flaws",
     }
 
-    def _cmd_adduser(self, text, team_id, user_id):
+    def _cmd_adduser(self, text, team_id, user_id, role_assignments=None):
         parts = text.strip().split()
         # Minimum: @mention  type  team
         if len(parts) < 3:
@@ -9679,18 +9770,25 @@ class SlackSlashCommandView(APIView):
             return self._text_block("❌ Your Slack account is not linked to a VaptFix admin account.")
 
         # Call the proper add-user-detail API
+        json_body = {
+            "admin_id":   str(admin_user.id),
+            "email":      email,
+            "first_name": first,
+            "last_name":  last,
+            "user_type":  user_type,
+            "team_name":  primary_team,
+            "Member_role": member_role,
+        }
+        # Optional — only sent from the Slack modal's Assets/Vulnerabilities
+        # checkbox picker (not the plain-text /adduser command). The API
+        # already accepts this field (role_assignments on UserDetail); no
+        # backend changes needed.
+        if role_assignments:
+            json_body["role_assignments"] = role_assignments
         data = self._call_api(
             "/api/admin/users_details/add-user-detail/", team_id,
             method="post",
-            json_body={
-                "admin_id":   str(admin_user.id),
-                "email":      email,
-                "first_name": first,
-                "last_name":  last,
-                "user_type":  user_type,
-                "team_name":  primary_team,
-                "Member_role": member_role,
-            },
+            json_body=json_body,
             slack_user_id=user_id,
         )
 
@@ -12585,9 +12683,13 @@ class SlackInteractivityView(APIView):
             # The only real way to update an already-open modal from a
             # block_actions event is an explicit views.update API call.
             live_action = (payload.get("actions") or [{}])[0]
-            self._debug_write(f"post(): live modal block_actions action_id={live_action.get('action_id')!r} raw={live_action!r}")
-            if live_action.get("action_id") == "team_checks":
-                threading.Thread(target=self._handle_team_checks_live, args=(payload,), daemon=True).start()
+            live_action_id = live_action.get("action_id", "")
+            self._debug_write(f"post(): live modal block_actions action_id={live_action_id!r} raw={live_action!r}")
+            if live_action_id in (
+                "team_checks", "assets_checks", "vulns_checks",
+                "assets_pg_prev", "assets_pg_next", "vulns_pg_prev", "vulns_pg_next",
+            ):
+                threading.Thread(target=self._handle_adduser_modal_live, args=(payload,), daemon=True).start()
             return Response({}, status=200)
 
         if ptype != "block_actions":
@@ -13324,7 +13426,20 @@ class SlackInteractivityView(APIView):
                     blocks = slash._text_block("❌ User and at least one team are required.")
                 else:
                     text = f"<@{target_uid}> {user_type} " + " ".join(team_codes)
-                    blocks = slash._cmd_adduser(text, team_id, slack_user_id)
+                    # Assets/vulns picked in the checkbox pickers (if any) —
+                    # round-tripped through private_metadata across page
+                    # flips by _handle_adduser_modal_live, same as team_codes
+                    # itself is tracked there for pagination purposes.
+                    role_assignments = None
+                    try:
+                        picker_state = json.loads(view.get("private_metadata") or "{}")
+                        sel_assets = picker_state.get("sel_assets") or []
+                        sel_vulns = picker_state.get("sel_vulns") or []
+                        if sel_assets or sel_vulns:
+                            role_assignments = {"assets": sel_assets, "vulnerabilities": sel_vulns}
+                    except (ValueError, TypeError):
+                        pass
+                    blocks = slash._cmd_adduser(text, team_id, slack_user_id, role_assignments=role_assignments)
             elif callback_id == "modal_deleteuser_submit":
                 target_uid = ((values.get("user_block") or {}).get("user_select") or {}).get("selected_user", "")
                 action = ((values.get("action_block") or {}).get("action_select") or {}).get(
@@ -13369,41 +13484,101 @@ class SlackInteractivityView(APIView):
         )
         self._debug_write(f"_handle_view_submission: {callback_id} views.update -> {getattr(resp, 'text', None)}")
 
-    def _handle_team_checks_live(self, payload):
+    def _handle_adduser_modal_live(self, payload):
         """
-        Live-updates the still-open Add User modal as Team(s) checkboxes are
-        (un)checked (dispatch_action) — via an explicit views.update call,
-        since response_action in the direct HTTP response only works for
-        view_submission/view_closed, not block_actions (confirmed: the
-        earlier response_action attempt built the right blocks per the
-        debug log but never visibly updated the modal).
+        Live-updates the still-open Add User modal for ANY of: Team(s)
+        checkbox change, Assets checkbox change, Vulnerabilities checkbox
+        change, or Assets/Vulns pagination — via an explicit views.update
+        call (response_action in the direct HTTP response only works for
+        view_submission/view_closed, not block_actions — confirmed:
+        response_action built the right blocks but never visibly updated
+        the modal).
+
+        Selections are round-tripped through the modal's private_metadata
+        as JSON — Slack's view.state.values only reflects elements
+        CURRENTLY rendered, so a selection made on page 1 of the Assets
+        picker would otherwise be forgotten the moment page 2 is shown.
         """
         view          = payload.get("view") or {}
         view_id       = view.get("id", "")
         team_id       = (payload.get("team") or {}).get("id", "")
         slack_user_id = (payload.get("user") or {}).get("id", "")
         live_action   = (payload.get("actions") or [{}])[0]
-        selected      = live_action.get("selected_options") or []
-        team_codes    = [o.get("value") for o in selected if o.get("value")]
+        action_id     = live_action.get("action_id", "")
+
+        try:
+            state = json.loads(view.get("private_metadata") or "{}")
+        except (ValueError, TypeError):
+            state = {}
+        state.setdefault("teams", [])
+        state.setdefault("asset_page", 0)
+        state.setdefault("vuln_page", 0)
+        state.setdefault("sel_assets", [])
+        state.setdefault("sel_vulns", [])
 
         slash = SlackSlashCommandView()
-        team_names = [slash._TEAM_MAP.get(c) for c in team_codes if slash._TEAM_MAP.get(c)]
+        PAGE_SIZE = slash._PICKER_PAGE_SIZE
+
+        def team_names():
+            return [slash._TEAM_MAP.get(c) for c in state["teams"] if slash._TEAM_MAP.get(c)]
+
         try:
-            preview_blocks = slash._build_team_assets_preview_blocks(team_id, slack_user_id, team_names)
+            if action_id == "team_checks":
+                selected = live_action.get("selected_options") or []
+                state["teams"] = [o.get("value") for o in selected if o.get("value")]
+                # A different team set means a different assets/vulns
+                # universe entirely — old page/selection no longer applies.
+                state["asset_page"] = 0
+                state["vuln_page"] = 0
+                state["sel_assets"] = []
+                state["sel_vulns"] = []
+                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+
+            elif action_id in ("assets_checks", "assets_pg_prev", "assets_pg_next"):
+                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                page_ids = {it["id"] for it in assets_list[state["asset_page"] * PAGE_SIZE: state["asset_page"] * PAGE_SIZE + PAGE_SIZE]}
+                if action_id == "assets_checks":
+                    checked = live_action.get("selected_options") or []
+                else:
+                    checked = (((view.get("state") or {}).get("values") or {})
+                        .get("assets_block", {}).get("assets_checks", {}).get("selected_options") or [])
+                checked_ids = {o.get("value") for o in checked if o.get("value")}
+                remaining = [x for x in state["sel_assets"] if x not in page_ids]
+                state["sel_assets"] = remaining + list(checked_ids)
+                if action_id != "assets_checks":
+                    state["asset_page"] = int(live_action.get("value") or 0)
+
+            elif action_id in ("vulns_checks", "vulns_pg_prev", "vulns_pg_next"):
+                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                page_ids = {it["id"] for it in vulns_list[state["vuln_page"] * PAGE_SIZE: state["vuln_page"] * PAGE_SIZE + PAGE_SIZE]}
+                if action_id == "vulns_checks":
+                    checked = live_action.get("selected_options") or []
+                else:
+                    checked = (((view.get("state") or {}).get("values") or {})
+                        .get("vulns_block", {}).get("vulns_checks", {}).get("selected_options") or [])
+                checked_ids = {o.get("value") for o in checked if o.get("value")}
+                remaining = [x for x in state["sel_vulns"] if x not in page_ids]
+                state["sel_vulns"] = remaining + list(checked_ids)
+                if action_id != "vulns_checks":
+                    state["vuln_page"] = int(live_action.get("value") or 0)
+
+            else:
+                return
         except Exception:
-            logger.exception("[SlackInteractivity] team_checks live preview failed")
-            preview_blocks = [{"type": "section", "text": {"type": "mrkdwn",
-                "text": "_Could not load assets/vulns preview for the selected team(s)._"}}]
+            logger.exception(f"[SlackInteractivity] adduser modal live ({action_id}) failed")
+            return
 
         bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
         if not bot_token or not view_id:
-            self._debug_write("_handle_team_checks_live: missing bot_token or view_id")
+            self._debug_write("_handle_adduser_modal_live: missing bot_token or view_id")
             return
-        new_view = slash._build_adduser_modal(selected_teams=team_codes, preview_blocks=preview_blocks)
+        new_view = slash._build_adduser_modal(
+            selected_teams=state["teams"], state=state, assets_list=assets_list, vulns_list=vulns_list,
+        )
         resp = _http_post(
             "https://slack.com/api/views.update",
             headers={"Authorization": f"Bearer {bot_token}"},
             json={"view_id": view_id, "view": new_view},  # no "hash" — same stale-hash lesson as above
             timeout=10,
         )
-        self._debug_write(f"_handle_team_checks_live: views.update -> {getattr(resp, 'text', None)}")
+        self._debug_write(f"_handle_adduser_modal_live: action={action_id} views.update -> {getattr(resp, 'text', None)}")
