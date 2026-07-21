@@ -8828,6 +8828,7 @@ class SlackSlashCommandView(APIView):
                     "value": f"{host}|0",
                 },
             })
+            blocks.append({"type": "divider"})
 
         pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "view_fix_assets_pg")
         if pg_block:
@@ -8863,23 +8864,29 @@ class SlackSlashCommandView(APIView):
             name = v.get("vul_name") or "Unknown"
             sev  = (v.get("severity") or "").capitalize() or "—"
             st   = v.get("status") or "open"
+            sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
+            safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
             blocks.append({
                 "type": "context",
                 "elements": [
                     self._status_icon_image_element(st),
-                    {"type": "mrkdwn", "text": f"`{sid}` *{name}* [{sev}]\nStatus: {st.capitalize()}"},
+                    {"type": "mrkdwn", "text": f"`{sid}` *{name}*"},
                 ],
             })
-            safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
             blocks.append({
-                "type": "actions",
-                "elements": [{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{sev_icon} *{sev}*  |  Status: {st.capitalize()}",
+                },
+                "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": f"view_allvuln_detail_{safe_sid}",
                     "value": sid,
-                }],
+                },
             })
+            blocks.append({"type": "divider"})
 
         pg_block = self._numbered_pagination_block(
             offset, PAGE_SIZE, count, "view_fix_asset_vulns_pg", value_prefix=f"{host}|",
@@ -11270,24 +11277,28 @@ class SlackSlashCommandView(APIView):
             sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
             st   = v.get("status") or "open"
             sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
+            safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
             blocks.append({
                 "type": "context",
                 "elements": [
                     self._status_icon_image_element(st),
-                    {"type": "mrkdwn", "text": f"`{sid}` *{name}* [{sev_icon} {sev}]\nHost: `{host}` | Status: {st.capitalize()}"},
+                    {"type": "mrkdwn", "text": f"`{sid}` *{name}*"},
                 ],
             })
-            # Unique action_id per row — Slack rejects duplicate action_ids in one message.
-            safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
             blocks.append({
-                "type": "actions",
-                "elements": [{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"`{host}`  |  {sev_icon} *{sev}*  |  Status: {st.capitalize()}",
+                },
+                "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": f"view_allvuln_detail_{safe_sid}",
                     "value": sid,
-                }],
+                },
             })
+            blocks.append({"type": "divider"})
 
         pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "view_vulndata_pg")
         if pg_block:
