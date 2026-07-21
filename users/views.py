@@ -9031,49 +9031,89 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "actions", "elements": nav_buttons})
         return blocks
 
-    def _build_adduser_modal(self):
+    def _build_adduser_modal(self, selected_teams=None, preview_blocks=None):
+        team_options = [
+            {"text": {"type": "plain_text", "text": name}, "value": code}
+            for code, name in self._TEAM_MAP.items()
+        ]
+        team_element = {"type": "checkboxes", "action_id": "team_checks", "options": team_options}
+        if selected_teams:
+            initial = [o for o in team_options if o["value"] in selected_teams]
+            if initial:
+                team_element["initial_options"] = initial
+
+        blocks = [
+            {
+                "type": "input",
+                "block_id": "user_block",
+                "label": {"type": "plain_text", "text": "User"},
+                "element": {"type": "users_select", "action_id": "user_select"},
+            },
+            {
+                "type": "input",
+                "block_id": "type_block",
+                "label": {"type": "plain_text", "text": "Type"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "type_select",
+                    "initial_option": {"text": {"type": "plain_text", "text": "external"}, "value": "external"},
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "external"}, "value": "external"},
+                        {"text": {"type": "plain_text", "text": "internal"}, "value": "internal"},
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "team_block",
+                "label": {"type": "plain_text", "text": "Team(s)"},
+                # dispatch_action lets Slack fire a live block_actions the
+                # instant a checkbox is (un)checked — WITHOUT losing the
+                # normal view.state.values tracking used at final submit.
+                "dispatch_action": True,
+                "element": team_element,
+            },
+        ]
+        if preview_blocks:
+            blocks.extend(preview_blocks)
+
         return {
             "type": "modal",
             "callback_id": "modal_adduser_submit",
             "title": {"type": "plain_text", "text": "Add User"},
             "submit": {"type": "plain_text", "text": "Add User"},
             "close": {"type": "plain_text", "text": "Cancel"},
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "user_block",
-                    "label": {"type": "plain_text", "text": "User"},
-                    "element": {"type": "users_select", "action_id": "user_select"},
-                },
-                {
-                    "type": "input",
-                    "block_id": "type_block",
-                    "label": {"type": "plain_text", "text": "Type"},
-                    "element": {
-                        "type": "static_select",
-                        "action_id": "type_select",
-                        "initial_option": {"text": {"type": "plain_text", "text": "external"}, "value": "external"},
-                        "options": [
-                            {"text": {"type": "plain_text", "text": "external"}, "value": "external"},
-                            {"text": {"type": "plain_text", "text": "internal"}, "value": "internal"},
-                        ],
-                    },
-                },
-                {
-                    "type": "input",
-                    "block_id": "team_block",
-                    "label": {"type": "plain_text", "text": "Team(s)"},
-                    "element": {
-                        "type": "checkboxes",
-                        "action_id": "team_checks",
-                        "options": [
-                            {"text": {"type": "plain_text", "text": name}, "value": code}
-                            for code, name in self._TEAM_MAP.items()
-                        ],
-                    },
-                },
-            ],
+            "blocks": blocks,
         }
+
+    def _build_team_assets_preview_blocks(self, team_id, user_id, team_names):
+        """
+        Live preview shown under the Team(s) checkboxes as they're
+        (un)checked — pulls the exact same data the website's "Configure
+        assets & vulnerabilities" panel uses (report-assets-vulns?role=),
+        so it's real assigned_team data, not a keyword guess. Read-only
+        call — no API changes.
+        """
+        if not team_names:
+            return []
+        blocks = [{"type": "divider"}, self._ctx("Assets & vulnerabilities for the selected team(s):")]
+        for team_name in team_names:
+            data = self._call_api(
+                "/api/admin/users_details/report-assets-vulns/", team_id,
+                params={"role": team_name}, slack_user_id=user_id,
+            )
+            assets = data.get("assets") or []
+            total_vulns = sum(a.get("vuln_count", 0) for a in assets)
+            lines = [f"*{team_name}* — {len(assets)} assets, {total_vulns} vulns"]
+            for a in assets[:5]:
+                vnames = ", ".join(v.get("plugin_name", "") for v in (a.get("vulnerabilities") or [])[:3])
+                lines.append(f"  • `{a.get('host_name')}` ({a.get('vuln_count')}): {vnames}")
+            if len(assets) > 5:
+                lines.append(f"  _...and {len(assets) - 5} more assets_")
+            if not assets:
+                lines.append("  _No assets/vulns assigned to this team yet._")
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)[:2900]}})
+        return blocks[:8]  # modals cap at 100 blocks total; keep the preview bounded regardless
 
     def _build_deleteuser_modal(self):
         return {
@@ -12534,6 +12574,31 @@ class SlackInteractivityView(APIView):
             )
             threading.Thread(target=self._handle_view_submission, args=(payload,), daemon=True).start()
             return Response({"response_action": "update", "view": processing_view}, status=200)
+
+        if ptype == "block_actions" and payload.get("view"):
+            # A block_actions payload that carries a "view" happened INSIDE
+            # a still-open modal (dispatch_action on Team(s) checkboxes) —
+            # must respond synchronously with the refreshed view; there's no
+            # response_url/views.update equivalent for "this modal is still
+            # being filled out, update it in place" the way there is for a
+            # final view_submission.
+            live_action = (payload.get("actions") or [{}])[0]
+            if live_action.get("action_id") == "team_checks":
+                team_id       = (payload.get("team") or {}).get("id", "")
+                slack_user_id = (payload.get("user") or {}).get("id", "")
+                selected      = live_action.get("selected_options") or []
+                team_codes    = [o.get("value") for o in selected if o.get("value")]
+                slash = SlackSlashCommandView()
+                team_names = [slash._TEAM_MAP.get(c) for c in team_codes if slash._TEAM_MAP.get(c)]
+                try:
+                    preview_blocks = slash._build_team_assets_preview_blocks(team_id, slack_user_id, team_names)
+                except Exception:
+                    logger.exception("[SlackInteractivity] team_checks live preview failed")
+                    preview_blocks = [{"type": "section", "text": {"type": "mrkdwn",
+                        "text": "_Could not load assets/vulns preview for the selected team(s)._"}}]
+                new_view = slash._build_adduser_modal(selected_teams=team_codes, preview_blocks=preview_blocks)
+                return Response({"response_action": "update", "view": new_view}, status=200)
+            return Response({}, status=200)
 
         if ptype != "block_actions":
             self._debug_write(f"post(): ignored type={ptype}")
