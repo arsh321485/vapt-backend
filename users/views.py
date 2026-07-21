@@ -27,6 +27,9 @@ def _http_post(url, **kwargs):
     timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
     return requests.post(url, timeout=timeout, **kwargs)
 
+def _picker_cache_key(view_id):
+    return f"slack_adduser_picker:{view_id}"
+
 def _find_by_action_id(values, action_id):
     """
     Look up a block_actions/view_submission `values` entry by action_id
@@ -9742,7 +9745,13 @@ class SlackSlashCommandView(APIView):
         return {
             "type": "modal",
             "callback_id": "modal_adduser_submit",
-            "private_metadata": json.dumps(state) if state else "",
+            # NOT the full picker state — Slack hard-caps private_metadata at
+            # 3000 chars, and 53+ vuln ids (host||long plugin name) alone
+            # blow past that, which made Slack reject the ENTIRE views.update
+            # with invalid_arguments (confirmed via debug log) the moment
+            # "Select All" vulns was clicked. State now lives server-side in
+            # Django's cache, keyed by view id — see _picker_cache_key.
+            "private_metadata": "",
             "title": {"type": "plain_text", "text": "Add User"},
             "submit": {"type": "plain_text", "text": "Add User"},
             "close": {"type": "plain_text", "text": "Cancel"},
@@ -14310,18 +14319,20 @@ class SlackInteractivityView(APIView):
                 else:
                     text = f"<@{target_uid}> {user_type} " + " ".join(team_codes)
                     # Assets/vulns picked in the checkbox pickers (if any) —
-                    # round-tripped through private_metadata across page
-                    # flips by _handle_adduser_modal_live, same as team_codes
-                    # itself is tracked there for pagination purposes.
+                    # round-tripped server-side (Django cache, keyed by view
+                    # id) across page flips by _handle_adduser_modal_live,
+                    # same as team_codes itself is tracked there for
+                    # pagination purposes. NOT private_metadata — Slack
+                    # hard-caps that at 3000 chars, which 53+ vuln ids alone
+                    # can exceed.
                     role_assignments = None
-                    try:
-                        picker_state = json.loads(view.get("private_metadata") or "{}")
-                        sel_assets = picker_state.get("sel_assets") or []
-                        sel_vulns = picker_state.get("sel_vulns") or []
-                        if sel_assets or sel_vulns:
-                            role_assignments = {"assets": sel_assets, "vulnerabilities": sel_vulns}
-                    except (ValueError, TypeError):
-                        pass
+                    view_id = view.get("id", "")
+                    picker_state = cache.get(_picker_cache_key(view_id)) or {}
+                    sel_assets = picker_state.get("sel_assets") or []
+                    sel_vulns = picker_state.get("sel_vulns") or []
+                    if sel_assets or sel_vulns:
+                        role_assignments = {"assets": sel_assets, "vulnerabilities": sel_vulns}
+                    cache.delete(_picker_cache_key(view_id))
                     blocks = slash._cmd_adduser(text, team_id, slack_user_id, role_assignments=role_assignments)
             elif callback_id == "modal_deleteuser_submit":
                 target_uid = ((values.get("user_block") or {}).get("user_select") or {}).get("selected_user", "")
@@ -14385,10 +14396,12 @@ class SlackInteractivityView(APIView):
         response_action built the right blocks but never visibly updated
         the modal).
 
-        Selections are round-tripped through the modal's private_metadata
-        as JSON — Slack's view.state.values only reflects elements
-        CURRENTLY rendered, so a selection made on page 1 of the Assets
-        picker would otherwise be forgotten the moment page 2 is shown.
+        Selections are round-tripped server-side via Django's cache, keyed
+        by view id (NOT private_metadata — Slack hard-caps that at 3000
+        chars, and 53+ vuln ids alone blow past it, silently failing the
+        whole views.update). Slack's view.state.values only reflects
+        elements CURRENTLY rendered, so a selection made on page 1 of the
+        Assets picker would otherwise be forgotten the moment page 2 is shown.
         """
         view          = payload.get("view") or {}
         view_id       = view.get("id", "")
@@ -14397,10 +14410,7 @@ class SlackInteractivityView(APIView):
         live_action   = (payload.get("actions") or [{}])[0]
         action_id     = live_action.get("action_id", "")
 
-        try:
-            state = json.loads(view.get("private_metadata") or "{}")
-        except (ValueError, TypeError):
-            state = {}
+        state = cache.get(_picker_cache_key(view_id)) or {}
         state.setdefault("teams", [])
         state.setdefault("asset_page", 0)
         state.setdefault("vuln_page", 0)
@@ -14481,6 +14491,8 @@ class SlackInteractivityView(APIView):
             f"sel_assets={len(state.get('sel_assets') or [])} sel_vulns={len(state.get('sel_vulns') or [])} "
             f"assets_list={len(assets_list)} vulns_list={len(vulns_list)}"
         )
+
+        cache.set(_picker_cache_key(view_id), state, timeout=1800)
 
         bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
         if not bot_token or not view_id:
