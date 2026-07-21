@@ -7839,6 +7839,289 @@ def _build_team_overview_html(data):
     return _TEAM_OVERVIEW_HTML_HEAD + body + "</body>\n</html>"
 
 
+_TEAM_PERFORMANCE_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Team Performance Monitoring | VaptFix</title>
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --slack-text: #1d1c1d;
+      --slack-sub: #616061;
+      --slack-border: #e8e8e8;
+      --team-blue: #2563eb;
+      --critical: #e01e5a;
+      --high: #e8912d;
+      --medium: #ecb22e;
+      --low: #2eb67d;
+      --closed: #16a34a;
+      --open: #dc2626;
+      --closure: #ea580c;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Lato", "Segoe UI", sans-serif;
+      background: #f4f6f8;
+      color: var(--slack-text);
+      font-size: 15px;
+      min-height: 100vh;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+    .dash {
+      width: 100%;
+      max-width: 760px;
+      border: 1px solid var(--slack-border);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,.05);
+      background: #fff;
+    }
+    .dash-top {
+      padding: 18px 22px;
+      background: #fff;
+      border-bottom: 1px solid var(--slack-border);
+    }
+    .dash-top h2 { font-size: 19px; font-weight: 900; }
+    .dash-top p { font-size: 13px; color: var(--slack-sub); margin-top: 2px; }
+    .panel-body { padding: 16px; background: #f4f6f8; }
+    .team-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .team-card {
+      background: #fff;
+      border-radius: 12px;
+      border: 1px solid var(--slack-border);
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+      overflow: hidden;
+    }
+    .team-card::before {
+      content: "";
+      display: block;
+      height: 3px;
+      background: linear-gradient(90deg, #6366f1, #3b82f6);
+    }
+    .team-card-inner { padding: 14px 16px 16px; }
+    .team-title {
+      font-size: 14px;
+      font-weight: 900;
+      color: var(--team-blue);
+      line-height: 1.3;
+    }
+    .team-subtitle {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--slack-sub);
+      margin-top: 2px;
+      margin-bottom: 12px;
+    }
+    .metrics-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .metric { text-align: center; }
+    .metric .label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--slack-sub);
+      margin-bottom: 3px;
+    }
+    .metric .value {
+      font-size: 20px;
+      font-weight: 900;
+      line-height: 1.1;
+    }
+    .metric.closure .value { color: var(--closure); }
+    .metric.closed .value { color: var(--closed); }
+    .metric.open .value { color: var(--open); }
+    .closure-icon {
+      display: inline-block;
+      font-size: 11px;
+      margin-left: 2px;
+      vertical-align: middle;
+      opacity: .7;
+    }
+    .sev-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--slack-sub);
+      margin-bottom: 6px;
+    }
+    .sev-bar {
+      display: flex;
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      background: #e8e8e8;
+      margin-bottom: 10px;
+    }
+    .sev-bar .seg { height: 100%; min-width: 0; }
+    .sev-bar .seg.critical { background: var(--critical); }
+    .sev-bar .seg.high { background: var(--high); }
+    .sev-bar .seg.medium { background: var(--medium); }
+    .sev-bar .seg.low { background: var(--low); }
+    .sev-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+    .sev-box {
+      border-radius: 8px;
+      padding: 6px 4px;
+      text-align: center;
+    }
+    .sev-box .name {
+      font-size: 8px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+      margin-bottom: 2px;
+    }
+    .sev-box .count {
+      font-size: 16px;
+      font-weight: 900;
+      line-height: 1.1;
+    }
+    .sev-box.critical { background: #fde8ef; }
+    .sev-box.critical .name { color: #b91c4a; }
+    .sev-box.critical .count { color: var(--critical); }
+    .sev-box.high { background: #fff4e6; }
+    .sev-box.high .name { color: #b56a1a; }
+    .sev-box.high .count { color: var(--high); }
+    .sev-box.medium { background: #fffbeb; }
+    .sev-box.medium .name { color: #9a7b12; }
+    .sev-box.medium .count { color: var(--medium); }
+    .sev-box.low { background: #eefaf4; }
+    .sev-box.low .name { color: #1f7a52; }
+    .sev-box.low .count { color: var(--low); }
+    .no-data {
+      grid-column: 1 / -1;
+      text-align: center;
+      color: var(--slack-sub);
+      font-size: 13px;
+      padding: 24px 8px;
+    }
+  </style>
+</head>
+<body>
+"""
+
+_TEAM_PERF_META = [
+    ("Network Security", "Network Security Team", "Infrastructure Focus"),
+    ("Patch Management", "Patch Management Team", "Lifecycle Management"),
+    ("Configuration Management", "Configuration Management Team", "System Configuration"),
+    ("Architectural Flaws", "Architectural Flaws Team", "Design & Architecture"),
+]
+
+
+def _build_team_performance_html(data):
+    """
+    Render team-performance.html design with live distribution-by-team/detail data.
+    """
+    teams_raw = data.get("teams") or data.get("results") or {}
+    if isinstance(teams_raw, list):
+        teams_map = {
+            (t.get("team_name") or t.get("name") or ""): t
+            for t in teams_raw
+        }
+    elif isinstance(teams_raw, dict):
+        teams_map = teams_raw
+    else:
+        teams_map = {}
+
+    # Case-insensitive lookup
+    lower_map = {(k or "").strip().lower(): v for k, v in teams_map.items()}
+
+    def _sev_counts(stats):
+        by_risk = stats.get("by_risk") or {}
+        return {
+            "critical": int(by_risk.get("Critical") or by_risk.get("critical") or 0),
+            "high": int(by_risk.get("High") or by_risk.get("high") or 0),
+            "medium": int(by_risk.get("Medium") or by_risk.get("medium") or 0),
+            "low": int(by_risk.get("Low") or by_risk.get("low") or 0),
+        }
+
+    def _render_bar(severity):
+        total = sum(severity.values())
+        if total <= 0:
+            return '<div class="sev-bar"></div>'
+        order = ["critical", "high", "medium", "low"]
+        segs = "".join(
+            f'<div class="seg {k}" style="width:{(severity[k] / total) * 100:.2f}%"></div>'
+            for k in order if severity[k] > 0
+        )
+        return f'<div class="sev-bar">{segs}</div>'
+
+    def _render_sev_boxes(severity):
+        labels = (("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low"))
+        return "".join(
+            f'<div class="sev-box {k}"><div class="name">{label}</div>'
+            f'<div class="count">{severity[k]}</div></div>'
+            for k, label in labels
+        )
+
+    cards = []
+    for api_name, display_name, subtitle in _TEAM_PERF_META:
+        stats = lower_map.get(api_name.lower()) or {}
+        total = int(stats.get("total") or 0)
+        open_v = int(stats.get("open") or 0)
+        closed = int(stats.get("closed") or 0)
+        rate = round((closed / total) * 100) if total else 0
+        severity = _sev_counts(stats)
+        cards.append(f"""
+      <div class="team-card">
+        <div class="team-card-inner">
+          <div class="team-title">{display_name}</div>
+          <div class="team-subtitle">{subtitle}</div>
+          <div class="metrics-row">
+            <div class="metric closure">
+              <div class="label">Closure Rate</div>
+              <div class="value">{rate}%<span class="closure-icon">📉</span></div>
+            </div>
+            <div class="metric closed">
+              <div class="label">Closed</div>
+              <div class="value">{closed}</div>
+            </div>
+            <div class="metric open">
+              <div class="label">Open</div>
+              <div class="value">{open_v}</div>
+            </div>
+          </div>
+          <div class="sev-label">Severity Breakdown</div>
+          {_render_bar(severity)}
+          <div class="sev-grid">{_render_sev_boxes(severity)}</div>
+        </div>
+      </div>""")
+
+    grid_html = "".join(cards) if cards else '<p class="no-data">No team data available.</p>'
+    body = f"""  <div class="dash">
+    <div class="dash-top">
+      <h2>📈 Team Performance Monitoring</h2>
+      <p>Per-team closure rate, open/closed counts, and severity breakdown across all teams.</p>
+    </div>
+    <div class="panel-body">
+      <div class="team-grid">{grid_html}
+      </div>
+    </div>
+  </div>
+"""
+    return _TEAM_PERFORMANCE_HTML_HEAD + body + "</body>\n</html>"
+
+
 _SUPPORT_HTML_HEAD = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8008,15 +8291,22 @@ def _build_vulnstats_html(data):
 def _dashboard_png_bytes(html, selector=".dash"):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        browser = p.chromium.launch(args=["--no-sandbox"])
+        browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
         try:
-            # device_scale_factor=2 renders at 2x pixel density (retina-style)
-            # — Slack still displays the image at the same on-screen width,
-            # but the text is twice as sharp instead of looking blurry/small.
-            page = browser.new_page(viewport={"width": 900, "height": 200}, device_scale_factor=2)
+            # device_scale_factor=2 → retina-sharp text in Slack (same CSS width, 2x pixels).
+            # Wider viewport for 2-column team cards so text stays crisp, not squeezed.
+            page = browser.new_page(viewport={"width": 840, "height": 200}, device_scale_factor=2)
             page.set_content(html, wait_until="networkidle")
+            # Let webfonts (Lato) finish applying before screenshot.
+            try:
+                page.evaluate("() => document.fonts && document.fonts.ready")
+            except Exception:
+                pass
+            page.wait_for_timeout(250)
             el = page.query_selector(selector)
-            png_bytes = el.screenshot()
+            if not el:
+                raise RuntimeError(f"Selector {selector!r} not found in rendered HTML")
+            png_bytes = el.screenshot(type="png")
         finally:
             browser.close()
     return png_bytes
@@ -8084,6 +8374,12 @@ class SlackDashboardImageView(APIView):
             )
             html = _build_team_overview_html(data)
             selector = ".wrapper"
+        elif kind == "teamperf":
+            data = slash._call_api(
+                "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
+            )
+            html = _build_team_performance_html(data if isinstance(data, dict) else {})
+            selector = ".dash"
         elif kind == "support":
             report_id = slash._get_workspace_report_id(team_id)
             data = (
@@ -8425,11 +8721,9 @@ class SlackSlashCommandView(APIView):
     # ── Command handlers ──────────────────────────────────────────────────
 
     def _cmd_teamoverview(self, text, team_id, user_id):
-        data = self._call_api(
-            "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
-            slack_user_id=user_id,
-        )
-        return self._format_teamoverview(data)
+        return [self._dashboard_image_block(
+            team_id, kind="teamperf", alt_text="Team Performance Monitoring",
+        )]
 
     def _cmd_vulnstats(self, text, team_id, user_id):
         data = self._call_api(
@@ -8534,11 +8828,9 @@ class SlackSlashCommandView(APIView):
                 self._team_subtab_blocks("team_sub_team", team_id, user_id)
 
         if action_id == "nav_teamperf":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/distribution-by-team/detail/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_teamoverview(data)
+            return [self._dashboard_image_block(
+                team_id, kind="teamperf", alt_text="Team Performance Monitoring",
+            )]
 
         if action_id == "nav_support":
             return self._support_tab_blocks(team_id, user_id)
@@ -13545,6 +13837,8 @@ class SlackInteractivityView(APIView):
         def team_names():
             return [slash._TEAM_MAP.get(c) for c in state["teams"] if slash._TEAM_MAP.get(c)]
 
+        self._debug_write(f"_handle_adduser_modal_live: start action={action_id} teams={state['teams']}")
+
         try:
             if action_id == "team_checks":
                 selected = live_action.get("selected_options") or []
@@ -13596,8 +13890,16 @@ class SlackInteractivityView(APIView):
             else:
                 return
         except Exception:
+            import traceback
             logger.exception(f"[SlackInteractivity] adduser modal live ({action_id}) failed")
+            self._debug_write(f"_handle_adduser_modal_live: EXCEPTION action={action_id}\n{traceback.format_exc()}")
             return
+
+        self._debug_write(
+            f"_handle_adduser_modal_live: computed action={action_id} "
+            f"sel_assets={len(state.get('sel_assets') or [])} sel_vulns={len(state.get('sel_vulns') or [])} "
+            f"assets_list={len(assets_list)} vulns_list={len(vulns_list)}"
+        )
 
         bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
         if not bot_token or not view_id:
