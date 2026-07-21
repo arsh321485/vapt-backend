@@ -12577,34 +12577,17 @@ class SlackInteractivityView(APIView):
 
         if ptype == "block_actions" and payload.get("view"):
             # A block_actions payload that carries a "view" happened INSIDE
-            # a still-open modal (dispatch_action on Team(s) checkboxes) —
-            # must respond synchronously with the refreshed view; there's no
-            # response_url/views.update equivalent for "this modal is still
-            # being filled out, update it in place" the way there is for a
-            # final view_submission.
+            # a still-open modal (dispatch_action on Team(s) checkboxes).
+            # NOTE: unlike view_submission, Slack does NOT honor
+            # response_action in the direct HTTP response for block_actions
+            # — confirmed empirically (backend built+returned the update
+            # correctly per debug log, but the modal never visibly changed).
+            # The only real way to update an already-open modal from a
+            # block_actions event is an explicit views.update API call.
             live_action = (payload.get("actions") or [{}])[0]
             self._debug_write(f"post(): live modal block_actions action_id={live_action.get('action_id')!r} raw={live_action!r}")
             if live_action.get("action_id") == "team_checks":
-                team_id       = (payload.get("team") or {}).get("id", "")
-                slack_user_id = (payload.get("user") or {}).get("id", "")
-                selected      = live_action.get("selected_options") or []
-                team_codes    = [o.get("value") for o in selected if o.get("value")]
-                slash = SlackSlashCommandView()
-                team_names = [slash._TEAM_MAP.get(c) for c in team_codes if slash._TEAM_MAP.get(c)]
-                self._debug_write(f"post(): team_checks team_codes={team_codes} team_names={team_names}")
-                try:
-                    import time as _time
-                    _t0 = _time.time()
-                    preview_blocks = slash._build_team_assets_preview_blocks(team_id, slack_user_id, team_names)
-                    self._debug_write(f"post(): team_checks preview built in {_time.time() - _t0:.2f}s, blocks={len(preview_blocks)}")
-                except Exception as exc:
-                    logger.exception("[SlackInteractivity] team_checks live preview failed")
-                    self._debug_write(f"post(): team_checks preview EXCEPTION: {exc!r}")
-                    preview_blocks = [{"type": "section", "text": {"type": "mrkdwn",
-                        "text": "_Could not load assets/vulns preview for the selected team(s)._"}}]
-                new_view = slash._build_adduser_modal(selected_teams=team_codes, preview_blocks=preview_blocks)
-                self._debug_write(f"post(): team_checks returning response_action=update, view_blocks={len(new_view.get('blocks') or [])}")
-                return Response({"response_action": "update", "view": new_view}, status=200)
+                threading.Thread(target=self._handle_team_checks_live, args=(payload,), daemon=True).start()
             return Response({}, status=200)
 
         if ptype != "block_actions":
@@ -13385,3 +13368,42 @@ class SlackInteractivityView(APIView):
             timeout=10,
         )
         self._debug_write(f"_handle_view_submission: {callback_id} views.update -> {getattr(resp, 'text', None)}")
+
+    def _handle_team_checks_live(self, payload):
+        """
+        Live-updates the still-open Add User modal as Team(s) checkboxes are
+        (un)checked (dispatch_action) — via an explicit views.update call,
+        since response_action in the direct HTTP response only works for
+        view_submission/view_closed, not block_actions (confirmed: the
+        earlier response_action attempt built the right blocks per the
+        debug log but never visibly updated the modal).
+        """
+        view          = payload.get("view") or {}
+        view_id       = view.get("id", "")
+        team_id       = (payload.get("team") or {}).get("id", "")
+        slack_user_id = (payload.get("user") or {}).get("id", "")
+        live_action   = (payload.get("actions") or [{}])[0]
+        selected      = live_action.get("selected_options") or []
+        team_codes    = [o.get("value") for o in selected if o.get("value")]
+
+        slash = SlackSlashCommandView()
+        team_names = [slash._TEAM_MAP.get(c) for c in team_codes if slash._TEAM_MAP.get(c)]
+        try:
+            preview_blocks = slash._build_team_assets_preview_blocks(team_id, slack_user_id, team_names)
+        except Exception:
+            logger.exception("[SlackInteractivity] team_checks live preview failed")
+            preview_blocks = [{"type": "section", "text": {"type": "mrkdwn",
+                "text": "_Could not load assets/vulns preview for the selected team(s)._"}}]
+
+        bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+        if not bot_token or not view_id:
+            self._debug_write("_handle_team_checks_live: missing bot_token or view_id")
+            return
+        new_view = slash._build_adduser_modal(selected_teams=team_codes, preview_blocks=preview_blocks)
+        resp = _http_post(
+            "https://slack.com/api/views.update",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            json={"view_id": view_id, "view": new_view},  # no "hash" — same stale-hash lesson as above
+            timeout=10,
+        )
+        self._debug_write(f"_handle_team_checks_live: views.update -> {getattr(resp, 'text', None)}")
