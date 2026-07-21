@@ -12583,6 +12583,7 @@ class SlackInteractivityView(APIView):
             # being filled out, update it in place" the way there is for a
             # final view_submission.
             live_action = (payload.get("actions") or [{}])[0]
+            self._debug_write(f"post(): live modal block_actions action_id={live_action.get('action_id')!r} raw={live_action!r}")
             if live_action.get("action_id") == "team_checks":
                 team_id       = (payload.get("team") or {}).get("id", "")
                 slack_user_id = (payload.get("user") or {}).get("id", "")
@@ -12590,13 +12591,19 @@ class SlackInteractivityView(APIView):
                 team_codes    = [o.get("value") for o in selected if o.get("value")]
                 slash = SlackSlashCommandView()
                 team_names = [slash._TEAM_MAP.get(c) for c in team_codes if slash._TEAM_MAP.get(c)]
+                self._debug_write(f"post(): team_checks team_codes={team_codes} team_names={team_names}")
                 try:
+                    import time as _time
+                    _t0 = _time.time()
                     preview_blocks = slash._build_team_assets_preview_blocks(team_id, slack_user_id, team_names)
-                except Exception:
+                    self._debug_write(f"post(): team_checks preview built in {_time.time() - _t0:.2f}s, blocks={len(preview_blocks)}")
+                except Exception as exc:
                     logger.exception("[SlackInteractivity] team_checks live preview failed")
+                    self._debug_write(f"post(): team_checks preview EXCEPTION: {exc!r}")
                     preview_blocks = [{"type": "section", "text": {"type": "mrkdwn",
                         "text": "_Could not load assets/vulns preview for the selected team(s)._"}}]
                 new_view = slash._build_adduser_modal(selected_teams=team_codes, preview_blocks=preview_blocks)
+                self._debug_write(f"post(): team_checks returning response_action=update, view_blocks={len(new_view.get('blocks') or [])}")
                 return Response({"response_action": "update", "view": new_view}, status=200)
             return Response({}, status=200)
 
