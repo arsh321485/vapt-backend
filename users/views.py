@@ -8820,7 +8820,7 @@ class SlackSlashCommandView(APIView):
             ) or "No open vulnerabilities"
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"🖥 `{host}`\n      {c['total']} Vulns\n      {counts_txt}"},
+                "text": {"type": "mrkdwn", "text": f"🖥 `{host}`  |  *{c['total']} Vulns*\n      {counts_txt}"},
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
