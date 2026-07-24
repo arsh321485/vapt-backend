@@ -8809,7 +8809,6 @@ class SlackSlashCommandView(APIView):
     _NAV_ITEMS = [
         ("nav_home",     "🏠 Home"),
         ("nav_fix",      "🔧 Fix"),
-        ("nav_admin_demo", "🧪 Admin Demo"),
         ("nav_register", "📋 Register"),
         ("nav_team",     "👥 Team"),
         ("nav_request",  "📨 Request"),
@@ -8826,13 +8825,6 @@ class SlackSlashCommandView(APIView):
         ("team_sub_externaluser", "🌐 External User"),
     ]
 
-    # Sub-tabs shown under the "All Vulnerabilities" nav tab specifically.
-    _ALLVULN_SUBTABS = [
-        ("av_sub_list",     "📋 All Vulns"),
-        ("av_sub_stats",    "📊 Statistics"),
-        ("av_sub_support",  "🎫 Support"),
-    ]
-
     # Sub-tabs shown under the standalone "Request" nav tab — moved out of
     # Admin Demo so timeline-extension approve/reject has its own home.
     _REQUEST_SUBTABS = [
@@ -8845,7 +8837,6 @@ class SlackSlashCommandView(APIView):
         ("fix_sub_assets", "🖥 All Assets"),
         ("fix_sub_vulns",  "📋 All Vulnerabilities"),
         ("fix_sub_common", "🧩 Common Vulns"),
-        ("fix_sub_details", "🔍 Vuln Details"),
     ]
 
     # Common Vulns — team filter keys (clickable category cards in Slack).
@@ -9223,10 +9214,6 @@ class SlackSlashCommandView(APIView):
             return self._fix_subnav_block(active_sub="fix_sub_assets") + \
                 self._fix_subtab_blocks("fix_sub_assets", team_id, user_id)
 
-        if action_id == "nav_admin_demo":
-            return self._allvuln_subnav_block(active_sub="av_sub_list") + \
-                self._allvuln_subtab_blocks("av_sub_list", team_id, user_id)
-
         if action_id == "nav_register":
             return self._register_subnav_block(active_sub="reg_sub_register") + \
                 self._register_subtab_blocks("reg_sub_register", team_id, user_id)
@@ -9272,36 +9259,6 @@ class SlackSlashCommandView(APIView):
         # in from the standalone nav_teamperf tab) instead of Team Overview.
         return [self._dashboard_image_block(team_id, kind="teamperf", alt_text="Team Performance Monitoring")]
 
-    def _allvuln_subnav_block(self, active_sub=None):
-        """Second-level button row(s) shown under the 'All Vulnerabilities' nav tab."""
-        return self._button_row_blocks(self._ALLVULN_SUBTABS, active_action_id=active_sub)
-
-    def _allvuln_subtab_blocks(self, sub_action_id, team_id, user_id):
-        """
-        Content for the 'All Vulnerabilities' sub-tabs. Approve/Reject moved
-        to the standalone Request tab (_request_subtab_blocks); Timeline Ext.
-        and the full interactive Support tab moved to Notification
-        (_notification_subtab_blocks); Vuln Details moved to Fix
-        (_fix_subtab_blocks) — see those instead.
-        """
-        if sub_action_id == "av_sub_stats":
-            # Real vulnerability-stats.html design, rendered as an image —
-            # pure display, no per-row input needed.
-            return [self._dashboard_image_block(team_id, kind="stats", alt_text="Vulnerability Statistics")]
-
-        if sub_action_id == "av_sub_support":
-            # Real support-requests.html design, rendered as an image — pure
-            # display, no per-row input needed, so no interactivity is lost.
-            # (Distinct from the full interactive Support tab that moved to
-            # Notification — this is just the summary snapshot image.)
-            return [self._dashboard_image_block(team_id, kind="support", alt_text="Support Requests")]
-
-        # av_sub_list (default)
-        data = self._call_api(
-            "/api/admin/adminregister/register/latest/vulns/", team_id,
-            slack_user_id=user_id,
-        )
-        return self._format_vulndata_list(data)
 
     def _request_subnav_block(self, active_sub=None):
         """Second-level button row under the standalone 'Request' nav tab: Approve | Reject."""
@@ -9577,15 +9534,6 @@ class SlackSlashCommandView(APIView):
 
         if sub_action_id == "fix_sub_common":
             return self._common_vulns_tab_blocks(team_id, user_id)
-
-        if sub_action_id == "fix_sub_details":
-            # Moved in from Admin Demo's old "Vuln Details" sub-tab (av_sub_details)
-            # — same underlying list/detail view, unchanged.
-            data = self._call_api(
-                "/api/admin/adminregister/register/latest/vulns/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_vulndata_list(data, origin="fixdetails")
 
         # fix_sub_assets (default)
         data = self._call_api(
@@ -10223,9 +10171,9 @@ class SlackSlashCommandView(APIView):
     # Fix, and Fix's own All Vulnerabilities/All Assets funnel through here
     # too, so a single hardcoded fallback was wrong for 3 of the 4 origins).
     _VULN_DETAIL_ORIGINS = {
-        "fixdetails": ("nav_fix", "fix_sub_details"),
         "fixvulns":   ("nav_fix", "fix_sub_vulns"),
         "fixassets":  ("nav_fix", "fix_sub_assets"),
+        "register":   ("nav_register", "reg_sub_register"),
     }
 
     def _parse_vuln_detail_action_value(self, value):
@@ -14599,20 +14547,15 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id.startswith("view_vulndata_pg_"):
-                # value format here is just "offset" — admin-channel command,
-                # re-fetched with the admin token (not a team member token).
-                # Nav rows are prepended so paginating from the All
-                # Vulnerabilities tab doesn't wipe out the tab bar — harmless
-                # when reached via plain /vulndata too.
+                # value format here is just "offset" — plain /vulndata
+                # admin-channel command pagination, re-fetched with the admin
+                # token (not a team member token). No nav bar — this is a
+                # standalone text command, not a tab.
                 page_offset = int(value) if value.isdigit() else 0
                 vd_data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
-                blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
-                    + slash._allvuln_subnav_block(active_sub="av_sub_list")
-                    + slash._format_vulndata_list(vd_data, offset=page_offset)
-                )
+                blocks = slash._format_vulndata_list(vd_data, offset=page_offset)
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -14703,7 +14646,12 @@ class SlackInteractivityView(APIView):
                 if not target:
                     content = slash._text_block(f"❌ Vulnerability `{sid}` not found.")
                 else:
-                    content = slash._allvuln_detail_blocks(target, "manual", team_id)
+                    # action_value tags "register" so the Manual/Automation
+                    # toggle buttons inside know to come back here, not fall
+                    # through to Admin Demo's default.
+                    content = slash._allvuln_detail_blocks(
+                        target, "manual", team_id, action_value=f"{sid}|register",
+                    )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_register")
                     + slash._register_subnav_block(active_sub="reg_sub_register")
@@ -15122,12 +15070,14 @@ class SlackInteractivityView(APIView):
                 elif origin_tag:
                     fallback_nav, fallback_sub = slash._VULN_DETAIL_ORIGINS[origin_tag]
                 else:
-                    # Plain sid, no tag — only Admin Demo's own "All Vulns"
-                    # (av_sub_list) still reaches this branch untagged.
-                    fallback_nav, fallback_sub = "nav_admin_demo", "av_sub_list"
-                fallback_subnav_block = (
-                    slash._fix_subnav_block if fallback_nav == "nav_fix" else slash._allvuln_subnav_block
-                )
+                    # Plain sid, no tag — only the standalone /vulndata
+                    # command (no tab of its own) still reaches this branch
+                    # untagged; Register is the closest remaining home.
+                    fallback_nav, fallback_sub = "nav_register", "reg_sub_register"
+                fallback_subnav_block = {
+                    "nav_fix": slash._fix_subnav_block,
+                    "nav_register": slash._register_subnav_block,
+                }.get(fallback_nav, slash._register_subnav_block)
 
                 if not target:
                     content = slash._text_block(f"❌ Vulnerability `{sid}` not found. Reopen the list and try again.")
@@ -15154,21 +15104,6 @@ class SlackInteractivityView(APIView):
                         + fallback_subnav_block(active_sub=fallback_sub)
                         + content
                     )
-                self._post_response_url(response_url, {
-                    "replace_original": True,
-                    "blocks": blocks,
-                }, action_id)
-                return
-
-            if action_id in dict(slash._ALLVULN_SUBTABS):
-                # av_sub_list / av_sub_stats / av_sub_support — plain content
-                # swap, keeping both nav rows (top-level + sub-tabs) on top.
-                content_blocks = slash._allvuln_subtab_blocks(action_id, team_id, slack_user_id)
-                blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
-                    + slash._allvuln_subnav_block(active_sub=action_id)
-                    + content_blocks
-                )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
