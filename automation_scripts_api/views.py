@@ -577,10 +577,22 @@ def user_download_script(request, plugin_id):
     if not full_path.exists():
         return Response({"error": f"Script file not found on server: {fix_script_path}"}, status=404)
 
+    now = datetime.datetime.utcnow().isoformat()
     with MongoContext() as db:
         db["automation_scripts"].update_one(
             {"plugin_id": int(plugin_id), "os": doc.get("os")},
             {"$inc": {"download_count": 1}}
+        )
+        # Per-user download record — lets user_download_stats show what THIS
+        # user downloaded, separate from the global (all-users) counter above.
+        db["script_user_downloads"].update_one(
+            {"plugin_id": int(plugin_id), "os": doc.get("os"), "user_email": request.user.email},
+            {
+                "$inc": {"download_count": 1},
+                "$set": {"last_downloaded_at": now},
+                "$setOnInsert": {"first_downloaded_at": now},
+            },
+            upsert=True,
         )
 
     return FileResponse(
@@ -600,6 +612,10 @@ def user_download_stats(request):
     report, then further filtered to the member's own assigned team(s).
     ?team=Patch+Management — narrow to one specific team when the member
     belongs to more than one (same convention as register/latest/vulns/).
+
+    "No. of Times Downloaded" here is THIS user's own download count
+    (from script_user_downloads), not the global all-users counter stored
+    on automation_scripts.download_count.
     """
     admin_id, admin_email, teams = _resolve_admin_and_teams(request)
     if not admin_id or not teams:
@@ -624,10 +640,26 @@ def user_download_stats(request):
 
         docs = list(db["automation_scripts"].find(
             {"plugin_id": {"$in": list(plugin_ids)}},
-            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1}
+            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1}
         ).sort("download_count", -1))
 
+        user_downloads = db["script_user_downloads"].find(
+            {"plugin_id": {"$in": list(plugin_ids)}, "user_email": request.user.email},
+            {"_id": 0, "plugin_id": 1, "os": 1, "download_count": 1},
+        )
+        my_count_by_key = {
+            (row["plugin_id"], (row.get("os") or "").strip().lower()): row.get("download_count", 0)
+            for row in user_downloads
+        }
+
+    # Replace the global counter with this user's own count before formatting,
+    # matched by (plugin_id, os) since a plugin_id can have multiple OS variants.
+    for d in docs:
+        key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
+        d["download_count"] = my_count_by_key.get(key, 0)
+
     stats = [s for s in _build_stats(docs, report_id=report_id) if s["team"].lower() in teams_lower]
+    stats.sort(key=lambda s: s["download_count"], reverse=True)
     return Response({
         "report_id": str(report_id),
         "teams": active_teams,
