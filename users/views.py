@@ -8814,6 +8814,7 @@ class SlackSlashCommandView(APIView):
         ("nav_team",     "👥 Team"),
         ("nav_teamperf", "📈 Team Performance"),
         ("nav_support",  "🎫 Support"),
+        ("nav_notification", "🔔 Notification"),
         ("nav_download", "📥 Download Report"),
     ]
 
@@ -8861,6 +8862,16 @@ class SlackSlashCommandView(APIView):
     _REGISTER_SUBTABS = [
         ("reg_sub_register", "📋 Register"),
         ("reg_sub_script",   "📜 Script"),
+    ]
+
+    # Sub-tabs shown under the "Notification" nav tab specifically — deadline
+    # urgency buckets computed from RiskCriteria SLA days, same formula used
+    # everywhere else in the app (risk_criteria/admindashboard/userdashboard).
+    _NOTIFICATION_SUBTABS = [
+        ("notif_sub_overdue",   "🔴 Overdue"),
+        ("notif_sub_today",     "🟠 Due Today"),
+        ("notif_sub_thisweek",  "🟡 This Week"),
+        ("notif_sub_nextweek",  "🟢 Next Week"),
     ]
 
     # Support tab — status + team filter keys (Slack Block Kit action values).
@@ -8949,6 +8960,7 @@ class SlackSlashCommandView(APIView):
                 "/support":          self._cmd_support,
                 "/extend":           self._cmd_extend,
                 "/scriptstats":      self._cmd_scriptstats,
+                "/deadlines":        self._cmd_deadlines,
             }
         else:
             return Response({
@@ -9225,6 +9237,10 @@ class SlackSlashCommandView(APIView):
         if action_id == "nav_support":
             return self._support_tab_blocks(team_id, user_id)
 
+        if action_id == "nav_notification":
+            return self._notification_subnav_block(active_sub="notif_sub_overdue") + \
+                self._notification_subtab_blocks("notif_sub_overdue", team_id, user_id)
+
         if action_id == "nav_download":
             # Uploads the report file to the channel as a side effect (same
             # as /downloadreport) and shows its confirmation card here too.
@@ -9395,6 +9411,135 @@ class SlackSlashCommandView(APIView):
         ):
             return self._text_block(f"❌ {vd_data.get('detail')}")
         return self._format_register_tab(vd_data, sev_filter="all", st_filter="all", offset=0)
+
+    def _parse_rc_days(self, raw_value):
+        """
+        Parses a RiskCriteria day-value string ("4 Days", "1 Week", "2") into
+        an int day count. Mirrors risk_criteria.views.parse_days — kept as a
+        tiny local copy so this file doesn't take a hard import dependency
+        on the risk_criteria app just for one small parser.
+        """
+        if raw_value is None:
+            return None
+        text = str(raw_value).strip().lower()
+        if not text:
+            return None
+        if text.isdigit():
+            return int(text)
+        import re as _re
+        total_days = 0
+        matched = False
+        week_match = _re.search(r"(\d+)\s*week", text)
+        if week_match:
+            total_days += int(week_match.group(1)) * 7
+            matched = True
+        day_match = _re.search(r"(\d+)\s*day|day\s*(\d+)", text)
+        if day_match:
+            num = day_match.group(1) or day_match.group(2)
+            total_days += int(num)
+            matched = True
+        return total_days if matched else None
+
+    def _bucket_deadline_rows(self, rows, rc_days):
+        """
+        Groups open vulnerability rows into deadline-urgency buckets using
+        the SAME formula the rest of the app uses for deadlines (RiskCriteria
+        SLA days per severity - elapsed calendar days since first_observation):
+          remaining_days < 0   -> overdue
+          remaining_days == 0  -> today
+          remaining_days 1-6   -> thisweek
+          remaining_days 7-13  -> nextweek
+          remaining_days > 13  -> excluded (not near-term enough for this view)
+        `rc_days` is {"critical": N, "high": N, "medium": N, "low": N} (ints).
+        Returns {"overdue": [...], "today": [...], "thisweek": [...], "nextweek": [...]}
+        each row annotated with "remaining_days".
+        """
+        from datetime import datetime, timezone as _tz
+
+        buckets = {"overdue": [], "today": [], "thisweek": [], "nextweek": []}
+        today = datetime.now(_tz.utc).date()
+
+        for row in rows:
+            status = (row.get("status") or "open").strip().lower()
+            if status == "closed":
+                continue
+
+            sev = (row.get("severity") or row.get("risk_factor") or "").strip().lower()
+            days = rc_days.get(sev)
+            if days is None:
+                continue
+
+            first_obs_raw = row.get("first_observation")
+            if not first_obs_raw:
+                continue
+            try:
+                first_obs = datetime.fromisoformat(str(first_obs_raw).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            first_obs_date = first_obs.date()
+
+            elapsed = max(0, (today - first_obs_date).days)
+            remaining_days = days - elapsed
+
+            row_out = dict(row, remaining_days=remaining_days)
+            if remaining_days < 0:
+                buckets["overdue"].append(row_out)
+            elif remaining_days == 0:
+                buckets["today"].append(row_out)
+            elif 1 <= remaining_days <= 6:
+                buckets["thisweek"].append(row_out)
+            elif 7 <= remaining_days <= 13:
+                buckets["nextweek"].append(row_out)
+            # > 13 days out — not shown in this near-term view
+
+        return buckets
+
+    def _notification_subnav_block(self, active_sub=None):
+        """Second-level button row under the 'Notification' nav tab."""
+        return self._button_row_blocks(self._NOTIFICATION_SUBTABS, active_action_id=active_sub)
+
+    def _notification_subtab_blocks(self, sub_action_id, team_id, user_id, offset=0):
+        """
+        Content for the 'Notification' sub-tabs — Overdue / Due Today /
+        This Week / Next Week deadline buckets. Reuses the same two APIs
+        the website's own deadline logic is built on: the register vuln
+        list (severity + first_observation per row) and the admin's
+        RiskCriteria (SLA days per severity) — no new backend endpoint.
+        """
+        bucket_key = {
+            "notif_sub_today":    "today",
+            "notif_sub_thisweek": "thisweek",
+            "notif_sub_nextweek": "nextweek",
+        }.get(sub_action_id, "overdue")
+
+        try:
+            vd_data = self._call_api(
+                "/api/admin/adminregister/register/latest/vulns/", team_id,
+                slack_user_id=user_id,
+            )
+            rc_data = self._call_api(
+                "/api/admin/risk_criteria/risks/", team_id,
+                slack_user_id=user_id,
+            )
+        except Exception as exc:
+            logger.exception("[notification_tab] fetch failed: %s", exc)
+            return self._text_block(f"❌ Could not load Notification data: `{exc}`")
+
+        rows = (vd_data.get("rows") or vd_data.get("results") or vd_data.get("vulnerabilities") or []) \
+            if isinstance(vd_data, dict) else (vd_data if isinstance(vd_data, list) else [])
+        rc_list = (rc_data.get("risk_criteria") or []) if isinstance(rc_data, dict) else []
+        if not rc_list:
+            return self._text_block("❌ No Risk Criteria configured yet — set it up under Risk Criteria first.")
+        rc = rc_list[0]
+        rc_days = {
+            "critical": self._parse_rc_days(rc.get("critical")),
+            "high":     self._parse_rc_days(rc.get("high")),
+            "medium":   self._parse_rc_days(rc.get("medium")),
+            "low":      self._parse_rc_days(rc.get("low")),
+        }
+
+        buckets = self._bucket_deadline_rows(rows, rc_days)
+        return self._format_notification_tab(bucket_key, buckets[bucket_key], offset=offset)
 
     def _fix_subtab_blocks(self, sub_action_id, team_id, user_id):
         """Content for the 'Fix' sub-tabs — All Assets, All Vulnerabilities,
@@ -12076,6 +12221,55 @@ class SlackSlashCommandView(APIView):
         matched_by_pid = {r.get("plugin_id"): r for r in results if r.get("matched")}
         return self._format_scriptstats(vulns, matched_by_pid, team_name)
 
+    def _cmd_deadlines(self, text, team_id, user_id, team_name):
+        """
+        /deadlines — Overdue / Due Today / This Week / Next Week buckets for
+        YOUR team's own assigned vulnerabilities. Same RiskCriteria-based
+        formula as the admin Notification tab, just team-filtered.
+        /deadlines [overdue|today|thisweek|nextweek] — jump to a bucket directly.
+        """
+        bucket_key = (text or "").strip().lower().replace(" ", "").replace("_", "")
+        bucket_map = {
+            "": "overdue", "overdue": "overdue",
+            "today": "today", "duetoday": "today",
+            "thisweek": "thisweek", "week": "thisweek",
+            "nextweek": "nextweek",
+        }
+        bucket_key = bucket_map.get(bucket_key, "overdue")
+
+        try:
+            vd_data = self._call_user_api(
+                "/api/user/register/register/latest/vulns/", team_id, user_id,
+                params={"team": team_name},
+            )
+            rc_data = self._call_user_api(
+                "/api/user/risk_criteria/risks/", team_id, user_id,
+            )
+        except Exception as exc:
+            logger.exception("[cmd_deadlines] fetch failed: %s", exc)
+            return self._text_block(f"❌ Could not load deadlines: `{exc}`")
+
+        if isinstance(vd_data, dict) and vd_data.get("detail") and "rows" not in vd_data:
+            return self._text_block(f"❌ {vd_data.get('detail')}")
+
+        rows = (vd_data.get("rows") or []) if isinstance(vd_data, dict) else []
+        team_lower = team_name.strip().lower()
+        rows = [r for r in rows if (r.get("assigned_team") or "").strip().lower() == team_lower]
+
+        rc_list = (rc_data.get("risk_criteria") or []) if isinstance(rc_data, dict) else []
+        if not rc_list:
+            return self._text_block("❌ No Risk Criteria configured yet for your admin.")
+        rc = rc_list[0]
+        rc_days = {
+            "critical": self._parse_rc_days(rc.get("critical")),
+            "high":     self._parse_rc_days(rc.get("high")),
+            "medium":   self._parse_rc_days(rc.get("medium")),
+            "low":      self._parse_rc_days(rc.get("low")),
+        }
+
+        buckets = self._bucket_deadline_rows(rows, rc_days)
+        return self._format_notification_tab(bucket_key, buckets[bucket_key], offset=0)
+
     # ── Formatters ────────────────────────────────────────────────────────
 
     def _text_block(self, text):
@@ -13174,6 +13368,81 @@ class SlackSlashCommandView(APIView):
             }
         )
         pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "script_list_pg")
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
+    def _format_notification_tab(self, bucket_key, rows, offset=0):
+        """
+        "Notification" nav tab sub-tabs — Overdue / Due Today / This Week /
+        Next Week. Each sub-tab is just a plain paginated list of the rows
+        already bucketed by _bucket_deadline_rows — no severity filter row
+        needed here since the bucket itself is the filter.
+        """
+        PAGE_SIZE = 5
+        titles = {
+            "overdue":  "🔴 Overdue",
+            "today":    "🟠 Due Today",
+            "thisweek": "🟡 Due This Week",
+            "nextweek": "🟢 Due Next Week",
+        }
+        count = len(rows)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = rows[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        def sev_icon(sev):
+            s = (sev or "").strip().lower()
+            return self._SEV_EMOJI_MAP.get(s, "⚪")
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": titles.get(bucket_key, "Notification"), "emoji": True}},
+            self._ctx("Deadline urgency, computed from your Risk Criteria SLA days."),
+            {"type": "divider"},
+        ]
+
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Nothing in this bucket right now.*"}})
+        else:
+            for idx, v in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sno = str(start_num + idx).zfill(2)
+                name = v.get("vul_name") or v.get("vulnerability_name") or v.get("plugin_name") or "Unknown"
+                asset = v.get("asset") or v.get("host_name") or "—"
+                sev = (v.get("severity") or v.get("risk_factor") or "").strip() or "—"
+                remaining = v.get("remaining_days", 0)
+                if bucket_key == "overdue":
+                    due_label = f"{abs(remaining)} day{'s' if abs(remaining) != 1 else ''} overdue"
+                elif remaining == 0:
+                    due_label = "Due today"
+                else:
+                    due_label = f"Due in {remaining} day{'s' if remaining != 1 else ''}"
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"*`{sno}`*  *{name}*\n"
+                                f"`{asset}`  |  {sev_icon(sev)} *{sev.upper()}*  |  *{due_label}*"
+                            ),
+                        },
+                    }
+                )
+
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Showing {start_num}-{end_num} of {count} results",
+                },
+            }
+        )
+        value_prefix = f"{bucket_key}|"
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "notif_list_pg", value_prefix=value_prefix)
         if pg_block:
             blocks.append(pg_block)
         return blocks
@@ -14437,6 +14706,46 @@ class SlackInteractivityView(APIView):
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_register")
                     + slash._register_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            # ── Notification tab (Overdue / Due Today / This Week / Next Week) ──
+            if action_id in dict(slash._NOTIFICATION_SUBTABS):
+                content_blocks = slash._notification_subtab_blocks(action_id, team_id, slack_user_id)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_notification")
+                    + slash._notification_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            if action_id.startswith("notif_list_pg_"):
+                # value format: "<bucket_key>|<offset>"
+                parts = value.split("|")
+                bucket_key = parts[0] if len(parts) > 0 and parts[0] else "overdue"
+                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                sub_action_id = {
+                    "today":    "notif_sub_today",
+                    "thisweek": "notif_sub_thisweek",
+                    "nextweek": "notif_sub_nextweek",
+                }.get(bucket_key, "notif_sub_overdue")
+                content_blocks = slash._notification_subtab_blocks(
+                    sub_action_id, team_id, slack_user_id, offset=page_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_notification")
+                    + slash._notification_subnav_block(active_sub=sub_action_id)
                     + content_blocks
                 )
                 self._post_response_url(
