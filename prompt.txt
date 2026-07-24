@@ -1,6 +1,22 @@
+1)  mujhe team vale tab me isme new sub title bnaya hai vha mujhe team user dekete vala tab chahihe jo user particular team se delete krne ke liye 
+
+meme aapko slack folder ke undr (delete user team.html) vala page diya hai design ke liye to mujhe vesa chahihe 
 
 
 
-jo risk Critical me set krte hai vali se critical high medium low ka aa rha hai na 
+for example mujhe particular team se se user ko delete krna hai 
+ritika user hai o pm cm dono hai to only mujhe pm se delete krna hai to vesa chahihe mujhe 
 
-ye confirm krao 
+allready website me vese uska api bnaya hai 
+
+
+2)
+jo notification vala tab hai usme support tab add krna hai jo notification ke left side hai o or bahr se remove krna hai o notification tab me chahihe mujhe 
+or 
+3)  admin demo tab jo timeline Ext. vala tab hai o mujhe notification tab me chahihe 
+
+5) team tab ke baju me Request tab bnana hai usne mujhe jo admin demo vale tav me approve or reject vala hai hai o request tab me chahihe 
+
+6) admin demo jo Vuln  Details vala tab hai o mujhe fix tab ke undr common vulns ke baju me chahihe 
+
+to plan btao fir code krna 
