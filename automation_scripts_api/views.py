@@ -71,6 +71,25 @@ def _normalize_team_display(raw):
     return text
 
 
+def _classify_automation(raw_value):
+    """
+    Maps the free-text `automation_possible` field to "full" | "partial" | None.
+    Raw values seen in the data: "Yes", "Yes [100%]" (full), "Partial" (partial),
+    and conditional strings like "Yes (if X unused) / Partial (if X in use)" —
+    treated as partial since full automation isn't guaranteed for every host.
+    None means unclassified (field missing) — caller should exclude these
+    from Full/Partial totals rather than guess.
+    """
+    text = (raw_value or "").strip().lower()
+    if not text:
+        return None
+    if "partial" in text:
+        return "partial"
+    if text.startswith("yes"):
+        return "full"
+    return None
+
+
 def _infer_team_from_name(vuln_name):
     """Keyword-based team when no vulnerability_cards match exists."""
     combined = (vuln_name or "").lower()
@@ -330,18 +349,23 @@ def _build_stats(docs, report_id=None):
     # A plugin_id's OS variants are split across docs: the "vulnerability"
     # doc carries severity, its sibling "...Fix — <OS>" script doc usually
     # doesn't. Build a plugin_id -> severity fallback from whichever variant
-    # in this same `docs` batch actually has one set.
+    # in this same `docs` batch actually has one set. Same split applies to
+    # automation_possible, so build the same fallback for it.
     severity_by_plugin = {}
+    category_by_plugin = {}
     for d in docs:
-        sev = (d.get("severity") or "").strip()
-        if not sev:
-            continue
         try:
             pid = int(d.get("plugin_id"))
         except (TypeError, ValueError):
             continue
-        if pid not in severity_by_plugin:
+
+        sev = (d.get("severity") or "").strip()
+        if sev and pid not in severity_by_plugin:
             severity_by_plugin[pid] = sev
+
+        cat = _classify_automation(d.get("automation_possible"))
+        if cat and pid not in category_by_plugin:
+            category_by_plugin[pid] = cat
 
     # Pass 1: name match (+ seed plugin map from successful name matches)
     provisional = []
@@ -373,12 +397,16 @@ def _build_stats(docs, report_id=None):
         severity = (d.get("severity") or "").strip()
         if not severity and pid is not None:
             severity = severity_by_plugin.get(pid, "")
+        category = _classify_automation(d.get("automation_possible"))
+        if not category and pid is not None:
+            category = category_by_plugin.get(pid)
         stats.append({
             "plugin_id": d.get("plugin_id"),
             "vulnerability": vuln,
             "severity": severity,
             "download_count": d.get("download_count", 0),
             "team": team,
+            "category": category,  # "full" | "partial" | None (unclassified)
         })
     return stats
 
@@ -481,7 +509,7 @@ def admin_download_stats(request):
 
         docs = list(db["automation_scripts"].find(
             {"plugin_id": {"$in": list(plugin_ids)}},
-            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1}
+            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1, "automation_possible": 1}
         ).sort("download_count", -1))
 
         team_count_by_key = {}
@@ -687,7 +715,7 @@ def user_download_stats(request):
 
         docs = list(db["automation_scripts"].find(
             {"plugin_id": {"$in": list(plugin_ids)}},
-            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1}
+            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1, "automation_possible": 1}
         ).sort("download_count", -1))
 
         user_downloads = db["script_user_downloads"].find(

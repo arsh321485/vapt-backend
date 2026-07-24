@@ -1,3 +1,16 @@
-https://vaptbackend.secureitlab.com/api/admin/automation-scripts/stats/
+Automations
+- Full - number - Critical - high - medium - low
 
-admin sahit pr bhi click kro ki lateset report ke accarding hi download count ho rha hai kya ?
+- Partial - number - Critical - high - medium - low
+
+
+mujhe slack ke plotform pr ek new tab bnana hai register ke bad Automations
+automations tab pr cilck krne ke bad  2 tab open honge 
+1 full 
+2 partial 
+
+to jese hi full pr cick krta hai to to full automated vali vulns hai o severity ke according filter hoke show hoga count krna hai 
+same as a partial ke liye bhi krna hai 
+
+
+to mujhe plan btao 
