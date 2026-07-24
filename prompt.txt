@@ -1,16 +1,17 @@
-Automations
-- Full - number - Critical - high - medium - low
+Plan: "Automations" Nav Tab (Full / Partial sub-tabs)
+Maine existing Register tab ka poora pattern study kar liya (severity-filter buttons with counts + paginated list + navbar wiring) — naya "Automations" tab exactly usi pattern ko follow karega:
 
-- Partial - number - Critical - high - medium - low
+Backend (automation_scripts_api/views.py): _build_stats() mein har row ko ek "category": "full"|"partial"|None field milega (sibling-fallback se automation_possible nikaal ke — pehle jaisa hi rule: Yes/Yes[100%]→full, Partial + conditional-strings→partial, missing→None/unclassified).
+
+Naya nav item: _NAV_ITEMS mein nav_register ke baad ("nav_automation", "🤖 Automation") add hoga.
+
+2 sub-tabs: _AUTOMATION_SUBTABS = [("auto_sub_full","✅ Full"), ("auto_sub_partial","🌓 Partial")] — Register ke "Register/Script" sub-tab jaisa hi button row.
+
+List view: har sub-tab mein severity filter row (All/Critical/High/Medium/Low, har button pe count inline, jaise Register ke status buttons mein hai) + paginated list (5/page) sirf us category (full/partial) ke scripts ki, jo select ki hui severity se match karti hain.
+
+Interactivity wiring: sub-tab click, severity-filter click (auto_sev_*), pagination click (auto_list_pg_*) — sab _handle_action mein Register tab jaisi hi dispatch add hogi.
+
+Ab implement karta hoon.
 
 
-mujhe slack ke plotform pr ek new tab bnana hai register ke bad Automations
-automations tab pr cilck krne ke bad  2 tab open honge 
-1 full 
-2 partial 
-
-to jese hi full pr cick krta hai to to full automated vali vulns hai o severity ke according filter hoke show hoga count krna hai 
-same as a partial ke liye bhi krna hai 
-
-
-to mujhe plan btao 
+jo api me modification kiya hai na usko undo kr do full and automation vala hai o 
