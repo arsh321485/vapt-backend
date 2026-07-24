@@ -6308,6 +6308,15 @@ class SlackEventsView(APIView):
                 return
             logger.info(f"[SlackEvent] Member email={email} name={user_data.get('real_name')}")
 
+            # Skip the admin themselves — the admin is a member of every
+            # auto-created workspace channel (they installed/authorized the
+            # app), so this event fires for their own join too. Without this
+            # check they'd get saved as their own "external" UserDetail with
+            # every team channel they belong to piling up in Member_role.
+            if email.strip().lower() == (getattr(admin, "email", "") or "").strip().lower():
+                logger.info(f"[SlackEvent] Skipping admin's own join event: {email}")
+                return
+
             name = user_data.get("real_name") or profile.get("display_name") or "Slack User"
             parts = name.strip().split()
             first_name = parts[0] if parts else "Slack"
@@ -9293,12 +9302,18 @@ class SlackSlashCommandView(APIView):
         )
         return self._format_vulndata_list(data)
 
-    def _allvuln_detail_blocks(self, v, sub, team_id):
+    def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None):
         """Manual / Automation Fix toggle for one specific vulnerability —
         both sides are strictly read-only for admins (no fix/run actions),
         matching the website's own admin-is-read-only behavior; whatever the
-        assigned team actually does shows up here live on next view."""
+        assigned team actually does shows up here live on next view.
+
+        action_value: optional button value for Manual/Automation (defaults to
+        short_id). Common-vuln asset flow passes sid|common|team|idx|… so the
+        toggle keeps Fix/Common navigation context.
+        """
         sid = v.get("short_id", "?")
+        btn_value = action_value if action_value is not None else sid
         toggle = {
             "type": "actions",
             "elements": [
@@ -9306,14 +9321,14 @@ class SlackSlashCommandView(APIView):
                     "type": "button",
                     "text": {"type": "plain_text", "text": "🛠 Manual", "emoji": True},
                     "action_id": "av_detail_manual",
-                    "value": sid,
+                    "value": btn_value,
                     **({"style": "primary"} if sub == "manual" else {}),
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "🤖 Automation Fix", "emoji": True},
                     "action_id": "av_detail_automation",
-                    "value": sid,
+                    "value": btn_value,
                     **({"style": "primary"} if sub == "automation" else {}),
                 },
             ],
@@ -9838,6 +9853,7 @@ class SlackSlashCommandView(APIView):
                 host = a.get("host") or "—"
                 os_name = a.get("os") or "—"
                 st = (a.get("status") or "open").lower()
+                safe_host = "".join(ch if ch.isalnum() else "_" for ch in str(host))[:30]
                 blocks.append({
                     "type": "context",
                     "elements": [
@@ -9850,6 +9866,12 @@ class SlackSlashCommandView(APIView):
                     "text": {
                         "type": "mrkdwn",
                         "text": f"OS: {os_name}  |  Status: *{st.capitalize()}*",
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": f"fix_common_asset_view_{offset + i}_{safe_host}",
+                        "value": f"{team_key}|{vuln_idx}|{list_offset}|{offset}|{host}",
                     },
                 })
                 blocks.append({"type": "divider"})
@@ -9868,6 +9890,53 @@ class SlackSlashCommandView(APIView):
         if pg_block:
             blocks.append(pg_block)
         return blocks
+
+    def _find_vuln_row_for_common_asset(self, rows, vuln_name, host):
+        """Match register/latest/vulns row by plugin name + host."""
+        vuln_name = (vuln_name or "").strip()
+        host = (host or "").strip()
+        for r in rows:
+            name = (r.get("vul_name") or r.get("plugin_name") or "").strip()
+            asset = (r.get("asset") or r.get("host_name") or "").strip()
+            if name == vuln_name and asset == host:
+                return r
+        return None
+
+    def _parse_vuln_detail_action_value(self, value):
+        """
+        Button value is either short_id, or
+        short_id|common|team_key|vuln_idx|list_offset|assets_offset
+        when opened from Common Vuln — Assets.
+        """
+        parts = (value or "").split("|")
+        sid = parts[0] if parts else (value or "")
+        common_ctx = None
+        if len(parts) >= 6 and parts[1] == "common":
+            common_ctx = {
+                "team_key": parts[2] if parts[2] in self._COMMON_TEAM_KEY_TO_NAME else "config",
+                "vuln_idx": int(parts[3]) if parts[3].isdigit() else 0,
+                "list_offset": int(parts[4]) if parts[4].isdigit() else 0,
+                "assets_offset": int(parts[5]) if parts[5].isdigit() else 0,
+            }
+        return sid, common_ctx
+
+    def _common_asset_vuln_detail_blocks(self, target, sub, team_id, common_ctx, action_value):
+        """Detail view opened from a Common Vuln asset row — Back returns to assets."""
+        back = {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "← Back to assets", "emoji": True},
+                "action_id": "fix_common_asset_detail_back",
+                "value": (
+                    f"{common_ctx['team_key']}|{common_ctx['vuln_idx']}|"
+                    f"{common_ctx['list_offset']}|{common_ctx['assets_offset']}"
+                ),
+            }],
+        }
+        return [back] + self._allvuln_detail_blocks(
+            target, sub, team_id, action_value=action_value,
+        )
 
     def _build_reject_modal(self, sid, vuln_label):
         """
@@ -14391,7 +14460,7 @@ class SlackInteractivityView(APIView):
                 action_id in ("view_allvuln_detail", "av_detail_manual", "av_detail_automation")
                 or action_id.startswith("view_allvuln_detail_")
             ):
-                sid = value
+                sid, common_ctx = slash._parse_vuln_detail_action_value(value)
                 vd_data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
@@ -14399,14 +14468,29 @@ class SlackInteractivityView(APIView):
                 target = next((r for r in rows if r.get("short_id") == sid), None)
                 if not target:
                     content = slash._text_block(f"❌ Vulnerability `{sid}` not found. Reopen All Vulnerabilities and try again.")
+                    blocks = (
+                        slash._nav_buttons_block(active_action_id="nav_admin_demo")
+                        + slash._allvuln_subnav_block(active_sub="av_sub_details")
+                        + content
+                    )
+                elif common_ctx:
+                    sub = "automation" if action_id == "av_detail_automation" else "manual"
+                    content = slash._common_asset_vuln_detail_blocks(
+                        target, sub, team_id, common_ctx, action_value=value,
+                    )
+                    blocks = (
+                        slash._nav_buttons_block(active_action_id="nav_fix")
+                        + slash._fix_subnav_block(active_sub="fix_sub_common")
+                        + content
+                    )
                 else:
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
                     content = slash._allvuln_detail_blocks(target, sub, team_id)
-                blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
-                    + slash._allvuln_subnav_block(active_sub="av_sub_details")
-                    + content
-                )
+                    blocks = (
+                        slash._nav_buttons_block(active_action_id="nav_admin_demo")
+                        + slash._allvuln_subnav_block(active_sub="av_sub_details")
+                        + content
+                    )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
@@ -14496,6 +14580,79 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id.startswith("fix_common_vuln_") or action_id.startswith("fix_common_assets_pg_"):
+                parts = value.split("|")
+                team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                assets_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                data = slash._fetch_common_vulns_data(team_id, slack_user_id)
+                grouped = slash._group_common_vulns_by_team(data if isinstance(data, dict) else {})
+                section = slash._format_common_vuln_assets(
+                    grouped, team_key, vuln_idx,
+                    list_offset=list_offset, offset=assets_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_common")
+                    + section
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id.startswith("fix_common_asset_view_"):
+                # value: team_key|vuln_idx|list_offset|assets_offset|host
+                parts = value.split("|", 4)
+                team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                assets_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                host = parts[4] if len(parts) > 4 else ""
+
+                data = slash._fetch_common_vulns_data(team_id, slack_user_id)
+                grouped = slash._group_common_vulns_by_team(data if isinstance(data, dict) else {})
+                team = grouped.get(team_key) or {}
+                vulns = team.get("vulns") or []
+                if vuln_idx < 0 or vuln_idx >= len(vulns):
+                    content = slash._text_block("❌ Vulnerability not found. Go back and try again.")
+                else:
+                    vuln_name = (vulns[vuln_idx].get("name") or "").strip()
+                    vd_data = slash._call_api(
+                        "/api/admin/adminregister/register/latest/vulns/",
+                        team_id, slack_user_id=slack_user_id,
+                    )
+                    rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
+                    target = slash._find_vuln_row_for_common_asset(rows, vuln_name, host)
+                    if not target:
+                        content = slash._text_block(
+                            f"❌ No detail found for `{vuln_name}` on `{host or '—'}`."
+                        )
+                    else:
+                        common_ctx = {
+                            "team_key": team_key,
+                            "vuln_idx": vuln_idx,
+                            "list_offset": list_offset,
+                            "assets_offset": assets_offset,
+                        }
+                        action_value = (
+                            f"{target.get('short_id')}|common|{team_key}|"
+                            f"{vuln_idx}|{list_offset}|{assets_offset}"
+                        )
+                        content = slash._common_asset_vuln_detail_blocks(
+                            target, "manual", team_id, common_ctx, action_value,
+                        )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_common")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id == "fix_common_asset_detail_back":
                 parts = value.split("|")
                 team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
                 vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0

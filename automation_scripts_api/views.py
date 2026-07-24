@@ -327,6 +327,22 @@ def _build_stats(docs, report_id=None):
                     if pid not in team_by_plugin:
                         team_by_plugin[pid] = team
 
+    # A plugin_id's OS variants are split across docs: the "vulnerability"
+    # doc carries severity, its sibling "...Fix — <OS>" script doc usually
+    # doesn't. Build a plugin_id -> severity fallback from whichever variant
+    # in this same `docs` batch actually has one set.
+    severity_by_plugin = {}
+    for d in docs:
+        sev = (d.get("severity") or "").strip()
+        if not sev:
+            continue
+        try:
+            pid = int(d.get("plugin_id"))
+        except (TypeError, ValueError):
+            continue
+        if pid not in severity_by_plugin:
+            severity_by_plugin[pid] = sev
+
     # Pass 1: name match (+ seed plugin map from successful name matches)
     provisional = []
     for d in docs:
@@ -354,10 +370,13 @@ def _build_stats(docs, report_id=None):
             team = _infer_team_from_name(vuln)
             if pid is not None and pid not in team_by_plugin:
                 team_by_plugin[pid] = team
+        severity = (d.get("severity") or "").strip()
+        if not severity and pid is not None:
+            severity = severity_by_plugin.get(pid, "")
         stats.append({
             "plugin_id": d.get("plugin_id"),
             "vulnerability": vuln,
-            "severity": d.get("severity", ""),
+            "severity": severity,
             "download_count": d.get("download_count", 0),
             "team": team,
         })
@@ -436,9 +455,20 @@ def admin_download_stats(request):
     `automation_scripts` itself is a global collection shared across every
     admin/report, so without this filter every admin sees every script ever
     loaded, not just the ones relevant to their current data.
+
+    "No. of Times Downloaded" is this admin's OWN team's total (summed
+    across every UserDetail under this admin from script_user_downloads),
+    not the global all-admins-on-the-platform counter stored on
+    automation_scripts.download_count.
     """
     admin_id = str(request.user.id)
     admin_email = getattr(request.user, "email", None)
+
+    member_emails = []
+    if UserDetail:
+        member_emails = list(
+            UserDetail.objects.filter(admin_id=admin_id).values_list("email", flat=True)
+        )
 
     with MongoContext() as db:
         report_id, uploaded_at, plugin_ids = _load_latest_report_plugin_ids(db, admin_id, admin_email)
@@ -451,10 +481,27 @@ def admin_download_stats(request):
 
         docs = list(db["automation_scripts"].find(
             {"plugin_id": {"$in": list(plugin_ids)}},
-            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1}
+            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1}
         ).sort("download_count", -1))
 
+        team_count_by_key = {}
+        if member_emails:
+            for row in db["script_user_downloads"].find(
+                {"plugin_id": {"$in": list(plugin_ids)}, "user_email": {"$in": member_emails}},
+                {"_id": 0, "plugin_id": 1, "os": 1, "download_count": 1},
+            ):
+                key = (row["plugin_id"], (row.get("os") or "").strip().lower())
+                team_count_by_key[key] = team_count_by_key.get(key, 0) + row.get("download_count", 0)
+
+    # Replace the global counter with this admin's own team's total before
+    # formatting, matched by (plugin_id, os) since a plugin_id can have
+    # multiple OS variants.
+    for d in docs:
+        key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
+        d["download_count"] = team_count_by_key.get(key, 0)
+
     stats = _build_stats(docs, report_id=report_id)
+    stats.sort(key=lambda s: s["download_count"], reverse=True)
     return Response({"report_id": str(report_id), "count": len(stats), "stats": stats})
 
 
