@@ -8812,17 +8812,18 @@ class SlackSlashCommandView(APIView):
         ("nav_admin_demo", "🧪 Admin Demo"),
         ("nav_register", "📋 Register"),
         ("nav_team",     "👥 Team"),
+        ("nav_request",  "📨 Request"),
         ("nav_teamperf", "📈 Team Performance"),
-        ("nav_support",  "🎫 Support"),
         ("nav_notification", "🔔 Notification"),
         ("nav_download", "📥 Download Report"),
     ]
 
     # Sub-tabs shown under the "Team Overview" nav tab specifically.
     _TEAM_SUBTABS = [
-        ("team_sub_team",         "Team"),
+        ("team_sub_team",         "📈 Team Performance"),
         ("team_sub_adduser",      "➕ Add User"),
         ("team_sub_deleteuser",   "🗑️ Delete User"),
+        ("team_sub_deleteteamuser", "🚫 Delete Team User"),
         ("team_sub_externaluser", "🌐 External User"),
     ]
 
@@ -8830,11 +8831,14 @@ class SlackSlashCommandView(APIView):
     _ALLVULN_SUBTABS = [
         ("av_sub_list",     "📋 All Vulns"),
         ("av_sub_stats",    "📊 Statistics"),
-        ("av_sub_details",  "🔍 Vuln Details"),
         ("av_sub_support",  "🎫 Support"),
-        ("av_sub_timeline", "⌛ Timeline Ext."),
-        ("av_sub_approve",  "✅ Approve"),
-        ("av_sub_reject",   "❌ Reject"),
+    ]
+
+    # Sub-tabs shown under the standalone "Request" nav tab — moved out of
+    # Admin Demo so timeline-extension approve/reject has its own home.
+    _REQUEST_SUBTABS = [
+        ("req_sub_approve", "✅ Approve"),
+        ("req_sub_reject",  "❌ Reject"),
     ]
 
     # Sub-tabs shown under the "Fix" nav tab specifically.
@@ -8842,6 +8846,7 @@ class SlackSlashCommandView(APIView):
         ("fix_sub_assets", "🖥 All Assets"),
         ("fix_sub_vulns",  "📋 All Vulnerabilities"),
         ("fix_sub_common", "🧩 Common Vulns"),
+        ("fix_sub_details", "🔍 Vuln Details"),
     ]
 
     # Common Vulns — team filter keys (clickable category cards in Slack).
@@ -8872,6 +8877,8 @@ class SlackSlashCommandView(APIView):
         ("notif_sub_today",     "🟠 Due Today"),
         ("notif_sub_thisweek",  "🟡 This Week"),
         ("notif_sub_nextweek",  "🟢 Next Week"),
+        ("notif_sub_support",   "🎫 Support"),
+        ("notif_sub_timeline",  "⌛ Timeline Ext."),
     ]
 
     # Support tab — status + team filter keys (Slack Block Kit action values).
@@ -9229,13 +9236,14 @@ class SlackSlashCommandView(APIView):
             return self._team_subnav_block(active_sub="team_sub_team") + \
                 self._team_subtab_blocks("team_sub_team", team_id, user_id)
 
+        if action_id == "nav_request":
+            return self._request_subnav_block(active_sub="req_sub_approve") + \
+                self._request_subtab_blocks("req_sub_approve", team_id, user_id)
+
         if action_id == "nav_teamperf":
             return [self._dashboard_image_block(
                 team_id, kind="teamperf", alt_text="Team Performance Monitoring",
             )]
-
-        if action_id == "nav_support":
-            return self._support_tab_blocks(team_id, user_id)
 
         if action_id == "nav_notification":
             return self._notification_subnav_block(active_sub="notif_sub_overdue") + \
@@ -9266,8 +9274,9 @@ class SlackSlashCommandView(APIView):
             )
             return self._format_externalusers(data)
 
-        # team_sub_team (default) — real team.html bento-card design, rendered as an image
-        return [self._dashboard_image_block(team_id, kind="team", alt_text="Team Overview")]
+        # team_sub_team (default) — now shows Team Performance content (moved
+        # in from the standalone nav_teamperf tab) instead of Team Overview.
+        return [self._dashboard_image_block(team_id, kind="teamperf", alt_text="Team Performance Monitoring")]
 
     def _allvuln_subnav_block(self, active_sub=None):
         """Second-level button row(s) shown under the 'All Vulnerabilities' nav tab."""
@@ -9275,24 +9284,12 @@ class SlackSlashCommandView(APIView):
 
     def _allvuln_subtab_blocks(self, sub_action_id, team_id, user_id):
         """
-        Content for the 'All Vulnerabilities' sub-tabs.
+        Content for the 'All Vulnerabilities' sub-tabs. Approve/Reject moved
+        to the standalone Request tab (_request_subtab_blocks); Timeline Ext.
+        and the full interactive Support tab moved to Notification
+        (_notification_subtab_blocks); Vuln Details moved to Fix
+        (_fix_subtab_blocks) — see those instead.
         """
-        if sub_action_id == "av_sub_approve":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
-                slack_user_id=user_id,
-            )
-            results = self._assign_severity_short_ids(data.get("results") or [])
-            return self._build_approve_list_blocks(results)
-
-        if sub_action_id == "av_sub_reject":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
-                slack_user_id=user_id,
-            )
-            results = self._assign_severity_short_ids(data.get("results") or [])
-            return self._build_reject_list_blocks(results)
-
         if sub_action_id == "av_sub_stats":
             # Real vulnerability-stats.html design, rendered as an image —
             # pure display, no per-row input needed.
@@ -9301,22 +9298,34 @@ class SlackSlashCommandView(APIView):
         if sub_action_id == "av_sub_support":
             # Real support-requests.html design, rendered as an image — pure
             # display, no per-row input needed, so no interactivity is lost.
+            # (Distinct from the full interactive Support tab that moved to
+            # Notification — this is just the summary snapshot image.)
             return [self._dashboard_image_block(team_id, kind="support", alt_text="Support Requests")]
 
-        if sub_action_id == "av_sub_timeline":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_extension_requests(data)
-
-        # av_sub_list / av_sub_details (default) — same paginated list; a
-        # vuln clicked from either one lands on the same detail view.
+        # av_sub_list (default)
         data = self._call_api(
             "/api/admin/adminregister/register/latest/vulns/", team_id,
             slack_user_id=user_id,
         )
         return self._format_vulndata_list(data)
+
+    def _request_subnav_block(self, active_sub=None):
+        """Second-level button row under the standalone 'Request' nav tab: Approve | Reject."""
+        return self._button_row_blocks(self._REQUEST_SUBTABS, active_action_id=active_sub)
+
+    def _request_subtab_blocks(self, sub_action_id, team_id, user_id):
+        """
+        Content for the 'Request' sub-tabs — timeline-extension Approve /
+        Reject lists, moved here from Admin Demo (av_sub_approve/av_sub_reject).
+        """
+        data = self._call_api(
+            "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+            slack_user_id=user_id,
+        )
+        results = self._assign_severity_short_ids(data.get("results") or [])
+        if sub_action_id == "req_sub_reject":
+            return self._build_reject_list_blocks(results)
+        return self._build_approve_list_blocks(results)
 
     def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None):
         """Manual / Automation Fix toggle for one specific vulnerability —
@@ -9498,14 +9507,28 @@ class SlackSlashCommandView(APIView):
         """Second-level button row under the 'Notification' nav tab."""
         return self._button_row_blocks(self._NOTIFICATION_SUBTABS, active_action_id=active_sub)
 
-    def _notification_subtab_blocks(self, sub_action_id, team_id, user_id, offset=0):
+    def _notification_subtab_blocks(self, sub_action_id, team_id, user_id, offset=0,
+                                     st_filter="all", team_filter="all"):
         """
         Content for the 'Notification' sub-tabs — Overdue / Due Today /
-        This Week / Next Week deadline buckets. Reuses the same two APIs
-        the website's own deadline logic is built on: the register vuln
-        list (severity + first_observation per row) and the admin's
-        RiskCriteria (SLA days per severity) — no new backend endpoint.
+        This Week / Next Week deadline buckets (computed here), plus
+        Support and Timeline Ext. (moved in from their old homes — the
+        standalone top-level Support tab and Admin Demo's Timeline Ext.
+        sub-tab respectively — reusing their existing content builders
+        unchanged).
         """
+        if sub_action_id == "notif_sub_support":
+            return self._support_tab_blocks(
+                team_id, user_id, st_filter=st_filter, team_filter=team_filter, offset=offset,
+            )
+
+        if sub_action_id == "notif_sub_timeline":
+            data = self._call_api(
+                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_extension_requests(data)
+
         bucket_key = {
             "notif_sub_today":    "today",
             "notif_sub_thisweek": "thisweek",
@@ -9555,6 +9578,15 @@ class SlackSlashCommandView(APIView):
 
         if sub_action_id == "fix_sub_common":
             return self._common_vulns_tab_blocks(team_id, user_id)
+
+        if sub_action_id == "fix_sub_details":
+            # Moved in from Admin Demo's old "Vuln Details" sub-tab (av_sub_details)
+            # — same underlying list/detail view, unchanged.
+            data = self._call_api(
+                "/api/admin/adminregister/register/latest/vulns/", team_id,
+                slack_user_id=user_id,
+            )
+            return self._format_vulndata_list(data)
 
         # fix_sub_assets (default)
         data = self._call_api(
@@ -10607,6 +10639,78 @@ class SlackSlashCommandView(APIView):
                     },
                 },
             ],
+        }
+
+    def _build_delete_team_user_modal(self, members, selected_detail_id=None, selected_member_teams=None):
+        """
+        "Delete Team User" modal (Team tab) — matches the design/delete-user-team.html
+        reference: pick an EXISTING VaptFix team member (not Slack's native
+        people-picker, since this needs to know their current Member_role list),
+        then check off which specific team(s) to remove them from. Submitting
+        calls DELETE /api/admin/users_details/user-detail/<id>/delete-role/
+        once per checked team (that endpoint only removes one role per call).
+        """
+        user_options = [
+            {
+                "text": {
+                    "type": "plain_text",
+                    "text": (f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or m.get("email") or "Unknown")[:75],
+                },
+                "value": str(m.get("_id") or m.get("id") or ""),
+            }
+            for m in members
+            if (m.get("_id") or m.get("id"))
+        ]
+
+        user_element = {
+            "type": "static_select",
+            "action_id": "dtu_user_select",
+            "options": user_options or [{"text": {"type": "plain_text", "text": "No team members found"}, "value": ""}],
+        }
+        initial_option = next((o for o in user_options if o["value"] == selected_detail_id), None)
+        if initial_option:
+            user_element["initial_option"] = initial_option
+
+        blocks = [
+            {
+                "type": "input",
+                "block_id": "dtu_user_block",
+                "label": {"type": "plain_text", "text": "Select User"},
+                "dispatch_action": True,
+                "element": user_element,
+            },
+        ]
+
+        if selected_detail_id:
+            if selected_member_teams:
+                team_options = [
+                    {"text": {"type": "plain_text", "text": t}, "value": t}
+                    for t in selected_member_teams
+                ]
+                blocks.append({
+                    "type": "input",
+                    "block_id": "dtu_team_block",
+                    "label": {"type": "plain_text", "text": "Remove from Team(s)"},
+                    "element": {
+                        "type": "checkboxes",
+                        "action_id": "dtu_team_checks",
+                        "options": team_options,
+                    },
+                })
+            else:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "_This member has no teams assigned._"},
+                })
+
+        return {
+            "type": "modal",
+            "callback_id": "modal_deleteteamuser_submit",
+            "private_metadata": selected_detail_id or "",
+            "title": {"type": "plain_text", "text": "Delete Team User"},
+            "submit": {"type": "plain_text", "text": "Remove"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": blocks,
         }
 
     def _build_result_modal(self, title, blocks):
@@ -12824,7 +12928,8 @@ class SlackSlashCommandView(APIView):
 
         if response_url and target:
             detail_blocks = (
-                self._nav_buttons_block(active_action_id="nav_support")
+                self._nav_buttons_block(active_action_id="nav_notification")
+                + self._notification_subnav_block(active_sub="notif_sub_support")
                 + self._format_support_detail(
                     target, team_id,
                     st_filter=st_filter, team_filter=team_filter, offset=offset,
@@ -14353,6 +14458,7 @@ class SlackInteractivityView(APIView):
             titles = {
                 "modal_adduser_submit": "Add User",
                 "modal_deleteuser_submit": "Delete User",
+                "modal_deleteteamuser_submit": "Delete Team User",
                 "modal_reject_submit": "Reject Request",
                 "modal_support_reply_submit": "Send Update",
             }
@@ -14383,6 +14489,8 @@ class SlackInteractivityView(APIView):
                 "assets_select_all", "assets_clear_all", "vulns_select_all", "vulns_clear_all",
             ):
                 threading.Thread(target=self._handle_adduser_modal_live, args=(payload,), daemon=True).start()
+            elif live_action_id == "dtu_user_select":
+                threading.Thread(target=self._handle_deleteteamuser_modal_live, args=(payload,), daemon=True).start()
             return Response({}, status=200)
 
         if ptype != "block_actions":
@@ -14604,7 +14712,11 @@ class SlackInteractivityView(APIView):
                     team_id, slack_user_id,
                     st_filter=st_filter, team_filter=team_filter, offset=page_offset,
                 )
-                blocks = slash._nav_buttons_block(active_action_id="nav_support") + section
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_notification")
+                    + slash._notification_subnav_block(active_sub="notif_sub_support")
+                    + section
+                )
                 self._post_response_url(
                     response_url, {"replace_original": True, "blocks": blocks}, action_id,
                 )
@@ -14619,7 +14731,11 @@ class SlackInteractivityView(APIView):
                     team_id, slack_user_id,
                     st_filter=st_filter, team_filter=team_filter, offset=page_offset,
                 )
-                blocks = slash._nav_buttons_block(active_action_id="nav_support") + section
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_notification")
+                    + slash._notification_subnav_block(active_sub="notif_sub_support")
+                    + section
+                )
                 self._post_response_url(
                     response_url, {"replace_original": True, "blocks": blocks}, action_id,
                 )
@@ -14634,7 +14750,11 @@ class SlackInteractivityView(APIView):
                     team_id, slack_user_id,
                     st_filter=st_filter, team_filter=team_filter, offset=page_offset,
                 )
-                blocks = slash._nav_buttons_block(active_action_id="nav_support") + section
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_notification")
+                    + slash._notification_subnav_block(active_sub="notif_sub_support")
+                    + section
+                )
                 self._post_response_url(
                     response_url, {"replace_original": True, "blocks": blocks}, action_id,
                 )
@@ -14649,7 +14769,11 @@ class SlackInteractivityView(APIView):
                     team_id, slack_user_id,
                     st_filter=st_filter, team_filter=team_filter, offset=page_offset,
                 )
-                blocks = slash._nav_buttons_block(active_action_id="nav_support") + section
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_notification")
+                    + slash._notification_subnav_block(active_sub="notif_sub_support")
+                    + section
+                )
                 self._post_response_url(
                     response_url, {"replace_original": True, "blocks": blocks}, action_id,
                 )
@@ -14672,7 +14796,11 @@ class SlackInteractivityView(APIView):
                         team_filter=team_filter,
                         offset=page_offset,
                     )
-                blocks = slash._nav_buttons_block(active_action_id="nav_support") + content
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_notification")
+                    + slash._notification_subnav_block(active_sub="notif_sub_support")
+                    + content
+                )
                 self._post_response_url(
                     response_url, {"replace_original": True, "blocks": blocks}, action_id,
                 )
@@ -14818,6 +14946,33 @@ class SlackInteractivityView(APIView):
                 self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
                 return
 
+            if action_id == "team_sub_deleteteamuser":
+                # Remove a member from ONE specific team (not the whole
+                # roster) — distinct from team_sub_deleteuser's full
+                # deactivate/delete. Needs the member list up front to
+                # populate the "Select User" dropdown.
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
+                    return
+                try:
+                    data = slash._call_api(
+                        "/api/admin/users_details/list-user-details/", team_id,
+                        slack_user_id=slack_user_id,
+                    )
+                    members = data if isinstance(data, list) else (data.get("results") or data.get("users") or [])
+                except Exception:
+                    members = []
+                view = slash._build_delete_team_user_modal(members)
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
+                return
+
             if action_id in dict(slash._TEAM_SUBTABS):
                 # team_sub_team / team_sub_externaluser — plain content swap,
                 # keeping both nav rows (top-level + sub-tabs) on top.
@@ -14854,8 +15009,8 @@ class SlackInteractivityView(APIView):
                     else slash._build_reject_list_blocks(all_requests, offset=page_offset)
                 )
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
-                    + slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject")
+                    slash._nav_buttons_block(active_action_id="nav_request")
+                    + slash._request_subnav_block(active_sub="req_sub_approve" if is_approve else "req_sub_reject")
                     + content
                 )
                 self._post_response_url(response_url, {
@@ -14877,8 +15032,8 @@ class SlackInteractivityView(APIView):
                     else slash._build_reject_list_blocks(all_requests, offset=page_offset)
                 )
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
-                    + slash._allvuln_subnav_block(active_sub="av_sub_approve" if is_approve else "av_sub_reject")
+                    slash._nav_buttons_block(active_action_id="nav_request")
+                    + slash._request_subnav_block(active_sub="req_sub_approve" if is_approve else "req_sub_reject")
                     + content
                 )
                 self._post_response_url(response_url, {
@@ -14900,8 +15055,8 @@ class SlackInteractivityView(APIView):
                 )
                 all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
                 blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_admin_demo")
-                    + slash._allvuln_subnav_block(active_sub="av_sub_approve")
+                    slash._nav_buttons_block(active_action_id="nav_request")
+                    + slash._request_subnav_block(active_sub="req_sub_approve")
                     + slash._build_approve_list_blocks(all_requests, offset=page_offset)
                 )
                 self._post_response_url(response_url, {
@@ -14979,13 +15134,26 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id in dict(slash._ALLVULN_SUBTABS):
-                # av_sub_list / av_sub_stats / av_sub_details / av_sub_support /
-                # av_sub_timeline — plain content swap, keeping both nav rows
-                # (top-level + sub-tabs) on top.
+                # av_sub_list / av_sub_stats / av_sub_support — plain content
+                # swap, keeping both nav rows (top-level + sub-tabs) on top.
                 content_blocks = slash._allvuln_subtab_blocks(action_id, team_id, slack_user_id)
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_admin_demo")
                     + slash._allvuln_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in dict(slash._REQUEST_SUBTABS):
+                # req_sub_approve / req_sub_reject — plain content swap.
+                content_blocks = slash._request_subtab_blocks(action_id, team_id, slack_user_id)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_request")
+                    + slash._request_subnav_block(active_sub=action_id)
                     + content_blocks
                 )
                 self._post_response_url(response_url, {
@@ -15389,6 +15557,7 @@ class SlackInteractivityView(APIView):
         titles = {
             "modal_adduser_submit": "Add User",
             "modal_deleteuser_submit": "Delete User",
+            "modal_deleteteamuser_submit": "Delete Team User",
             "modal_reject_submit": "Reject Request",
             "modal_support_reply_submit": "Send Update",
         }
@@ -15435,6 +15604,36 @@ class SlackInteractivityView(APIView):
                     blocks = slash._cmd_deleteuser_permanent(f"<@{target_uid}>", team_id, slack_user_id)
                 else:
                     blocks = slash._cmd_deleteuser(f"<@{target_uid}>", team_id, slack_user_id)
+            elif callback_id == "modal_deleteteamuser_submit":
+                detail_id = view.get("private_metadata") or ""
+                selected = _find_by_action_id(values, "dtu_team_checks").get("selected_options") or []
+                team_names = [o.get("value") for o in selected if o.get("value")]
+                if not detail_id:
+                    blocks = slash._text_block("❌ Please select a user first.")
+                elif not team_names:
+                    blocks = slash._text_block("❌ Select at least one team to remove them from.")
+                else:
+                    removed, failed = [], []
+                    for team_name in team_names:
+                        try:
+                            result = slash._call_api(
+                                f"/api/admin/users_details/user-detail/{detail_id}/delete-role/",
+                                team_id, method="delete",
+                                json_body={"confirm": True, "member_role": team_name},
+                                slack_user_id=slack_user_id,
+                            )
+                            if result.get("message"):
+                                removed.append(team_name)
+                            else:
+                                failed.append((team_name, result.get("detail", "unknown error")))
+                        except Exception as exc:
+                            failed.append((team_name, str(exc)))
+                    lines = []
+                    if removed:
+                        lines.append(f"✅ Removed from: {', '.join(removed)}")
+                    if failed:
+                        lines.append("❌ Failed: " + ", ".join(f"{t} ({e})" for t, e in failed))
+                    blocks = slash._text_block("\n".join(lines) or "❌ Nothing was removed.")
             elif callback_id == "modal_support_reply_submit":
                 meta_json = view.get("private_metadata") or "{}"
                 reply_text = ((values.get("reply_text_block") or {}).get("reply_text_input") or {}).get("value") or ""
@@ -15599,3 +15798,46 @@ class SlackInteractivityView(APIView):
             timeout=10,
         )
         self._debug_write(f"_handle_adduser_modal_live: action={action_id} views.update -> {getattr(resp, 'text', None)}")
+
+    def _handle_deleteteamuser_modal_live(self, payload):
+        """
+        Live-updates the still-open "Delete Team User" modal the instant an
+        admin picks a member from the dropdown — re-renders with a checkbox
+        for each team THAT member currently belongs to (so e.g. Ritika, who
+        is on both Patch Management and Configuration Management, only sees
+        those two, not all four teams).
+        """
+        view          = payload.get("view") or {}
+        view_id       = view.get("id", "")
+        team_id       = (payload.get("team") or {}).get("id", "")
+        slack_user_id = (payload.get("user") or {}).get("id", "")
+        live_action   = (payload.get("actions") or [{}])[0]
+        selected_detail_id = (live_action.get("selected_option") or {}).get("value", "")
+
+        slash = SlackSlashCommandView()
+        try:
+            data = slash._call_api(
+                "/api/admin/users_details/list-user-details/", team_id,
+                slack_user_id=slack_user_id,
+            )
+            members = data if isinstance(data, list) else (data.get("results") or data.get("users") or [])
+            target = next((m for m in members if str(m.get("_id") or m.get("id")) == selected_detail_id), None)
+            selected_teams = (target.get("Member_role") or []) if target else []
+            new_view = slash._build_delete_team_user_modal(
+                members, selected_detail_id=selected_detail_id, selected_member_teams=selected_teams,
+            )
+        except Exception:
+            self._debug_write(f"_handle_deleteteamuser_modal_live: EXCEPTION\n{traceback.format_exc()}")
+            return
+
+        bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+        if not bot_token or not view_id:
+            self._debug_write("_handle_deleteteamuser_modal_live: missing bot_token or view_id")
+            return
+        resp = _http_post(
+            "https://slack.com/api/views.update",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            json={"view_id": view_id, "view": new_view},
+            timeout=10,
+        )
+        self._debug_write(f"_handle_deleteteamuser_modal_live: views.update -> {getattr(resp, 'text', None)}")
