@@ -9404,7 +9404,9 @@ class SlackSlashCommandView(APIView):
                 "/api/admin/adminregister/register/latest/vulns/", team_id,
                 slack_user_id=user_id,
             )
-            return self._format_vulndata_list(data)
+            return self._format_vulndata_list(
+                data, show_filters=True, pg_action_id="fix_vuln_pg",
+            )
 
         if sub_action_id == "fix_sub_common":
             return self._common_vulns_tab_blocks(team_id, user_id)
@@ -9416,6 +9418,124 @@ class SlackSlashCommandView(APIView):
         )
         rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
         return self._format_asset_list(rows)
+
+    def _norm_vuln_sev(self, v):
+        return (v.get("severity") or v.get("risk_factor") or "").strip().lower()
+
+    def _norm_vuln_status(self, v):
+        return (v.get("status") or "open").strip().lower()
+
+    def _match_vuln_sev(self, v, sev_filter):
+        if sev_filter == "all":
+            return True
+        return self._norm_vuln_sev(v) == sev_filter
+
+    def _match_vuln_status(self, v, st_filter):
+        st = self._norm_vuln_status(v)
+        if st_filter == "all":
+            return True
+        if st_filter == "in_progress":
+            return "progress" in st
+        if st_filter == "open":
+            return st == "open" or st.startswith("open/")
+        if st_filter == "closed":
+            return st == "closed"
+        return st == st_filter
+
+    def _filter_vuln_rows(self, rows, sev_filter="all", st_filter="all"):
+        return [
+            v for v in rows
+            if self._match_vuln_sev(v, sev_filter) and self._match_vuln_status(v, st_filter)
+        ]
+
+    def _vuln_sev_status_counts(self, rows, sev_filter="all", st_filter="all"):
+        """Cross-filter counts (severity under active status, status under active severity)."""
+        sev_base = [v for v in rows if self._match_vuln_status(v, st_filter)]
+        st_base = [v for v in rows if self._match_vuln_sev(v, sev_filter)]
+        sev_counts = {
+            "all": len(sev_base),
+            "critical": sum(1 for v in sev_base if self._norm_vuln_sev(v) == "critical"),
+            "high": sum(1 for v in sev_base if self._norm_vuln_sev(v) == "high"),
+            "medium": sum(1 for v in sev_base if self._norm_vuln_sev(v) == "medium"),
+            "low": sum(1 for v in sev_base if self._norm_vuln_sev(v) == "low"),
+        }
+        st_counts = {
+            "all": len(st_base),
+            "open": sum(
+                1 for v in st_base
+                if (self._norm_vuln_status(v) == "open" or self._norm_vuln_status(v).startswith("open/"))
+            ),
+            "closed": sum(1 for v in st_base if self._norm_vuln_status(v) == "closed"),
+            "in_progress": sum(1 for v in st_base if "progress" in self._norm_vuln_status(v)),
+        }
+        return sev_counts, st_counts
+
+    def _asset_sev_status_counts(self, rows, sev_filter="all", st_filter="all"):
+        """Asset-unique counts for Fix All Assets filter buttons."""
+        def host_count(sev_f, st_f):
+            filtered = self._filter_vuln_rows(rows, sev_f, st_f)
+            return len({
+                (v.get("asset") or v.get("host_name") or "Unknown") for v in filtered
+            })
+
+        sev_counts = {
+            "all": host_count("all", st_filter),
+            "critical": host_count("critical", st_filter),
+            "high": host_count("high", st_filter),
+            "medium": host_count("medium", st_filter),
+            "low": host_count("low", st_filter),
+        }
+        st_counts = {
+            "all": host_count(sev_filter, "all"),
+            "open": host_count(sev_filter, "open"),
+            "closed": host_count(sev_filter, "closed"),
+            "in_progress": host_count(sev_filter, "in_progress"),
+        }
+        return sev_counts, st_counts
+
+    def _sev_status_filter_blocks(self, sev_filter, st_filter, sev_counts, st_counts, sev_prefix, st_prefix):
+        """Two action rows: severity + status (Register / Fix shared layout)."""
+        sev_buttons = [
+            ("all", "All"),
+            ("critical", "Critical"),
+            ("high", "High"),
+            ("medium", "Medium"),
+            ("low", "Low"),
+        ]
+        st_buttons = [
+            ("all", f"All {st_counts.get('all', 0)}"),
+            ("open", f"Open {st_counts.get('open', 0)}"),
+            ("closed", f"Closed {st_counts.get('closed', 0)}"),
+            ("in_progress", f"In Progress {st_counts.get('in_progress', 0)}"),
+        ]
+        return [
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": label, "emoji": True},
+                        "action_id": f"{sev_prefix}{k}",
+                        "value": f"{k}|{st_filter}|0",
+                        **({"style": "primary"} if k == sev_filter else {}),
+                    }
+                    for (k, label) in sev_buttons
+                ],
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": label, "emoji": True},
+                        "action_id": f"{st_prefix}{k}",
+                        "value": f"{sev_filter}|{k}|0",
+                        **({"style": "primary"} if k == st_filter else {}),
+                    }
+                    for (k, label) in st_buttons
+                ],
+            },
+        ]
 
     def _group_assets_from_vulns(self, rows):
         """Groups the flat vuln list by host/asset — total + severity counts
@@ -9485,9 +9605,18 @@ class SlackSlashCommandView(APIView):
     # low rgb(16,185,129)).
     _ASSET_SEV_EMOJI = [("critical", "🔴", "Critical"), ("high", "🟠", "High"), ("medium", "🟡", "Medium"), ("low", "🟢", "Low")]
 
-    def _format_asset_list(self, rows, offset=0):
+    def _format_asset_list(self, rows, offset=0, sev_filter="all", st_filter="all"):
         PAGE_SIZE = 5
-        assets = self._group_assets_from_vulns(rows)
+        sev_filter = (sev_filter or "all").strip().lower()
+        st_filter = (st_filter or "all").strip().lower()
+        if sev_filter not in ("all", "critical", "high", "medium", "low"):
+            sev_filter = "all"
+        if st_filter not in ("all", "open", "closed", "in_progress"):
+            st_filter = "all"
+
+        _, st_counts = self._asset_sev_status_counts(rows, sev_filter, st_filter)
+        filtered_rows = self._filter_vuln_rows(rows, sev_filter, st_filter)
+        assets = self._group_assets_from_vulns(filtered_rows)
         count = len(assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = assets[offset:offset + PAGE_SIZE]
@@ -9496,9 +9625,19 @@ class SlackSlashCommandView(APIView):
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🖥 All Assets", "emoji": True}},
             self._ctx("Every asset in your latest report. Click one to see its vulnerabilities."),
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total:* {count} assets — showing {offset + 1 if page_items else 0}-{end_num}"}},
-            {"type": "divider"},
         ]
+        blocks.extend(self._sev_status_filter_blocks(
+            sev_filter, st_filter, {}, st_counts,
+            sev_prefix="fix_asset_sev_", st_prefix="fix_asset_st_",
+        ))
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Total:* {count} assets — showing {offset + 1 if page_items else 0}-{end_num}",
+            },
+        })
+        blocks.append({"type": "divider"})
         if not page_items:
             return blocks + self._text_block("No assets found.")
 
@@ -9513,17 +9652,21 @@ class SlackSlashCommandView(APIView):
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": "view_fix_asset",
-                    "value": f"{host}|0",
+                    # host|sev|st|list_offset|vuln_offset
+                    "value": f"{host}|{sev_filter}|{st_filter}|{offset}|0",
                 },
             })
             blocks.append({"type": "divider"})
 
-        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "view_fix_assets_pg")
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, "fix_asset_pg",
+            value_prefix=f"{sev_filter}|{st_filter}|",
+        )
         if pg_block:
             blocks.append(pg_block)
         return blocks
 
-    def _format_asset_vulns(self, rows, host, offset=0):
+    def _format_asset_vulns(self, rows, host, offset=0, sev_filter="all", st_filter="all", list_offset=0):
         PAGE_SIZE = 5
         matching = self._assign_severity_short_ids([v for v in rows if (v.get("asset") or v.get("host_name")) == host])
         count = len(matching)
@@ -9540,6 +9683,7 @@ class SlackSlashCommandView(APIView):
                     "type": "button",
                     "text": {"type": "plain_text", "text": "← Back to All Assets", "emoji": True},
                     "action_id": "view_fix_asset_back",
+                    "value": f"{sev_filter}|{st_filter}|{list_offset}",
                 }],
             },
             {"type": "divider"},
@@ -9576,8 +9720,10 @@ class SlackSlashCommandView(APIView):
             })
             blocks.append({"type": "divider"})
 
+        # value: host|sev|st|list_offset|vuln_offset
         pg_block = self._numbered_pagination_block(
-            offset, PAGE_SIZE, count, "view_fix_asset_vulns_pg", value_prefix=f"{host}|",
+            offset, PAGE_SIZE, count, "view_fix_asset_vulns_pg",
+            value_prefix=f"{host}|{sev_filter}|{st_filter}|{list_offset}|",
         )
         if pg_block:
             blocks.append(pg_block)
@@ -12637,27 +12783,57 @@ class SlackSlashCommandView(APIView):
             "alt_text": self._status_icon_kind(st),
         }
 
-    def _format_vulndata_list(self, data, offset=0):
+    def _format_vulndata_list(
+        self, data, offset=0, sev_filter="all", st_filter="all",
+        show_filters=False, pg_action_id="view_vulndata_pg",
+    ):
         # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
         # "rows" (not "results"/"vulnerabilities"), with fields vul_name/asset
         # — reading the wrong keys silently produced "Total: 0" every time.
         PAGE_SIZE = 5
         raw_items = data if isinstance(data, list) else (data.get("rows") or data.get("results") or data.get("vulnerabilities") or [])
-        items = self._assign_severity_short_ids(raw_items)
+
+        sev_filter = (sev_filter or "all").strip().lower()
+        st_filter = (st_filter or "all").strip().lower()
+        if sev_filter not in ("all", "critical", "high", "medium", "low"):
+            sev_filter = "all"
+        if st_filter not in ("all", "open", "closed", "in_progress"):
+            st_filter = "all"
+
+        # Assign short IDs on the FULL list so View always resolves after filters.
+        all_items = self._assign_severity_short_ids(raw_items)
+        _, st_counts = self._vuln_sev_status_counts(all_items, sev_filter, st_filter)
+        items = self._filter_vuln_rows(all_items, sev_filter, st_filter) if show_filters else all_items
         count = len(items)
 
-        offset = max(0, min(offset, max(count - 1, 0)))
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = items[offset:offset + PAGE_SIZE]
         start_num  = offset + 1 if page_items else 0
         end_num    = offset + len(page_items)
 
+        header_title = "📋 All Vulnerabilities" if show_filters else "🔍 Vulnerability Data"
         blocks = [
-            {"type": "header", "text": {"type": "plain_text", "text": "🔍 Vulnerability Data", "emoji": True}},
+            {"type": "header", "text": {"type": "plain_text", "text": header_title, "emoji": True}},
             self._ctx("All vulnerabilities in your latest report. Use `/vulndata [id]` for details, `/vulndata automation` for script stats."),
-            {"type": "section", "text": {"type": "mrkdwn",
-                "text": f"*Total:* {count} vulnerabilities — showing {start_num}-{end_num}"}},
-            {"type": "divider"},
         ]
+        if show_filters:
+            blocks.extend(self._sev_status_filter_blocks(
+                sev_filter, st_filter, {}, st_counts,
+                sev_prefix="fix_vuln_sev_", st_prefix="fix_vuln_st_",
+            ))
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Total:* {count} vulnerabilities — showing {start_num}-{end_num}",
+            },
+        })
+        blocks.append({"type": "divider"})
+        if not page_items:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*No vulnerabilities found.*"},
+            })
         for v in page_items:
             sid  = v.get("short_id", "?")
             name = v.get("vul_name") or v.get("vulnerability_name") or v.get("plugin_name") or "Unknown"
@@ -12688,7 +12864,10 @@ class SlackSlashCommandView(APIView):
             })
             blocks.append({"type": "divider"})
 
-        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "view_vulndata_pg")
+        value_prefix = f"{sev_filter}|{st_filter}|" if show_filters else ""
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, pg_action_id, value_prefix=value_prefix,
+        )
         if pg_block:
             blocks.append(pg_block)
 
@@ -14674,16 +14853,90 @@ class SlackInteractivityView(APIView):
                 )
                 return
 
+            # ── Fix All Vulns — severity / status filters + pagination ───────
+            if (
+                action_id.startswith("fix_vuln_sev_")
+                or action_id.startswith("fix_vuln_st_")
+                or action_id.startswith("fix_vuln_pg_")
+            ):
+                parts = value.split("|")
+                sev_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                vd_data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/",
+                    team_id, slack_user_id=slack_user_id,
+                )
+                content = slash._format_vulndata_list(
+                    vd_data, offset=page_offset,
+                    sev_filter=sev_filter, st_filter=st_filter,
+                    show_filters=True, pg_action_id="fix_vuln_pg",
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_vulns")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            # ── Fix All Assets — severity / status filters + pagination ──────
+            if (
+                action_id.startswith("fix_asset_sev_")
+                or action_id.startswith("fix_asset_st_")
+                or action_id.startswith("fix_asset_pg_")
+                or action_id.startswith("view_fix_assets_pg_")
+            ):
+                parts = value.split("|")
+                if action_id.startswith("view_fix_assets_pg_") and value.isdigit():
+                    # Legacy pagination value was plain offset
+                    sev_filter, st_filter, page_offset = "all", "all", int(value)
+                else:
+                    sev_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                    st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                    page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/",
+                    team_id, slack_user_id=slack_user_id,
+                )
+                rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
+                content = slash._format_asset_list(
+                    rows, offset=page_offset, sev_filter=sev_filter, st_filter=st_filter,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_assets")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
             if action_id == "view_fix_asset" or action_id.startswith("view_fix_asset_vulns_pg_"):
-                # value is "host|offset" for both.
-                parts_v = value.split("|", 1)
+                # value: host|sev|st|list_offset|vuln_offset  (also legacy host|offset)
+                parts_v = value.split("|")
                 host = parts_v[0] if parts_v else value
-                page_offset = int(parts_v[1]) if len(parts_v) > 1 and parts_v[1].isdigit() else 0
+                if len(parts_v) >= 5:
+                    sev_filter = parts_v[1] or "all"
+                    st_filter = parts_v[2] or "all"
+                    list_offset = int(parts_v[3]) if parts_v[3].isdigit() else 0
+                    page_offset = int(parts_v[4]) if parts_v[4].isdigit() else 0
+                elif len(parts_v) == 2 and parts_v[1].isdigit():
+                    sev_filter, st_filter, list_offset = "all", "all", 0
+                    page_offset = int(parts_v[1])
+                else:
+                    sev_filter, st_filter, list_offset, page_offset = "all", "all", 0, 0
                 data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
-                content = slash._format_asset_vulns(rows, host, offset=page_offset)
+                content = slash._format_asset_vulns(
+                    rows, host, offset=page_offset,
+                    sev_filter=sev_filter, st_filter=st_filter, list_offset=list_offset,
+                )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_fix")
                     + slash._fix_subnav_block(active_sub="fix_sub_assets")
@@ -14696,6 +14949,10 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id == "view_fix_asset_back":
+                parts = value.split("|")
+                sev_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                 data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
@@ -14703,24 +14960,9 @@ class SlackInteractivityView(APIView):
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_fix")
                     + slash._fix_subnav_block(active_sub="fix_sub_assets")
-                    + slash._format_asset_list(rows)
-                )
-                self._post_response_url(response_url, {
-                    "replace_original": True,
-                    "blocks": blocks,
-                }, action_id)
-                return
-
-            if action_id.startswith("view_fix_assets_pg_"):
-                page_offset = int(value) if value.isdigit() else 0
-                data = slash._call_api(
-                    "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
-                )
-                rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
-                blocks = (
-                    slash._nav_buttons_block(active_action_id="nav_fix")
-                    + slash._fix_subnav_block(active_sub="fix_sub_assets")
-                    + slash._format_asset_list(rows, offset=page_offset)
+                    + slash._format_asset_list(
+                        rows, offset=page_offset, sev_filter=sev_filter, st_filter=st_filter,
+                    )
                 )
                 self._post_response_url(response_url, {
                     "replace_original": True,
