@@ -8831,7 +8831,22 @@ class SlackSlashCommandView(APIView):
     _FIX_SUBTABS = [
         ("fix_sub_assets", "🖥 All Assets"),
         ("fix_sub_vulns",  "📋 All Vulnerabilities"),
+        ("fix_sub_common", "🧩 Common Vulns"),
     ]
+
+    # Common Vulns — team filter keys (clickable category cards in Slack).
+    _COMMON_TEAM_FILTERS = [
+        ("patch", "Patch Management"),
+        ("config", "Configuration Management"),
+        ("network", "Network Security"),
+        ("arch", "Architectural Flaws"),
+    ]
+    _COMMON_TEAM_KEY_TO_NAME = {
+        "patch": "Patch Management",
+        "config": "Configuration Management",
+        "network": "Network Security",
+        "arch": "Architectural Flaws",
+    }
 
     # Sub-tabs shown under the "Register" nav tab specifically.
     _REGISTER_SUBTABS = [
@@ -9367,17 +9382,17 @@ class SlackSlashCommandView(APIView):
         return self._format_register_tab(vd_data, sev_filter="all", st_filter="all", offset=0)
 
     def _fix_subtab_blocks(self, sub_action_id, team_id, user_id):
-        """Content for the 'Fix' sub-tabs — All Assets (grouped by host from
-        the same latest-vulns list, no new backend endpoint needed) and All
-        Vulnerabilities (identical list to the All Vulnerabilities nav tab).
-        Clicking "View" on any row lands on the same shared Manual/Automation
-        detail view the All Vulnerabilities tab uses."""
+        """Content for the 'Fix' sub-tabs — All Assets, All Vulnerabilities,
+        and Common Vulns (mitigation-strategy by-team API)."""
         if sub_action_id == "fix_sub_vulns":
             data = self._call_api(
                 "/api/admin/adminregister/register/latest/vulns/", team_id,
                 slack_user_id=user_id,
             )
             return self._format_vulndata_list(data)
+
+        if sub_action_id == "fix_sub_common":
+            return self._common_vulns_tab_blocks(team_id, user_id)
 
         # fix_sub_assets (default)
         data = self._call_api(
@@ -9548,6 +9563,307 @@ class SlackSlashCommandView(APIView):
 
         pg_block = self._numbered_pagination_block(
             offset, PAGE_SIZE, count, "view_fix_asset_vulns_pg", value_prefix=f"{host}|",
+        )
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
+    def _fetch_common_vulns_data(self, team_id, user_id):
+        return self._call_api(
+            "/api/admin/adminmitigationstrategy/by-team/", team_id,
+            slack_user_id=user_id,
+        )
+
+    def _group_common_vulns_by_team(self, data):
+        """
+        Transform by-team API flat rows into:
+        { team_name: { total, severity, affected_assets, vulns: [{name, severity, asset_count, assets}] } }
+        """
+        teams_raw = (data or {}).get("teams") or {}
+        result = {}
+        for key, display_name in self._COMMON_TEAM_KEY_TO_NAME.items():
+            bucket = teams_raw.get(display_name) or {}
+            rows = bucket.get("vulnerabilities") or []
+            # Group by plugin_name
+            by_plugin = {}
+            for r in rows:
+                pname = (r.get("plugin_name") or "").strip()
+                if not pname:
+                    continue
+                entry = by_plugin.setdefault(pname, {
+                    "name": pname,
+                    "severity": (r.get("risk_factor") or r.get("severity") or "").strip().lower() or "medium",
+                    "assets": [],
+                    "hosts": set(),
+                })
+                host = (r.get("host_name") or "").strip()
+                if host and host not in entry["hosts"]:
+                    entry["hosts"].add(host)
+                    entry["assets"].append({
+                        "host": host,
+                        "os": r.get("os") or "—",
+                        "status": (r.get("status") or "open").strip().lower(),
+                        "port": r.get("port") or "",
+                    })
+                # Prefer non-empty severity
+                sev = (r.get("risk_factor") or r.get("severity") or "").strip().lower()
+                if sev in ("critical", "high", "medium", "low"):
+                    entry["severity"] = sev
+
+            vulns = []
+            sev_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+            all_hosts = set()
+            for pname, entry in sorted(by_plugin.items(), key=lambda kv: (-len(kv[1]["assets"]), kv[0].lower())):
+                asset_count = len(entry["assets"])
+                sev = entry["severity"] if entry["severity"] in sev_counts else "medium"
+                sev_counts[sev] += asset_count  # count asset-rows toward severity (matches HTML sample style of totals)
+                all_hosts.update(entry["hosts"])
+                vulns.append({
+                    "name": entry["name"],
+                    "severity": sev,
+                    "asset_count": asset_count,
+                    "assets": entry["assets"],
+                })
+
+            # Better severity counts: count unique vulns by severity (like category card "Medium: 26")
+            # Recompute as vuln-count not asset-count to match HTML "total: 26" with medium: 26
+            sev_vuln_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+            for v in vulns:
+                if v["severity"] in sev_vuln_counts:
+                    sev_vuln_counts[v["severity"]] += 1
+
+            result[key] = {
+                "display_name": display_name,
+                "total": len(vulns),
+                "row_count": len(rows),
+                "severity": sev_vuln_counts,
+                "affected_assets": len(all_hosts),
+                "vulns": vulns,
+            }
+        return result
+
+    def _default_common_team_key(self, grouped):
+        for key, _ in self._COMMON_TEAM_FILTERS:
+            if grouped.get(key, {}).get("total", 0) > 0:
+                return key
+        return "config"
+
+    def _common_vulns_tab_blocks(self, team_id, user_id, team_key=None, offset=0):
+        data = self._fetch_common_vulns_data(team_id, user_id)
+        if not isinstance(data, dict):
+            return self._text_block("❌ Failed to load common vulnerabilities.")
+        if data.get("detail") and "teams" not in data:
+            return self._text_block(f"❌ {data['detail']}")
+        grouped = self._group_common_vulns_by_team(data)
+        if not team_key or team_key not in self._COMMON_TEAM_KEY_TO_NAME:
+            team_key = self._default_common_team_key(grouped)
+        return self._format_common_vulns_tab(grouped, team_key=team_key, offset=offset)
+
+    def _format_common_vulns_tab(self, grouped, team_key="config", offset=0):
+        """
+        Common Vulns list for one selected team — clickable team filter buttons
+        + vuln rows with View on the right (matches common-vulnerabilities.html flow).
+        """
+        PAGE_SIZE = 5
+        team = grouped.get(team_key) or {
+            "display_name": self._COMMON_TEAM_KEY_TO_NAME.get(team_key, team_key),
+            "total": 0, "severity": {}, "affected_assets": 0, "vulns": [],
+        }
+        vulns = team.get("vulns") or []
+        count = len(vulns)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = vulns[offset: offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        sev = team.get("severity") or {}
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🧩 Common Vulnerabilities", "emoji": True}},
+            self._ctx("Select a team to see vulnerabilities that appear on 4+ assets. Click View for affected assets."),
+            {"type": "divider"},
+        ]
+
+        # Team filter row — unique action_ids; short labels so all 4 fit
+        short_labels = {
+            "patch": "Patch",
+            "config": "Config",
+            "network": "Network",
+            "arch": "Arch",
+        }
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"{short_labels[k]} {grouped.get(k, {}).get('total', 0)}",
+                        "emoji": True,
+                    },
+                    "action_id": f"fix_common_team_{k}",
+                    "value": f"{k}|0",
+                    **({"style": "primary"} if k == team_key else {}),
+                }
+                for k, _label in self._COMMON_TEAM_FILTERS
+            ],
+        })
+
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": f"Selected: *{team.get('display_name')}*",
+            }],
+        })
+
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*{team.get('display_name')}*\n"
+                    f"Total Vulns: *{team.get('total', 0)}*  |  "
+                    f"Affected Assets: *{team.get('affected_assets', 0)}*\n"
+                    f"🔴 Critical: {sev.get('critical', 0)}  "
+                    f"🟠 High: {sev.get('high', 0)}  "
+                    f"🟡 Medium: {sev.get('medium', 0)}  "
+                    f"🟢 Low: {sev.get('low', 0)}"
+                ),
+            },
+        })
+        blocks.append({"type": "divider"})
+
+        if not page_items:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*No common vulnerabilities for this team.*"},
+            })
+        else:
+            for idx, v in enumerate(page_items):
+                sno = str(start_num + idx).zfill(2)
+                name = v.get("name") or "Unknown"
+                sev_norm = (v.get("severity") or "medium").lower()
+                sev_icon = self._SEV_EMOJI_MAP.get(sev_norm, "⚪")
+                asset_count = v.get("asset_count") or 0
+                # Encode team + vuln name for detail lookup (base64-ish safe short token via index)
+                vuln_idx = offset + idx
+                blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": f"*`{sno}`*  🖥 *{asset_count} assets*  |  {sev_icon} *{sev_norm.upper()}*",
+                    }],
+                })
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*{name}*"},
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": f"fix_common_vuln_{team_key}_{vuln_idx}",
+                        "value": f"{team_key}|{vuln_idx}|{offset}",
+                    },
+                })
+                blocks.append({"type": "divider"})
+
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"Showing {start_num}-{end_num} of {count} common vulns",
+            },
+        })
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, "fix_common_list_pg", value_prefix=f"{team_key}|",
+        )
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
+    def _format_common_vuln_assets(self, grouped, team_key, vuln_idx, list_offset=0, offset=0):
+        """Asset list for one common vulnerability under a team."""
+        PAGE_SIZE = 5
+        team = grouped.get(team_key) or {}
+        vulns = team.get("vulns") or []
+        if vuln_idx < 0 or vuln_idx >= len(vulns):
+            return self._text_block("❌ Vulnerability not found. Go back and try again.")
+
+        v = vulns[vuln_idx]
+        assets = v.get("assets") or []
+        count = len(assets)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = assets[offset: offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+        sev_norm = (v.get("severity") or "medium").lower()
+        sev_icon = self._SEV_EMOJI_MAP.get(sev_norm, "⚪")
+        name = v.get("name") or "Unknown"
+        display = team.get("display_name") or self._COMMON_TEAM_KEY_TO_NAME.get(team_key, team_key)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🧩 Common Vuln — Assets", "emoji": True}},
+            {
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "← Back to list", "emoji": True},
+                    "action_id": "fix_common_back",
+                    "value": f"{team_key}|{list_offset}",
+                }],
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*{name}*\n"
+                        f"Team: {display}  |  {sev_icon} *{sev_norm.upper()}*  |  "
+                        f"Assets: *{count}*"
+                    ),
+                },
+            },
+            {"type": "divider"},
+        ]
+
+        if not page_items:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*No assets found for this vulnerability.*"},
+            })
+        else:
+            for i, a in enumerate(page_items):
+                sno = str(start_num + i).zfill(2)
+                host = a.get("host") or "—"
+                os_name = a.get("os") or "—"
+                st = (a.get("status") or "open").lower()
+                blocks.append({
+                    "type": "context",
+                    "elements": [
+                        self._status_icon_image_element(st),
+                        {"type": "mrkdwn", "text": f"*`{sno}`*  `{host}`"},
+                    ],
+                })
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"OS: {os_name}  |  Status: *{st.capitalize()}*",
+                    },
+                })
+                blocks.append({"type": "divider"})
+
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"Showing {start_num}-{end_num} of {count} assets",
+            },
+        })
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, "fix_common_assets_pg",
+            value_prefix=f"{team_key}|{vuln_idx}|{list_offset}|",
         )
         if pg_block:
             blocks.append(pg_block)
@@ -14114,7 +14430,7 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id in dict(slash._FIX_SUBTABS):
-                # fix_sub_assets / fix_sub_vulns — plain content swap.
+                # fix_sub_assets / fix_sub_vulns / fix_sub_common — plain content swap.
                 content_blocks = slash._fix_subtab_blocks(action_id, team_id, slack_user_id)
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_fix")
@@ -14125,6 +14441,80 @@ class SlackInteractivityView(APIView):
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
+                return
+
+            # ── Common Vulns (Fix tab) — team filter, list, asset detail ──────
+            if action_id.startswith("fix_common_team_"):
+                parts = value.split("|")
+                team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else action_id.replace("fix_common_team_", "")
+                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                section = slash._common_vulns_tab_blocks(
+                    team_id, slack_user_id, team_key=team_key, offset=page_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_common")
+                    + section
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id.startswith("fix_common_list_pg_"):
+                parts = value.split("|")
+                team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                section = slash._common_vulns_tab_blocks(
+                    team_id, slack_user_id, team_key=team_key, offset=page_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_common")
+                    + section
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id == "fix_common_back":
+                parts = value.split("|")
+                team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                section = slash._common_vulns_tab_blocks(
+                    team_id, slack_user_id, team_key=team_key, offset=page_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_common")
+                    + section
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id.startswith("fix_common_vuln_") or action_id.startswith("fix_common_assets_pg_"):
+                parts = value.split("|")
+                team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                assets_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                data = slash._fetch_common_vulns_data(team_id, slack_user_id)
+                grouped = slash._group_common_vulns_by_team(data if isinstance(data, dict) else {})
+                section = slash._format_common_vuln_assets(
+                    grouped, team_key, vuln_idx,
+                    list_offset=list_offset, offset=assets_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_common")
+                    + section
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
                 return
 
             if action_id == "view_fix_asset" or action_id.startswith("view_fix_asset_vulns_pg_"):
