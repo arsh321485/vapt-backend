@@ -1,13 +1,6 @@
-Automations
-- Full - number - Critical - high - medium - low
+register vale tab me mujhe particular vuln ki view pr cilck krne ke bad uski details sho honi chahihe 
 
-- Partial - number - Critical - high - medium - low
+manual or automated vala 
 
-mujhe register tab ke right right pr ek nav tab chahihe Automations krke 
 
-jo automation Automation Possible
-Yes [100%] to full tab me jaye 
-
-or jo partial hai o partial me show kro Partial [50%]
-
-to mujhe eska mujhe plan btao fir code krna 
+fix tab me se vuln details vala tab remove kr do 
