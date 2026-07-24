@@ -8810,6 +8810,7 @@ class SlackSlashCommandView(APIView):
         ("nav_home",     "🏠 Home"),
         ("nav_fix",      "🔧 Fix"),
         ("nav_register", "📋 Register"),
+        ("nav_automation", "🤖 Automations"),
         ("nav_team",     "👥 Team"),
         ("nav_request",  "📨 Request"),
         ("nav_notification", "🔔 Notification"),
@@ -8857,6 +8858,14 @@ class SlackSlashCommandView(APIView):
     _REGISTER_SUBTABS = [
         ("reg_sub_register", "📋 Register"),
         ("reg_sub_script",   "📜 Script"),
+    ]
+
+    # Sub-tabs shown under the "Automations" nav tab — Full vs Partial
+    # automation coverage, classified client-side (Slack code only) from
+    # automation_possible; no backend API changes for this feature.
+    _AUTOMATION_SUBTABS = [
+        ("auto_sub_full",    "✅ Full"),
+        ("auto_sub_partial", "🌓 Partial"),
     ]
 
     # Sub-tabs shown under the "Notification" nav tab specifically — deadline
@@ -9218,6 +9227,10 @@ class SlackSlashCommandView(APIView):
             return self._register_subnav_block(active_sub="reg_sub_register") + \
                 self._register_subtab_blocks("reg_sub_register", team_id, user_id)
 
+        if action_id == "nav_automation":
+            return self._automation_subnav_block(active_sub="auto_sub_full") + \
+                self._automation_subtab_blocks("auto_sub_full", team_id, user_id)
+
         if action_id == "nav_team":
             return self._team_subnav_block(active_sub="team_sub_team") + \
                 self._team_subtab_blocks("team_sub_team", team_id, user_id)
@@ -9371,6 +9384,96 @@ class SlackSlashCommandView(APIView):
         ):
             return self._text_block(f"❌ {vd_data.get('detail')}")
         return self._format_register_tab(vd_data, sev_filter="all", st_filter="all", offset=0)
+
+    def _classify_automation_possible(self, raw_value):
+        """
+        Maps the free-text automation_possible field to "full" | "partial" | None.
+        "Yes" / "Yes [100%]" -> full. "Partial" and conditional strings like
+        "Yes (if X unused) / Partial (if X in use)" (contain "Partial") -> partial.
+        Missing/blank -> None (unclassified, excluded from both tabs rather
+        than guessed).
+        """
+        text = (raw_value or "").strip().lower()
+        if not text:
+            return None
+        if "partial" in text:
+            return "partial"
+        if text.startswith("yes"):
+            return "full"
+        return None
+
+    def _build_automation_category_map(self, team_id, user_id):
+        """
+        Builds {plugin_id: "full"|"partial"} from the automation scripts
+        library (GET /api/admin/automation-scripts/ — unmodified, existing
+        endpoint). A plugin_id can have multiple OS-variant documents where
+        only one carries automation_possible, so this takes whichever
+        variant resolves a classification first (same sibling-fallback
+        pattern used elsewhere for severity/team).
+        """
+        try:
+            data = self._call_api(
+                "/api/admin/automation-scripts/", team_id, slack_user_id=user_id,
+            )
+        except Exception:
+            logger.exception("[automation_tab] library fetch failed")
+            return {}
+        scripts = data.get("scripts") or [] if isinstance(data, dict) else []
+        category_by_plugin = {}
+        for s in scripts:
+            pid = s.get("plugin_id")
+            if pid is None:
+                continue
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                continue
+            if pid in category_by_plugin:
+                continue
+            cat = self._classify_automation_possible(s.get("automation_possible"))
+            if cat:
+                category_by_plugin[pid] = cat
+        return category_by_plugin
+
+    def _automation_subnav_block(self, active_sub=None):
+        """Second-level button row under the 'Automations' nav tab: Full | Partial."""
+        return self._button_row_blocks(self._AUTOMATION_SUBTABS, active_action_id=active_sub)
+
+    def _automation_subtab_blocks(self, sub_action_id, team_id, user_id, sev_filter="all", offset=0):
+        """
+        Content for the 'Automations' sub-tabs. Combines two existing,
+        unmodified endpoints entirely client-side (no backend API changes):
+          - /api/admin/automation-scripts/stats/  -> latest-report-scoped
+            plugin_id + vulnerability name + severity + team
+          - /api/admin/automation-scripts/         -> automation_possible
+            per plugin_id (library-wide), classified into full/partial here
+        """
+        category = "partial" if sub_action_id == "auto_sub_partial" else "full"
+        try:
+            stats_data = self._call_api(
+                "/api/admin/automation-scripts/stats/", team_id, slack_user_id=user_id,
+            )
+        except Exception as exc:
+            logger.exception("[automation_tab] stats fetch failed: %s", exc)
+            return self._text_block(f"❌ Could not load Automations data: `{exc}`")
+        if not isinstance(stats_data, dict):
+            return self._text_block("❌ Could not load Automations data (invalid API response).")
+        if stats_data.get("detail") and not stats_data.get("stats"):
+            return self._text_block(f"❌ {stats_data.get('detail')}")
+
+        category_by_plugin = self._build_automation_category_map(team_id, user_id)
+
+        rows = []
+        for s in (stats_data.get("stats") or []):
+            pid = s.get("plugin_id")
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                continue
+            if category_by_plugin.get(pid) == category:
+                rows.append(s)
+
+        return self._format_automation_tab(category, rows, sev_filter=sev_filter, offset=offset)
 
     def _parse_rc_days(self, raw_value):
         """
@@ -13514,6 +13617,106 @@ class SlackSlashCommandView(APIView):
             blocks.append(pg_block)
         return blocks
 
+    def _format_automation_tab(self, category, rows, sev_filter="all", offset=0):
+        """
+        "Automations" nav tab — Full / Partial sub-tabs. `rows` are already
+        pre-filtered to this category by _automation_subtab_blocks; this
+        just applies the severity filter (with live counts) and paginates.
+        """
+        PAGE_SIZE = 5
+
+        def _norm_sev(v):
+            return (v.get("severity") or "").strip().lower()
+
+        sev_counts = {
+            "all": len(rows),
+            "critical": sum(1 for v in rows if _norm_sev(v) == "critical"),
+            "high": sum(1 for v in rows if _norm_sev(v) == "high"),
+            "medium": sum(1 for v in rows if _norm_sev(v) == "medium"),
+            "low": sum(1 for v in rows if _norm_sev(v) == "low"),
+        }
+
+        filtered = rows if sev_filter == "all" else [v for v in rows if _norm_sev(v) == sev_filter]
+        count = len(filtered)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = filtered[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        def sev_icon(sev_norm):
+            return self._SEV_EMOJI_MAP.get(sev_norm, "⚪")
+
+        badge = "✅ Full" if category == "full" else "🌓 Partial [50%]"
+        title = "✅ Fully Automated" if category == "full" else "🌓 Partially Automated"
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": title, "emoji": True}},
+            self._ctx("Automation coverage by severity — classified from the automation library's Automation Possible field."),
+            {"type": "divider"},
+        ]
+
+        sev_buttons = [
+            ("all", f"All {sev_counts['all']}"),
+            ("critical", f"Critical {sev_counts['critical']}"),
+            ("high", f"High {sev_counts['high']}"),
+            ("medium", f"Medium {sev_counts['medium']}"),
+            ("low", f"Low {sev_counts['low']}"),
+        ]
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": label, "emoji": True},
+                        "action_id": f"auto_sev_{k}",
+                        "value": f"{category}|{k}|0",
+                        **({"style": "primary"} if k == sev_filter else {}),
+                    }
+                    for (k, label) in sev_buttons
+                ],
+            }
+        )
+        blocks.append({"type": "divider"})
+
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No scripts found for this filter.*"}})
+        else:
+            for idx, s in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sno = str(start_num + idx).zfill(2)
+                name = s.get("vulnerability") or "Unknown"
+                sev_norm = _norm_sev(s)
+                sev_label = sev_norm.upper() if sev_norm else "—"
+                team = (s.get("team") or "").strip() or "—"
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"*`{sno}`*  *{name}*\n"
+                                f"{sev_icon(sev_norm)} *{sev_label}*  |  *Team:* {team}  |  {badge}"
+                            ),
+                        },
+                    }
+                )
+
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Showing {start_num}-{end_num} of {count} results",
+                },
+            }
+        )
+        value_prefix = f"{category}|{sev_filter}|"
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "auto_list_pg", value_prefix=value_prefix)
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
     def _format_vulndata_detail(self, data, fix_vuln_id):
         name  = data.get("vulnerability_name") or data.get("name") or fix_vuln_id
         sev   = (data.get("severity") or "").capitalize()
@@ -14796,6 +14999,43 @@ class SlackInteractivityView(APIView):
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_register")
                     + slash._register_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            # ── Automations tab (Full / Partial) ─────────────────────────────
+            if action_id in dict(slash._AUTOMATION_SUBTABS):
+                content_blocks = slash._automation_subtab_blocks(action_id, team_id, slack_user_id)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_automation")
+                    + slash._automation_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            if action_id.startswith("auto_sev_") or action_id.startswith("auto_list_pg_"):
+                # value format: "<category>|<sev>|<offset>"
+                parts = value.split("|")
+                category = parts[0] if len(parts) > 0 and parts[0] else "full"
+                sev_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                sub_action_id = "auto_sub_partial" if category == "partial" else "auto_sub_full"
+                content_blocks = slash._automation_subtab_blocks(
+                    sub_action_id, team_id, slack_user_id, sev_filter=sev_filter, offset=page_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_automation")
+                    + slash._automation_subnav_block(active_sub=sub_action_id)
                     + content_blocks
                 )
                 self._post_response_url(
