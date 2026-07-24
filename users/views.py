@@ -8813,7 +8813,6 @@ class SlackSlashCommandView(APIView):
         ("nav_register", "📋 Register"),
         ("nav_team",     "👥 Team"),
         ("nav_request",  "📨 Request"),
-        ("nav_teamperf", "📈 Team Performance"),
         ("nav_notification", "🔔 Notification"),
         ("nav_download", "📥 Download Report"),
     ]
@@ -9240,11 +9239,6 @@ class SlackSlashCommandView(APIView):
             return self._request_subnav_block(active_sub="req_sub_approve") + \
                 self._request_subtab_blocks("req_sub_approve", team_id, user_id)
 
-        if action_id == "nav_teamperf":
-            return [self._dashboard_image_block(
-                team_id, kind="teamperf", alt_text="Team Performance Monitoring",
-            )]
-
         if action_id == "nav_notification":
             return self._notification_subnav_block(active_sub="notif_sub_overdue") + \
                 self._notification_subtab_blocks("notif_sub_overdue", team_id, user_id)
@@ -9504,8 +9498,13 @@ class SlackSlashCommandView(APIView):
         return buckets
 
     def _notification_subnav_block(self, active_sub=None):
-        """Second-level button row under the 'Notification' nav tab."""
-        return self._button_row_blocks(self._NOTIFICATION_SUBTABS, active_action_id=active_sub)
+        """
+        Second-level button row under the 'Notification' nav tab. chunk_size=6
+        (not the default 5) so all 6 sub-tabs stay on one row — Support and
+        Timeline Ext. need to sit next to each other, not wrap onto their own
+        second row.
+        """
+        return self._button_row_blocks(self._NOTIFICATION_SUBTABS, active_action_id=active_sub, chunk_size=6)
 
     def _notification_subtab_blocks(self, sub_action_id, team_id, user_id, offset=0,
                                      st_filter="all", team_filter="all"):
@@ -9573,7 +9572,7 @@ class SlackSlashCommandView(APIView):
                 slack_user_id=user_id,
             )
             return self._format_vulndata_list(
-                data, show_filters=True, pg_action_id="fix_vuln_pg",
+                data, show_filters=True, pg_action_id="fix_vuln_pg", origin="fixvulns",
             )
 
         if sub_action_id == "fix_sub_common":
@@ -9586,7 +9585,7 @@ class SlackSlashCommandView(APIView):
                 "/api/admin/adminregister/register/latest/vulns/", team_id,
                 slack_user_id=user_id,
             )
-            return self._format_vulndata_list(data)
+            return self._format_vulndata_list(data, origin="fixdetails")
 
         # fix_sub_assets (default)
         data = self._call_api(
@@ -9892,7 +9891,7 @@ class SlackSlashCommandView(APIView):
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": f"view_allvuln_detail_{safe_sid}",
-                    "value": sid,
+                    "value": f"{sid}|fixassets",
                 },
             })
             blocks.append({"type": "divider"})
@@ -10218,15 +10217,28 @@ class SlackSlashCommandView(APIView):
                 return r
         return None
 
+    # Tabs that route through the shared view_allvuln_detail_* button — each
+    # needs to know which one to return to afterward instead of always
+    # falling back to Admin Demo (Vuln Details moved out of Admin Demo into
+    # Fix, and Fix's own All Vulnerabilities/All Assets funnel through here
+    # too, so a single hardcoded fallback was wrong for 3 of the 4 origins).
+    _VULN_DETAIL_ORIGINS = {
+        "fixdetails": ("nav_fix", "fix_sub_details"),
+        "fixvulns":   ("nav_fix", "fix_sub_vulns"),
+        "fixassets":  ("nav_fix", "fix_sub_assets"),
+    }
+
     def _parse_vuln_detail_action_value(self, value):
         """
-        Button value is either short_id, or
+        Button value is either short_id, short_id|<origin_tag> (one of
+        _VULN_DETAIL_ORIGINS' keys), or
         short_id|common|team_key|vuln_idx|list_offset|assets_offset
         when opened from Common Vuln — Assets.
         """
         parts = (value or "").split("|")
         sid = parts[0] if parts else (value or "")
         common_ctx = None
+        origin_tag = None
         if len(parts) >= 6 and parts[1] == "common":
             common_ctx = {
                 "team_key": parts[2] if parts[2] in self._COMMON_TEAM_KEY_TO_NAME else "config",
@@ -10234,7 +10246,9 @@ class SlackSlashCommandView(APIView):
                 "list_offset": int(parts[4]) if parts[4].isdigit() else 0,
                 "assets_offset": int(parts[5]) if parts[5].isdigit() else 0,
             }
-        return sid, common_ctx
+        elif len(parts) == 2 and parts[1] in self._VULN_DETAIL_ORIGINS:
+            origin_tag = parts[1]
+        return sid, common_ctx, origin_tag
 
     def _common_asset_vuln_detail_blocks(self, target, sub, team_id, common_ctx, action_value):
         """Detail view opened from a Common Vuln asset row — Back returns to assets."""
@@ -13077,7 +13091,7 @@ class SlackSlashCommandView(APIView):
 
     def _format_vulndata_list(
         self, data, offset=0, sev_filter="all", st_filter="all",
-        show_filters=False, pg_action_id="view_vulndata_pg",
+        show_filters=False, pg_action_id="view_vulndata_pg", origin=None,
     ):
         # LatestSuperAdminVulnerabilityRegisterAPIView returns the list under
         # "rows" (not "results"/"vulnerabilities"), with fields vul_name/asset
@@ -13151,7 +13165,7 @@ class SlackSlashCommandView(APIView):
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": f"view_allvuln_detail_{safe_sid}",
-                    "value": sid,
+                    "value": f"{sid}|{origin}" if origin else sid,
                 },
             })
             blocks.append({"type": "divider"})
@@ -15096,17 +15110,30 @@ class SlackInteractivityView(APIView):
                 action_id in ("view_allvuln_detail", "av_detail_manual", "av_detail_automation")
                 or action_id.startswith("view_allvuln_detail_")
             ):
-                sid, common_ctx = slash._parse_vuln_detail_action_value(value)
+                sid, common_ctx, origin_tag = slash._parse_vuln_detail_action_value(value)
                 vd_data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
                 target = next((r for r in rows if r.get("short_id") == sid), None)
+
+                if common_ctx:
+                    fallback_nav, fallback_sub = "nav_fix", "fix_sub_common"
+                elif origin_tag:
+                    fallback_nav, fallback_sub = slash._VULN_DETAIL_ORIGINS[origin_tag]
+                else:
+                    # Plain sid, no tag — only Admin Demo's own "All Vulns"
+                    # (av_sub_list) still reaches this branch untagged.
+                    fallback_nav, fallback_sub = "nav_admin_demo", "av_sub_list"
+                fallback_subnav_block = (
+                    slash._fix_subnav_block if fallback_nav == "nav_fix" else slash._allvuln_subnav_block
+                )
+
                 if not target:
-                    content = slash._text_block(f"❌ Vulnerability `{sid}` not found. Reopen All Vulnerabilities and try again.")
+                    content = slash._text_block(f"❌ Vulnerability `{sid}` not found. Reopen the list and try again.")
                     blocks = (
-                        slash._nav_buttons_block(active_action_id="nav_admin_demo")
-                        + slash._allvuln_subnav_block(active_sub="av_sub_details")
+                        slash._nav_buttons_block(active_action_id=fallback_nav)
+                        + fallback_subnav_block(active_sub=fallback_sub)
                         + content
                     )
                 elif common_ctx:
@@ -15115,16 +15142,16 @@ class SlackInteractivityView(APIView):
                         target, sub, team_id, common_ctx, action_value=value,
                     )
                     blocks = (
-                        slash._nav_buttons_block(active_action_id="nav_fix")
-                        + slash._fix_subnav_block(active_sub="fix_sub_common")
+                        slash._nav_buttons_block(active_action_id=fallback_nav)
+                        + fallback_subnav_block(active_sub=fallback_sub)
                         + content
                     )
                 else:
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
-                    content = slash._allvuln_detail_blocks(target, sub, team_id)
+                    content = slash._allvuln_detail_blocks(target, sub, team_id, action_value=value)
                     blocks = (
-                        slash._nav_buttons_block(active_action_id="nav_admin_demo")
-                        + slash._allvuln_subnav_block(active_sub="av_sub_details")
+                        slash._nav_buttons_block(active_action_id=fallback_nav)
+                        + fallback_subnav_block(active_sub=fallback_sub)
                         + content
                     )
                 self._post_response_url(response_url, {
@@ -15340,7 +15367,7 @@ class SlackInteractivityView(APIView):
                 content = slash._format_vulndata_list(
                     vd_data, offset=page_offset,
                     sev_filter=sev_filter, st_filter=st_filter,
-                    show_filters=True, pg_action_id="fix_vuln_pg",
+                    show_filters=True, pg_action_id="fix_vuln_pg", origin="fixvulns",
                 )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_fix")
