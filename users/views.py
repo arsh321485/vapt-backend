@@ -8698,7 +8698,7 @@ class SlackStatusIconView(APIView):
         "open": "status-open.png",
         "closed": "status-closed.png",
         "progress": "status-progress.png",
-        "review": "status-open.png",
+        "review": "status-review.png",
     }
 
     def get(self, request, kind="open"):
