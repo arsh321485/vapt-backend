@@ -9979,30 +9979,32 @@ class SlackSlashCommandView(APIView):
         if not page_items:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No support requests found.*"}})
         else:
+            # Same row layout as admin's _format_support_tab: status-icon
+            # context line, host+severity+View, then a Requested By/Raised/
+            # Status/Team context line.
             for idx, r in enumerate(page_items):
-                if idx > 0:
-                    blocks.append({"type": "divider"})
                 sno = str(start_num + idx).zfill(2)
                 sid = r.get("short_id", "?")
                 vuln = r.get("vul_name") or r.get("vulnerability_name") or "General Request"
-                host = r.get("host_name") or ""
+                host = r.get("host_name") or "—"
                 sev = (r.get("severity") or "").strip() or "—"
-                st = (r.get("status") or "open").capitalize()
+                st = r.get("status") or "open"
+                st_display = st.strip().lower().capitalize()
                 sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
-                desc = (r.get("description") or "").strip()
                 requester = r.get("requested_by") or "Unknown"
-                host_part = f"  |  Host: `{host}`" if host else ""
-                desc_part = f"\n_{desc}_" if desc else ""
+                raised = self._short_display_date(r.get("requested_at"))
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
+
+                blocks.append({
+                    "type": "context",
+                    "elements": [
+                        self._status_icon_image_element(st),
+                        {"type": "mrkdwn", "text": f"*`{sno}`*  `{sid}`  *{vuln}*"},
+                    ],
+                })
                 blocks.append({
                     "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f"*`{sno}`*  `{sid}`  *{vuln}*{host_part}{desc_part}\n"
-                            f"{sev_icon} *{sev.upper()}*  |  Status: {st}  |  By: {requester}"
-                        ),
-                    },
+                    "text": {"type": "mrkdwn", "text": f"`{host}`  |  {sev_icon} *{sev.upper()}*"},
                     "accessory": {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
@@ -10010,6 +10012,19 @@ class SlackSlashCommandView(APIView):
                         "value": f"{sid}|{vapt_team}|{st_filter}|{offset}",
                     },
                 })
+                blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*Requested By:* {requester}  |  "
+                            f"*Raised:* {raised}  |  "
+                            f"*Status:* *{st_display}*  |  "
+                            f"*Team:* {vapt_team}"
+                        ),
+                    }],
+                })
+                blocks.append({"type": "divider"})
 
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
         value_prefix = f"{vapt_team}|{st_filter}|"
@@ -15109,7 +15124,7 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*Port / Protocol*\n{port}/{proto}"},
             ]},
             self._ctx(
-                f"First seen: {v.get('first_observation') or '—'} | Last check: {v.get('second_observation') or '—'}"
+                f"*First Obs.:* {v.get('first_observation') or '—'} | *Last Obs.:* {v.get('second_observation') or '—'}"
             ),
         ]
 
