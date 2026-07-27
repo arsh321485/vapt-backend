@@ -3339,6 +3339,10 @@ class UserClosedVulnerabilitiesAPIView(APIView):
 
                 # Build host -> OS map from nessus report (fallback for old records)
                 host_os_map = {}
+                # (plugin_name, host_name) -> the nessus vuln entry's own
+                # created_at — same "first observed" source
+                # UserLatestVulnerabilityRegisterAPIView uses.
+                first_obs_map = {}
                 for h in latest_doc.get("vulnerabilities_by_host", []):
                     h_name = h.get("host_name") or h.get("host") or ""
                     host_info = h.get("host_information") or {}
@@ -3357,6 +3361,10 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                             host_os_map[h_name] = "Linux"
                         else:
                             host_os_map[h_name] = os_raw
+                    for v in h.get("vulnerabilities", []):
+                        p_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if p_name and h_name:
+                            first_obs_map[(p_name, h_name)] = v.get("created_at")
 
                 # Step 3: Query fix_vulnerabilities_closed filtered by member's teams
                 closed_cursor = db[FIX_VULN_CLOSED_COLLECTION].find(
@@ -3370,11 +3378,17 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                 results = []
                 for doc in closed_cursor:
                     host_name = doc.get("host_name", "")
+                    plugin_name = doc.get("plugin_name", "")
                     # Use stored OS first; fall back to nessus host_information; default Windows
                     os_value = doc.get("operating_system", "") or host_os_map.get(host_name, "") or "Windows"
+                    # Same fields/sourcing as UserLatestVulnerabilityRegisterAPIView:
+                    # first_observation from the nessus vuln entry's own created_at
+                    # (falling back to this fix doc's own created_at), second_observation
+                    # from verification_sent_at (set when the team sent it for retest).
+                    first_obs = first_obs_map.get((plugin_name, host_name)) or doc.get("created_at")
                     results.append({
                         "fix_vulnerability_id": doc.get("fix_vulnerability_id", str(doc.get("_id", ""))),
-                        "plugin_name":          doc.get("plugin_name", ""),
+                        "plugin_name":          plugin_name,
                         "host_name":            host_name,
                         "os":                   os_value,
                         "port":                 doc.get("port", ""),
@@ -3383,6 +3397,8 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                         "created_at":           _normalize_iso(doc.get("created_at")),
                         "closed_at":            _normalize_iso(doc.get("closed_at")),
                         "closed_by":            doc.get("closed_by", ""),
+                        "first_observation":    _normalize_iso(first_obs),
+                        "second_observation":   _normalize_iso(doc.get("verification_sent_at")),
                     })
 
                 return Response(
