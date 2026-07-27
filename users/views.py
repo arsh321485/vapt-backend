@@ -9314,7 +9314,7 @@ class SlackSlashCommandView(APIView):
     def _team_fix_subnav_block(self, vapt_team, active_sub=None):
         return self._button_row_blocks(self._TEAM_FIX_SUBTABS, active_action_id=active_sub, value=vapt_team)
 
-    def _team_fix_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, offset=0):
+    def _team_fix_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, sev_filter="all", st_filter="all", offset=0):
         if sub_action_id == "tfix_sub_common":
             team_key = next(
                 (k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "config",
@@ -9326,33 +9326,122 @@ class SlackSlashCommandView(APIView):
             return self._text_block(f"❌ {raw_data.get('detail')}")
 
         if sub_action_id == "tfix_sub_vulns":
-            return self._format_team_plain_list(
-                vulns, title="📋 All Vulns", pg_action_id="tfix_vuln_pg", vapt_team=vapt_team, offset=offset,
+            return self._format_team_vuln_list(
+                vulns, title="📋 All Vulns", action_prefix="tfix_vuln",
+                vapt_team=vapt_team, sev_filter=sev_filter, st_filter=st_filter, offset=offset,
             )
 
-        # tfix_sub_assets (default) — one row per distinct host
-        seen = {}
+        # tfix_sub_assets (default) — one row per distinct host, with a
+        # severity breakdown pill row (matches user-assets.html design).
+        by_host = {}
         for v in vulns:
             host = v.get("host_name")
             if not host:
                 continue
-            seen.setdefault(host, 0)
-            seen[host] += 1
-        asset_rows = [{"host_name": h, "vuln_count": c} for h, c in seen.items()]
-        return self._format_team_asset_list(asset_rows, vapt_team, offset=offset)
+            by_host.setdefault(host, []).append(v)
+        asset_rows = [{"host_name": h, "vulns": vs} for h, vs in by_host.items()]
+        return self._format_team_asset_list(asset_rows, vapt_team, sev_filter=sev_filter, st_filter=st_filter, offset=offset)
 
-    def _format_team_plain_list(self, vulns, title, pg_action_id, vapt_team, offset=0):
+    def _team_sev_status_filter_blocks(self, items, vapt_team, sev_filter, st_filter, action_prefix, extra_value=""):
         """
-        Read-only paginated vuln list for team Fix/Register tabs — no
-        drill-down detail (matches the assets.html/register design's own
-        scope: a flat list, not a deep-link into a fix workflow). Team name
-        is embedded in the pagination button's value since the click
-        carries no other context to recover it from.
+        Shared severity + status filter row pair (with live counts) for team
+        Fix/Register lists — matches the user-assets.html/user-vulnerabilities.html/
+        user-register.html designs. `items` must have "risk_factor"/"status" keys
+        (the _get_team_vulns shape). Each button's value carries
+        "<team>|<sev>|<st>|0<extra_value>" so the click can rebuild full context.
+        """
+        def norm_sev(v):
+            return (v.get("risk_factor") or "").strip().lower()
+
+        def norm_status(v):
+            st = (v.get("status") or "open").strip().lower()
+            return st
+
+        sev_base = [v for v in items if st_filter == "all" or norm_status(v) == st_filter]
+        st_base = [v for v in items if sev_filter == "all" or norm_sev(v) == sev_filter]
+
+        sev_counts = {
+            "all": len(sev_base),
+            "critical": sum(1 for v in sev_base if norm_sev(v) == "critical"),
+            "high": sum(1 for v in sev_base if norm_sev(v) == "high"),
+            "medium": sum(1 for v in sev_base if norm_sev(v) == "medium"),
+            "low": sum(1 for v in sev_base if norm_sev(v) == "low"),
+        }
+        st_counts = {
+            "all": len(st_base),
+            "open": sum(1 for v in st_base if norm_status(v) == "open"),
+            "closed": sum(1 for v in st_base if norm_status(v) == "closed"),
+            "progress": sum(1 for v in st_base if "progress" in norm_status(v)),
+        }
+
+        def value_for(sev, st):
+            return f"{vapt_team}|{sev}|{st}|0{extra_value}"
+
+        sev_row = {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label, "emoji": True},
+                    "action_id": f"{action_prefix}_sev_{k}",
+                    "value": value_for(k, st_filter),
+                    **({"style": "primary"} if k == sev_filter else {}),
+                }
+                for k, label in [
+                    ("all", "All"), ("critical", "Critical"), ("high", "High"),
+                    ("medium", "Medium"), ("low", "Low"),
+                ]
+            ],
+        }
+        st_row = {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label, "emoji": True},
+                    "action_id": f"{action_prefix}_st_{k}",
+                    "value": value_for(sev_filter, k),
+                    **({"style": "primary"} if k == st_filter else {}),
+                }
+                for k, label in [
+                    ("all", f"All {st_counts['all']}"), ("open", f"Open {st_counts['open']}"),
+                    ("closed", f"Closed {st_counts['closed']}"), ("progress", f"In Progress {st_counts['progress']}"),
+                ]
+            ],
+        }
+        return [sev_row, st_row]
+
+    def _format_team_vuln_list(self, vulns, title, action_prefix, vapt_team, sev_filter="all", st_filter="all", offset=0):
+        """
+        Filterable, paginated vuln list for team Fix (All Vulns) / Register
+        tabs — matches user-vulnerabilities.html/user-register.html: severity
+        + status filter rows with live counts, numbered rows, host, severity,
+        status. No drill-down detail (matches those designs' own scope — a
+        flat list, not a deep-link into a fix workflow).
         """
         PAGE_SIZE = 5
-        count = len(vulns)
+
+        def norm_sev(v):
+            return (v.get("risk_factor") or "").strip().lower()
+
+        def norm_status(v):
+            st = (v.get("status") or "open").strip().lower()
+            return st
+
+        def matches(v):
+            sev_ok = sev_filter == "all" or norm_sev(v) == sev_filter
+            if st_filter == "all":
+                st_ok = True
+            elif st_filter == "progress":
+                st_ok = "progress" in norm_status(v)
+            else:
+                st_ok = norm_status(v) == st_filter
+            return sev_ok and st_ok
+
+        filtered = [v for v in vulns if matches(v)]
+        count = len(filtered)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
-        page_items = vulns[offset:offset + PAGE_SIZE]
+        page_items = filtered[offset:offset + PAGE_SIZE]
         start_num = offset + 1 if page_items else 0
         end_num = offset + len(page_items)
 
@@ -9361,11 +9450,14 @@ class SlackSlashCommandView(APIView):
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": title, "emoji": True}},
-            self._ctx(f"Total: {count} vulnerabilities assigned to your team."),
+            self._ctx(f"{vapt_team} — vulnerabilities assigned to your team."),
             {"type": "divider"},
         ]
+        blocks.extend(self._team_sev_status_filter_blocks(vulns, vapt_team, sev_filter, st_filter, action_prefix))
+        blocks.append({"type": "divider"})
+
         if not page_items:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No vulnerabilities found.*"}})
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No vulnerabilities found for this filter.*"}})
         else:
             for idx, v in enumerate(page_items):
                 if idx > 0:
@@ -9384,41 +9476,82 @@ class SlackSlashCommandView(APIView):
                 })
 
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
-        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, pg_action_id, value_prefix=f"{vapt_team}|")
+        value_prefix = f"{vapt_team}|{sev_filter}|{st_filter}|"
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, f"{action_prefix}_pg", value_prefix=value_prefix)
         if pg_block:
             blocks.append(pg_block)
         return blocks
 
-    def _format_team_asset_list(self, asset_rows, vapt_team, offset=0):
+    def _format_team_asset_list(self, asset_rows, vapt_team, sev_filter="all", st_filter="all", offset=0):
+        """
+        Matches user-assets.html: severity + status filter rows, each asset
+        row shows a severity-breakdown pill line (Critical: N, High: N, ...)
+        instead of a flat vuln count.
+        """
         PAGE_SIZE = 5
-        count = len(asset_rows)
+
+        def norm_sev(v):
+            return (v.get("risk_factor") or "").strip().lower()
+
+        def norm_status(v):
+            return (v.get("status") or "open").strip().lower()
+
+        def asset_matches_status(vs):
+            if st_filter == "all":
+                return True
+            if st_filter == "progress":
+                return any("progress" in norm_status(v) for v in vs)
+            return any(norm_status(v) == st_filter for v in vs)
+
+        def asset_matches_sev(vs):
+            return sev_filter == "all" or any(norm_sev(v) == sev_filter for v in vs)
+
+        filtered_assets = [a for a in asset_rows if asset_matches_sev(a["vulns"]) and asset_matches_status(a["vulns"])]
+        count = len(filtered_assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
-        page_items = asset_rows[offset:offset + PAGE_SIZE]
+        page_items = filtered_assets[offset:offset + PAGE_SIZE]
         start_num = offset + 1 if page_items else 0
         end_num = offset + len(page_items)
 
+        # Flatten all vulns across assets just for the shared filter-count row.
+        all_vulns = [v for a in asset_rows for v in a["vulns"]]
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🖥 All Assets", "emoji": True}},
-            self._ctx(f"Total: {count} assets with vulnerabilities assigned to your team."),
+            self._ctx(f"{vapt_team} — every asset with vulnerabilities assigned to your team."),
             {"type": "divider"},
         ]
+        blocks.extend(self._team_sev_status_filter_blocks(all_vulns, vapt_team, sev_filter, st_filter, "tfix_asset"))
+        blocks.append({"type": "divider"})
+
         if not page_items:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No assets found.*"}})
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No assets found for this filter.*"}})
         else:
             for idx, a in enumerate(page_items):
                 if idx > 0:
                     blocks.append({"type": "divider"})
                 sno = str(start_num + idx).zfill(2)
+                vs = a["vulns"]
+                sev_counts = {
+                    "critical": sum(1 for v in vs if norm_sev(v) == "critical"),
+                    "high": sum(1 for v in vs if norm_sev(v) == "high"),
+                    "medium": sum(1 for v in vs if norm_sev(v) == "medium"),
+                    "low": sum(1 for v in vs if norm_sev(v) == "low"),
+                }
+                pills = "  ".join(
+                    f"{self._SEV_EMOJI_MAP.get(k, '⚪')} {k.capitalize()}: {v}"
+                    for k, v in sev_counts.items() if v
+                ) or "_No open vulns_"
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*`{sno}`*  `{a['host_name']}`  |  *{a['vuln_count']} Vulns*",
+                        "text": f"*`{sno}`*  `{a['host_name']}`  |  *{len(vs)} Vulns*\n{pills}",
                     },
                 })
 
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
-        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "tfix_asset_pg", value_prefix=f"{vapt_team}|")
+        value_prefix = f"{vapt_team}|{sev_filter}|{st_filter}|"
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "tfix_asset_pg", value_prefix=value_prefix)
         if pg_block:
             blocks.append(pg_block)
         return blocks
@@ -9428,7 +9561,7 @@ class SlackSlashCommandView(APIView):
     def _team_reg_subnav_block(self, vapt_team, active_sub=None):
         return self._button_row_blocks(self._TEAM_REG_SUBTABS, active_action_id=active_sub, value=vapt_team)
 
-    def _team_reg_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, offset=0):
+    def _team_reg_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, sev_filter="all", st_filter="all", offset=0):
         if sub_action_id == "treg_sub_scripts":
             plugin_ids = sorted({v.get("plugin_id") for v in self._get_team_vulns(vapt_team, team_id, user_id)[0] if v.get("plugin_id")})
             if not plugin_ids:
@@ -9439,21 +9572,92 @@ class SlackSlashCommandView(APIView):
             )
             results = [r for r in (bulk.get("results") or []) if r.get("matched")]
             rows = [
-                {"plugin_name": r.get("vulnerability") or "Unknown", "host_name": "—",
-                 "risk_factor": r.get("severity") or "", "status": "open"}
+                {"vulnerability": r.get("vulnerability") or "Unknown",
+                 "severity": r.get("severity") or "", "download_count": r.get("download_count", 0),
+                 "team": vapt_team}
                 for r in results
             ]
-            return self._format_team_plain_list(
-                rows, title="📜 Scripts", pg_action_id="treg_script_pg", vapt_team=vapt_team, offset=offset,
-            )
+            return self._format_team_script_list(rows, vapt_team, sev_filter=sev_filter, offset=offset)
 
         # treg_sub_register (default)
         vulns, _, raw_data = self._get_team_vulns(vapt_team, team_id, user_id)
         if raw_data.get("detail") and not vulns:
             return self._text_block(f"❌ {raw_data.get('detail')}")
-        return self._format_team_plain_list(
-            vulns, title="📋 Register", pg_action_id="treg_list_pg", vapt_team=vapt_team, offset=offset,
+        return self._format_team_vuln_list(
+            vulns, title="📋 Register", action_prefix="treg_list",
+            vapt_team=vapt_team, sev_filter=sev_filter, st_filter=st_filter, offset=offset,
         )
+
+    def _format_team_script_list(self, rows, vapt_team, sev_filter="all", offset=0):
+        """Matches user-script.html: severity-only filter (no status), Downloads + Team per row."""
+        PAGE_SIZE = 5
+
+        def norm_sev(s):
+            return (s.get("severity") or "").strip().lower()
+
+        filtered = rows if sev_filter == "all" else [r for r in rows if norm_sev(r) == sev_filter]
+        count = len(filtered)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = filtered[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        sev_counts = {
+            "all": len(rows),
+            "critical": sum(1 for r in rows if norm_sev(r) == "critical"),
+            "high": sum(1 for r in rows if norm_sev(r) == "high"),
+            "medium": sum(1 for r in rows if norm_sev(r) == "medium"),
+            "low": sum(1 for r in rows if norm_sev(r) == "low"),
+        }
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "📜 Scripts", "emoji": True}},
+            self._ctx("Automation scripts available for your team's vulnerabilities."),
+            {"type": "divider"},
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": label, "emoji": True},
+                        "action_id": f"treg_script_sev_{k}",
+                        "value": f"{vapt_team}|{k}|0",
+                        **({"style": "primary"} if k == sev_filter else {}),
+                    }
+                    for k, label in [
+                        ("all", f"All {sev_counts['all']}"), ("critical", f"Critical {sev_counts['critical']}"),
+                        ("high", f"High {sev_counts['high']}"), ("medium", f"Medium {sev_counts['medium']}"),
+                        ("low", f"Low {sev_counts['low']}"),
+                    ]
+                ],
+            },
+            {"type": "divider"},
+        ]
+
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No scripts found for this severity.*"}})
+        else:
+            for idx, s in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sev = (s.get("severity") or "").strip() or "—"
+                sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*{s.get('vulnerability') or 'Unknown'}*\n"
+                            f"{sev_icon} *{sev.upper()}*  |  Downloads: {s.get('download_count', 0)}  |  Team: {s.get('team')}"
+                        ),
+                    },
+                })
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "treg_script_pg", value_prefix=f"{vapt_team}|{sev_filter}|")
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
 
     # ── Support Status (team) ────────────────────────────────────────────
 
@@ -9498,6 +9702,14 @@ class SlackSlashCommandView(APIView):
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Status", "emoji": True}},
             self._ctx(f"{vapt_team} — support requests raised by your team."),
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Total*\n{st_counts['all']}"},
+                    {"type": "mrkdwn", "text": f"*Open*\n{st_counts['open']}"},
+                    {"type": "mrkdwn", "text": f"*Closed*\n{st_counts['closed']}"},
+                ],
+            },
             {"type": "divider"},
         ]
         st_buttons = [
@@ -9528,15 +9740,23 @@ class SlackSlashCommandView(APIView):
                     blocks.append({"type": "divider"})
                 sno = str(start_num + idx).zfill(2)
                 sid = r.get("short_id", "?")
-                vuln = r.get("vul_name") or r.get("vulnerability_name") or "Unknown"
+                vuln = r.get("vul_name") or r.get("vulnerability_name") or "General Request"
+                host = r.get("host_name") or ""
                 sev = (r.get("severity") or "").strip() or "—"
                 st = (r.get("status") or "open").capitalize()
                 sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
+                desc = (r.get("description") or "").strip()
+                requester = r.get("requested_by") or "Unknown"
+                host_part = f"  |  Host: `{host}`" if host else ""
+                desc_part = f"\n_{desc}_" if desc else ""
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*`{sno}`*  `{sid}`  *{vuln}*\n{sev_icon} *{sev.upper()}*  |  Status: {st}",
+                        "text": (
+                            f"*`{sno}`*  `{sid}`  *{vuln}*{host_part}{desc_part}\n"
+                            f"{sev_icon} *{sev.upper()}*  |  Status: {st}  |  By: {requester}"
+                        ),
                     },
                 })
 
@@ -15666,13 +15886,21 @@ class SlackInteractivityView(APIView):
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
-            if action_id.startswith("tfix_vuln_pg_") or action_id.startswith("tfix_asset_pg_"):
-                # value: "<team>|<offset>"
+            if (
+                action_id.startswith("tfix_vuln_sev_") or action_id.startswith("tfix_vuln_st_") or action_id.startswith("tfix_vuln_pg_")
+                or action_id.startswith("tfix_asset_sev_") or action_id.startswith("tfix_asset_st_") or action_id.startswith("tfix_asset_pg_")
+            ):
+                # value: "<team>|<sev>|<st>|<offset>"
                 parts = value.split("|")
-                vapt_team = parts[0] if parts else ""
-                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-                sub_action_id = "tfix_sub_vulns" if action_id.startswith("tfix_vuln_pg_") else "tfix_sub_assets"
-                content_blocks = slash._team_fix_subtab_blocks(sub_action_id, team_id, slack_user_id, vapt_team, offset=page_offset)
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                sev_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                st_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                sub_action_id = "tfix_sub_assets" if "asset" in action_id else "tfix_sub_vulns"
+                content_blocks = slash._team_fix_subtab_blocks(
+                    sub_action_id, team_id, slack_user_id, vapt_team,
+                    sev_filter=sev_filter, st_filter=st_filter, offset=page_offset,
+                )
                 blocks = (
                     slash._team_nav_buttons_block("tnav_fix", vapt_team)
                     + slash._team_fix_subnav_block(vapt_team, active_sub=sub_action_id)
@@ -15681,16 +15909,40 @@ class SlackInteractivityView(APIView):
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
-            if action_id.startswith("treg_list_pg_") or action_id.startswith("treg_script_pg_"):
-                # value: "<team>|<offset>"
+            if (
+                action_id.startswith("treg_list_sev_") or action_id.startswith("treg_list_st_") or action_id.startswith("treg_list_pg_")
+            ):
+                # value: "<team>|<sev>|<st>|<offset>"
                 parts = value.split("|")
-                vapt_team = parts[0] if parts else ""
-                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-                sub_action_id = "treg_sub_scripts" if action_id.startswith("treg_script_pg_") else "treg_sub_register"
-                content_blocks = slash._team_reg_subtab_blocks(sub_action_id, team_id, slack_user_id, vapt_team, offset=page_offset)
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                sev_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                st_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                content_blocks = slash._team_reg_subtab_blocks(
+                    "treg_sub_register", team_id, slack_user_id, vapt_team,
+                    sev_filter=sev_filter, st_filter=st_filter, offset=page_offset,
+                )
                 blocks = (
                     slash._team_nav_buttons_block("tnav_register", vapt_team)
-                    + slash._team_reg_subnav_block(vapt_team, active_sub=sub_action_id)
+                    + slash._team_reg_subnav_block(vapt_team, active_sub="treg_sub_register")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("treg_script_sev_") or action_id.startswith("treg_script_pg_"):
+                # value: "<team>|<sev>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                sev_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                content_blocks = slash._team_reg_subtab_blocks(
+                    "treg_sub_scripts", team_id, slack_user_id, vapt_team,
+                    sev_filter=sev_filter, offset=page_offset,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_register", vapt_team)
+                    + slash._team_reg_subnav_block(vapt_team, active_sub="treg_sub_scripts")
                     + content_blocks
                 )
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)

@@ -1,24 +1,174 @@
-mujhe abhi slack ke plotform pr particular team me design bnani hai 
-
-lekin team ke according data show hona chahihe 
-
-tab ka name me aapko diti hu 
-
-1)  Home
-2) Fix
-3) Register
-4) support status
-5) fixed
-6) Reminder
+https://vaptbackend.secureitlab.com/api/user/automation-scripts/stats/
 
 
-mujhe esa tab bnana hai 
+{
+    "report_id": "6a60a67a9367b555d6c9cc2d",
+    "teams": [
+        "Patch Management",
+        "Configuration Management"
+    ],
+    "count": 21,
+    "stats": [
+        {
+            "plugin_id": 51192,
+            "vulnerability": "SSL Certificate Cannot Be Trusted Fix — Ubuntu",
+            "severity": "medium",
+            "download_count": 4,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 57582,
+            "vulnerability": "SSL Self-Signed Certificate Fix — Ubuntu",
+            "severity": "medium",
+            "download_count": 2,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 42873,
+            "vulnerability": "SWEET32 (CVE-2016-2183) - SSL Medium Strength Cipher Suite Mitigation Script",
+            "severity": "high",
+            "download_count": 2,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 42057,
+            "vulnerability": "Password Autocomplete Fix — Plugin 42057",
+            "severity": "low",
+            "download_count": 1,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 85582,
+            "vulnerability": "Clickjacking Fix — Plugin 85582",
+            "severity": "medium",
+            "download_count": 1,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 51192,
+            "vulnerability": "SSL Certificate Cannot Be Trusted",
+            "severity": "medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 157288,
+            "vulnerability": "TLS Version 1.1 Protocol Detection",
+            "severity": "Medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 157288,
+            "vulnerability": "Starting TLS 1.1 fix for Ubuntu...",
+            "severity": "Medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 104743,
+            "vulnerability": "TLS Version 1.0 Protocol Detection",
+            "severity": "Medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 104743,
+            "vulnerability": "Starting TLS 1.0 fix for Ubuntu...",
+            "severity": "Medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 85582,
+            "vulnerability": "Web Application Potentially Vulnerable to Clickjacking",
+            "severity": "medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 69551,
+            "vulnerability": "SSL Certificate Chain Contains RSA Keys Less Than 2048 bits",
+            "severity": "low",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 57582,
+            "vulnerability": "SSL Self-Signed Certificate",
+            "severity": "medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 45411,
+            "vulnerability": "SSL Certificate with Wrong Hostname",
+            "severity": "medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 45411,
+            "vulnerability": "SSL Certificate Wrong Hostname Fix — Plugin 45411",
+            "severity": "medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 42873,
+            "vulnerability": "SSL Medium Strength Cipher Suites Supported (SWEET32)",
+            "severity": "high",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 42057,
+            "vulnerability": "Web Server Allows Password Auto-Completion",
+            "severity": "low",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 26194,
+            "vulnerability": "Web Server Transmits Cleartext Credentials",
+            "severity": "low",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 26194,
+            "vulnerability": "Cleartext Credentials Fix — Plugin 26194",
+            "severity": "low",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 15901,
+            "vulnerability": "SSL Certificate Expiry",
+            "severity": "medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        },
+        {
+            "plugin_id": 15901,
+            "vulnerability": "SSL Certificate Expiry Fix — Plugin 15901",
+            "severity": "medium",
+            "download_count": 0,
+            "team": "Configuration Management"
+        }
+    ]
+}
 
-me aapko home page ka design bhejti hu vese hi mujhe chahihe 
 
-slack folder ke under
+      {
+            "plugin_id": 42873,
+            "vulnerability": "SWEET32 (CVE-2016-2183) - SSL Medium Strength Cipher Suite Mitigation Script",
+            "severity": "high",
+            "download_count": 1,
+            "team": "Configuration Management"
+        },
 
-1) home ke liye userdashboard 
-4) support status uske under pagination bnakr do 5 or vale jese aapne admin sahit bnaye the vese
+        ye vali vuln medium hai to o high me q dikha rhi hai scripts vale api me 
+        admin user dono sahit
 
-plan btao fir code krna 
+        to mujhe btao fir code krna 
