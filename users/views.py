@@ -9275,7 +9275,13 @@ class SlackSlashCommandView(APIView):
     ]
 
     def _team_nav_buttons_block(self, active_action_id, vapt_team):
-        return self._button_row_blocks(self._TEAM_NAV_ITEMS, active_action_id=active_action_id, value=vapt_team)
+        # All navbar tabs in ONE actions block so Slack shows a single row
+        # instead of wrapping the 6th ("Reminder") onto its own line — same
+        # fix already applied to the admin navbar's _nav_buttons_block.
+        return self._button_row_blocks(
+            self._TEAM_NAV_ITEMS, active_action_id=active_action_id,
+            value=vapt_team, chunk_size=len(self._TEAM_NAV_ITEMS),
+        )
 
     def _cmd_postteamnav(self, text, team_id, user_id, team_name):
         """
@@ -9674,7 +9680,7 @@ class SlackSlashCommandView(APIView):
         vuln_offset = int(parts[7]) if origin == "tfixassets" and len(parts) > 7 and parts[7].isdigit() else 0
         return sid, origin, vapt_team, sev_filter, st_filter, list_offset, host, vuln_offset
 
-    def _team_vuln_detail_blocks(self, v, sub, team_id, user_id, report_id, action_value=None):
+    def _team_vuln_detail_blocks(self, v, sub, team_id, user_id, report_id, action_value=None, steps_offset=0):
         """Team-side Manual/Automation Fix detail — mirrors _allvuln_detail_blocks
         but authenticates as the team member via /api/user/... endpoints instead
         of the admin (both sides remain strictly read-only, same as admin).
@@ -9723,7 +9729,10 @@ class SlackSlashCommandView(APIView):
                 steps_data = self._call_user_api(
                     f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, user_id,
                 )
-            content = self._format_vulndata_single(v, steps_data)
+            content = self._format_vulndata_single(
+                v, steps_data, offset=steps_offset,
+                action_id="tav_detail_manual", action_value=btn_value,
+            )
         return [toggle] + content
 
     def _build_team_vuln_detail_response(self, action_id, value, team_id, user_id):
@@ -9731,6 +9740,10 @@ class SlackSlashCommandView(APIView):
         the Manual/Automation toggle, and the Back button — one function
         serving all three origins since they only differ in which list to
         return to."""
+        # "View Next Steps" (see _format_vulndata_single) reuses this same
+        # tav_detail_manual action_id with a trailing '|SP:<offset>' marker —
+        # strip it before the fixed-position parse below.
+        value, steps_offset = self._split_steps_page_marker(value)
         sid, origin, vapt_team, sev_filter, st_filter, list_offset, host, vuln_offset = \
             self._parse_team_vuln_detail_value(value)
         # vulns already carry a stable short_id from _get_team_vulns itself —
@@ -9778,7 +9791,9 @@ class SlackSlashCommandView(APIView):
                 "value": value,
             }],
         }
-        detail_content = self._team_vuln_detail_blocks(target, sub, team_id, user_id, report_id, action_value=value)
+        detail_content = self._team_vuln_detail_blocks(
+            target, sub, team_id, user_id, report_id, action_value=value, steps_offset=steps_offset,
+        )
         return nav_blocks + [back_block] + detail_content
 
     # ── Register (team) ─────────────────────────────────────────────────
@@ -9977,6 +9992,7 @@ class SlackSlashCommandView(APIView):
                 requester = r.get("requested_by") or "Unknown"
                 host_part = f"  |  Host: `{host}`" if host else ""
                 desc_part = f"\n_{desc}_" if desc else ""
+                safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
                 blocks.append({
                     "type": "section",
                     "text": {
@@ -9986,6 +10002,12 @@ class SlackSlashCommandView(APIView):
                             f"{sev_icon} *{sev.upper()}*  |  Status: {st}  |  By: {requester}"
                         ),
                     },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": f"tsup_view_{safe_sid}",
+                        "value": f"{sid}|{vapt_team}|{st_filter}|{offset}",
+                    },
                 })
 
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
@@ -9993,6 +10015,83 @@ class SlackSlashCommandView(APIView):
         pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "tsup_list_pg", value_prefix=value_prefix)
         if pg_block:
             blocks.append(pg_block)
+        return blocks
+
+    def _get_team_support_rows(self, team_id, user_id, vapt_team):
+        """Fetch + team-filter + short-id-assign support requests — same
+        derivation _format_team_support_tab uses, factored out so the "View"
+        button's detail lookup resolves the identical short_id."""
+        data = self._fetch_support_report_data(team_id, user_id)
+        if not data or data.get("detail"):
+            return []
+        team_key = next((k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "")
+        raw_results = [r for r in (data.get("results") or []) if self._match_support_team_filter(r, team_key)]
+        return self._assign_severity_short_ids([
+            dict(r, severity=self._resolve_support_row_severity(r) or r.get("severity", ""))
+            for r in raw_results
+        ])
+
+    def _format_team_support_detail(self, record, vapt_team, st_filter="all", offset=0):
+        """
+        Read-only Support Status detail for one request (team channel) —
+        same fields as admin's _format_support_detail, minus the Reply
+        action (out of scope here — the request was just a View button
+        that shows details, not two-way messaging from Slack).
+        """
+        sid = record.get("short_id", "?")
+        vuln = record.get("vul_name") or record.get("vulnerability_name") or "General Request"
+        host = record.get("host_name") or "—"
+        requester = record.get("requested_by") or "Unknown"
+        st = record.get("status") or "open"
+        sev = self._resolve_support_row_severity(record) or (record.get("severity") or "—")
+        sev = sev.strip().upper() if sev and sev != "—" else sev
+        desc = (record.get("description") or "—").strip() or "—"
+        raised = self._short_display_date(record.get("requested_at"))
+        messages = record.get("messages") or []
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Request Detail", "emoji": True}},
+            {"type": "divider"},
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*ID*\n`{sid}`"},
+                    {"type": "mrkdwn", "text": f"*Status*\n{(st or 'open').capitalize()}"},
+                    {"type": "mrkdwn", "text": f"*Vulnerability*\n{vuln}"},
+                    {"type": "mrkdwn", "text": f"*Asset*\n`{host}`"},
+                    {"type": "mrkdwn", "text": f"*Criticality*\n{sev}"},
+                    {"type": "mrkdwn", "text": f"*Team*\n{vapt_team}"},
+                    {"type": "mrkdwn", "text": f"*Requested By*\n{requester}"},
+                    {"type": "mrkdwn", "text": f"*Support Raised*\n{raised}"},
+                ],
+            },
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Description*\n_{desc}_"}},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "*Messages*"}},
+        ]
+        if messages:
+            for m in messages[:10]:
+                sender = m.get("sender_email") or m.get("sender") or "—"
+                text = (m.get("text") or "").strip()
+                sent = self._short_display_date(m.get("sent_at"))
+                vis = (m.get("visibility") or "customer").capitalize()
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"*{sender}* ({sent}) · _{vis}_\n{text[:400]}"}],
+                })
+        else:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "_No messages yet._"}]})
+
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "← Back", "emoji": True},
+                "action_id": "tsup_detail_back",
+                "value": f"{vapt_team}|{st_filter}|{offset}",
+            }],
+        })
         return blocks
 
     # ── Fixed (team) ─────────────────────────────────────────────────────
@@ -10006,6 +10105,7 @@ class SlackSlashCommandView(APIView):
 
     def _format_team_fixed_list(self, rows, vapt_team, offset=0):
         PAGE_SIZE = 5
+        rows = self._assign_severity_short_ids([dict(r, severity=r.get("risk_factor") or "") for r in rows])
         count = len(rows)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = rows[offset:offset + PAGE_SIZE]
@@ -10024,16 +10124,24 @@ class SlackSlashCommandView(APIView):
                 if idx > 0:
                     blocks.append({"type": "divider"})
                 sno = str(start_num + idx).zfill(2)
+                sid = r.get("short_id", "?")
                 name = r.get("plugin_name") or "Unknown"
                 host = r.get("host_name") or "—"
                 sev = (r.get("risk_factor") or "").strip() or "—"
                 sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
                 closed_at = (r.get("closed_at") or "—").split("T")[0]
+                safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
                         "text": f"*`{sno}`*  *{name}*\n`{host}`  |  {sev_icon} *{sev.upper()}*  |  Closed: {closed_at}",
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": f"tfixed_view_{safe_sid}",
+                        "value": f"{sid}|{vapt_team}|{offset}",
                     },
                 })
 
@@ -10042,6 +10150,47 @@ class SlackSlashCommandView(APIView):
         if pg_block:
             blocks.append(pg_block)
         return blocks
+
+    def _get_team_fixed_rows(self, team_id, user_id, vapt_team):
+        """Fetch + team-filter + short-id-assign closed vulns — same
+        derivation _format_team_fixed_list uses, factored out so the "View"
+        button's detail lookup resolves the identical short_id."""
+        data = self._call_user_api("/api/user/register/closed-vulns/", team_id, user_id)
+        if not isinstance(data, dict):
+            return []
+        rows = [r for r in (data.get("closed_vulnerabilities") or []) if r.get("assigned_team") == vapt_team]
+        return self._assign_severity_short_ids([dict(r, severity=r.get("risk_factor") or "") for r in rows])
+
+    def _format_team_fixed_detail(self, record, team_id, user_id, vapt_team, offset=0, steps_offset=0):
+        """
+        Read-only detail for one closed/fixed vuln — reuses
+        _format_vulndata_single for the header/fields/steps display (steps
+        should show fully completed since the fix is already done); no
+        Manual/Automation toggle here since that decision was already made
+        and acted on, nothing left to choose.
+        """
+        sid = record.get("short_id", "?")
+        record = dict(record, status="closed")
+        fix_vuln_id = record.get("fix_vulnerability_id")
+        steps_data = None
+        if fix_vuln_id:
+            steps_data = self._call_user_api(
+                f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, user_id,
+            )
+        back = {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "← Back", "emoji": True},
+                "action_id": "tfixed_detail_back",
+                "value": f"{vapt_team}|{offset}",
+            }],
+        }
+        content = self._format_vulndata_single(
+            record, steps_data, offset=steps_offset,
+            action_id=f"tfixed_view_{sid}", action_value=f"{sid}|{vapt_team}|{offset}",
+        )
+        return [back] + content
 
     # ── Reminder (team) ──────────────────────────────────────────────────
 
@@ -10242,7 +10391,7 @@ class SlackSlashCommandView(APIView):
         results = self._assign_severity_short_ids(data.get("results") or [])
         return self._build_history_view_blocks(results, history_view=history_view, offset=offset)
 
-    def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None):
+    def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None, steps_offset=0):
         """Manual / Automation Fix toggle for one specific vulnerability —
         both sides are strictly read-only for admins (no fix/run actions),
         matching the website's own admin-is-read-only behavior; whatever the
@@ -10251,6 +10400,10 @@ class SlackSlashCommandView(APIView):
         action_value: optional button value for Manual/Automation (defaults to
         short_id). Common-vuln asset flow passes sid|common|team|idx|… so the
         toggle keeps Fix/Common navigation context.
+        steps_offset: mitigation-steps page offset carried by a "View Next
+        Steps" click (see _format_vulndata_single's `|SP:<offset>` marker) —
+        without threading it back through here, every "next steps" click
+        would reset back to steps 1-3 instead of advancing.
         """
         sid = v.get("short_id", "?")
         btn_value = action_value if action_value is not None else sid
@@ -10291,7 +10444,10 @@ class SlackSlashCommandView(APIView):
                 steps_data = self._call_api(
                     f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id,
                 )
-            content = self._format_vulndata_single(v, steps_data)
+            content = self._format_vulndata_single(
+                v, steps_data, offset=steps_offset,
+                action_id="av_detail_manual", action_value=btn_value,
+            )
         return [toggle] + content
 
     def _fix_subnav_block(self, active_sub=None):
@@ -10998,6 +11154,15 @@ class SlackSlashCommandView(APIView):
             return base, team
         return value, None
 
+    def _split_steps_page_marker(self, value):
+        """Strip a trailing '|SP:<offset>' marker (see _format_vulndata_single's
+        "View Next Steps" button) off a button value.
+        Returns (value_without_marker, steps_offset)."""
+        if value and "|SP:" in value:
+            base, _, offset_s = value.rpartition("|SP:")
+            return base, (int(offset_s) if offset_s.isdigit() else 0)
+        return value, 0
+
     def _tag_common_vuln_blocks_for_team(self, blocks, vapt_team):
         """Append '|VT:<team>' to every Common-Vulns button value in `blocks`
         so the next click still knows it's in a team-channel context."""
@@ -11277,7 +11442,7 @@ class SlackSlashCommandView(APIView):
             origin_tag = parts[1]
         return sid, common_ctx, origin_tag
 
-    def _common_asset_vuln_detail_blocks(self, target, sub, team_id, common_ctx, action_value):
+    def _common_asset_vuln_detail_blocks(self, target, sub, team_id, common_ctx, action_value, steps_offset=0):
         """Detail view opened from a Common Vuln asset row — Back returns to assets."""
         back = {
             "type": "actions",
@@ -11292,7 +11457,7 @@ class SlackSlashCommandView(APIView):
             }],
         }
         return [back] + self._allvuln_detail_blocks(
-            target, sub, team_id, action_value=action_value,
+            target, sub, team_id, action_value=action_value, steps_offset=steps_offset,
         )
 
     def _build_reject_modal(self, sid, vuln_label):
@@ -14715,7 +14880,7 @@ class SlackSlashCommandView(APIView):
                 "text": f"{icon} *Step {i}:* {step_name}"}})
         return blocks
 
-    def _format_vulndata_single(self, v, steps_data=None, offset=0):
+    def _format_vulndata_single(self, v, steps_data=None, offset=0, action_id=None, action_value=None):
         """
         Full detail for one vuln resolved from a short ID (h1/m5/c3...) via
         /vulndata [id] — the base fields come from the admin-wide
@@ -14727,6 +14892,15 @@ class SlackSlashCommandView(APIView):
         Mark Step Done / Send for Verification buttons here — the backend
         already blocks admin POSTs to step-complete (403), and this Slack
         view mirrors that: read-only by design, not just by omission.
+
+        `action_id`/`action_value`: when this view is reached from a wrapped
+        Fix/Register/Common-Vuln context (not the bare /vulndata command),
+        the caller passes its own Manual-toggle action_id + full context
+        value here so "View Next Steps" can reuse the SAME dispatch handler
+        (with a `|SP:<offset>` marker appended) instead of the old standalone
+        view_vulndata_steps_page handler — which only ever returned the raw
+        step blocks with no nav/back/toggle around them, wiping out the
+        whole wrapper on every "View Next Steps" click.
         """
         # Field names differ between the admin-wide row shape (vul_name/asset/
         # severity) and _get_team_vulns' remapped team row shape (plugin_name/
@@ -14798,13 +14972,18 @@ class SlackSlashCommandView(APIView):
 
         current_page = offset // PAGE_SIZE + 1
         if offset + PAGE_SIZE < len(steps):
+            next_offset = offset + PAGE_SIZE
+            if action_id and action_value is not None:
+                next_action_id, next_value = action_id, f"{action_value}|SP:{next_offset}"
+            else:
+                next_action_id, next_value = "view_vulndata_steps_page", f"{sid}|{current_page + 1}"
             blocks.append({
                 "type": "actions",
                 "elements": [{
                     "type": "button",
                     "text": {"type": "plain_text", "text": "🔎 View Next Steps", "emoji": True},
-                    "action_id": "view_vulndata_steps_page",
-                    "value": f"{sid}|{current_page + 1}",
+                    "action_id": next_action_id,
+                    "value": next_value,
                 }],
             })
 
@@ -16229,8 +16408,67 @@ class SlackInteractivityView(APIView):
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
+            if action_id.startswith("tfixed_view_"):
+                # value: "<sid>|<team>|<offset>[|SP:<steps_offset>]" — the
+                # trailing SP marker is this record's own "View Next Steps"
+                # click (_format_vulndata_single reuses this action_id).
+                value, steps_offset = slash._split_steps_page_marker(value)
+                parts = value.split("|")
+                sid = parts[0] if len(parts) > 0 else ""
+                vapt_team = parts[1] if len(parts) > 1 else ""
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                rows = slash._get_team_fixed_rows(team_id, slack_user_id, vapt_team)
+                target = next((r for r in rows if r.get("short_id") == sid), None)
+                if not target:
+                    content_blocks = slash._text_block(f"❌ Vulnerability `{sid}` not found. Reopen the list and try again.")
+                else:
+                    content_blocks = slash._format_team_fixed_detail(
+                        target, team_id, slack_user_id, vapt_team, offset=page_offset, steps_offset=steps_offset,
+                    )
+                blocks = slash._team_nav_buttons_block("tnav_fixed", vapt_team) + content_blocks
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id == "tfixed_detail_back":
+                # value: "<team>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if parts else ""
+                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                content_blocks = slash._team_fixed_tab_blocks(team_id, slack_user_id, vapt_team, offset=page_offset)
+                blocks = slash._team_nav_buttons_block("tnav_fixed", vapt_team) + content_blocks
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
             if action_id.startswith("tsup_st_") or action_id.startswith("tsup_list_pg_"):
                 # value: "<team>|<status>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                content_blocks = slash._team_support_tab_blocks(team_id, slack_user_id, vapt_team, st_filter=st_filter, offset=page_offset)
+                blocks = slash._team_nav_buttons_block("tnav_support", vapt_team) + content_blocks
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("tsup_view_"):
+                # value: "<sid>|<team>|<status_filter>|<offset>"
+                parts = value.split("|", 3)
+                sid = parts[0] if len(parts) > 0 else ""
+                vapt_team = parts[1] if len(parts) > 1 else ""
+                st_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                rows = slash._get_team_support_rows(team_id, slack_user_id, vapt_team)
+                target = next((r for r in rows if r.get("short_id") == sid), None)
+                if not target:
+                    content_blocks = slash._text_block(f"❌ Request `{sid}` not found. Reopen the list and try again.")
+                else:
+                    content_blocks = slash._format_team_support_detail(target, vapt_team, st_filter=st_filter, offset=page_offset)
+                blocks = slash._team_nav_buttons_block("tnav_support", vapt_team) + content_blocks
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id == "tsup_detail_back":
+                # value: "<team>|<status_filter>|<offset>"
                 parts = value.split("|")
                 vapt_team = parts[0] if len(parts) > 0 else ""
                 st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
@@ -16507,9 +16745,14 @@ class SlackInteractivityView(APIView):
                 # av_detail_manual/av_detail_automation double as the Common
                 # Vuln asset-detail toggle, which can be reached from a team
                 # channel too — strip that case's '|VT:<team>' marker first
-                # (see _tag_common_vuln_blocks_for_team) so the fixed-position
-                # common_ctx parsing below still sees a plain value.
+                # (see _tag_common_vuln_blocks_for_team), then the "View Next
+                # Steps" button's '|SP:<offset>' marker (see
+                # _format_vulndata_single), so the fixed-position common_ctx
+                # parsing below still sees a plain value. VT is always the
+                # outermost/rightmost marker since it's applied last, after
+                # SP, when a team click gets re-tagged on the way out.
                 value, vt_team = slash._split_vt_marker(value)
+                value, steps_offset = slash._split_steps_page_marker(value)
                 sid, common_ctx, origin_tag = slash._parse_vuln_detail_action_value(value)
                 vd_data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
@@ -16538,11 +16781,13 @@ class SlackInteractivityView(APIView):
                 elif common_ctx:
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
                     content = slash._common_asset_vuln_detail_blocks(
-                        target, sub, team_id, common_ctx, action_value=value,
+                        target, sub, team_id, common_ctx, action_value=value, steps_offset=steps_offset,
                     )
                 else:
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
-                    content = slash._allvuln_detail_blocks(target, sub, team_id, action_value=value)
+                    content = slash._allvuln_detail_blocks(
+                        target, sub, team_id, action_value=value, steps_offset=steps_offset,
+                    )
 
                 if vt_team:
                     content = slash._tag_common_vuln_blocks_for_team(content, vt_team)
