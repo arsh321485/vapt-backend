@@ -9732,6 +9732,7 @@ class SlackSlashCommandView(APIView):
             content = self._format_vulndata_single(
                 v, steps_data, offset=steps_offset,
                 action_id="tav_detail_manual", action_value=btn_value,
+                raise_support_fix_vuln_id=fix_vuln_id,
             )
         return [toggle] + content
 
@@ -10033,10 +10034,12 @@ class SlackSlashCommandView(APIView):
 
     def _format_team_support_detail(self, record, vapt_team, st_filter="all", offset=0):
         """
-        Read-only Support Status detail for one request (team channel) —
-        same fields as admin's _format_support_detail, minus the Reply
-        action (out of scope here — the request was just a View button
-        that shows details, not two-way messaging from Slack).
+        Support Status detail for one request (team channel) — same fields
+        as admin's _format_support_detail, plus a Reply button so the
+        requester can send a message on their own ticket (via
+        /api/user/register/support-requests/report/<report_id>/, always
+        "customer"-visible — team members don't get admin's Internal Note
+        option).
         """
         sid = record.get("short_id", "?")
         vuln = record.get("vul_name") or record.get("vulnerability_name") or "General Request"
@@ -10083,14 +10086,32 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "_No messages yet._"}]})
 
         blocks.append({"type": "divider"})
+        meta = json.dumps({
+            "req_id": str(record.get("_id") or ""),
+            "report_id": record.get("report_id") or "",
+            "sid": sid,
+            "vapt_team": vapt_team,
+            "st_filter": st_filter,
+            "offset": offset,
+            "vuln": vuln,
+        })
         blocks.append({
             "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "← Back", "emoji": True},
-                "action_id": "tsup_detail_back",
-                "value": f"{vapt_team}|{st_filter}|{offset}",
-            }],
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "← Back", "emoji": True},
+                    "action_id": "tsup_detail_back",
+                    "value": f"{vapt_team}|{st_filter}|{offset}",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✈ Reply", "emoji": True},
+                    "action_id": "tsup_reply_open",
+                    "value": meta,
+                    "style": "primary",
+                },
+            ],
         })
         return blocks
 
@@ -12665,13 +12686,15 @@ class SlackSlashCommandView(APIView):
 
         vulns = [
             {
-                "plugin_name":   r.get("vul_name", ""),
-                "host_name":     r.get("asset", ""),
-                "risk_factor":   r.get("severity", ""),
-                "port":          r.get("port", ""),
-                "protocol":      r.get("protocol", ""),
-                "status":        r.get("status", "open"),
-                "assigned_team": r.get("assigned_team", ""),
+                "plugin_name":       r.get("vul_name", ""),
+                "host_name":         r.get("asset", ""),
+                "risk_factor":       r.get("severity", ""),
+                "port":              r.get("port", ""),
+                "protocol":          r.get("protocol", ""),
+                "status":            r.get("status", "open"),
+                "assigned_team":     r.get("assigned_team", ""),
+                "first_observation":  r.get("first_observation", ""),
+                "second_observation": r.get("second_observation", ""),
             }
             for r in rows
             if (r.get("assigned_team") or "").strip().lower() == team_lower
@@ -14161,6 +14184,162 @@ class SlackSlashCommandView(APIView):
             },
         }]
 
+    def _build_raise_support_modal(self, meta_json, vuln_label, step_number):
+        """
+        Team-only "Raise Support Request" modal, opened from the right-side
+        button on a specific mitigation step (see _format_vulndata_single).
+        Posts to /api/user/register/fix-vulnerability/<id>/raise-support-request/,
+        which is keyed by (fix_vuln_id, user, step_number) — one request per
+        step per member, matching the design's per-step ticket model.
+        """
+        return {
+            "type": "modal",
+            "callback_id": "modal_raise_support_submit",
+            "private_metadata": meta_json[:3000],
+            "title": {"type": "plain_text", "text": "Raise Support Request"},
+            "submit": {"type": "plain_text", "text": "Raise Request"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*Vulnerability:* {vuln_label}\n*Step:* {step_number}"},
+                },
+                {
+                    "type": "input",
+                    "block_id": "raise_support_msg_block",
+                    "label": {"type": "plain_text", "text": "Message"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "raise_support_msg_input",
+                        "multiline": True,
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "Describe the issue, e.g. \"raised issue in this step\"",
+                        },
+                    },
+                },
+            ],
+        }
+
+    def _submit_raise_support(self, meta_json, message, team_id, user_id):
+        """POST the raise-support-request for one step; team-member-authenticated."""
+        try:
+            meta = json.loads(meta_json or "{}")
+        except (ValueError, TypeError):
+            meta = {}
+
+        fix_vuln_id = meta.get("fix_vuln_id") or ""
+        step_number = meta.get("step_number")
+
+        if not message or not message.strip():
+            return self._text_block("❌ Message is required.")
+        if not fix_vuln_id or step_number is None:
+            return self._text_block("❌ Missing vulnerability/step context. Reopen the view and retry.")
+
+        resp = self._call_user_api(
+            f"/api/user/register/fix-vulnerability/{fix_vuln_id}/raise-support-request/",
+            team_id, user_id, method="post",
+            json_body={"step_number": step_number, "description": message.strip()},
+        )
+        if not isinstance(resp, dict):
+            return self._text_block("❌ Failed to raise support request.")
+        if resp.get("detail") and not resp.get("message"):
+            return self._text_block(f"❌ {resp['detail']}")
+
+        return [{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"✅ Support request raised for Step {step_number}.\n"
+                    "_Your admin has been notified. Check Support Status for updates._"
+                ),
+            },
+        }]
+
+    def _build_team_support_reply_modal(self, meta_json, vuln_label):
+        """
+        Team-side reply modal — message only, no visibility choice (the
+        backend always stores team-sent messages as "customer"-visible;
+        the Internal Note option is admin-only).
+        """
+        return {
+            "type": "modal",
+            "callback_id": "modal_team_support_reply_submit",
+            "private_metadata": meta_json[:3000],
+            "title": {"type": "plain_text", "text": "Send Update"},
+            "submit": {"type": "plain_text", "text": "Send"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*Replying to:* {vuln_label}"},
+                },
+                {
+                    "type": "input",
+                    "block_id": "team_reply_text_block",
+                    "label": {"type": "plain_text", "text": "Your message"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "team_reply_text_input",
+                        "multiline": True,
+                        "placeholder": {"type": "plain_text", "text": "Type your message..."},
+                    },
+                },
+            ],
+        }
+
+    def _submit_team_support_reply(self, meta_json, text, team_id, user_id):
+        """POST reply to UserSupportRequestsByReportAPIView; refresh the detail message."""
+        try:
+            meta = json.loads(meta_json or "{}")
+        except (ValueError, TypeError):
+            meta = {}
+
+        sid = meta.get("sid") or ""
+        req_id = meta.get("req_id") or ""
+        report_id = meta.get("report_id") or ""
+        vapt_team = meta.get("vapt_team") or ""
+        st_filter = meta.get("st_filter") or "all"
+        offset = int(meta.get("offset") or 0)
+        response_url = meta.get("response_url") or ""
+
+        if not text or not text.strip():
+            return self._text_block("❌ Message is required.")
+        if not req_id or not report_id:
+            return self._text_block("❌ Missing support request id. Open the ticket again and retry.")
+
+        resp = self._call_user_api(
+            f"/api/user/register/support-requests/report/{report_id}/",
+            team_id, user_id, method="post",
+            json_body={"request_id": req_id, "text": text.strip()},
+        )
+        if not isinstance(resp, dict):
+            return self._text_block("❌ Failed to send message.")
+        if resp.get("detail") and not resp.get("message"):
+            return self._text_block(f"❌ {resp['detail']}")
+
+        if response_url and vapt_team:
+            rows = self._get_team_support_rows(team_id, user_id, vapt_team)
+            target = next((r for r in rows if r.get("short_id") == sid), None)
+            if target:
+                detail_blocks = (
+                    self._team_nav_buttons_block("tnav_support", vapt_team)
+                    + self._format_team_support_detail(target, vapt_team, st_filter=st_filter, offset=offset)
+                )
+                try:
+                    _http_post(response_url, json={"replace_original": True, "blocks": detail_blocks}, timeout=10)
+                except Exception:
+                    logger.exception("[Slack] failed to refresh team support detail after reply")
+
+        return [{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"✅ Message sent on `{sid}`.\n_The ticket detail in the channel now shows your message._",
+            },
+        }]
+
     def _lookup_support_by_short_id(self, sid, team_id, user_id):
         data = self._fetch_support_report_data(team_id, user_id)
         if not data:
@@ -14880,7 +15059,7 @@ class SlackSlashCommandView(APIView):
                 "text": f"{icon} *Step {i}:* {step_name}"}})
         return blocks
 
-    def _format_vulndata_single(self, v, steps_data=None, offset=0, action_id=None, action_value=None):
+    def _format_vulndata_single(self, v, steps_data=None, offset=0, action_id=None, action_value=None, raise_support_fix_vuln_id=None):
         """
         Full detail for one vuln resolved from a short ID (h1/m5/c3...) via
         /vulndata [id] — the base fields come from the admin-wide
@@ -14901,6 +15080,12 @@ class SlackSlashCommandView(APIView):
         view_vulndata_steps_page handler — which only ever returned the raw
         step blocks with no nav/back/toggle around them, wiping out the
         whole wrapper on every "View Next Steps" click.
+
+        `raise_support_fix_vuln_id`: team-only. When set, each step gets a
+        "Raise Support Request" button on its right (opens a modal, posts to
+        /api/user/register/fix-vulnerability/<id>/raise-support-request/).
+        Admin's own read-only /vulndata view never passes this — admins
+        don't raise support requests against themselves.
         """
         # Field names differ between the admin-wide row shape (vul_name/asset/
         # severity) and _get_team_vulns' remapped team row shape (plugin_name/
@@ -14924,7 +15109,7 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*Port / Protocol*\n{port}/{proto}"},
             ]},
             self._ctx(
-                f"First seen: {v.get('first_observation', '—')} | Last check: {v.get('second_observation', '—')}"
+                f"First seen: {v.get('first_observation') or '—'} | Last check: {v.get('second_observation') or '—'}"
             ),
         ]
 
@@ -14965,8 +15150,16 @@ class SlackSlashCommandView(APIView):
             os_data   = step.get(os_key) or {}
             action    = (os_data.get("action") or "").strip()
 
-            blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"*{step_num}. {step_name}* — {badge}"}})
+            step_header = {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*{step_num}. {step_name}* — {badge}"}}
+            if raise_support_fix_vuln_id:
+                step_header["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🎫 Raise Support Request", "emoji": True},
+                    "action_id": f"sup_raise_step_{step_num}",
+                    "value": f"{raise_support_fix_vuln_id}|{step_num}|{name}",
+                }
+            blocks.append(step_header)
             if action:
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Action:*\n{action[:400]}"}})
 
@@ -15788,6 +15981,8 @@ class SlackInteractivityView(APIView):
                 "modal_deleteteamuser_submit": "Delete Team User",
                 "modal_reject_submit": "Reject Request",
                 "modal_support_reply_submit": "Send Update",
+                "modal_raise_support_submit": "Raise Support Request",
+                "modal_team_support_reply_submit": "Send Update",
             }
             if callback_id not in titles:
                 return Response({}, status=200)
@@ -16156,6 +16351,27 @@ class SlackInteractivityView(APIView):
                 self._debug_write(f"sup_reply_open views.open -> {getattr(resp, 'text', None)}")
                 return
 
+            if action_id.startswith("sup_raise_step_"):
+                # value: "<fix_vuln_id>|<step_number>|<vuln_name>"
+                parts = value.split("|", 2)
+                fix_vuln_id = parts[0] if len(parts) > 0 else ""
+                step_number = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+                vuln_label = parts[2] if len(parts) > 2 and parts[2] else "this vulnerability"
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id or not fix_vuln_id or step_number is None:
+                    self._debug_write("sup_raise_step: missing bot_token/trigger_id/fix_vuln_id/step_number")
+                    return
+                meta = {"fix_vuln_id": fix_vuln_id, "step_number": step_number}
+                view = slash._build_raise_support_modal(json.dumps(meta), vuln_label, step_number)
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"sup_raise_step views.open -> {getattr(resp, 'text', None)}")
+                return
+
             if action_id in dict(slash._REGISTER_SUBTABS):
                 content_blocks = slash._register_subtab_blocks(action_id, team_id, slack_user_id)
                 blocks = (
@@ -16476,6 +16692,30 @@ class SlackInteractivityView(APIView):
                 content_blocks = slash._team_support_tab_blocks(team_id, slack_user_id, vapt_team, st_filter=st_filter, offset=page_offset)
                 blocks = slash._team_nav_buttons_block("tnav_support", vapt_team) + content_blocks
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id == "tsup_reply_open":
+                # Open the team-side reply modal — merge response_url into
+                # private_metadata so after Send we can refresh the detail
+                # message in-channel (mirrors admin's sup_reply_open).
+                try:
+                    meta = json.loads(value or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                meta["response_url"] = response_url
+                vuln_label = meta.get("vuln") or meta.get("sid") or "Support Request"
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write("tsup_reply_open: missing bot_token or trigger_id")
+                    return
+                view = slash._build_team_support_reply_modal(json.dumps(meta), vuln_label)
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"tsup_reply_open views.open -> {getattr(resp, 'text', None)}")
                 return
 
             if action_id.startswith("trem_list_pg_"):
@@ -17297,6 +17537,8 @@ class SlackInteractivityView(APIView):
             "modal_deleteteamuser_submit": "Delete Team User",
             "modal_reject_submit": "Reject Request",
             "modal_support_reply_submit": "Send Update",
+            "modal_raise_support_submit": "Raise Support Request",
+            "modal_team_support_reply_submit": "Send Update",
         }
         if callback_id not in titles:
             return
@@ -17379,6 +17621,14 @@ class SlackInteractivityView(APIView):
                 blocks = slash._submit_support_reply(
                     meta_json, reply_text, visibility, team_id, slack_user_id,
                 )
+            elif callback_id == "modal_raise_support_submit":
+                meta_json = view.get("private_metadata") or "{}"
+                message = ((values.get("raise_support_msg_block") or {}).get("raise_support_msg_input") or {}).get("value") or ""
+                blocks = slash._submit_raise_support(meta_json, message, team_id, slack_user_id)
+            elif callback_id == "modal_team_support_reply_submit":
+                meta_json = view.get("private_metadata") or "{}"
+                reply_text = ((values.get("team_reply_text_block") or {}).get("team_reply_text_input") or {}).get("value") or ""
+                blocks = slash._submit_team_support_reply(meta_json, reply_text, team_id, slack_user_id)
             else:
                 # modal_reject_submit — sid was already known when the modal
                 # was opened (from the clicked row), carried via
