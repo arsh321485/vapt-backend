@@ -1,5 +1,24 @@
-mujhe slack ke pltform me admin vale channel me 
-1)  notification tabname change krke Reminder rkhna hai 
+mujhe abhi slack ke plotform pr particular team me design bnani hai 
 
-2)  request tab  name change Timeline Ext. rkhna hai or jo request vale tab ke undr 2 tab (approve or reject )hai usko History vale tab ke undr dalna hai or jo notification vale me jo timeline Ext vala tab hai o vha se remove krke yha dalna hai 
+lekin team ke according data show hona chahihe 
 
+tab ka name me aapko diti hu 
+
+1)  Home
+2) Fix
+3) Register
+4) support status
+5) fixed
+6) Reminder
+
+
+mujhe esa tab bnana hai 
+
+me aapko home page ka design bhejti hu vese hi mujhe chahihe 
+
+slack folder ke under
+
+1) home ke liye userdashboard 
+4) support status uske under pagination bnakr do 5 or vale jese aapne admin sahit bnaye the vese
+
+plan btao fir code krna 

@@ -7572,7 +7572,16 @@ def _dashboard_donut_gradient(counts):
     return f"conic-gradient({', '.join(stops)})", total
 
 
-def _build_dashboard_html(data):
+def _build_dashboard_html(data, title="📊 VaptFix Admin Dashboard",
+                           subtitle="Overall summary — assets, vuln severity, mitigation timeline, mean fix time, and support tickets."):
+    """
+    Shared bento-grid layout for both the admin Home dashboard and a team's
+    own Home dashboard (kind="userdash") — /api/admin/.../summary/ and
+    /api/user/dashboard/summary/ return the identical 7-key shape
+    (total_assets/avg_score/vulnerabilities/vulnerabilities_fixed/
+    mitigation_timeline/mean_time_remediate/support_requests), just scoped
+    differently server-side, so only the header text needs to vary.
+    """
     total_assets = (data.get("total_assets") or {}).get("total_assets", 0)
     avg_score    = (data.get("avg_score") or {}).get("avg_score", 0) or 0
     vulns        = data.get("vulnerabilities") or {}
@@ -7636,8 +7645,8 @@ def _build_dashboard_html(data):
 
     body = f"""  <div class="dash">
     <div class="dash-top">
-      <h2>📊 VaptFix Admin Dashboard</h2>
-      <p>Overall summary — assets, vuln severity, mitigation timeline, mean fix time, and support tickets.</p>
+      <h2>{title}</h2>
+      <p>{subtitle}</p>
     </div>
 
     <div class="bento">
@@ -8767,6 +8776,32 @@ class SlackDashboardImageView(APIView):
             )
             html = _build_vulnstats_html(data)
             selector = ".dash"
+        elif kind == "userdash":
+            # Team channel's own Home dashboard — Slack fetches this with no
+            # specific Slack user context, so unlike every other kind above
+            # (admin token) this needs a real team-member JWT to call the
+            # team-filtered /api/user/dashboard/summary/ endpoint.
+            vapt_team = (request.query_params.get("team") or "").strip()
+            member_token = slash._get_team_representative_token(team_id, vapt_team)
+            if not member_token:
+                return HttpResponse(status=404)
+            backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+            resp = _http_get(
+                f"{backend}/api/user/dashboard/summary/",
+                headers={"Authorization": f"Bearer {member_token}"},
+                params={"team": vapt_team} if vapt_team else None,
+                timeout=15,
+            )
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+            html = _build_dashboard_html(
+                data,
+                title=f"📊 {vapt_team or 'Team'} Dashboard",
+                subtitle="Your team's summary — assigned assets, vuln severity, mitigation timeline, mean fix time, and support tickets.",
+            )
+            selector = ".dash"
         else:
             data = slash._call_api("/api/admin/admindashboard/dashboard/summary/", team_id)
             html = _build_dashboard_html(data)
@@ -8972,6 +9007,7 @@ class SlackSlashCommandView(APIView):
                 "/extend":           self._cmd_extend,
                 "/scriptstats":      self._cmd_scriptstats,
                 "/deadlines":        self._cmd_deadlines,
+                "/postteamnav":      self._cmd_postteamnav,
             }
         else:
             return Response({
@@ -9085,6 +9121,29 @@ class SlackSlashCommandView(APIView):
             return None
         return str(_RT.for_user(user).access_token)
 
+    def _get_team_representative_token(self, team_id, vapt_team_name):
+        """
+        Mints a JWT for ANY team member belonging to `vapt_team_name` under
+        this Slack workspace's admin — used only server-side by
+        SlackDashboardImageView, which Slack's own servers fetch with no
+        specific Slack user context at all (unlike _get_member_token, which
+        needs a slack_user_id). /api/user/dashboard/summary/ requires a real
+        team-member identity to resolve "their" admin/team via UserDetail,
+        so any member of the target team works equally well here.
+        """
+        from rest_framework_simplejwt.tokens import RefreshToken as _RT
+        admin = User.objects.filter(slack_team_id=team_id).first()
+        if not admin:
+            return None
+        from users_details.models import UserDetail
+        detail = UserDetail.objects.filter(admin=admin, Member_role__contains=vapt_team_name).first()
+        if not detail:
+            return None
+        user = User.objects.filter(email=detail.email).first()
+        if not user:
+            return None
+        return str(_RT.for_user(user).access_token)
+
     def _call_user_api(self, path, team_id, user_id, method="get", json_body=None, params=None):
         """Like _call_api but authenticates as the team member (not the admin) — for
         /api/user/register/* and /api/user/automation-scripts/* endpoints."""
@@ -9181,19 +9240,423 @@ class SlackSlashCommandView(APIView):
         section_blocks = self._nav_section_blocks("nav_home", team_id, user_id)
         return self._nav_buttons_block(active_action_id="nav_home") + section_blocks
 
-    def _button_row_blocks(self, items, active_action_id=None, chunk_size=5):
+    # ══════════════════════════════════════════════════════════════════════
+    # TEAM CHANNEL NAVBAR — same clickable-tab pattern as the admin
+    # dashboard's navbar, scoped to one VaptFix team. Uses an entirely
+    # separate action-id namespace (t*) from the admin navbar so a click
+    # here can never dispatch into the admin's own handlers. Every button's
+    # `value` carries the team name (via _button_row_blocks' `value` param)
+    # since these buttons have no admin-token context to resolve "which
+    # team" from otherwise.
+    # ══════════════════════════════════════════════════════════════════════
+
+    _TEAM_NAV_ITEMS = [
+        ("tnav_home",     "🏠 Home"),
+        ("tnav_fix",      "🔧 Fix"),
+        ("tnav_register", "📋 Register"),
+        ("tnav_support",  "🎫 Support Status"),
+        ("tnav_fixed",    "✅ Fixed"),
+        ("tnav_reminder", "🔔 Reminder"),
+    ]
+    _TEAM_FIX_SUBTABS = [
+        ("tfix_sub_assets", "🖥 All Assets"),
+        ("tfix_sub_vulns",  "📋 All Vulns"),
+        ("tfix_sub_common", "🧩 Common Vulns"),
+    ]
+    _TEAM_REG_SUBTABS = [
+        ("treg_sub_register", "📋 Register"),
+        ("treg_sub_scripts",  "📜 Scripts"),
+    ]
+    _TEAM_REMINDER_SUBTABS = [
+        ("trem_sub_overdue",  "🔴 Overdue"),
+        ("trem_sub_today",    "🟠 Due Today"),
+        ("trem_sub_thisweek", "🟡 This Week"),
+        ("trem_sub_nextweek", "🟢 Next Week"),
+    ]
+
+    def _team_nav_buttons_block(self, active_action_id, vapt_team):
+        return self._button_row_blocks(self._TEAM_NAV_ITEMS, active_action_id=active_action_id, value=vapt_team)
+
+    def _cmd_postteamnav(self, text, team_id, user_id, team_name):
+        """
+        /postteamnav — posts the clickable team navbar + Home dashboard in
+        this team channel. Mirrors /postnavbar for the admin channel.
+        """
+        section_blocks = self._team_nav_section_blocks("tnav_home", team_id, user_id, team_name)
+        return self._team_nav_buttons_block("tnav_home", team_name) + section_blocks
+
+    def _team_nav_section_blocks(self, action_id, team_id, user_id, vapt_team):
+        if action_id == "tnav_fix":
+            return self._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_assets") + \
+                self._team_fix_subtab_blocks("tfix_sub_assets", team_id, user_id, vapt_team)
+
+        if action_id == "tnav_register":
+            return self._team_reg_subnav_block(vapt_team, active_sub="treg_sub_register") + \
+                self._team_reg_subtab_blocks("treg_sub_register", team_id, user_id, vapt_team)
+
+        if action_id == "tnav_support":
+            return self._team_support_tab_blocks(team_id, user_id, vapt_team)
+
+        if action_id == "tnav_fixed":
+            return self._team_fixed_tab_blocks(team_id, user_id, vapt_team)
+
+        if action_id == "tnav_reminder":
+            return self._team_reminder_subnav_block(vapt_team, active_sub="trem_sub_overdue") + \
+                self._team_reminder_subtab_blocks("trem_sub_overdue", team_id, user_id, vapt_team)
+
+        # tnav_home (default)
+        return [self._dashboard_image_block(
+            team_id, kind="userdash", alt_text=f"{vapt_team} Dashboard", extra_params={"team": vapt_team},
+        )]
+
+    # ── Fix (team) ──────────────────────────────────────────────────────
+
+    def _team_fix_subnav_block(self, vapt_team, active_sub=None):
+        return self._button_row_blocks(self._TEAM_FIX_SUBTABS, active_action_id=active_sub, value=vapt_team)
+
+    def _team_fix_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, offset=0):
+        if sub_action_id == "tfix_sub_common":
+            team_key = next(
+                (k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "config",
+            )
+            return self._common_vulns_tab_blocks(team_id, user_id, team_key=team_key, offset=offset)
+
+        vulns, _, raw_data = self._get_team_vulns(vapt_team, team_id, user_id)
+        if raw_data.get("detail") and not vulns:
+            return self._text_block(f"❌ {raw_data.get('detail')}")
+
+        if sub_action_id == "tfix_sub_vulns":
+            return self._format_team_plain_list(
+                vulns, title="📋 All Vulns", pg_action_id="tfix_vuln_pg", vapt_team=vapt_team, offset=offset,
+            )
+
+        # tfix_sub_assets (default) — one row per distinct host
+        seen = {}
+        for v in vulns:
+            host = v.get("host_name")
+            if not host:
+                continue
+            seen.setdefault(host, 0)
+            seen[host] += 1
+        asset_rows = [{"host_name": h, "vuln_count": c} for h, c in seen.items()]
+        return self._format_team_asset_list(asset_rows, vapt_team, offset=offset)
+
+    def _format_team_plain_list(self, vulns, title, pg_action_id, vapt_team, offset=0):
+        """
+        Read-only paginated vuln list for team Fix/Register tabs — no
+        drill-down detail (matches the assets.html/register design's own
+        scope: a flat list, not a deep-link into a fix workflow). Team name
+        is embedded in the pagination button's value since the click
+        carries no other context to recover it from.
+        """
+        PAGE_SIZE = 5
+        count = len(vulns)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = vulns[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        def sev_icon(sev):
+            return self._SEV_EMOJI_MAP.get((sev or "").strip().lower(), "⚪")
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": title, "emoji": True}},
+            self._ctx(f"Total: {count} vulnerabilities assigned to your team."),
+            {"type": "divider"},
+        ]
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No vulnerabilities found.*"}})
+        else:
+            for idx, v in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sno = str(start_num + idx).zfill(2)
+                name = v.get("plugin_name") or "Unknown"
+                host = v.get("host_name") or "—"
+                sev = (v.get("risk_factor") or "").strip() or "—"
+                st = (v.get("status") or "open").capitalize()
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*`{sno}`*  *{name}*\n`{host}`  |  {sev_icon(sev)} *{sev.upper()}*  |  Status: {st}",
+                    },
+                })
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, pg_action_id, value_prefix=f"{vapt_team}|")
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
+    def _format_team_asset_list(self, asset_rows, vapt_team, offset=0):
+        PAGE_SIZE = 5
+        count = len(asset_rows)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = asset_rows[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🖥 All Assets", "emoji": True}},
+            self._ctx(f"Total: {count} assets with vulnerabilities assigned to your team."),
+            {"type": "divider"},
+        ]
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No assets found.*"}})
+        else:
+            for idx, a in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sno = str(start_num + idx).zfill(2)
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*`{sno}`*  `{a['host_name']}`  |  *{a['vuln_count']} Vulns*",
+                    },
+                })
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "tfix_asset_pg", value_prefix=f"{vapt_team}|")
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
+    # ── Register (team) ─────────────────────────────────────────────────
+
+    def _team_reg_subnav_block(self, vapt_team, active_sub=None):
+        return self._button_row_blocks(self._TEAM_REG_SUBTABS, active_action_id=active_sub, value=vapt_team)
+
+    def _team_reg_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, offset=0):
+        if sub_action_id == "treg_sub_scripts":
+            plugin_ids = sorted({v.get("plugin_id") for v in self._get_team_vulns(vapt_team, team_id, user_id)[0] if v.get("plugin_id")})
+            if not plugin_ids:
+                return self._text_block("No Nessus plugin IDs found for your team's vulnerabilities.")
+            bulk = self._call_user_api(
+                "/api/user/automation-scripts/match/bulk/", team_id, user_id,
+                method="post", json_body={"plugin_ids": plugin_ids},
+            )
+            results = [r for r in (bulk.get("results") or []) if r.get("matched")]
+            rows = [
+                {"plugin_name": r.get("vulnerability") or "Unknown", "host_name": "—",
+                 "risk_factor": r.get("severity") or "", "status": "open"}
+                for r in results
+            ]
+            return self._format_team_plain_list(
+                rows, title="📜 Scripts", pg_action_id="treg_script_pg", vapt_team=vapt_team, offset=offset,
+            )
+
+        # treg_sub_register (default)
+        vulns, _, raw_data = self._get_team_vulns(vapt_team, team_id, user_id)
+        if raw_data.get("detail") and not vulns:
+            return self._text_block(f"❌ {raw_data.get('detail')}")
+        return self._format_team_plain_list(
+            vulns, title="📋 Register", pg_action_id="treg_list_pg", vapt_team=vapt_team, offset=offset,
+        )
+
+    # ── Support Status (team) ────────────────────────────────────────────
+
+    def _team_support_tab_blocks(self, team_id, user_id, vapt_team, st_filter="all", offset=0):
+        data = self._fetch_support_report_data(team_id, user_id)
+        if not data:
+            return self._text_block("❌ No report found for this workspace.")
+        if data.get("detail"):
+            return self._text_block(f"❌ {data['detail']}")
+        return self._format_team_support_tab(data, vapt_team, st_filter=st_filter, offset=offset)
+
+    def _format_team_support_tab(self, data, vapt_team, st_filter="all", offset=0):
+        """
+        Support Status tab (team channel) — status filter + 5 rows/page,
+        locked to this team only (no team-switcher, unlike the admin
+        Reminder tab's Support sub-tab which shows every team).
+        """
+        PAGE_SIZE = 5
+        # _match_support_team_filter expects a short key ("config") not the
+        # full display name ("Configuration Management") — same scheme as
+        # _COMMON_TEAM_KEY_TO_NAME, reversed here.
+        team_key = next((k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "")
+        raw_results = [r for r in (data.get("results") or []) if self._match_support_team_filter(r, team_key)]
+
+        st_counts = {
+            "all": len(raw_results),
+            "open": sum(1 for r in raw_results if self._match_support_status_filter(r, "open")),
+            "closed": sum(1 for r in raw_results if self._match_support_status_filter(r, "closed")),
+        }
+
+        all_items = self._assign_severity_short_ids([
+            dict(r, severity=self._resolve_support_row_severity(r) or r.get("severity", ""))
+            for r in raw_results
+        ])
+        filtered = [r for r in all_items if self._match_support_status_filter(r, st_filter)]
+        count = len(filtered)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = filtered[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🎫 Support Status", "emoji": True}},
+            self._ctx(f"{vapt_team} — support requests raised by your team."),
+            {"type": "divider"},
+        ]
+        st_buttons = [
+            ("all", f"All {st_counts['all']}"),
+            ("open", f"Open {st_counts['open']}"),
+            ("closed", f"Closed {st_counts['closed']}"),
+        ]
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label, "emoji": True},
+                    "action_id": f"tsup_st_{k}",
+                    "value": f"{vapt_team}|{k}|0",
+                    **({"style": "primary"} if k == st_filter else {}),
+                }
+                for (k, label) in st_buttons
+            ],
+        })
+        blocks.append({"type": "divider"})
+
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No support requests found.*"}})
+        else:
+            for idx, r in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sno = str(start_num + idx).zfill(2)
+                sid = r.get("short_id", "?")
+                vuln = r.get("vul_name") or r.get("vulnerability_name") or "Unknown"
+                sev = (r.get("severity") or "").strip() or "—"
+                st = (r.get("status") or "open").capitalize()
+                sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*`{sno}`*  `{sid}`  *{vuln}*\n{sev_icon} *{sev.upper()}*  |  Status: {st}",
+                    },
+                })
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
+        value_prefix = f"{vapt_team}|{st_filter}|"
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "tsup_list_pg", value_prefix=value_prefix)
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
+    # ── Fixed (team) ─────────────────────────────────────────────────────
+
+    def _team_fixed_tab_blocks(self, team_id, user_id, vapt_team, offset=0):
+        data = self._call_user_api("/api/user/register/closed-vulns/", team_id, user_id)
+        if not isinstance(data, dict) or data.get("detail") and "closed_vulnerabilities" not in data:
+            return self._text_block(f"❌ {data.get('detail', 'Could not load closed vulnerabilities.')}")
+        rows = [r for r in (data.get("closed_vulnerabilities") or []) if r.get("assigned_team") == vapt_team]
+        return self._format_team_fixed_list(rows, vapt_team, offset=offset)
+
+    def _format_team_fixed_list(self, rows, vapt_team, offset=0):
+        PAGE_SIZE = 5
+        count = len(rows)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = rows[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "✅ Fixed", "emoji": True}},
+            self._ctx(f"Total: {count} vulnerabilities closed by your team."),
+            {"type": "divider"},
+        ]
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Nothing fixed yet.*"}})
+        else:
+            for idx, r in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sno = str(start_num + idx).zfill(2)
+                name = r.get("plugin_name") or "Unknown"
+                host = r.get("host_name") or "—"
+                sev = (r.get("risk_factor") or "").strip() or "—"
+                sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
+                closed_at = (r.get("closed_at") or "—").split("T")[0]
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*`{sno}`*  *{name}*\n`{host}`  |  {sev_icon} *{sev.upper()}*  |  Closed: {closed_at}",
+                    },
+                })
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "tfixed_pg", value_prefix=f"{vapt_team}|")
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
+    # ── Reminder (team) ──────────────────────────────────────────────────
+
+    def _team_reminder_subnav_block(self, vapt_team, active_sub=None):
+        return self._button_row_blocks(self._TEAM_REMINDER_SUBTABS, active_action_id=active_sub, value=vapt_team)
+
+    def _team_reminder_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, offset=0):
+        bucket_key = {
+            "trem_sub_today":    "today",
+            "trem_sub_thisweek": "thisweek",
+            "trem_sub_nextweek": "nextweek",
+        }.get(sub_action_id, "overdue")
+
+        try:
+            vd_data = self._call_user_api(
+                "/api/user/register/register/latest/vulns/", team_id, user_id,
+                params={"team": vapt_team},
+            )
+            rc_data = self._call_user_api("/api/user/risk_criteria/risks/", team_id, user_id)
+        except Exception as exc:
+            logger.exception("[team_reminder] fetch failed: %s", exc)
+            return self._text_block(f"❌ Could not load Reminder data: `{exc}`")
+
+        rows = (vd_data.get("rows") or []) if isinstance(vd_data, dict) else []
+        team_lower = vapt_team.strip().lower()
+        rows = [r for r in rows if (r.get("assigned_team") or "").strip().lower() == team_lower]
+
+        rc_list = (rc_data.get("risk_criteria") or []) if isinstance(rc_data, dict) else []
+        if not rc_list:
+            return self._text_block("❌ No Risk Criteria configured yet for your admin.")
+        rc = rc_list[0]
+        rc_days = {
+            "critical": self._parse_rc_days(rc.get("critical")),
+            "high":     self._parse_rc_days(rc.get("high")),
+            "medium":   self._parse_rc_days(rc.get("medium")),
+            "low":      self._parse_rc_days(rc.get("low")),
+        }
+
+        buckets = self._bucket_deadline_rows(rows, rc_days)
+        return self._format_notification_tab(
+            bucket_key, buckets[bucket_key], offset=offset,
+            pg_action_id="trem_list_pg", value_prefix_extra=f"{vapt_team}|",
+        )
+
+    def _button_row_blocks(self, items, active_action_id=None, chunk_size=5, value=""):
         """
         Builds one or more "actions" blocks from (action_id, label) pairs —
         split into chunks of at most `chunk_size` buttons each. Slack's
         client collapses a single actions block with more than ~5 buttons
         into a "+N more" overflow instead of showing them all; splitting
         into several same-row-worth blocks avoids that entirely.
+
+        `value` (optional) is stamped on every button — used by the team
+        navbar to carry the VaptFix team name (e.g. "Patch Management")
+        through the click, since team nav buttons have no admin-token
+        context to resolve it from otherwise.
         """
         buttons = [
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": label, "emoji": True},
                 "action_id": action_id,
+                **({"value": value} if value else {}),
                 **({"style": "primary"} if action_id == active_action_id else {}),
             }
             for action_id, label in items
@@ -13569,12 +14032,14 @@ class SlackSlashCommandView(APIView):
             blocks.append(pg_block)
         return blocks
 
-    def _format_notification_tab(self, bucket_key, rows, offset=0):
+    def _format_notification_tab(self, bucket_key, rows, offset=0, pg_action_id="notif_list_pg", value_prefix_extra=""):
         """
-        "Notification" nav tab sub-tabs — Overdue / Due Today / This Week /
+        "Reminder" nav tab sub-tabs — Overdue / Due Today / This Week /
         Next Week. Each sub-tab is just a plain paginated list of the rows
         already bucketed by _bucket_deadline_rows — no severity filter row
-        needed here since the bucket itself is the filter.
+        needed here since the bucket itself is the filter. `pg_action_id`
+        is parameterized so the team-channel Reminder tab (own isolated
+        action-id namespace) can reuse this exact renderer.
         """
         PAGE_SIZE = 5
         titles = {
@@ -13638,8 +14103,8 @@ class SlackSlashCommandView(APIView):
                 },
             }
         )
-        value_prefix = f"{bucket_key}|"
-        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "notif_list_pg", value_prefix=value_prefix)
+        value_prefix = f"{value_prefix_extra}{bucket_key}|"
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, pg_action_id, value_prefix=value_prefix)
         if pg_block:
             blocks.append(pg_block)
         return blocks
@@ -15152,6 +15617,124 @@ class SlackInteractivityView(APIView):
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
+                return
+
+            # ══════════════════════════════════════════════════════════════
+            # TEAM CHANNEL NAVBAR — isolated t* action-id namespace, team
+            # name always recovered from the clicked button's own `value`
+            # (see _button_row_blocks' `value` param), never from channel
+            # lookup.
+            # ══════════════════════════════════════════════════════════════
+
+            if action_id in dict(slash._TEAM_NAV_ITEMS):
+                vapt_team = value
+                section_blocks = slash._team_nav_section_blocks(action_id, team_id, slack_user_id, vapt_team)
+                blocks = slash._team_nav_buttons_block(action_id, vapt_team) + section_blocks
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id in dict(slash._TEAM_FIX_SUBTABS):
+                vapt_team = value
+                content_blocks = slash._team_fix_subtab_blocks(action_id, team_id, slack_user_id, vapt_team)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id in dict(slash._TEAM_REG_SUBTABS):
+                vapt_team = value
+                content_blocks = slash._team_reg_subtab_blocks(action_id, team_id, slack_user_id, vapt_team)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_register", vapt_team)
+                    + slash._team_reg_subnav_block(vapt_team, active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id in dict(slash._TEAM_REMINDER_SUBTABS):
+                vapt_team = value
+                content_blocks = slash._team_reminder_subtab_blocks(action_id, team_id, slack_user_id, vapt_team)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_reminder", vapt_team)
+                    + slash._team_reminder_subnav_block(vapt_team, active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("tfix_vuln_pg_") or action_id.startswith("tfix_asset_pg_"):
+                # value: "<team>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if parts else ""
+                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                sub_action_id = "tfix_sub_vulns" if action_id.startswith("tfix_vuln_pg_") else "tfix_sub_assets"
+                content_blocks = slash._team_fix_subtab_blocks(sub_action_id, team_id, slack_user_id, vapt_team, offset=page_offset)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub=sub_action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("treg_list_pg_") or action_id.startswith("treg_script_pg_"):
+                # value: "<team>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if parts else ""
+                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                sub_action_id = "treg_sub_scripts" if action_id.startswith("treg_script_pg_") else "treg_sub_register"
+                content_blocks = slash._team_reg_subtab_blocks(sub_action_id, team_id, slack_user_id, vapt_team, offset=page_offset)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_register", vapt_team)
+                    + slash._team_reg_subnav_block(vapt_team, active_sub=sub_action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("tfixed_pg_"):
+                # value: "<team>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if parts else ""
+                page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                content_blocks = slash._team_fixed_tab_blocks(team_id, slack_user_id, vapt_team, offset=page_offset)
+                blocks = slash._team_nav_buttons_block("tnav_fixed", vapt_team) + content_blocks
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("tsup_st_") or action_id.startswith("tsup_list_pg_"):
+                # value: "<team>|<status>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                content_blocks = slash._team_support_tab_blocks(team_id, slack_user_id, vapt_team, st_filter=st_filter, offset=page_offset)
+                blocks = slash._team_nav_buttons_block("tnav_support", vapt_team) + content_blocks
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("trem_list_pg_"):
+                # value: "<team>|<bucket>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                bucket_key = parts[1] if len(parts) > 1 and parts[1] else "overdue"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                sub_action_id = {
+                    "today":    "trem_sub_today",
+                    "thisweek": "trem_sub_thisweek",
+                    "nextweek": "trem_sub_nextweek",
+                }.get(bucket_key, "trem_sub_overdue")
+                content_blocks = slash._team_reminder_subtab_blocks(sub_action_id, team_id, slack_user_id, vapt_team, offset=page_offset)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_reminder", vapt_team)
+                    + slash._team_reminder_subnav_block(vapt_team, active_sub=sub_action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
             if action_id in ("team_sub_adduser", "team_sub_deleteuser"):
