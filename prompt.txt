@@ -1,0 +1,7 @@
+1) manual fix hai uski jo steps hai jha steps aati hai uske right side pr raise support request vala aana chahihe (screen short 1) slack ke folder me support krke hai o ui dekh lena
+
+2) support req hai vha msg bhi kr skte hai esa chahihe  (screen short 2)
+
+3) manual me dirst obs or second obs nai aa rha hai o check kr lena (screen short 3)
+
+plan fir code 
