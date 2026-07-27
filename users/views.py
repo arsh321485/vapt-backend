@@ -8812,8 +8812,8 @@ class SlackSlashCommandView(APIView):
         ("nav_register", "📋 Register"),
         ("nav_automation", "🤖 Automations"),
         ("nav_team",     "👥 Team"),
-        ("nav_request",  "📨 Request"),
-        ("nav_notification", "🔔 Notification"),
+        ("nav_request",  "📨 Timeline Ext."),
+        ("nav_notification", "🔔 Reminder"),
         ("nav_download", "📥 Download Report"),
     ]
 
@@ -8826,11 +8826,15 @@ class SlackSlashCommandView(APIView):
         ("team_sub_externaluser", "🌐 External User"),
     ]
 
-    # Sub-tabs shown under the standalone "Request" nav tab — moved out of
-    # Admin Demo so timeline-extension approve/reject has its own home.
+    # Sub-tabs shown under the standalone "Timeline Ext." nav tab (action_id
+    # still nav_request internally). Extension Requests = the actual
+    # timeline-extension list (moved in from Notification's old Timeline
+    # Ext. sub-tab). History = Approve/Reject, now a single sub-tab with an
+    # internal toggle (same pattern as the Manual/Automation toggle)
+    # instead of two separate sub-tabs.
     _REQUEST_SUBTABS = [
-        ("req_sub_approve", "✅ Approve"),
-        ("req_sub_reject",  "❌ Reject"),
+        ("req_sub_extensions", "📋 Extension Requests"),
+        ("req_sub_history",    "🕘 History"),
     ]
 
     # Sub-tabs shown under the "Fix" nav tab specifically.
@@ -8868,16 +8872,17 @@ class SlackSlashCommandView(APIView):
         ("auto_sub_partial", "🌓 Partial"),
     ]
 
-    # Sub-tabs shown under the "Notification" nav tab specifically — deadline
-    # urgency buckets computed from RiskCriteria SLA days, same formula used
-    # everywhere else in the app (risk_criteria/admindashboard/userdashboard).
+    # Sub-tabs shown under the "Reminder" nav tab specifically (action_id
+    # still nav_notification internally) — deadline urgency buckets computed
+    # from RiskCriteria SLA days, same formula used everywhere else in the
+    # app (risk_criteria/admindashboard/userdashboard). Timeline Ext. moved
+    # out to the standalone Timeline Ext. nav tab (nav_request).
     _NOTIFICATION_SUBTABS = [
         ("notif_sub_overdue",   "🔴 Overdue"),
         ("notif_sub_today",     "🟠 Due Today"),
         ("notif_sub_thisweek",  "🟡 This Week"),
         ("notif_sub_nextweek",  "🟢 Next Week"),
         ("notif_sub_support",   "🎫 Support"),
-        ("notif_sub_timeline",  "⌛ Timeline Ext."),
     ]
 
     # Support tab — status + team filter keys (Slack Block Kit action values).
@@ -9236,8 +9241,8 @@ class SlackSlashCommandView(APIView):
                 self._team_subtab_blocks("team_sub_team", team_id, user_id)
 
         if action_id == "nav_request":
-            return self._request_subnav_block(active_sub="req_sub_approve") + \
-                self._request_subtab_blocks("req_sub_approve", team_id, user_id)
+            return self._request_subnav_block(active_sub="req_sub_extensions") + \
+                self._request_subtab_blocks("req_sub_extensions", team_id, user_id)
 
         if action_id == "nav_notification":
             return self._notification_subnav_block(active_sub="notif_sub_overdue") + \
@@ -9274,22 +9279,57 @@ class SlackSlashCommandView(APIView):
 
 
     def _request_subnav_block(self, active_sub=None):
-        """Second-level button row under the standalone 'Request' nav tab: Approve | Reject."""
+        """Second-level button row under the standalone 'Timeline Ext.' nav tab: Extension Requests | History."""
         return self._button_row_blocks(self._REQUEST_SUBTABS, active_action_id=active_sub)
 
-    def _request_subtab_blocks(self, sub_action_id, team_id, user_id):
+    def _build_history_view_blocks(self, results, history_view="approve", offset=0):
         """
-        Content for the 'Request' sub-tabs — timeline-extension Approve /
-        Reject lists, moved here from Admin Demo (av_sub_approve/av_sub_reject).
+        History sub-tab content — Approve/Reject as an internal toggle
+        (same pattern as the Manual/Automation Fix toggle) instead of two
+        separate sub-tabs.
+        """
+        toggle = {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✅ Approve", "emoji": True},
+                    "action_id": "req_hist_approve",
+                    "value": "0",
+                    **({"style": "primary"} if history_view != "reject" else {}),
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "❌ Reject", "emoji": True},
+                    "action_id": "req_hist_reject",
+                    "value": "0",
+                    **({"style": "primary"} if history_view == "reject" else {}),
+                },
+            ],
+        }
+        content = (
+            self._build_reject_list_blocks(results, offset=offset) if history_view == "reject"
+            else self._build_approve_list_blocks(results, offset=offset)
+        )
+        return [toggle] + content
+
+    def _request_subtab_blocks(self, sub_action_id, team_id, user_id, history_view="approve", offset=0):
+        """
+        Content for the 'Timeline Ext.' sub-tabs:
+          - req_sub_extensions: the actual timeline extension request list
+            (moved in from Notification's old Timeline Ext. sub-tab)
+          - req_sub_history (default): Approve/Reject, now a single sub-tab
+            with an internal toggle instead of two separate sub-tabs
         """
         data = self._call_api(
             "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
             slack_user_id=user_id,
         )
+        if sub_action_id == "req_sub_extensions":
+            return self._format_extension_requests(data)
+
         results = self._assign_severity_short_ids(data.get("results") or [])
-        if sub_action_id == "req_sub_reject":
-            return self._build_reject_list_blocks(results)
-        return self._build_approve_list_blocks(results)
+        return self._build_history_view_blocks(results, history_view=history_view, offset=offset)
 
     def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None):
         """Manual / Automation Fix toggle for one specific vulnerability —
@@ -9558,35 +9598,22 @@ class SlackSlashCommandView(APIView):
         return buckets
 
     def _notification_subnav_block(self, active_sub=None):
-        """
-        Second-level button row under the 'Notification' nav tab. chunk_size=6
-        (not the default 5) so all 6 sub-tabs stay on one row — Support and
-        Timeline Ext. need to sit next to each other, not wrap onto their own
-        second row.
-        """
-        return self._button_row_blocks(self._NOTIFICATION_SUBTABS, active_action_id=active_sub, chunk_size=6)
+        """Second-level button row under the 'Reminder' nav tab."""
+        return self._button_row_blocks(self._NOTIFICATION_SUBTABS, active_action_id=active_sub)
 
     def _notification_subtab_blocks(self, sub_action_id, team_id, user_id, offset=0,
                                      st_filter="all", team_filter="all"):
         """
-        Content for the 'Notification' sub-tabs — Overdue / Due Today /
-        This Week / Next Week deadline buckets (computed here), plus
-        Support and Timeline Ext. (moved in from their old homes — the
-        standalone top-level Support tab and Admin Demo's Timeline Ext.
-        sub-tab respectively — reusing their existing content builders
-        unchanged).
+        Content for the 'Reminder' sub-tabs — Overdue / Due Today / This
+        Week / Next Week deadline buckets (computed here), plus Support
+        (moved in from the old standalone top-level Support tab, content
+        builder reused unchanged). Timeline Ext. moved out to the
+        standalone Timeline Ext. nav tab (nav_request).
         """
         if sub_action_id == "notif_sub_support":
             return self._support_tab_blocks(
                 team_id, user_id, st_filter=st_filter, team_filter=team_filter, offset=offset,
             )
-
-        if sub_action_id == "notif_sub_timeline":
-            data = self._call_api(
-                "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
-                slack_user_id=user_id,
-            )
-            return self._format_extension_requests(data)
 
         bucket_key = {
             "notif_sub_today":    "today",
@@ -15206,13 +15233,12 @@ class SlackInteractivityView(APIView):
                 # jump lands on the wrong page.
                 filtered = [r for r in all_requests if r.get("status", "review") != ("rejected" if is_approve else "approved")]
                 page_offset = slash._extension_page_for_sid(filtered, value)
-                content = (
-                    slash._build_approve_list_blocks(all_requests, offset=page_offset) if is_approve
-                    else slash._build_reject_list_blocks(all_requests, offset=page_offset)
+                content = slash._build_history_view_blocks(
+                    all_requests, history_view=("approve" if is_approve else "reject"), offset=page_offset,
                 )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_request")
-                    + slash._request_subnav_block(active_sub="req_sub_approve" if is_approve else "req_sub_reject")
+                    + slash._request_subnav_block(active_sub="req_sub_history")
                     + content
                 )
                 self._post_response_url(response_url, {
@@ -15229,13 +15255,12 @@ class SlackInteractivityView(APIView):
                 )
                 all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
                 is_approve = action_id.startswith("av_approve_list")
-                content = (
-                    slash._build_approve_list_blocks(all_requests, offset=page_offset) if is_approve
-                    else slash._build_reject_list_blocks(all_requests, offset=page_offset)
+                content = slash._build_history_view_blocks(
+                    all_requests, history_view=("approve" if is_approve else "reject"), offset=page_offset,
                 )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_request")
-                    + slash._request_subnav_block(active_sub="req_sub_approve" if is_approve else "req_sub_reject")
+                    + slash._request_subnav_block(active_sub="req_sub_history")
                     + content
                 )
                 self._post_response_url(response_url, {
@@ -15258,8 +15283,8 @@ class SlackInteractivityView(APIView):
                 all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_request")
-                    + slash._request_subnav_block(active_sub="req_sub_approve")
-                    + slash._build_approve_list_blocks(all_requests, offset=page_offset)
+                    + slash._request_subnav_block(active_sub="req_sub_history")
+                    + slash._build_history_view_blocks(all_requests, history_view="approve", offset=page_offset)
                 )
                 self._post_response_url(response_url, {
                     "replace_original": True,
@@ -15351,11 +15376,29 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id in dict(slash._REQUEST_SUBTABS):
-                # req_sub_approve / req_sub_reject — plain content swap.
+                # req_sub_extensions / req_sub_history — plain content swap
+                # (History defaults to the Approve view of its toggle).
                 content_blocks = slash._request_subtab_blocks(action_id, team_id, slack_user_id)
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_request")
                     + slash._request_subnav_block(active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id in ("req_hist_approve", "req_hist_reject"):
+                # History sub-tab's internal Approve/Reject toggle.
+                history_view = "approve" if action_id == "req_hist_approve" else "reject"
+                content_blocks = slash._request_subtab_blocks(
+                    "req_sub_history", team_id, slack_user_id, history_view=history_view,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_request")
+                    + slash._request_subnav_block(active_sub="req_sub_history")
                     + content_blocks
                 )
                 self._post_response_url(response_url, {

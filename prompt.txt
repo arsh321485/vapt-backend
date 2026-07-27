@@ -1,0 +1,5 @@
+mujhe slack ke pltform me admin vale channel me 
+1)  notification tabname change krke Reminder rkhna hai 
+
+2)  request tab  name change Timeline Ext. rkhna hai or jo request vale tab ke undr 2 tab (approve or reject )hai usko History vale tab ke undr dalna hai or jo notification vale me jo timeline Ext vala tab hai o vha se remove krke yha dalna hai 
+
