@@ -41,6 +41,7 @@ urlpatterns = [
     path("api/user/risk_criteria/", include("userrisk_criteria.urls")),
     path("api/notifications/", include("notifications.urls")),
     path("api/partners/", include("partners.urls")),
+    path("api/webinar/", include("webinar.urls")),
     path("api/admin/automation-scripts/", include(admin_urlpatterns)),
     path("api/user/automation-scripts/", include(user_urlpatterns)),
 

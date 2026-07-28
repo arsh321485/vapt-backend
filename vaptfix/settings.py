@@ -80,6 +80,7 @@ INSTALLED_APPS = [
     "notifications",
     "automation_scripts_api",
     "partners",
+    "webinar",
 ]
 
 MIDDLEWARE = [
