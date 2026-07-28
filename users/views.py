@@ -15385,11 +15385,22 @@ class SlackSlashCommandView(APIView):
                 # to the right of whichever button above (Step N Completed
                 # or Complete Step N) as long as steps remain, not only on
                 # the current step's page.
+                #
+                # action_id MUST differ from the sibling button's — Slack
+                # rejects the entire message ("invalid_blocks", with zero
+                # visible error to the user before the response_url
+                # rejection-surfacing fix) if two buttons in the SAME
+                # actions block share one action_id. This is exactly what
+                # was silently breaking "Fix" for any vuln where this row
+                # and the Step-Completed/Complete-Step row both rendered
+                # (i.e. almost every non-fully-verified vuln) — both used
+                # the bare action_id/"tav_detail_manual" with no suffix.
                 if completed < total:
+                    all_action_id = f"{action_id}__allstep" if action_id else "tav_detail_manual__allstep"
                     action_row["elements"].append({
                         "type": "button",
                         "text": {"type": "plain_text", "text": "✅ All Completed", "emoji": True},
-                        "action_id": action_id or "tav_detail_manual",
+                        "action_id": all_action_id,
                         "value": f"{refresh_value}|CA:{raise_support_fix_vuln_id}",
                     })
                 blocks.append(action_row)
@@ -16373,14 +16384,15 @@ class SlackInteractivityView(APIView):
 
     def _handle_action(self, action_id, value, team_id, slack_user_id, response_url, trigger_id="", channel_id=""):
         self._debug_write(f"_handle_action: START action={action_id} value={value!r}")
-        # Back Step / View Next Steps sit in the SAME actions row and reuse
-        # whatever action_id the surrounding Manual-detail view uses (e.g.
-        # "tav_detail_manual") — Slack rejects two buttons sharing one
-        # action_id within a single block, so _format_vulndata_single tags
-        # them "<action_id>__prev"/"<action_id>__next". Stripping it here,
-        # once, up front, means every existing comparison further down
-        # matches the base action_id unchanged.
-        if action_id.endswith("__prev") or action_id.endswith("__next"):
+        # Back Step / View Next Steps / All Completed sit in the SAME actions
+        # row as another button reusing the surrounding Manual-detail view's
+        # action_id (e.g. "tav_detail_manual") — Slack rejects two buttons
+        # sharing one action_id within a single block, so
+        # _format_vulndata_single tags them "<action_id>__prev"/"__next"/
+        # "__allstep". Stripping it here, once, up front, means every
+        # existing comparison further down matches the base action_id
+        # unchanged.
+        if action_id.endswith(("__prev", "__next", "__allstep")):
             action_id = action_id.rsplit("__", 1)[0]
         try:
             parts       = value.split("|")

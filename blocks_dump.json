@@ -1,0 +1,320 @@
+[
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🏠 Home",
+          "emoji": true
+        },
+        "action_id": "tnav_home",
+        "value": "Configuration Management"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🔧 Fix",
+          "emoji": true
+        },
+        "action_id": "tnav_fix",
+        "value": "Configuration Management",
+        "style": "primary"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "📋 Register",
+          "emoji": true
+        },
+        "action_id": "tnav_register",
+        "value": "Configuration Management"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🎫 Support Status",
+          "emoji": true
+        },
+        "action_id": "tnav_support",
+        "value": "Configuration Management"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "✅ Fixed",
+          "emoji": true
+        },
+        "action_id": "tnav_fixed",
+        "value": "Configuration Management"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🔔 Reminder",
+          "emoji": true
+        },
+        "action_id": "tnav_reminder",
+        "value": "Configuration Management"
+      }
+    ]
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🖥 All Assets",
+          "emoji": true
+        },
+        "action_id": "tfix_sub_assets",
+        "value": "Configuration Management"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "📋 All Vulns",
+          "emoji": true
+        },
+        "action_id": "tfix_sub_vulns",
+        "value": "Configuration Management",
+        "style": "primary"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🧩 Common Vulns",
+          "emoji": true
+        },
+        "action_id": "tfix_sub_common",
+        "value": "Configuration Management"
+      }
+    ]
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "← Back",
+          "emoji": true
+        },
+        "action_id": "tav_detail_back",
+        "value": "h1|tfixvulns|Configuration Management|all|all|0"
+      }
+    ]
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🛠 Manual",
+          "emoji": true
+        },
+        "action_id": "tav_detail_manual",
+        "value": "h1|tfixvulns|Configuration Management|all|all|0",
+        "style": "primary"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🤖 Automation Fix",
+          "emoji": true
+        },
+        "action_id": "tav_detail_automation",
+        "value": "h1|tfixvulns|Configuration Management|all|all|0"
+      }
+    ]
+  },
+  {
+    "type": "header",
+    "text": {
+      "type": "plain_text",
+      "text": "🔍 H1 — Redis Server Unprotected by Password Authentication",
+      "emoji": true
+    }
+  },
+  {
+    "type": "section",
+    "fields": [
+      {
+        "type": "mrkdwn",
+        "text": "*Severity*\nHigh"
+      },
+      {
+        "type": "mrkdwn",
+        "text": "*Status*\n❗ Open"
+      },
+      {
+        "type": "mrkdwn",
+        "text": "*Host*\n`192.168.0.26`"
+      },
+      {
+        "type": "mrkdwn",
+        "text": "*Port / Protocol*\n/—"
+      }
+    ]
+  },
+  {
+    "type": "context",
+    "elements": [
+      {
+        "type": "mrkdwn",
+        "text": "*First Obs.:* 2026-07-22T11:17:28.457000-05:00 | *Last Obs.:* —"
+      }
+    ]
+  },
+  {
+    "type": "divider"
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*📋 Mitigation Steps* — 0/4 done | OS: Windows"
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*1. Step 1* — ▶️ Pending"
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Action:*\nLOCATE: Redis configuration file\nREMOVE: ❌ none — additive change\nREPLACE: ❌ none — additive change\nWHERE: C:\\Program Files (x86)\\ZKTECO\\ZKTIME\\zkeco\\python-support\\redis\\redis_64\\redis.conf"
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*File Path:*\n`C:\\Program Files (x86)\\ZKTECO\\ZKTIME\\zkeco\\python-support\\redis\\redis_64\\redis.conf`"
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Where To Run:*\nPowerShell (Windows — press Win+X, then click PowerShell)"
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*How To Run:*\nRight-click the Start button → select 'Windows PowerShell (Admin)' → paste the command below and press Enter:"
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Command To Run:*\n```$redisConfigPath = 'C:\\Program Files (x86)\\ZKTECO\\ZKTIME\\zkeco\\python-support\\redis\\redis_64\\redis.conf'\nGet-Content $redisConfigPath | Select-String -Pattern 'requirepass'```"
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Expected Output:*\nAfter completing this step: Ensure the output does not contain `requirepass` indicating no password is set."
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Verification Check:*\nEnsure the output does not contain `requirepass` indicating no password is set."
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Artefacts & Tools:*\nWindows PowerShell"
+    }
+  },
+  {
+    "type": "context",
+    "elements": [
+      {
+        "type": "mrkdwn",
+        "text": "⚠️ *Important:* Ensure to replace `<your_secure_password>` with a strong password that meets your security policies."
+      }
+    ]
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🎫 Support Raised",
+          "emoji": true
+        },
+        "action_id": "sup_raise_step_1",
+        "value": "SIMULATEDID_NEVER_REAL|1|Redis Server Unprotected by Password Authentication",
+        "style": "primary"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "✅ Complete Step 1",
+          "emoji": true
+        },
+        "action_id": "tav_detail_manual",
+        "value": "h1|tfixvulns|Configuration Management|all|all|0|SP:0|CS:SIMULATEDID_NEVER_REAL",
+        "style": "primary"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "✅ All Completed",
+          "emoji": true
+        },
+        "action_id": "tav_detail_manual__allstep",
+        "value": "h1|tfixvulns|Configuration Management|all|all|0|SP:0|CA:SIMULATEDID_NEVER_REAL"
+      }
+    ]
+  },
+  {
+    "type": "divider"
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "🔎 View Next Steps",
+          "emoji": true
+        },
+        "action_id": "tav_detail_manual__next",
+        "value": "h1|tfixvulns|Configuration Management|all|all|0|SP:1"
+      }
+    ]
+  }
+]
