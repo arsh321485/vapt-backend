@@ -10427,7 +10427,39 @@ class SlackSlashCommandView(APIView):
         results = self._assign_severity_short_ids(data.get("results") or [])
         return self._build_history_view_blocks(results, history_view=history_view, offset=offset)
 
-    def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None, steps_offset=0, raise_support_fix_vuln_id=None):
+    def _get_or_create_admin_fix_vuln_id(self, vuln, report_id, team_id):
+        """
+        Admin-side get-or-create — mirrors _get_or_create_fix_vuln_id but
+        authenticates as the admin (via _call_api) and reuses the row's own
+        "id" field (the admin register endpoint's throwaway per-row UUID,
+        required by this create endpoint).
+
+        Without this, a vuln nobody had started a fix on yet had no
+        fix_vulnerabilities document at all, so step-complete had nothing to
+        return and the Manual view showed "No fix has been started — no
+        steps to show" even though the real mitigation steps already exist
+        in vulnerability_cards.mitigation_table and just need materializing
+        into a fix record before they can be displayed. Idempotent —
+        get-or-create only, no state admin wouldn't already be able to see.
+        """
+        host_name = vuln.get("asset") or vuln.get("host_name") or ""
+        if not report_id or not host_name:
+            return None, {}
+        data = self._call_api(
+            f"/api/admin/adminregister/fix-vulnerability/report/{report_id}/asset/{host_name}/create/",
+            team_id, method="post",
+            json_body={
+                "id": vuln.get("id", ""),
+                "plugin_name": vuln.get("vul_name") or vuln.get("plugin_name", ""),
+                "risk_factor": vuln.get("severity") or vuln.get("risk_factor") or "Medium",
+                "port": vuln.get("port", ""),
+            },
+        )
+        result = data.get("data") or {}
+        fix_vuln_id = result.get("fix_vulnerability_id") or result.get("_id")
+        return fix_vuln_id, data
+
+    def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None, steps_offset=0, raise_support_fix_vuln_id=None, report_id=""):
         """Manual / Automation Fix toggle for one specific vulnerability —
         both sides are strictly read-only for admins (no fix/run actions),
         matching the website's own admin-is-read-only behavior; whatever the
@@ -10443,6 +10475,9 @@ class SlackSlashCommandView(APIView):
         raise_support_fix_vuln_id: only set when this view was reached from a
         team channel (Common Vulns' shared admin code path — see the
         `|VT:<team>` marker); admin's own /vulndata never passes this.
+        report_id: needed to get-or-create a fix record when v's own
+        fix_vulnerability_id is still empty (see
+        _get_or_create_admin_fix_vuln_id).
         """
         sid = v.get("short_id", "?")
         btn_value = action_value if action_value is not None else sid
@@ -10479,6 +10514,8 @@ class SlackSlashCommandView(APIView):
         else:
             steps_data = None
             fix_vuln_id = v.get("fix_vulnerability_id")
+            if not fix_vuln_id:
+                fix_vuln_id, _ = self._get_or_create_admin_fix_vuln_id(v, report_id, team_id)
             if fix_vuln_id:
                 steps_data = self._call_api(
                     f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id,
@@ -11482,7 +11519,7 @@ class SlackSlashCommandView(APIView):
             origin_tag = parts[1]
         return sid, common_ctx, origin_tag
 
-    def _common_asset_vuln_detail_blocks(self, target, sub, team_id, common_ctx, action_value, steps_offset=0, raise_support_fix_vuln_id=None):
+    def _common_asset_vuln_detail_blocks(self, target, sub, team_id, common_ctx, action_value, steps_offset=0, raise_support_fix_vuln_id=None, report_id=""):
         """Detail view opened from a Common Vuln asset row — Back returns to assets."""
         back = {
             "type": "actions",
@@ -11498,7 +11535,7 @@ class SlackSlashCommandView(APIView):
         }
         return [back] + self._allvuln_detail_blocks(
             target, sub, team_id, action_value=action_value, steps_offset=steps_offset,
-            raise_support_fix_vuln_id=raise_support_fix_vuln_id,
+            raise_support_fix_vuln_id=raise_support_fix_vuln_id, report_id=report_id,
         )
 
     def _build_reject_modal(self, sid, vuln_label):
@@ -12233,6 +12270,8 @@ class SlackSlashCommandView(APIView):
                 )
             steps_data = None
             fix_vuln_id = target.get("fix_vulnerability_id")
+            if not fix_vuln_id:
+                fix_vuln_id, _ = self._get_or_create_admin_fix_vuln_id(target, data.get("report_id", ""), team_id)
             if fix_vuln_id:
                 steps_data = self._call_api(
                     f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/",
@@ -16373,6 +16412,7 @@ class SlackInteractivityView(APIView):
                     # through to Admin Demo's default.
                     content = slash._allvuln_detail_blocks(
                         target, "manual", team_id, action_value=f"{sid}|register",
+                        report_id=vd_data.get("report_id", ""),
                     )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_register")
@@ -16642,6 +16682,8 @@ class SlackInteractivityView(APIView):
                 else:
                     steps_data = None
                     fix_vuln_id = target.get("fix_vulnerability_id")
+                    if not fix_vuln_id:
+                        fix_vuln_id, _ = slash._get_or_create_admin_fix_vuln_id(target, vd_data.get("report_id", ""), team_id)
                     if fix_vuln_id:
                         steps_data = slash._call_api(
                             f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/",
@@ -17185,11 +17227,13 @@ class SlackInteractivityView(APIView):
                     content = slash._common_asset_vuln_detail_blocks(
                         target, sub, team_id, common_ctx, action_value=value, steps_offset=steps_offset,
                         raise_support_fix_vuln_id=(target.get("fix_vulnerability_id") if vt_team else None),
+                        report_id=vd_data.get("report_id", ""),
                     )
                 else:
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
                     content = slash._allvuln_detail_blocks(
                         target, sub, team_id, action_value=value, steps_offset=steps_offset,
+                        report_id=vd_data.get("report_id", ""),
                     )
 
                 if vt_team:
@@ -17414,6 +17458,7 @@ class SlackInteractivityView(APIView):
                         content = slash._common_asset_vuln_detail_blocks(
                             target, "manual", team_id, common_ctx, action_value,
                             raise_support_fix_vuln_id=(target.get("fix_vulnerability_id") if vt_team else None),
+                            report_id=vd_data.get("report_id", ""),
                         )
                 if vt_team:
                     content = slash._tag_common_vuln_blocks_for_team(content, vt_team)
