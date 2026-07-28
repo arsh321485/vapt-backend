@@ -15151,32 +15151,101 @@ class SlackSlashCommandView(APIView):
         os_key    = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
 
         blocks.append({"type": "divider"})
+        team_view = bool(raise_support_fix_vuln_id)
+        title = "*📋 Mitigation Steps*" if team_view else "*📋 Mitigation Steps (view only)*"
         blocks.append({"type": "section", "text": {"type": "mrkdwn",
-            "text": f"*📋 Mitigation Steps (view only)* — {completed}/{total} done | OS: {os_v}"}})
+            "text": f"{title} — {completed}/{total} done | OS: {os_v}"}})
 
-        PAGE_SIZE = 3
+        # One step per page (matches the website's per-step drill-in) instead
+        # of 3 — "View Next Steps" still advances through them in order.
+        PAGE_SIZE = 1
         page_steps = steps[offset:offset + PAGE_SIZE]
         for step in page_steps:
-            step_num  = step.get("step_number")
-            step_name = step.get("step_name") or f"Step {step_num}"
-            status_v  = step.get("status", "pending")
-            done      = status_v == "completed"
-            badge     = "✅ Done" if done else ("🔒 Locked" if step.get("is_locked") else "▶️ Pending")
-            os_data   = step.get(os_key) or {}
-            action    = (os_data.get("action") or "").strip()
+            step_num   = step.get("step_number")
+            step_name  = step.get("step_name") or f"Step {step_num}"
+            status_v   = step.get("status", "pending")
+            done       = status_v == "completed"
+            is_current = bool(step.get("is_current"))
+            badge      = "✅ Done" if done else ("🔒 Locked" if step.get("is_locked") else "▶️ Pending")
+            os_data    = step.get(os_key) or {}
+            action     = (os_data.get("action") or "").strip()
 
-            step_header = {"type": "section", "text": {"type": "mrkdwn",
-                "text": f"*{step_num}. {step_name}* — {badge}"}}
-            if raise_support_fix_vuln_id:
-                step_header["accessory"] = {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "🎫 Raise Support Request", "emoji": True},
-                    "action_id": f"sup_raise_step_{step_num}",
-                    "value": f"{raise_support_fix_vuln_id}|{step_num}|{name}",
-                }
-            blocks.append(step_header)
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*{step_num}. {step_name}* — {badge}"}})
             if action:
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Action:*\n{action[:400]}"}})
+
+            # Same field set as the website's step card (FILE PATH / WHERE TO
+            # RUN / HOW TO RUN / COMMAND TO RUN / EXPECTED OUTPUT /
+            # VERIFICATION CHECK / ARTEFACTS & TOOLS / IMPORTANT
+            # CONSIDERATIONS) — shown to admin too (read-only oversight),
+            # only the action buttons below are team-only.
+            file_path = (os_data.get("system_file_path") or "").strip()
+            if file_path:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*File Path:*\n`{file_path}`"}})
+
+            where_label = (os_data.get("where_to_run_label") or "").strip()
+            if where_label:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Where To Run:*\n{where_label}"}})
+
+            how_to_run = (os_data.get("how_to_run") or "").strip()
+            if how_to_run:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*How To Run:*\n{how_to_run}"}})
+
+            # commands_for_action is [{"label": "...", "commands": [...]}] —
+            # command_to_run naively str()s that list when auto-filled, so
+            # the clean command text is pulled directly from the structured
+            # field instead of trusting command_to_run.
+            cmd_groups = os_data.get("commands_for_action")
+            command_lines = []
+            if isinstance(cmd_groups, list):
+                for grp in cmd_groups:
+                    if isinstance(grp, dict):
+                        command_lines.extend(str(c) for c in (grp.get("commands") or []) if c)
+            command_text = "\n".join(command_lines).strip() or (
+                str(os_data.get("command_to_run") or "").strip()
+                if not isinstance(os_data.get("commands_for_action"), list) else ""
+            )
+            if command_text:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Command To Run:*\n```{command_text[:400]}```"}})
+
+            expected_output = (os_data.get("expected_output") or "").strip()
+            if expected_output:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Expected Output:*\n{expected_output[:400]}"}})
+
+            verification_check = (os_data.get("verification_check") or "").strip()
+            if verification_check:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Verification Check:*\n{verification_check[:400]}"}})
+
+            artefacts = os_data.get("artifacts_tools_used")
+            artefacts_text = ", ".join(str(a) for a in artefacts if a) if isinstance(artefacts, list) else str(artefacts or "").strip()
+            if artefacts_text:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Artefacts & Tools:*\n{artefacts_text}"}})
+
+            important = (os_data.get("important_consideration") or "").strip()
+            if important:
+                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"⚠️ *Important:* {important[:400]}"}]})
+
+            if team_view:
+                action_row = {
+                    "type": "actions",
+                    "elements": [{
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🎫 Raise Support Request", "emoji": True},
+                        "action_id": f"sup_raise_step_{step_num}",
+                        "value": f"{raise_support_fix_vuln_id}|{step_num}|{name}",
+                    }],
+                }
+                if is_current and not done:
+                    action_row["elements"].append({
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": f"✅ Complete Step {step_num}", "emoji": True},
+                        "action_id": f"tav_complete_step_{step_num}",
+                        "value": f"{raise_support_fix_vuln_id}|{step_num}|{action_value if action_value is not None else sid}",
+                        "style": "primary",
+                    })
+                blocks.append(action_row)
+            blocks.append({"type": "divider"})
 
         current_page = offset // PAGE_SIZE + 1
         if offset + PAGE_SIZE < len(steps):
@@ -16761,6 +16830,24 @@ class SlackInteractivityView(APIView):
                 or action_id in ("tav_detail_manual", "tav_detail_automation", "tav_detail_back")
             ):
                 blocks = slash._build_team_vuln_detail_response(action_id, value, team_id, slack_user_id)
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("tav_complete_step_"):
+                # value: "<fix_vuln_id>|<step_number>|<detail_value>" — completes
+                # the next pending step (backend auto-detects which one; no
+                # explicit step_number needed in the POST body), then rebuilds
+                # the same Manual view via the normal tav_detail_manual path so
+                # the just-completed step's badge/next-step state refresh.
+                parts = value.split("|", 2)
+                fix_vuln_id = parts[0] if len(parts) > 0 else ""
+                detail_value = parts[2] if len(parts) > 2 else ""
+                if fix_vuln_id:
+                    slash._call_user_api(
+                        f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/",
+                        team_id, slack_user_id, method="post", json_body={},
+                    )
+                blocks = slash._build_team_vuln_detail_response("tav_detail_manual", detail_value, team_id, slack_user_id)
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
