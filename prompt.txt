@@ -1,11 +1,6 @@
-1) mujhe raise support request ke right sahit pr button chahihe step 1 complete or vha se step bhi complete honi chahihe (screen short 1)
+PARTICULAR vulns ki step 1 complete ki hai 
+view next steps pr gae to mujhe steps 1 dekhna hoga to 
 
+mujhe uske liye back step vala button chahihe 
 
-jeshi hi steps completed hoti hai vese hi step 1 completed ho jana chahihe 
-
-
-2) screen short number 1 jese website me particular step ki jo bhi details show ho rhi hai hai manual me vese mujhe slack ke plotform pr bhi chahihe 
-
-or ek sath ek hiu step nikao 
-
-to ye krke do mujhe 
+user or admin dono sahit 
