@@ -1,17 +1,4 @@
-1)user sihit pr jese admin ke channel me jese tabs vala open hota dirct open hota hai vese hi mujhe user vale team me chahihe bhi vese chahih
-
-admin ne jo usr ko add kiya hai usko jese admin me tab open hote hai vese hi user sahit pr bhi krna hai 
+jiska status open hai o vulns ke fix pr cilck hi nai ho rha hai o issue solve kro 
 
 
-2)user sahit pr jese steps next krti hu to fir se step 1 pr aa jata hai 
-
-3) vulns ki sari steps complete krne ke bad bhi sttaus in process dikh rha hai  sare steps ho jate hai to status open/review hona chahihe 
-
-4) status in process dikha rha tha or sare steps ho gye the to superadmin approve krne ke bad bhi status in process hi dikh rha hai 
-
-
-5) particular steps ke yha jo steps completed vala button hai uske right sahit pr all completed vala button dena hai jese hi all pr cilck krta hai vese hi sare steps colsed ho jayenge 
-
-6) scripts vala tab hai admin user dono sahit usne abhi all website me jitne script download hue hai o dikh rha hai lekin mujhe particular admin ki latest vali upload reoprt pr usne jo user add kiye hai uska hi count aana chahihe 
-
-mujhe plan fir code 
+all steps completed vala bhi option dena hai steps  completed ke right sahit pr  
