@@ -15307,10 +15307,14 @@ class SlackSlashCommandView(APIView):
                 blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"⚠️ *Important:* {important[:400]}"}]})
 
             if team_view:
-                # Base refresh value (no CS marker) — used for both the
-                # "already completed" badge (just re-renders) and as the
-                # foundation the CS marker gets appended onto below.
-                refresh_value = action_value if action_value is not None else sid
+                # Base refresh value, WITH the current step's own offset
+                # baked in via the same '|SP:<offset>' marker "View Next
+                # Steps" uses — without it, completing/viewing a step other
+                # than the first would refresh back to offset 0 (Step 1's
+                # page) instead of staying on the step just acted on, since
+                # action_value itself never carries the steps-page offset
+                # (only the list-level pagination, a separate value).
+                refresh_value = f"{action_value if action_value is not None else sid}|SP:{offset}"
                 action_row = {
                     "type": "actions",
                     "elements": [{
@@ -15344,9 +15348,13 @@ class SlackSlashCommandView(APIView):
                         "value": f"{refresh_value}|CS:{raise_support_fix_vuln_id}",
                         "style": "primary",
                     })
-                    # '|CA:<fix_vuln_id>' marker — same idea as CS but marks
-                    # EVERY remaining step completed in one backend call
-                    # (complete_all=true) instead of just the current one.
+                # '|CA:<fix_vuln_id>' marker — same idea as CS but marks EVERY
+                # remaining step completed in one backend call
+                # (complete_all=true) instead of just the current one. Shown
+                # to the right of whichever button above (Step N Completed
+                # or Complete Step N) as long as steps remain, not only on
+                # the current step's page.
+                if completed < total:
                     action_row["elements"].append({
                         "type": "button",
                         "text": {"type": "plain_text", "text": "✅ All Completed", "emoji": True},
@@ -15399,7 +15407,7 @@ class SlackSlashCommandView(APIView):
             team_view and total > 0 and completed >= total
             and (v.get("status") or "").strip().lower() not in ("open/review", "closed")
         ):
-            sv_refresh_value = action_value if action_value is not None else sid
+            sv_refresh_value = f"{action_value if action_value is not None else sid}|SP:{offset}"
             blocks.append({
                 "type": "actions",
                 "elements": [{
