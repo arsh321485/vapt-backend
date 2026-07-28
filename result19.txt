@@ -1,0 +1,9 @@
+[SlackCmd] _get_team_vulns team=Configuration Management report_id=6a60a67a9367b555d6c9cc2d vuln_count=53
+[SlackCmd] _get_team_vulns team=Configuration Management report_id=6a60a67a9367b555d6c9cc2d vuln_count=53
+[SlackCmd] _get_team_vulns team=Configuration Management report_id=6a60a67a9367b555d6c9cc2d vuln_count=53
+Step shown initially: *1. Step 1* — ▶️ Pending
+Next button action_id/value: tav_detail_manual__next | h1|tfixvulns|Configuration Management|all|all|0|SP:1
+After suffix-strip -> action_id: tav_detail_manual | value: h1|tfixvulns|Configuration Management|all|all|0|SP:1
+[SlackCmd] _get_team_vulns team=Configuration Management report_id=6a60a67a9367b555d6c9cc2d vuln_count=53
+[SlackCmd] _get_team_vulns team=Configuration Management report_id=6a60a67a9367b555d6c9cc2d vuln_count=53
+Step shown after 'Next Steps' click: *2. Step 2* — 🔒 Locked

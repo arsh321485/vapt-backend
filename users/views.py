@@ -6044,10 +6044,11 @@ class SlackEventsView(APIView):
                 logger.info(f"[SlackEvent] member_joined_channel: slack_user_id={slack_user_id} channel_id={channel_id} tid={tid}")
                 self._save_slack_member_to_user_detail(slack_user_id, tid, channel_id=channel_id)
 
-                # If it's the BOT itself joining #vaptfix-admin-dashboard (not
-                # a human member), auto-post the clickable navbar+dashboard
-                # message — this is the one-time trigger that replaces
-                # needing to type /dashboard at all.
+                # If it's the BOT itself joining #vaptfix-admin-dashboard OR
+                # one of the 4 team channels (not a human member), auto-post
+                # that channel's clickable navbar+dashboard message — the
+                # one-time trigger that replaces needing to type /dashboard
+                # or /postteamnav at all. Same parity for both channel kinds.
                 admin = User.objects.filter(slack_team_id=tid).first()
                 if admin and admin.slack_bot_token:
                     bot_user_id = self._get_bot_user_id(admin.slack_bot_token)
@@ -6055,6 +6056,9 @@ class SlackEventsView(APIView):
                         channel_name = self._get_channel_name(admin.slack_bot_token, channel_id)
                         if channel_name == SlackSlashCommandView.ADMIN_CHANNEL:
                             self._post_admin_navbar_message(admin.slack_bot_token, channel_id, tid)
+                        elif channel_name in SlackSlashCommandView.TEAM_CHANNELS:
+                            team_name = SlackSlashCommandView.TEAM_CHANNELS[channel_name]
+                            self._post_team_navbar_message(admin.slack_bot_token, channel_id, tid, team_name)
 
             elif etype == "member_left_channel":
                 logger.info(f"[SlackEvent] member_left_channel: user={event.get('user')} channel={event.get('channel')}")
@@ -6154,6 +6158,38 @@ class SlackEventsView(APIView):
                 logger.warning(f"[SlackEvent] chat.postMessage for navbar failed: {data.get('error')}")
         except Exception:
             logger.exception("[SlackEvent] _post_admin_navbar_message failed")
+
+    def _post_team_navbar_message(self, bot_token, channel_id, team_id, team_name):
+        """
+        Team-channel equivalent of _post_admin_navbar_message — auto-posts
+        the clickable team navbar + Home dashboard the moment the bot is
+        added to one of the 4 team channels, so a team never has to type
+        /postteamnav manually (same parity the admin channel already had).
+        """
+        slash = SlackSlashCommandView()
+        try:
+            blocks = slash._cmd_postteamnav("", team_id, user_id=None, team_name=team_name)
+            resp = _http_post(
+                "https://slack.com/api/chat.postMessage",
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                json={"channel": channel_id, "blocks": blocks, "text": f"VaptFix {team_name} Team Dashboard"},
+                timeout=15,
+            )
+            data = resp.json() if resp else {}
+            if data.get("ok") and data.get("ts"):
+                try:
+                    _http_post(
+                        "https://slack.com/api/pins.add",
+                        headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                        json={"channel": channel_id, "timestamp": data["ts"]},
+                        timeout=10,
+                    )
+                except Exception:
+                    logger.exception("[SlackEvent] Failed to pin team navbar message")
+            elif not data.get("ok"):
+                logger.warning(f"[SlackEvent] chat.postMessage for team navbar failed: {data.get('error')}")
+        except Exception:
+            logger.exception("[SlackEvent] _post_team_navbar_message failed")
 
     def _publish_app_home(self, bot_token, slack_user_id):
         """Publish a welcome App Home tab view when user opens VaptFix in Slack sidebar."""
@@ -15308,6 +15344,15 @@ class SlackSlashCommandView(APIView):
                         "value": f"{refresh_value}|CS:{raise_support_fix_vuln_id}",
                         "style": "primary",
                     })
+                    # '|CA:<fix_vuln_id>' marker — same idea as CS but marks
+                    # EVERY remaining step completed in one backend call
+                    # (complete_all=true) instead of just the current one.
+                    action_row["elements"].append({
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "✅ All Completed", "emoji": True},
+                        "action_id": action_id or "tav_detail_manual",
+                        "value": f"{refresh_value}|CA:{raise_support_fix_vuln_id}",
+                    })
                 blocks.append(action_row)
             blocks.append({"type": "divider"})
 
@@ -15344,6 +15389,27 @@ class SlackSlashCommandView(APIView):
             })
         if nav_elements:
             blocks.append({"type": "actions", "elements": nav_elements})
+
+        # Completing every step doesn't auto-transition status on its own —
+        # the backend requires this separate explicit call to move
+        # "in_progress" -> "open/review" and notify the superadmin (see
+        # UserSendVerificationAPIView). Without a button for it here, status
+        # got stuck at "in_process" forever even once all steps were done.
+        if (
+            team_view and total > 0 and completed >= total
+            and (v.get("status") or "").strip().lower() not in ("open/review", "closed")
+        ):
+            sv_refresh_value = action_value if action_value is not None else sid
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📨 Send Verification", "emoji": True},
+                    "action_id": action_id or "tav_detail_manual",
+                    "value": f"{sv_refresh_value}|SV:{raise_support_fix_vuln_id}",
+                    "style": "primary",
+                }],
+            })
 
         return blocks
 
@@ -16279,19 +16345,40 @@ class SlackInteractivityView(APIView):
             # it's the first "|CS:" occurrence that's real — split on that
             # specifically and splice any trailing "|VT:..." back onto value
             # rather than rpartition-ing, which would swallow it into the id.
-            if "|CS:" in value:
-                before, _, after = value.partition("|CS:")
+            def _split_step_marker(val, marker):
+                """Strip a '|<marker>:<fix_vuln_id>' suffix, preserving any
+                trailing '|VT:<team>' that got tacked on after it (Common
+                Vulns tags VT onto the already-built blocks, so CS/CA/SV are
+                always the inner marker, VT the outer one)."""
+                tag = f"|{marker}:"
+                if tag not in val:
+                    return val, None
+                before, _, after = val.partition(tag)
                 if "|VT:" in after:
-                    _cs_fix_vuln_id, vt_rest = after.split("|VT:", 1)
-                    value = f"{before}|VT:{vt_rest}"
-                else:
-                    _cs_fix_vuln_id = after
-                    value = before
-                if _cs_fix_vuln_id:
-                    slash._call_user_api(
-                        f"/api/user/register/fix-vulnerability/{_cs_fix_vuln_id}/step-complete/",
-                        team_id, slack_user_id, method="post", json_body={},
-                    )
+                    fix_id, vt_rest = after.split("|VT:", 1)
+                    return f"{before}|VT:{vt_rest}", fix_id
+                return before, after
+
+            value, _cs_fix_vuln_id = _split_step_marker(value, "CS")
+            if _cs_fix_vuln_id:
+                slash._call_user_api(
+                    f"/api/user/register/fix-vulnerability/{_cs_fix_vuln_id}/step-complete/",
+                    team_id, slack_user_id, method="post", json_body={},
+                )
+
+            value, _ca_fix_vuln_id = _split_step_marker(value, "CA")
+            if _ca_fix_vuln_id:
+                slash._call_user_api(
+                    f"/api/user/register/fix-vulnerability/{_ca_fix_vuln_id}/step-complete/",
+                    team_id, slack_user_id, method="post", json_body={"complete_all": True},
+                )
+
+            value, _sv_fix_vuln_id = _split_step_marker(value, "SV")
+            if _sv_fix_vuln_id:
+                slash._call_user_api(
+                    f"/api/user/register/fix-vulnerability/{_sv_fix_vuln_id}/send-verification/",
+                    team_id, slack_user_id, method="post", json_body={},
+                )
 
             if action_id in ("view_vulns_prev", "view_vulns_next"):
                 # value format here is "team_name|offset" (no fix_vuln_id) —
