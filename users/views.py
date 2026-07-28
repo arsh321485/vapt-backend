@@ -15255,6 +15255,7 @@ class SlackSlashCommandView(APIView):
                         "text": {"type": "plain_text", "text": f"✅ Step {step_num} Completed", "emoji": True},
                         "action_id": action_id or "tav_detail_manual",
                         "value": refresh_value,
+                        "style": "primary",
                     })
                 elif is_current:
                     # '|CS:<fix_vuln_id>' marker — stripped and acted on at
