@@ -10427,7 +10427,7 @@ class SlackSlashCommandView(APIView):
         results = self._assign_severity_short_ids(data.get("results") or [])
         return self._build_history_view_blocks(results, history_view=history_view, offset=offset)
 
-    def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None, steps_offset=0):
+    def _allvuln_detail_blocks(self, v, sub, team_id, action_value=None, steps_offset=0, raise_support_fix_vuln_id=None):
         """Manual / Automation Fix toggle for one specific vulnerability —
         both sides are strictly read-only for admins (no fix/run actions),
         matching the website's own admin-is-read-only behavior; whatever the
@@ -10440,6 +10440,9 @@ class SlackSlashCommandView(APIView):
         Steps" click (see _format_vulndata_single's `|SP:<offset>` marker) —
         without threading it back through here, every "next steps" click
         would reset back to steps 1-3 instead of advancing.
+        raise_support_fix_vuln_id: only set when this view was reached from a
+        team channel (Common Vulns' shared admin code path — see the
+        `|VT:<team>` marker); admin's own /vulndata never passes this.
         """
         sid = v.get("short_id", "?")
         btn_value = action_value if action_value is not None else sid
@@ -10483,6 +10486,7 @@ class SlackSlashCommandView(APIView):
             content = self._format_vulndata_single(
                 v, steps_data, offset=steps_offset,
                 action_id="av_detail_manual", action_value=btn_value,
+                raise_support_fix_vuln_id=raise_support_fix_vuln_id,
             )
         return [toggle] + content
 
@@ -11478,7 +11482,7 @@ class SlackSlashCommandView(APIView):
             origin_tag = parts[1]
         return sid, common_ctx, origin_tag
 
-    def _common_asset_vuln_detail_blocks(self, target, sub, team_id, common_ctx, action_value, steps_offset=0):
+    def _common_asset_vuln_detail_blocks(self, target, sub, team_id, common_ctx, action_value, steps_offset=0, raise_support_fix_vuln_id=None):
         """Detail view opened from a Common Vuln asset row — Back returns to assets."""
         back = {
             "type": "actions",
@@ -11494,6 +11498,7 @@ class SlackSlashCommandView(APIView):
         }
         return [back] + self._allvuln_detail_blocks(
             target, sub, team_id, action_value=action_value, steps_offset=steps_offset,
+            raise_support_fix_vuln_id=raise_support_fix_vuln_id,
         )
 
     def _build_reject_modal(self, sid, vuln_label):
@@ -15227,62 +15232,78 @@ class SlackSlashCommandView(APIView):
                 blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"⚠️ *Important:* {important[:400]}"}]})
 
             if team_view:
+                # Base refresh value (no CS marker) — used for both the
+                # "already completed" badge (just re-renders) and as the
+                # foundation the CS marker gets appended onto below.
+                refresh_value = action_value if action_value is not None else sid
                 action_row = {
                     "type": "actions",
                     "elements": [{
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "🎫 Raise Support Request", "emoji": True},
+                        "text": {"type": "plain_text", "text": "🎫 Support Raised", "emoji": True},
                         "action_id": f"sup_raise_step_{step_num}",
                         "value": f"{raise_support_fix_vuln_id}|{step_num}|{name}",
+                        "style": "primary",
                     }],
                 }
-                if is_current and not done:
+                if done:
+                    # Same "done" treatment as the website's static green
+                    # "Step N Completed" pill — re-clicking just refreshes
+                    # this same view (harmless; nothing left to complete).
+                    action_row["elements"].append({
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": f"✅ Step {step_num} Completed", "emoji": True},
+                        "action_id": action_id or "tav_detail_manual",
+                        "value": refresh_value,
+                    })
+                elif is_current:
+                    # '|CS:<fix_vuln_id>' marker — stripped and acted on at
+                    # the top of _handle_action, then falls through to this
+                    # SAME action_id's normal refresh handling (works whether
+                    # this view came from the main Fix flow or Common Vulns).
                     action_row["elements"].append({
                         "type": "button",
                         "text": {"type": "plain_text", "text": f"✅ Complete Step {step_num}", "emoji": True},
-                        "action_id": f"tav_complete_step_{step_num}",
-                        "value": f"{raise_support_fix_vuln_id}|{step_num}|{action_value if action_value is not None else sid}",
+                        "action_id": action_id or "tav_detail_manual",
+                        "value": f"{refresh_value}|CS:{raise_support_fix_vuln_id}",
                         "style": "primary",
                     })
                 blocks.append(action_row)
             blocks.append({"type": "divider"})
 
         current_page = offset // PAGE_SIZE + 1
-        # Back Step and View Next Steps each get their OWN actions block (not
-        # shared elements in one block) — reusing the same action_id as the
-        # Manual toggle button is already safe across separate blocks (that's
-        # exactly what View Next Steps already did), but Slack rejects two
-        # buttons sharing one action_id within the SAME block's elements.
+        # Back Step and View Next Steps sit in ONE row (Back on the left) —
+        # they can't share one action_id within that row (Slack rejects it),
+        # so each gets a "__prev"/"__next" suffix; every dispatch handler
+        # that reads this action_id strips the suffix first before its usual
+        # matching, so the underlying handling is unchanged.
+        nav_elements = []
         if offset > 0:
             prev_offset = max(0, offset - PAGE_SIZE)
             if action_id and action_value is not None:
-                prev_action_id, prev_value = action_id, f"{action_value}|SP:{prev_offset}"
+                prev_action_id, prev_value = f"{action_id}__prev", f"{action_value}|SP:{prev_offset}"
             else:
-                prev_action_id, prev_value = "view_vulndata_steps_page", f"{sid}|{max(1, current_page - 1)}"
-            blocks.append({
-                "type": "actions",
-                "elements": [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "◀ Back Step", "emoji": True},
-                    "action_id": prev_action_id,
-                    "value": prev_value,
-                }],
+                prev_action_id, prev_value = "view_vulndata_steps_prev", f"{sid}|{max(1, current_page - 1)}"
+            nav_elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "◀ Back Step", "emoji": True},
+                "action_id": prev_action_id,
+                "value": prev_value,
             })
         if offset + PAGE_SIZE < len(steps):
             next_offset = offset + PAGE_SIZE
             if action_id and action_value is not None:
-                next_action_id, next_value = action_id, f"{action_value}|SP:{next_offset}"
+                next_action_id, next_value = f"{action_id}__next", f"{action_value}|SP:{next_offset}"
             else:
-                next_action_id, next_value = "view_vulndata_steps_page", f"{sid}|{current_page + 1}"
-            blocks.append({
-                "type": "actions",
-                "elements": [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "🔎 View Next Steps", "emoji": True},
-                    "action_id": next_action_id,
-                    "value": next_value,
-                }],
+                next_action_id, next_value = "view_vulndata_steps_next", f"{sid}|{current_page + 1}"
+            nav_elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "🔎 View Next Steps", "emoji": True},
+                "action_id": next_action_id,
+                "value": next_value,
             })
+        if nav_elements:
+            blocks.append({"type": "actions", "elements": nav_elements})
 
         return blocks
 
@@ -16188,6 +16209,15 @@ class SlackInteractivityView(APIView):
 
     def _handle_action(self, action_id, value, team_id, slack_user_id, response_url, trigger_id="", channel_id=""):
         self._debug_write(f"_handle_action: START action={action_id} value={value!r}")
+        # Back Step / View Next Steps sit in the SAME actions row and reuse
+        # whatever action_id the surrounding Manual-detail view uses (e.g.
+        # "tav_detail_manual") — Slack rejects two buttons sharing one
+        # action_id within a single block, so _format_vulndata_single tags
+        # them "<action_id>__prev"/"<action_id>__next". Stripping it here,
+        # once, up front, means every existing comparison further down
+        # matches the base action_id unchanged.
+        if action_id.endswith("__prev") or action_id.endswith("__next"):
+            action_id = action_id.rsplit("__", 1)[0]
         try:
             parts       = value.split("|")
             fix_vuln_id = parts[0] if len(parts) > 0 else ""
@@ -16195,6 +16225,33 @@ class SlackInteractivityView(APIView):
             team_name   = parts[2] if len(parts) > 2 else ""
 
             slash = SlackSlashCommandView()
+
+            # "Complete Step N" (see _format_vulndata_single) tags its value
+            # with a trailing '|CS:<fix_vuln_id>' marker instead of using a
+            # dedicated action_id/handler — stripping it here and completing
+            # the step (team-authenticated; this button only ever appears in
+            # a team context) lets the click fall straight through to the
+            # ordinary tav_detail_manual/av_detail_manual refresh below,
+            # which already knows how to rebuild whichever view (main Fix
+            # flow or Common Vulns) it came from. CS is always applied
+            # BEFORE VT (Common Vulns tags |VT:<team> onto already-built
+            # blocks, after CS was baked in at button-construction time), so
+            # it's the first "|CS:" occurrence that's real — split on that
+            # specifically and splice any trailing "|VT:..." back onto value
+            # rather than rpartition-ing, which would swallow it into the id.
+            if "|CS:" in value:
+                before, _, after = value.partition("|CS:")
+                if "|VT:" in after:
+                    _cs_fix_vuln_id, vt_rest = after.split("|VT:", 1)
+                    value = f"{before}|VT:{vt_rest}"
+                else:
+                    _cs_fix_vuln_id = after
+                    value = before
+                if _cs_fix_vuln_id:
+                    slash._call_user_api(
+                        f"/api/user/register/fix-vulnerability/{_cs_fix_vuln_id}/step-complete/",
+                        team_id, slack_user_id, method="post", json_body={},
+                    )
 
             if action_id in ("view_vulns_prev", "view_vulns_next"):
                 # value format here is "team_name|offset" (no fix_vuln_id) —
@@ -16567,7 +16624,7 @@ class SlackInteractivityView(APIView):
                 )
                 return
 
-            if action_id == "view_vulndata_steps_page":
+            if action_id in ("view_vulndata_steps_prev", "view_vulndata_steps_next"):
                 # value format here is "short_id|page" — admin-channel
                 # read-only step pager for /vulndata [id], mirrors the text
                 # fallback (`/vulndata h1 2`) as a real button.
@@ -16853,24 +16910,6 @@ class SlackInteractivityView(APIView):
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
-            if action_id.startswith("tav_complete_step_"):
-                # value: "<fix_vuln_id>|<step_number>|<detail_value>" — completes
-                # the next pending step (backend auto-detects which one; no
-                # explicit step_number needed in the POST body), then rebuilds
-                # the same Manual view via the normal tav_detail_manual path so
-                # the just-completed step's badge/next-step state refresh.
-                parts = value.split("|", 2)
-                fix_vuln_id = parts[0] if len(parts) > 0 else ""
-                detail_value = parts[2] if len(parts) > 2 else ""
-                if fix_vuln_id:
-                    slash._call_user_api(
-                        f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/",
-                        team_id, slack_user_id, method="post", json_body={},
-                    )
-                blocks = slash._build_team_vuln_detail_response("tav_detail_manual", detail_value, team_id, slack_user_id)
-                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
-                return
-
             if action_id == "tasset_view":
                 # value: host|team|sev|st|list_offset|vuln_offset
                 parts = value.split("|", 5)
@@ -17144,6 +17183,7 @@ class SlackInteractivityView(APIView):
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
                     content = slash._common_asset_vuln_detail_blocks(
                         target, sub, team_id, common_ctx, action_value=value, steps_offset=steps_offset,
+                        raise_support_fix_vuln_id=(target.get("fix_vulnerability_id") if vt_team else None),
                     )
                 else:
                     sub = "automation" if action_id == "av_detail_automation" else "manual"
@@ -17372,6 +17412,7 @@ class SlackInteractivityView(APIView):
                         )
                         content = slash._common_asset_vuln_detail_blocks(
                             target, "manual", team_id, common_ctx, action_value,
+                            raise_support_fix_vuln_id=(target.get("fix_vulnerability_id") if vt_team else None),
                         )
                 if vt_team:
                     content = slash._tag_common_vuln_blocks_for_team(content, vt_team)
