@@ -16358,24 +16358,12 @@ class SlackInteractivityView(APIView):
                     self._debug_write(f"_post_response_url: action={action_id} SENT_PAYLOAD={json.dumps(payload)}")
                 except Exception:
                     pass
-                # Slack rejecting the blocks (e.g. invalid_blocks) previously
-                # left the user with NO visible sign anything happened at
-                # all — clicking looked like a dead button. A minimal,
-                # near-impossible-to-also-reject ephemeral fallback at least
-                # surfaces that *something* went wrong, instead of silence.
-                if payload.get("replace_original"):
-                    try:
-                        _http_post(
-                            response_url,
-                            json={
-                                "response_type": "ephemeral",
-                                "replace_original": False,
-                                "text": f"⚠️ Couldn't update this view (Slack rejected it: {err_body}). Try again — if it keeps happening, tell an admin.",
-                            },
-                            timeout=10,
-                        )
-                    except Exception:
-                        logger.exception(f"[SlackInteractivity] fallback ephemeral POST also failed for action={action_id}")
+                # A visible ephemeral fallback lived here briefly purely to
+                # diagnose the "invalid_blocks" duplicate-action_id bug (see
+                # the __allstep fix) — that's what surfaced it. Root cause is
+                # fixed now; back to silent (logger.warning + _debug_write
+                # above already capture everything needed) so users don't
+                # see internal diagnostics as routine UI noise.
             else:
                 self._debug_write(f"_post_response_url: action={action_id} OK (Slack accepted it)")
         except Exception as exc:
