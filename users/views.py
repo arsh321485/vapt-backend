@@ -12233,7 +12233,7 @@ class SlackSlashCommandView(APIView):
                     f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/",
                     team_id, slack_user_id=user_id,
                 )
-            return self._format_vulndata_single(target, steps_data, offset=(steps_page - 1) * 3)
+            return self._format_vulndata_single(target, steps_data, offset=steps_page - 1)
         elif text_stripped:
             fix_vuln_id = text_stripped
             data = self._call_api(
@@ -15248,6 +15248,26 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "divider"})
 
         current_page = offset // PAGE_SIZE + 1
+        # Back Step and View Next Steps each get their OWN actions block (not
+        # shared elements in one block) — reusing the same action_id as the
+        # Manual toggle button is already safe across separate blocks (that's
+        # exactly what View Next Steps already did), but Slack rejects two
+        # buttons sharing one action_id within the SAME block's elements.
+        if offset > 0:
+            prev_offset = max(0, offset - PAGE_SIZE)
+            if action_id and action_value is not None:
+                prev_action_id, prev_value = action_id, f"{action_value}|SP:{prev_offset}"
+            else:
+                prev_action_id, prev_value = "view_vulndata_steps_page", f"{sid}|{max(1, current_page - 1)}"
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "◀ Back Step", "emoji": True},
+                    "action_id": prev_action_id,
+                    "value": prev_value,
+                }],
+            })
         if offset + PAGE_SIZE < len(steps):
             next_offset = offset + PAGE_SIZE
             if action_id and action_value is not None:
@@ -16569,7 +16589,7 @@ class SlackInteractivityView(APIView):
                             f"/api/admin/adminregister/fix-vulnerability/{fix_vuln_id}/step-complete/",
                             team_id, slack_user_id=slack_user_id,
                         )
-                    blocks = slash._format_vulndata_single(target, steps_data, offset=(v_page - 1) * 3)
+                    blocks = slash._format_vulndata_single(target, steps_data, offset=v_page - 1)
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
