@@ -8,26 +8,21 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 
-from vaptfix.mongo_client import get_shared_client
+from vaptfix.mongo_client import MongoContext
 from .serializers import WebinarRegistrationSerializer, TEAM_SIZE_CHOICES
 
 logger = logging.getLogger(__name__)
 
-WEBINAR_DB_NAME = "webinar"
-WEBINAR_COLLECTION = "registrations"
+WEBINAR_COLLECTION = "webinar"
 
 _index_ensured = False
 _index_lock = threading.Lock()
 
 
 def _get_webinar_collection():
-    """
-    Registrations live in a separate Mongo database ("webinar"), not the
-    main "vaptfix" one, so this bypasses MongoContext/get_shared_db and
-    selects the database directly off the shared pooled client.
-    """
-    db = get_shared_client()[WEBINAR_DB_NAME]
-    collection = db[WEBINAR_COLLECTION]
+    """Registrations live in the shared "vaptfix" database, "webinar" collection."""
+    with MongoContext() as db:
+        collection = db[WEBINAR_COLLECTION]
 
     global _index_ensured
     if not _index_ensured:
@@ -65,7 +60,8 @@ class WebinarRegistrationCreateAPIView(APIView):
     POST /api/webinar/register/
 
     Public endpoint — submits a webinar registration. No authentication
-    required. Data is stored in the "webinar" MongoDB database.
+    required. Data is stored in the "vaptfix" MongoDB database, "webinar"
+    collection.
     """
     permission_classes = [AllowAny]
 
