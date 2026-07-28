@@ -9191,12 +9191,24 @@ class SlackSlashCommandView(APIView):
             }
         headers = {"Authorization": f"Bearer {token}"}
         url = f"{backend}{path}"
-        if method == "get":
-            resp = _http_get(url, headers=headers, params=params, timeout=15)
-        elif method == "post":
-            resp = _http_post(url, headers=headers, json=json_body, timeout=15)
-        else:
-            resp = _http_get(url, headers=headers, timeout=15)
+        # 25s (not 15s) specifically because get-or-create on a vuln with no
+        # existing fix record does real work server-side (host-wide scan +
+        # 2 card lookups + a team-member query) — noticeably slower than the
+        # fast duplicate-check path an already-touched vuln takes, and a
+        # ReadTimeout here used to propagate as a silent no-op for the user
+        # (see the try/except below and _post_response_url's Slack-rejection
+        # fallback — both added together to stop "Fix" on an untouched vuln
+        # from looking like a dead button with zero visible error).
+        try:
+            if method == "get":
+                resp = _http_get(url, headers=headers, params=params, timeout=25)
+            elif method == "post":
+                resp = _http_post(url, headers=headers, json=json_body, timeout=25)
+            else:
+                resp = _http_get(url, headers=headers, timeout=25)
+        except Exception as exc:
+            logger.exception(f"[SlackCmd] _call_user_api network error for {path}")
+            return {"detail": f"Request to backend failed: {exc}"}
         try:
             return resp.json()
         except ValueError:
@@ -16305,9 +16317,10 @@ class SlackInteractivityView(APIView):
             resp = _http_post(response_url, json=payload, timeout=10)
             ok = resp is not None and resp.status_code == 200 and (resp.text or "").strip() == "ok"
             if not ok:
+                err_body = getattr(resp, "text", None)
                 msg = (
                     f"_post_response_url: action={action_id} "
-                    f"got status={getattr(resp, 'status_code', None)} body={getattr(resp, 'text', None)!r}"
+                    f"got status={getattr(resp, 'status_code', None)} body={err_body!r}"
                 )
                 logger.warning(f"[SlackInteractivity] {msg}")
                 self._debug_write(msg)
@@ -16315,6 +16328,24 @@ class SlackInteractivityView(APIView):
                     self._debug_write(f"_post_response_url: action={action_id} SENT_PAYLOAD={json.dumps(payload)}")
                 except Exception:
                     pass
+                # Slack rejecting the blocks (e.g. invalid_blocks) previously
+                # left the user with NO visible sign anything happened at
+                # all — clicking looked like a dead button. A minimal,
+                # near-impossible-to-also-reject ephemeral fallback at least
+                # surfaces that *something* went wrong, instead of silence.
+                if payload.get("replace_original"):
+                    try:
+                        _http_post(
+                            response_url,
+                            json={
+                                "response_type": "ephemeral",
+                                "replace_original": False,
+                                "text": f"⚠️ Couldn't update this view (Slack rejected it: {err_body}). Try again — if it keeps happening, tell an admin.",
+                            },
+                            timeout=10,
+                        )
+                    except Exception:
+                        logger.exception(f"[SlackInteractivity] fallback ephemeral POST also failed for action={action_id}")
             else:
                 self._debug_write(f"_post_response_url: action={action_id} OK (Slack accepted it)")
         except Exception as exc:
