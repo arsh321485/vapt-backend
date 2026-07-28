@@ -9740,6 +9740,10 @@ class SlackSlashCommandView(APIView):
         """
         sid = v.get("short_id", "?")
         btn_value = action_value if action_value is not None else sid
+        logger.info(
+            f"[SlackCmd] _team_vuln_detail_blocks: sid={sid!r} sub={sub!r} report_id={report_id!r} "
+            f"plugin_name={v.get('plugin_name')!r} host_name={v.get('host_name')!r} status={v.get('status')!r}"
+        )
         toggle = {
             "type": "actions",
             "elements": [
@@ -9772,10 +9776,16 @@ class SlackSlashCommandView(APIView):
                 content = self._format_vulndata_automation_detail(v, automation)
         else:
             steps_data = None
+            if not report_id:
+                logger.warning(f"[SlackCmd] _team_vuln_detail_blocks: EMPTY report_id for sid={sid!r} — skipping get-or-create entirely")
             fix_vuln_id, _ = self._get_or_create_fix_vuln_id(v, report_id, team_id, user_id) if report_id else (None, {})
             if fix_vuln_id:
                 steps_data = self._call_user_api(
                     f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, user_id,
+                )
+                logger.info(
+                    f"[SlackCmd] _team_vuln_detail_blocks: steps fetch for fix_vuln_id={fix_vuln_id!r} -> "
+                    f"detail={steps_data.get('detail')!r} step_count={len(steps_data.get('steps') or [])}"
                 )
             content = self._format_vulndata_single(
                 v, steps_data, offset=steps_offset,
@@ -12922,16 +12932,25 @@ class SlackSlashCommandView(APIView):
         Returns (fix_vuln_id_or_None, raw_response_dict).
         """
         host_name = vuln.get("host_name") or ""
+        plugin_name = vuln.get("plugin_name", "")
+        logger.info(
+            f"[SlackCmd] _get_or_create_fix_vuln_id: requesting report_id={report_id} "
+            f"host={host_name!r} plugin={plugin_name!r} status={vuln.get('status')!r}"
+        )
         data = self._call_user_api(
             f"/api/user/register/fix-vulnerability/report/{report_id}/asset/{host_name}/create/",
             team_id, user_id, method="post",
             json_body={
-                "plugin_name": vuln.get("plugin_name", ""),
+                "plugin_name": plugin_name,
                 "risk_factor": vuln.get("risk_factor") or vuln.get("sev_label") or "Medium",
                 "port": vuln.get("port", ""),
             },
         )
         fix_vuln_id = (data.get("data") or {}).get("_id")
+        logger.info(
+            f"[SlackCmd] _get_or_create_fix_vuln_id: result fix_vuln_id={fix_vuln_id!r} "
+            f"response_detail={data.get('detail')!r} response_message={data.get('message')!r}"
+        )
         return fix_vuln_id, data
 
     def _get_channel_id_by_name(self, bot_token, channel_name):
@@ -17075,7 +17094,9 @@ class SlackInteractivityView(APIView):
                 action_id.startswith("tav_view_")
                 or action_id in ("tav_detail_manual", "tav_detail_automation", "tav_detail_back")
             ):
+                logger.info(f"[SlackCmd] tav_view dispatch: action_id={action_id!r} value={value!r}")
                 blocks = slash._build_team_vuln_detail_response(action_id, value, team_id, slack_user_id)
+                logger.info(f"[SlackCmd] tav_view dispatch: built {len(blocks)} blocks, posting to response_url")
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
