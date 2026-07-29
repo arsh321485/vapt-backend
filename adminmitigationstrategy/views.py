@@ -139,9 +139,15 @@ class MitigationStrategyByTeamAPIView(APIView):
                     logger.warning("Suppressed error: %s", e)
 
                 # Build closed vulnerability keys set
+                # NOTE: filter by admin_id, not created_by — created_by holds
+                # whoever's action actually created the fix_vulnerability
+                # record (often a team member), not the owning admin, so
+                # filtering on it here matched zero closed docs for this
+                # admin and made every vuln in this endpoint show as "open"
+                # even once genuinely closed.
                 closed_vulns = set()
                 for doc in closed_coll.find(
-                    {"report_id": report_id, "created_by": admin_id},
+                    {"report_id": report_id, "admin_id": admin_id},
                     {"plugin_name": 1, "host_name": 1, "port": 1},
                 ):
                     closed_vulns.add((
