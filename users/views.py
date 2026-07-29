@@ -9302,9 +9302,14 @@ class SlackSlashCommandView(APIView):
         ("tnav_home",     "🏠 Home"),
         ("tnav_fix",      "🔧 Fix"),
         ("tnav_register", "📋 Register"),
+        ("tnav_extend",   "📨 Timeline Ext."),
         ("tnav_support",  "🎫 Support Status"),
         ("tnav_fixed",    "✅ Fixed"),
         ("tnav_reminder", "🔔 Reminder"),
+    ]
+    _TEAM_EXTEND_SUBTABS = [
+        ("tex_sub_list", "📋 Extension Requests"),
+        ("tex_sub_new",  "⏳ Request Extension"),
     ]
     _TEAM_FIX_SUBTABS = [
         ("tfix_sub_assets", "🖥 All Assets"),
@@ -9347,6 +9352,10 @@ class SlackSlashCommandView(APIView):
         if action_id == "tnav_register":
             return self._team_reg_subnav_block(vapt_team, active_sub="treg_sub_register") + \
                 self._team_reg_subtab_blocks("treg_sub_register", team_id, user_id, vapt_team)
+
+        if action_id == "tnav_extend":
+            return self._team_extend_subnav_block(vapt_team, active_sub="tex_sub_list") + \
+                self._team_extend_subtab_blocks("tex_sub_list", team_id, user_id, vapt_team)
 
         if action_id == "tnav_support":
             return self._team_support_tab_blocks(team_id, user_id, vapt_team)
@@ -9960,6 +9969,274 @@ class SlackSlashCommandView(APIView):
         if pg_block:
             blocks.append(pg_block)
         return blocks
+
+    # ── Timeline Ext. (team) ─────────────────────────────────────────────
+    # Wraps the already-working /extend command's underlying APIs
+    # (mitigation-timeline-extension/request/ + /report/) in a clickable
+    # tab, matching the extend.html / extend-status.html designs — no new
+    # backend endpoints, this is UI-only.
+
+    def _team_extend_subnav_block(self, vapt_team, active_sub=None):
+        return self._button_row_blocks(self._TEAM_EXTEND_SUBTABS, active_action_id=active_sub, value=vapt_team)
+
+    def _team_extend_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, status_filter="all", offset=0):
+        if sub_action_id == "tex_sub_new":
+            return self._format_team_extend_new(vapt_team)
+
+        # tex_sub_list (default)
+        data = self._call_user_api(
+            "/api/user/dashboard/mitigation-timeline-extension/report/", team_id, user_id,
+        )
+        return self._format_team_extend_list(data, vapt_team, status_filter=status_filter, offset=offset)
+
+    def _format_team_extend_new(self, vapt_team):
+        """
+        'Request Extension' sub-tab — Slack can't render an inline HTML
+        form, so this is just a prompt + button that opens the actual form
+        as a modal (see _build_extend_request_modal).
+        """
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "⏳ Request Timeline Extension", "emoji": True}},
+            self._ctx(f"{vapt_team} — extend the remediation deadline for a vulnerability assigned to your team."),
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Click below to fill in the vulnerability, days, and reason."},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "⏳ Request Extension", "emoji": True},
+                    "action_id": "tex_open_request_modal",
+                    "value": vapt_team,
+                    "style": "primary",
+                },
+            },
+        ]
+
+    def _format_team_extend_list(self, data, vapt_team, status_filter="all", offset=0):
+        """Matches extend-status.html: stat cards + paginated list + View."""
+        PAGE_SIZE = 5
+        results = data.get("results") or []
+        # /report/ already scopes to the caller's own teams server-side;
+        # "requested_by" on each row is actually the TEAM name (extension
+        # requests are recorded per-team, not per-individual), so this is a
+        # belt-and-suspenders re-filter for multi-team members viewing a
+        # SPECIFIC team's channel, not a bug — falls back to the full set if
+        # nothing matches (e.g. requested_by wasn't populated on old rows).
+        team_results = [
+            r for r in results if (r.get("requested_by") or "").strip().lower() == vapt_team.strip().lower()
+        ] or results
+
+        status_icons = {"review": "⏳", "approved": "✅", "rejected": "❌"}
+        total = len(team_results)
+        approved = sum(1 for r in team_results if r.get("status") == "approved")
+        rejected = sum(1 for r in team_results if r.get("status") == "rejected")
+
+        filtered = (
+            team_results if status_filter == "all"
+            else [r for r in team_results if (r.get("status") or "review") == status_filter]
+        )
+        # Assign a stable per-row short id (independent of request_id, which
+        # is a 24-char Mongo id) so the "View" button's value stays short —
+        # matches the c/h/m/l short_id convention used everywhere else.
+        for i, r in enumerate(filtered):
+            r["_row_id"] = f"e{offset + i + 1}"
+        count = len(filtered)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = filtered[offset:offset + PAGE_SIZE]
+        start_num = offset + 1 if page_items else 0
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "⏳ Extension Requests", "emoji": True}},
+            self._ctx(f"{vapt_team} — timeline extension requests for your team."),
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Total*\n{total}"},
+                    {"type": "mrkdwn", "text": f"*Approved*\n{approved}"},
+                    {"type": "mrkdwn", "text": f"*Rejected*\n{rejected}"},
+                ],
+            },
+            {"type": "divider"},
+        ]
+
+        if not page_items:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*No extension requests found.*"}})
+        else:
+            for idx, r in enumerate(page_items):
+                if idx > 0:
+                    blocks.append({"type": "divider"})
+                sno = str(start_num + idx).zfill(2)
+                vuln = r.get("vul_name") or "Unknown"
+                sev = (r.get("severity") or "").capitalize() or "—"
+                st = r.get("status") or "review"
+                days = r.get("extension_days", 0)
+                icon = status_icons.get(st, "⏳")
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*`{sno}`*  {icon} *{vuln}*  `[{sev}]`\n"
+                            f"Status: *{st.capitalize()}*  |  Requested: +{days} day(s)"
+                        ),
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": f"tex_view_{r['_row_id']}",
+                        "value": f"{r.get('request_id')}|{vapt_team}|{status_filter}|{offset}",
+                    },
+                })
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
+        value_prefix = f"{vapt_team}|{status_filter}|"
+        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "tex_list_pg", value_prefix=value_prefix)
+        if pg_block:
+            blocks.append(pg_block)
+        return blocks
+
+    def _format_team_extend_detail(self, record, vapt_team, status_filter="all", offset=0):
+        vuln = record.get("vul_name") or "Unknown"
+        sev = (record.get("severity") or "").capitalize() or "—"
+        st = (record.get("status") or "review").capitalize()
+        days = record.get("extension_days", 0)
+        reason = record.get("reason") or "—"
+        asset = record.get("asset") or "—"
+        raised = self._short_display_date(record.get("request_date"))
+
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "⏳ Extension Request Detail", "emoji": True}},
+            {"type": "divider"},
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Vulnerability*\n{vuln}"},
+                    {"type": "mrkdwn", "text": f"*Severity*\n{sev}"},
+                    {"type": "mrkdwn", "text": f"*Status*\n{st}"},
+                    {"type": "mrkdwn", "text": f"*Requested*\n+{days} day(s)"},
+                    {"type": "mrkdwn", "text": f"*Asset*\n`{asset}`"},
+                    {"type": "mrkdwn", "text": f"*Raised*\n{raised}"},
+                ],
+            },
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Reason*\n_{reason}_"}},
+            {"type": "divider"},
+            {
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "← Back", "emoji": True},
+                    "action_id": "tex_detail_back",
+                    "value": f"{vapt_team}|{status_filter}|{offset}",
+                }],
+            },
+        ]
+
+    def _build_extend_request_modal(self, vulns, vapt_team):
+        """
+        Matches extend.html: vuln dropdown + extension days (1-90) + reason.
+        static_select caps at 100 options — a team with more assigned vulns
+        than that would need an external_select (search-as-you-type, needs
+        its own options-lookup endpoint) instead; not built here as it's a
+        much bigger change than this modal itself.
+        """
+        options = [
+            {
+                "text": {"type": "plain_text", "text": f"{v.get('short_id')} — {(v.get('plugin_name') or 'Unknown')[:60]}"[:75]},
+                "value": v.get("short_id", ""),
+            }
+            for v in vulns[:100] if v.get("short_id")
+        ]
+        if not options:
+            options = [{"text": {"type": "plain_text", "text": "No vulnerabilities assigned"}, "value": "none"}]
+        return {
+            "type": "modal",
+            "callback_id": "modal_extend_request_submit",
+            "private_metadata": vapt_team,
+            "title": {"type": "plain_text", "text": "Request Extension"},
+            "submit": {"type": "plain_text", "text": "Submit Request"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "extend_vuln_block",
+                    "label": {"type": "plain_text", "text": "Vulnerability"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "extend_vuln_select",
+                        "options": options,
+                        "placeholder": {"type": "plain_text", "text": "Select a vulnerability"},
+                    },
+                },
+                {
+                    "type": "input",
+                    "block_id": "extend_days_block",
+                    "label": {"type": "plain_text", "text": "Extension Days"},
+                    "element": {
+                        "type": "number_input",
+                        "action_id": "extend_days_input",
+                        "is_decimal_allowed": False,
+                        "min_value": "1",
+                        "max_value": "90",
+                        "initial_value": "7",
+                    },
+                },
+                {
+                    "type": "input",
+                    "block_id": "extend_reason_block",
+                    "label": {"type": "plain_text", "text": "Reason"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "extend_reason_input",
+                        "multiline": True,
+                        "placeholder": {"type": "plain_text", "text": "e.g. \"going on leave\""},
+                    },
+                },
+            ],
+        }
+
+    def _submit_extend_request(self, vapt_team, short_id, days, reason, team_id, user_id):
+        """Resolves short_id -> the real vuln fields, then reuses the exact
+        same create-endpoint /extend [id] [days] [reason] already posts to."""
+        target, _ = self._resolve_vuln_id(short_id, vapt_team, team_id, user_id)
+        if not target:
+            return self._text_block(f"❌ Vulnerability `{short_id}` not found. Reopen the tab and try again.")
+        plugin_name = target.get("plugin_name") or ""
+        host_name = target.get("host_name") or ""
+        sev = target.get("risk_factor") or target.get("sev_label") or "Medium"
+        icon = self._SEV_ICONS.get(sev, "⚪")
+
+        resp = self._call_user_api(
+            "/api/user/dashboard/mitigation-timeline-extension/request/", team_id, user_id,
+            method="post",
+            json_body={
+                "severity": sev,
+                "asset": host_name,
+                "vulnerability_name": plugin_name,
+                "requested_extension_days": days,
+                "reason": reason,
+            },
+        )
+        if not resp.get("request_id"):
+            return self._text_block(f"❌ Could not submit extension request: {resp.get('detail') or 'unknown error'}")
+
+        self._notify_admin(
+            team_id, user_id,
+            f"⏳ *Timeline Extension Request* — *{vapt_team}*\n"
+            f"Vulnerability: `{plugin_name}` {icon} {sev} on `{host_name}`\n"
+            f"Requested: +{days} day(s) | Reason: {reason}\n"
+            f"Use `/request` to review, then `/approve [request-id]` or `/reject [request-id]`."
+        )
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": "⏳ Extension Request Submitted", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"*Vulnerability:* `{plugin_name}`\n"
+                f"*Severity:* {icon} {sev}\n"
+                f"*Requested:* +{days} day(s)\n"
+                f"*Reason:* {reason}\n\n"
+                "_Recorded in VaptFix — your admin can review and approve/reject it._"
+            )}},
+        ]
 
     # ── Support Status (team) ────────────────────────────────────────────
 
@@ -16264,6 +16541,7 @@ class SlackInteractivityView(APIView):
                 "modal_support_reply_submit": "Send Update",
                 "modal_raise_support_submit": "Raise Support Request",
                 "modal_team_support_reply_submit": "Send Update",
+                "modal_extend_request_submit": "Request Extension",
             }
             if callback_id not in titles:
                 return Response({}, status=200)
@@ -16890,6 +17168,17 @@ class SlackInteractivityView(APIView):
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
+            if action_id in dict(slash._TEAM_EXTEND_SUBTABS):
+                vapt_team = value
+                content_blocks = slash._team_extend_subtab_blocks(action_id, team_id, slack_user_id, vapt_team)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_extend", vapt_team)
+                    + slash._team_extend_subnav_block(vapt_team, active_sub=action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
             if action_id in dict(slash._TEAM_REMINDER_SUBTABS):
                 vapt_team = value
                 content_blocks = slash._team_reminder_subtab_blocks(action_id, team_id, slack_user_id, vapt_team)
@@ -16961,6 +17250,85 @@ class SlackInteractivityView(APIView):
                     + content_blocks
                 )
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("tex_list_pg_"):
+                # value: "<team>|<status_filter>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                status_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                content_blocks = slash._team_extend_subtab_blocks(
+                    "tex_sub_list", team_id, slack_user_id, vapt_team,
+                    status_filter=status_filter, offset=page_offset,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_extend", vapt_team)
+                    + slash._team_extend_subnav_block(vapt_team, active_sub="tex_sub_list")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id.startswith("tex_view_"):
+                # value: "<request_id>|<team>|<status_filter>|<offset>"
+                parts = value.split("|", 3)
+                request_id = parts[0] if len(parts) > 0 else ""
+                vapt_team = parts[1] if len(parts) > 1 else ""
+                status_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                data = slash._call_user_api(
+                    "/api/user/dashboard/mitigation-timeline-extension/report/", team_id, slack_user_id,
+                )
+                target = next((r for r in (data.get("results") or []) if r.get("request_id") == request_id), None)
+                if not target:
+                    content_blocks = slash._text_block("❌ Request not found. Reopen the tab and try again.")
+                else:
+                    content_blocks = slash._format_team_extend_detail(
+                        target, vapt_team, status_filter=status_filter, offset=page_offset,
+                    )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_extend", vapt_team)
+                    + slash._team_extend_subnav_block(vapt_team, active_sub="tex_sub_list")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id == "tex_detail_back":
+                # value: "<team>|<status_filter>|<offset>"
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                status_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                content_blocks = slash._team_extend_subtab_blocks(
+                    "tex_sub_list", team_id, slack_user_id, vapt_team,
+                    status_filter=status_filter, offset=page_offset,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_extend", vapt_team)
+                    + slash._team_extend_subnav_block(vapt_team, active_sub="tex_sub_list")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id == "tex_open_request_modal":
+                # value: vapt_team
+                vapt_team = value
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write("tex_open_request_modal: missing bot_token or trigger_id")
+                    return
+                vulns, _, _ = slash._get_team_vulns(vapt_team, team_id, slack_user_id)
+                view = slash._build_extend_request_modal(vulns, vapt_team)
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"tex_open_request_modal views.open -> {getattr(resp, 'text', None)}")
                 return
 
             if action_id.startswith("tfixed_pg_"):
@@ -17895,6 +18263,7 @@ class SlackInteractivityView(APIView):
             "modal_support_reply_submit": "Send Update",
             "modal_raise_support_submit": "Raise Support Request",
             "modal_team_support_reply_submit": "Send Update",
+            "modal_extend_request_submit": "Request Extension",
         }
         if callback_id not in titles:
             return
@@ -17985,6 +18354,22 @@ class SlackInteractivityView(APIView):
                 meta_json = view.get("private_metadata") or "{}"
                 reply_text = ((values.get("team_reply_text_block") or {}).get("team_reply_text_input") or {}).get("value") or ""
                 blocks = slash._submit_team_support_reply(meta_json, reply_text, team_id, slack_user_id)
+            elif callback_id == "modal_extend_request_submit":
+                vapt_team = view.get("private_metadata") or ""
+                vuln_opt = ((values.get("extend_vuln_block") or {}).get("extend_vuln_select") or {}).get("selected_option") or {}
+                short_id = vuln_opt.get("value") or ""
+                days_raw = ((values.get("extend_days_block") or {}).get("extend_days_input") or {}).get("value") or "7"
+                reason = (((values.get("extend_reason_block") or {}).get("extend_reason_input") or {}).get("value") or "").strip()
+                try:
+                    days = int(days_raw)
+                except (TypeError, ValueError):
+                    days = 7
+                if not short_id or short_id == "none":
+                    blocks = slash._text_block("❌ Please select a vulnerability.")
+                elif not reason:
+                    blocks = slash._text_block("❌ Reason is required.")
+                else:
+                    blocks = slash._submit_extend_request(vapt_team, short_id, days, reason, team_id, slack_user_id)
             else:
                 # modal_reject_submit — sid was already known when the modal
                 # was opened (from the clicked row), carried via
