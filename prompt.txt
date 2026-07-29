@@ -1,5 +1,3 @@
-admin sahit prexten requests vale tab me reuest approve or jaye to history ke approve tab me jaye or extension request me se remove ho jaye 
+admin or user sahit pr jo scripts vala tab hai usme mujhe jo count aa rha hai download ka o mujhe particular admin ki jo lateset report hai admin ne jo user add kiye hai uo usr ne jo download ki hai script to usika mujhe aana chahihe 
 
-or same as a reject ke liye bhi 
-
-or admin sahit pr pariticular vulns ka jo right sahit pr btn hai na o fix se change krke view kr do 
+to mujhe vese krke do or website ke api me bhi same hi continue dalna to mujhe plan btao fir code krna
