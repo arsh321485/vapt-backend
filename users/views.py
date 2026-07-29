@@ -9592,6 +9592,15 @@ class SlackSlashCommandView(APIView):
         def asset_matches_sev(vs):
             return sev_filter == "all" or any(norm_sev(v) == sev_filter for v in vs)
 
+        def vuln_matches_filter(v):
+            if sev_filter != "all" and norm_sev(v) != sev_filter:
+                return False
+            if st_filter == "all":
+                return True
+            if st_filter == "progress":
+                return "progress" in norm_status(v)
+            return norm_status(v) == st_filter
+
         filtered_assets = [a for a in asset_rows if asset_matches_sev(a["vulns"]) and asset_matches_status(a["vulns"])]
         count = len(filtered_assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
@@ -9616,7 +9625,12 @@ class SlackSlashCommandView(APIView):
                 if idx > 0:
                     blocks.append({"type": "divider"})
                 sno = str(start_num + idx).zfill(2)
-                vs = a["vulns"]
+                # The active filter only decided whether this ASSET is
+                # included above — the count/severity pills shown per-row
+                # must reflect just the matching vulns, not the asset's
+                # full unfiltered list (otherwise "Closed" shows every vuln
+                # on the host, not only the closed one).
+                vs = [v for v in a["vulns"] if vuln_matches_filter(v)]
                 sev_counts = {
                     "critical": sum(1 for v in vs if norm_sev(v) == "critical"),
                     "high": sum(1 for v in vs if norm_sev(v) == "high"),
@@ -9660,7 +9674,27 @@ class SlackSlashCommandView(APIView):
         PAGE_SIZE = 5
         # Reuses the short_id _get_team_vulns already assigned (see
         # _format_team_vuln_list) rather than reassigning one here.
-        matching = [v for v in vulns if v.get("host_name") == host]
+        def _norm_sev(v):
+            return (v.get("risk_factor") or "").strip().lower()
+
+        def _norm_status(v):
+            return (v.get("status") or "open").strip().lower()
+
+        def _vuln_matches_filter(v):
+            if sev_filter != "all" and _norm_sev(v) != sev_filter:
+                return False
+            if st_filter == "all":
+                return True
+            if st_filter == "progress":
+                return "progress" in _norm_status(v)
+            return _norm_status(v) == st_filter
+
+        # Must apply the same sev/status filter the asset list was showing —
+        # otherwise "Fix" ignores which filter you drilled in from (e.g.
+        # clicking in from the "Closed" tab would list ALL of the host's
+        # vulns, open ones included, contradicting the count shown on the
+        # list screen) — mirrors the same fix in admin's _format_asset_vulns.
+        matching = [v for v in vulns if v.get("host_name") == host and _vuln_matches_filter(v)]
         count = len(matching)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = matching[offset:offset + PAGE_SIZE]
