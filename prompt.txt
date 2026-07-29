@@ -1,4 +1,0 @@
-admin sahit pr all assets vale tab pr jese mene 3 ss bhejen first all asset vala usme se mene ek asset ke view pr cilck kiya to uski vulns show hue hai to usme se jo particular vuln ki view krte uski details proper show nai ho rhi hai view krne pr jo vuln pr view kre to vhi vuln ki details show ho 
-
-
-abhi proper show nai ho rha hai to o kr do 
