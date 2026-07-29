@@ -380,7 +380,39 @@ def _build_stats(docs, report_id=None):
             "download_count": d.get("download_count", 0),
             "team": team,
         })
-    return stats
+
+    # A plugin_id can have multiple OS-variant docs (e.g. a Linux and a
+    # Windows script for the same fix) — each produced its own row above,
+    # but downloads only ever get attributed to whichever single OS variant
+    # was actually fetched, leaving its sibling permanently stuck at 0. Left
+    # unmerged this double-lists every multi-OS vulnerability and inflates
+    # the total count. Collapse to one row per plugin_id, summing counts —
+    # the variant that actually has downloads (or the first one, if none do)
+    # supplies the displayed name/severity/team.
+    by_plugin = {}
+    order = []
+    for s in stats:
+        pid = s.get("plugin_id")
+        if pid not in by_plugin:
+            by_plugin[pid] = []
+            order.append(pid)
+        by_plugin[pid].append(s)
+
+    merged = []
+    for pid in order:
+        variants = by_plugin[pid]
+        total_downloads = sum(v.get("download_count", 0) for v in variants)
+        primary = max(variants, key=lambda v: v.get("download_count", 0))
+        severity = primary.get("severity") or next((v.get("severity") for v in variants if v.get("severity")), "")
+        team = primary.get("team") or next((v.get("team") for v in variants if v.get("team")), "")
+        merged.append({
+            "plugin_id": pid,
+            "vulnerability": primary.get("vulnerability"),
+            "severity": severity,
+            "download_count": total_downloads,
+            "team": team,
+        })
+    return merged
 
 
 def _get_feedback_summary(plugin_id):
