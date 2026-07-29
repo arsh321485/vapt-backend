@@ -11401,7 +11401,13 @@ class SlackSlashCommandView(APIView):
 
     def _format_asset_vulns(self, rows, host, offset=0, sev_filter="all", st_filter="all", list_offset=0):
         PAGE_SIZE = 5
-        matching = self._assign_severity_short_ids([v for v in rows if (v.get("asset") or v.get("host_name")) == host])
+        host_rows = [v for v in rows if (v.get("asset") or v.get("host_name")) == host]
+        # Must apply the same sev/status filter the asset list was showing —
+        # otherwise "View" ignores which filter you drilled in from (e.g.
+        # clicking View from the "Closed" tab would list ALL of the host's
+        # vulns, open ones included, contradicting the "1 Vulns" count shown
+        # on the list screen).
+        matching = self._assign_severity_short_ids(self._filter_vuln_rows(host_rows, sev_filter, st_filter))
         count = len(matching)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = matching[offset:offset + PAGE_SIZE]
