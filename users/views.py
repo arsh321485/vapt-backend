@@ -6396,15 +6396,19 @@ class SlackEventsView(APIView):
                     _upd["slack_member_id"] = slack_user_id
                 if not user_detail.platform:
                     _upd["platform"] = "slack"
-                # Joined another team's channel — add that team to their
-                # existing roles instead of leaving them stuck on "Viewer"
-                # (or missing this newer team) forever.
+                # Only let a channel join ESTABLISH a team assignment when
+                # the user has none yet (still stuck on the "Viewer"
+                # fallback) — once the admin has deliberately assigned a
+                # real team (via /adduser or an earlier join), joining some
+                # OTHER channel must never silently expand their access on
+                # top of that. Without this guard, any member who joins
+                # (or is added to) an unrelated team channel instantly
+                # gained that team's full data access too.
                 if resolved_team:
                     existing_roles = list(user_detail.Member_role or [])
-                    if resolved_team not in existing_roles:
-                        existing_roles = [r for r in existing_roles if r != "Viewer"]
-                        existing_roles.append(resolved_team)
-                        _upd["Member_role"] = existing_roles
+                    real_roles = [r for r in existing_roles if r != "Viewer"]
+                    if not real_roles and resolved_team not in existing_roles:
+                        _upd["Member_role"] = [resolved_team]
                 if channel_id:
                     existing_ids = list(user_detail.slack_channel_ids or [])
                     if channel_id not in existing_ids:
@@ -12981,6 +12985,16 @@ class SlackSlashCommandView(APIView):
             except Exception:
                 logger.exception(f"[SlackCmd] /adduser: failed to merge roles for existing user {email}")
 
+        # Invite them straight into every assigned team's channel — without
+        # this, the only way Member_role ever gets set is by the user
+        # manually finding and joining a channel themselves, and joining ANY
+        # channel (including ones they weren't assigned to) auto-grants that
+        # team's access (see _save_slack_member_to_user_detail). Inviting
+        # here means the admin's own /adduser assignment is what actually
+        # grants access, not whichever channels the user happens to join.
+        invite_results = self._invite_member_to_team_channels(bot_token, slack_uid, team_names)
+        failed_invites = [t for t, ok in invite_results.items() if not ok]
+
         teams_display = ", ".join(team_names)
         header = "✅ User Updated in VaptFix" if updated_existing else "✅ User Added to VaptFix"
         footer = (
@@ -12988,6 +13002,11 @@ class SlackSlashCommandView(APIView):
             if updated_existing else
             "A welcome email with login instructions has been sent."
         )
+        if failed_invites:
+            footer += (
+                f"\n⚠️ Could not auto-invite them to: {', '.join(failed_invites)} — "
+                "they may need to join that channel manually."
+            )
         return [
             {"type": "header", "text": {"type": "plain_text", "text": header, "emoji": True}},
             self._ctx("Adds a Slack user to VaptFix with team access. Usage: `/adduser @username external|internal pm|cm|ns|af`"),
@@ -13308,6 +13327,39 @@ class SlackSlashCommandView(APIView):
     def _get_admin_channel_id(self, bot_token):
         """Look up the vaptfix-admin-dashboard channel ID via Slack API."""
         return self._get_channel_id_by_name(bot_token, self.ADMIN_CHANNEL)
+
+    def _invite_member_to_team_channels(self, bot_token, slack_uid, team_names):
+        """
+        Invite a Slack user into each of their assigned team channels via
+        conversations.invite, so /adduser alone is enough to grant access —
+        no manual channel join required. Best-effort: a failed invite for
+        one team is logged and reported back, never blocks the rest.
+        Returns {team_name: True/False}.
+        """
+        channel_name_by_team = {v: k for k, v in self.TEAM_CHANNELS.items()}
+        results = {}
+        for team_name in team_names:
+            channel_name = channel_name_by_team.get(team_name)
+            if not channel_name:
+                results[team_name] = False
+                continue
+            channel_id = self._get_channel_id_by_name(bot_token, channel_name)
+            if not channel_id:
+                logger.warning(f"[SlackCmd] invite: channel not found for team={team_name!r} ({channel_name})")
+                results[team_name] = False
+                continue
+            resp = _http_post(
+                "https://slack.com/api/conversations.invite",
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                json={"channel": channel_id, "users": slack_uid},
+                timeout=10,
+            )
+            data = resp.json() if resp is not None else {}
+            ok = bool(data.get("ok")) or data.get("error") == "already_in_channel"
+            if not ok:
+                logger.warning(f"[SlackCmd] invite failed for team={team_name!r}: {data.get('error')}")
+            results[team_name] = ok
+        return results
 
     def _post_to_channel(self, bot_token, channel_id, message):
         resp = _http_post(
