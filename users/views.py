@@ -11435,13 +11435,22 @@ class SlackSlashCommandView(APIView):
 
     def _format_asset_vulns(self, rows, host, offset=0, sev_filter="all", st_filter="all", list_offset=0):
         PAGE_SIZE = 5
-        host_rows = [v for v in rows if (v.get("asset") or v.get("host_name")) == host]
+        # short_id MUST be assigned over the FULL, unfiltered admin-wide list
+        # — the same list+order the shared view_allvuln_detail_ handler
+        # re-fetches and re-assigns short_ids over when a "View" button is
+        # clicked (see that handler's `_assign_severity_short_ids(vd_data
+        # ["rows"])`). Assigning short_ids only over this host's own subset
+        # would give e.g. "m2" a different meaning here (2nd Medium vuln on
+        # THIS host) than what the click handler resolves it to (2nd Medium
+        # vuln across ALL hosts) — silently opening the wrong vulnerability.
+        all_rows = self._assign_severity_short_ids(rows)
+        host_rows = [v for v in all_rows if (v.get("asset") or v.get("host_name")) == host]
         # Must apply the same sev/status filter the asset list was showing —
         # otherwise "View" ignores which filter you drilled in from (e.g.
         # clicking View from the "Closed" tab would list ALL of the host's
         # vulns, open ones included, contradicting the "1 Vulns" count shown
         # on the list screen).
-        matching = self._assign_severity_short_ids(self._filter_vuln_rows(host_rows, sev_filter, st_filter))
+        matching = self._filter_vuln_rows(host_rows, sev_filter, st_filter)
         count = len(matching)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = matching[offset:offset + PAGE_SIZE]
