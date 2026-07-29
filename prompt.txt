@@ -1,7 +1,5 @@
-slack folder me extend-status or extend vali 2 ui diya hai mujhe extend 
+admin sahit prexten requests vale tab me reuest approve or jaye to history ke approve tab me jaye or extension request me se remove ho jaye 
 
-register tab ke right sahit pr timeline Ext. krke tab bnana hai usme user particular vulns ki date extend kr skta hai jese website ke liye hai na vese 
+or same as a reject ke liye bhi 
 
-
-
-to plan btao fir code krna
+or admin sahit pr pariticular vulns ka jo right sahit pr btn hai na o fix se change krke view kr do 

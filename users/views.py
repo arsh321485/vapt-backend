@@ -11906,7 +11906,12 @@ class SlackSlashCommandView(APIView):
 
     def _build_approve_list_blocks(self, results, offset=0):
         # Only pending + already-approved — an already-rejected request has
-        # no business showing up (with an Approve button) on this tab.
+        # no business showing up (with an Approve button) on this tab. This
+        # list doubles as BOTH the actual approve mechanism (pending rows
+        # get an "Approve Request" button, wired to av_list_approve_row →
+        # _cmd_approve) AND the approved-history view (decided rows just
+        # show a label) — don't drop pending rows here even though the
+        # separate Extension Requests tab now filters them out.
         results = [r for r in results if r.get("status", "review") != "rejected"]
         PAGE_SIZE = 4
         count = len(results)
@@ -11958,7 +11963,13 @@ class SlackSlashCommandView(APIView):
 
     def _build_reject_list_blocks(self, results, offset=0):
         # Only pending + already-rejected — an already-approved request has
-        # no business showing up (with a Reject button) on this tab.
+        # no business showing up (with a Reject button) on this tab. This
+        # list doubles as BOTH the actual reject mechanism (pending rows
+        # get a "Reject Request" button, wired to av_list_reject_row →
+        # a reason modal → _cmd_reject) AND the rejected-history view
+        # (decided rows just show a label) — don't drop pending rows here
+        # even though the separate Extension Requests tab now filters
+        # them out.
         results = [r for r in results if r.get("status", "review") != "approved"]
         PAGE_SIZE = 4
         count = len(results)
@@ -14756,32 +14767,34 @@ class SlackSlashCommandView(APIView):
 
     def _format_extension_requests(self, data):
         raw_results = data.get("results") or []
-        results = self._assign_severity_short_ids(raw_results)
-        count   = data.get("count", len(results))
+        # Only PENDING ("review") requests belong on this tab — once
+        # approved/rejected, a request should disappear from here and show
+        # up under History's matching toggle instead (that's purely a
+        # status-filter difference, no separate "move" step needed, since
+        # the underlying record's status already reflects the decision).
+        pending_results = [r for r in raw_results if r.get("status", "review") == "review"]
+        results = self._assign_severity_short_ids(pending_results)
+        count   = len(results)
         blocks  = [
             {"type": "header", "text": {"type": "plain_text", "text": "⏳ Timeline Extension Requests", "emoji": True}},
-            self._ctx("All team requests to extend mitigation deadlines. Use `/approve` or `/reject` to respond."),
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Requests:* {count}"}},
+            self._ctx("Pending team requests to extend mitigation deadlines. Use `/approve` or `/reject` to respond — decided ones move to History."),
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Pending Requests:* {count}"}},
             {"type": "divider"},
         ]
-        status_icons = {"review": "🔵", "approved": "✅", "rejected": "❌"}
+        if not results:
+            return blocks + self._text_block("✅ No pending extension requests — all caught up.")
         for r in results[:8]:
             sid   = r.get("short_id", "?")
             team  = r.get("requested_by") or "Unknown"
             vuln  = r.get("vul_name") or "Unknown"
             sev   = (r.get("severity") or "").capitalize()
-            st    = r.get("status", "review")
             days  = r.get("extension_days", 0)
             reason = r.get("reason", "—")
-            icon  = status_icons.get(st, "🔵")
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": (
-                    f"{icon} `{sid}` *{vuln}* [{sev}]\n"
+                    f"🔵 `{sid}` *{vuln}* [{sev}]\n"
                     f"Team: {team} | +{days} days | Reason: {reason}"
                 )}})
-            # Buttons always shown (matches the design — even an
-            # already-approved/rejected row keeps its Approve/Reject
-            # actions, letting the admin change their decision).
             blocks.append({
                 "type": "actions",
                 "elements": [
@@ -15111,7 +15124,7 @@ class SlackSlashCommandView(APIView):
                 st_display = _norm_status(v).replace("_", " ").capitalize()
 
                 has_fix = bool(v.get("fix_vulnerability_id") or v.get("hasFix"))
-                action_text = "FIX" if has_fix else "VIEW"
+                action_text = "VIEW"
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
                 def _short_date(val):
@@ -15133,7 +15146,7 @@ class SlackSlashCommandView(APIView):
                     "action_id": f"reg_view_{safe_sid}",
                     "value": sid,
                 }
-                if action_text == "FIX":
+                if has_fix:
                     btn["style"] = "primary"
 
                 # Top: Fix-tab style PNG status icon + S.No + id + FULL vuln name
