@@ -13144,7 +13144,7 @@ class SlackSlashCommandView(APIView):
         # team's access (see _save_slack_member_to_user_detail). Inviting
         # here means the admin's own /adduser assignment is what actually
         # grants access, not whichever channels the user happens to join.
-        invite_results = self._invite_member_to_team_channels(bot_token, slack_uid, team_names)
+        invite_results = self._invite_member_to_team_channels(bot_token, slack_uid, team_names, team_id)
         failed_invites = [t for t, ok in invite_results.items() if not ok]
 
         teams_display = ", ".join(team_names)
@@ -13506,7 +13506,7 @@ class SlackSlashCommandView(APIView):
         """Look up the vaptfix-admin-dashboard channel ID via Slack API."""
         return self._get_channel_id_by_name(bot_token, self.ADMIN_CHANNEL)
 
-    def _invite_member_to_team_channels(self, bot_token, slack_uid, team_names):
+    def _invite_member_to_team_channels(self, bot_token, slack_uid, team_names, team_id=None):
         """
         Invite a Slack user into each of their assigned team channels via
         conversations.invite, so /adduser alone is enough to grant access —
@@ -13533,11 +13533,44 @@ class SlackSlashCommandView(APIView):
                 timeout=10,
             )
             data = resp.json() if resp is not None else {}
-            ok = bool(data.get("ok")) or data.get("error") == "already_in_channel"
+            already_in = data.get("error") == "already_in_channel"
+            ok = bool(data.get("ok")) or already_in
             if not ok:
                 logger.warning(f"[SlackCmd] invite failed for team={team_name!r}: {data.get('error')}")
             results[team_name] = ok
+            if ok and not already_in and team_id:
+                # A genuinely fresh invite — this person could not have seen
+                # this channel's navbar before (they weren't in it), and
+                # /adduser alone should be enough for them to land straight
+                # on the Home dashboard, same as an admin never having to
+                # type a command. If the channel already has one posted
+                # (e.g. an earlier teammate's /adduser already triggered it),
+                # skip reposting — avoids a fresh navbar spamming existing
+                # members every single time one more person is added.
+                self._ensure_team_navbar_posted(bot_token, channel_id, team_id, team_name)
         return results
+
+    def _ensure_team_navbar_posted(self, bot_token, channel_id, team_id, team_name):
+        """Post the team navbar+Home dashboard into `channel_id` unless one
+        is already there (matched by the same text chat.postMessage tags it
+        with — see _post_team_navbar_message)."""
+        try:
+            resp = _http_get(
+                "https://slack.com/api/conversations.history",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                params={"channel": channel_id, "limit": 30},
+                timeout=15,
+            )
+            data = resp.json() if resp is not None else {}
+            if data.get("ok"):
+                marker = f"VaptFix {team_name} Team Dashboard"
+                if any(marker in (m.get("text") or "") for m in data.get("messages", [])):
+                    return
+            else:
+                logger.warning(f"[SlackCmd] _ensure_team_navbar_posted: history check failed: {data.get('error')}")
+        except Exception:
+            logger.exception("[SlackCmd] _ensure_team_navbar_posted: history check failed")
+        SlackEventsView()._post_team_navbar_message(bot_token, channel_id, team_id, team_name)
 
     def _post_to_channel(self, bot_token, channel_id, message):
         resp = _http_post(
