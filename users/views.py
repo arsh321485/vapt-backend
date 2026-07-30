@@ -3241,7 +3241,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_
     existing = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
 
     channel_ids = {}
-    newly_created_admin_channel = False
+    newly_created = set()
     for name in channels_to_handle:
         # VAPTFIX_CHANNELS are already lowercase; Slack lowercases names automatically
         if name in existing:
@@ -3255,8 +3255,7 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_
             ch_data = create_resp.json()
             if ch_data.get("ok"):
                 channel_ids[name] = ch_data.get("channel", {}).get("id")
-                if name == ADMIN_DASHBOARD_CHANNEL:
-                    newly_created_admin_channel = True
+                newly_created.add(name)
             elif ch_data.get("error") == "name_taken":
                 # Already exists but not in listing (e.g. archived) — re-fetch
                 retry_resp = _http_get(
@@ -3281,11 +3280,28 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_
             json={"channel": channel_id}, timeout=15
         )
 
-        if name == ADMIN_DASHBOARD_CHANNEL and newly_created_admin_channel and team_id:
+        if name == ADMIN_DASHBOARD_CHANNEL and name in newly_created and team_id:
             try:
                 SlackEventsView()._post_admin_navbar_message(bot_token, channel_id, team_id)
             except Exception:
                 logger.warning("[ensure_vaptfix_channels] Failed to auto-post navbar", exc_info=True)
+        elif name in newly_created and team_id:
+            # Team channel — same direct, synchronous auto-post as the admin
+            # channel above. Relying solely on the member_joined_channel
+            # Slack EVENT for this (see SlackEventsView._handle_event) isn't
+            # enough on its own: a bot that creates a channel via
+            # conversations.create + conversations.join doesn't reliably get
+            # a member_joined_channel event fired for its own membership, so
+            # team channels were silently never auto-posting, forcing every
+            # team to type /postteamnav manually — this call guarantees it
+            # happens the moment the channel is actually created, matching
+            # the admin channel's guarantee exactly.
+            team_name = SlackSlashCommandView.TEAM_CHANNELS.get(name)
+            if team_name:
+                try:
+                    SlackEventsView()._post_team_navbar_message(bot_token, channel_id, team_id, team_name)
+                except Exception:
+                    logger.warning("[ensure_vaptfix_channels] Failed to auto-post team navbar for %s", name, exc_info=True)
 
         # Invite the logged-in Slack user
         if slack_user_id:
@@ -9371,7 +9387,17 @@ class SlackSlashCommandView(APIView):
             return self._team_reminder_subnav_block(vapt_team, active_sub="trem_sub_overdue") + \
                 self._team_reminder_subtab_blocks("trem_sub_overdue", team_id, user_id, vapt_team)
 
-        # tnav_home (default)
+        # tnav_home (default) — the dashboard image itself has no way to say
+        # "you're not on this team" (it's rendered from a team-representative
+        # token, not the specific caller's own identity), so check membership
+        # here first. When user_id is None (the one-time auto-post triggered
+        # right when the channel is created — see ensure_vaptfix_channels),
+        # there's no specific caller to check, so this intentionally falls
+        # straight through to the image, same as before.
+        if user_id:
+            _, _, raw_data = self._get_team_vulns(vapt_team, team_id, user_id)
+            if raw_data.get("not_member_of_team"):
+                return self._team_not_member_blocks(vapt_team, raw_data)
         return [self._dashboard_image_block(
             team_id, kind="userdash", alt_text=f"{vapt_team} Dashboard", extra_params={"team": vapt_team},
         )]
@@ -9386,7 +9412,10 @@ class SlackSlashCommandView(APIView):
             team_key = next(
                 (k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "config",
             )
-            section = self._common_vulns_tab_blocks(team_id, user_id, team_key=team_key, offset=offset)
+            allowed_teams = self._resolve_member_teams(vapt_team, team_id, user_id)
+            section = self._common_vulns_tab_blocks(
+                team_id, user_id, team_key=team_key, offset=offset, allowed_teams=allowed_teams,
+            )
             return self._tag_common_vuln_blocks_for_team(section, vapt_team)
 
         vulns, _, raw_data = self._get_team_vulns(vapt_team, team_id, user_id)
@@ -11627,11 +11656,12 @@ class SlackSlashCommandView(APIView):
             }
         return result
 
-    def _default_common_team_key(self, grouped):
-        for key, _ in self._COMMON_TEAM_FILTERS:
+    def _default_common_team_key(self, grouped, allowed_keys=None):
+        keys = [k for k, _ in self._COMMON_TEAM_FILTERS if allowed_keys is None or k in allowed_keys]
+        for key in keys:
             if grouped.get(key, {}).get("total", 0) > 0:
                 return key
-        return "config"
+        return keys[0] if keys else "config"
 
     # Common Vulns is one shared implementation used by both the admin
     # channel and every team channel. Its own dispatch handlers hardcode the
@@ -11681,18 +11711,30 @@ class SlackSlashCommandView(APIView):
                     el["value"] = f"{el.get('value', '')}{marker}"
         return blocks
 
-    def _common_vulns_tab_blocks(self, team_id, user_id, team_key=None, offset=0):
+    def _common_vulns_tab_blocks(self, team_id, user_id, team_key=None, offset=0, allowed_teams=None):
+        """
+        allowed_teams: when set (team-channel access — see _team_fix_subtab_blocks),
+        restricts which teams' Common Vulns this specific member can see/select
+        to only the team(s) they're actually assigned to, instead of all 4 —
+        a team member should never be able to browse another team's common
+        vulnerabilities just because Common Vulns is shared implementation.
+        None (admin access) means unrestricted, same as before.
+        """
         data = self._fetch_common_vulns_data(team_id, user_id)
         if not isinstance(data, dict):
             return self._text_block("❌ Failed to load common vulnerabilities.")
         if data.get("detail") and "teams" not in data:
             return self._text_block(f"❌ {data['detail']}")
         grouped = self._group_common_vulns_by_team(data)
-        if not team_key or team_key not in self._COMMON_TEAM_KEY_TO_NAME:
-            team_key = self._default_common_team_key(grouped)
-        return self._format_common_vulns_tab(grouped, team_key=team_key, offset=offset)
+        allowed_keys = None
+        if allowed_teams is not None:
+            allowed_lower = {t.strip().lower() for t in allowed_teams}
+            allowed_keys = {k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v.strip().lower() in allowed_lower}
+        if not team_key or team_key not in self._COMMON_TEAM_KEY_TO_NAME or (allowed_keys is not None and team_key not in allowed_keys):
+            team_key = self._default_common_team_key(grouped, allowed_keys=allowed_keys)
+        return self._format_common_vulns_tab(grouped, team_key=team_key, offset=offset, allowed_keys=allowed_keys)
 
-    def _format_common_vulns_tab(self, grouped, team_key="config", offset=0):
+    def _format_common_vulns_tab(self, grouped, team_key="config", offset=0, allowed_keys=None):
         """
         Common Vulns list for one selected team — clickable team filter buttons
         + vuln rows with View on the right (matches common-vulnerabilities.html flow).
@@ -11716,7 +11758,13 @@ class SlackSlashCommandView(APIView):
             {"type": "divider"},
         ]
 
-        # Team filter row — full team names, no counts
+        # Team filter row — full team names, no counts. Restricted to
+        # allowed_keys when set (team-channel access), so a member can only
+        # ever pick their own assigned team(s), never another team's.
+        visible_filters = [
+            (k, label) for k, label in self._COMMON_TEAM_FILTERS
+            if allowed_keys is None or k in allowed_keys
+        ]
         blocks.append({
             "type": "actions",
             "elements": [
@@ -11731,7 +11779,7 @@ class SlackSlashCommandView(APIView):
                     "value": f"{k}|0",
                     **({"style": "primary"} if k == team_key else {}),
                 }
-                for k, label in self._COMMON_TEAM_FILTERS
+                for k, label in visible_filters
             ],
         })
 
@@ -13219,6 +13267,20 @@ class SlackSlashCommandView(APIView):
         "architectural-flaws":      "Architectural Flaws",
         "configuration-management": "Configuration Management",
     }
+
+    def _resolve_member_teams(self, vapt_team, team_id, user_id):
+        """
+        Returns the calling team member's OWN assigned team(s) (display
+        names, e.g. ["Patch Management", "Configuration Management"]) — used
+        to restrict which teams' Common Vulns a member can browse to just
+        their own, instead of all 4, since Common Vulns is shared
+        implementation between the admin channel and every team channel.
+        Reuses _get_team_vulns purely for its already-resolved member_teams
+        field; `vapt_team` only affects which team's vulns get fetched
+        alongside it, not which teams come back in member_teams.
+        """
+        _, _, raw_data = self._get_team_vulns(vapt_team, team_id, user_id)
+        return raw_data.get("member_teams") or []
 
     def _get_team_vulns(self, team_name, team_id, user_id):
         """
@@ -18123,8 +18185,9 @@ class SlackInteractivityView(APIView):
                 parts = value.split("|")
                 team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else action_id.replace("fix_common_team_", "")
                 page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                allowed_teams = slash._resolve_member_teams(vt_team, team_id, slack_user_id) if vt_team else None
                 section = slash._common_vulns_tab_blocks(
-                    team_id, slack_user_id, team_key=team_key, offset=page_offset,
+                    team_id, slack_user_id, team_key=team_key, offset=page_offset, allowed_teams=allowed_teams,
                 )
                 if vt_team:
                     section = slash._tag_common_vuln_blocks_for_team(section, vt_team)
@@ -18149,8 +18212,9 @@ class SlackInteractivityView(APIView):
                 parts = value.split("|")
                 team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
                 page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                allowed_teams = slash._resolve_member_teams(vt_team, team_id, slack_user_id) if vt_team else None
                 section = slash._common_vulns_tab_blocks(
-                    team_id, slack_user_id, team_key=team_key, offset=page_offset,
+                    team_id, slack_user_id, team_key=team_key, offset=page_offset, allowed_teams=allowed_teams,
                 )
                 if vt_team:
                     section = slash._tag_common_vuln_blocks_for_team(section, vt_team)
@@ -18175,8 +18239,9 @@ class SlackInteractivityView(APIView):
                 parts = value.split("|")
                 team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
                 page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                allowed_teams = slash._resolve_member_teams(vt_team, team_id, slack_user_id) if vt_team else None
                 section = slash._common_vulns_tab_blocks(
-                    team_id, slack_user_id, team_key=team_key, offset=page_offset,
+                    team_id, slack_user_id, team_key=team_key, offset=page_offset, allowed_teams=allowed_teams,
                 )
                 if vt_team:
                     section = slash._tag_common_vuln_blocks_for_team(section, vt_team)
