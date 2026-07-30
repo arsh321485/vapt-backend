@@ -1,7 +1,5 @@
 
+jb admin user ko kisi team me add krta for ex: pm ,cm to jo ss diya direct home tab open hoke dikhna chahihe 
 
-
-
-user side pr jo common vuln hai jo user ko jo team me add kiya hai use vhi team nai dikhni chahihe 
-
-yha mujhe 4 team dikh rhi hai lekin mujhe pm cm kiya tha to mujhe ns af ka nai dikhna chahihe to o kr do 
+/postteamnav dalne ke bad open hota hai lekin eski jrurt nai pdni chahihe 
+admin ne kese direct aata hai vese hi user side bhi kr do 
