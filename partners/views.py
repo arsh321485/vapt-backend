@@ -11,6 +11,7 @@ from .serializers import (
     PartnerApplicationSerializer,
     COMPANY_SIZE_CHOICES,
     PARTNER_TYPE_CHOICES,
+    COUNTRY_CALLING_CODES,
 )
 
 PARTNERS_COLLECTION = "partners"
@@ -26,11 +27,16 @@ class PartnerFormOptionsAPIView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        phone_country_codes = [
+            {"country": country, "code": code}
+            for country, code in sorted(COUNTRY_CALLING_CODES.items())
+        ]
         return Response(
             {
                 "countries": sorted(list(VALID_COUNTRIES)),
                 "company_size_options": COMPANY_SIZE_CHOICES,
                 "partner_type_options": PARTNER_TYPE_CHOICES,
+                "phone_country_codes": phone_country_codes,
             },
             status=status.HTTP_200_OK,
         )
