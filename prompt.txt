@@ -1,9 +1,7 @@
 
 
 
-or all assets or all vulnerabilities , common vulns me open/review vala tab bhi add kr do 
 
+user side pr jo common vuln hai jo user ko jo team me add kiya hai use vhi team nai dikhni chahihe 
 
-or common vulns ke particular vuln ka name aata hai vha muje yha all critial high medium low all open closed in process open_view vala dal do 
-
-same as a user side bhi kr do
+yha mujhe 4 team dikh rhi hai lekin mujhe pm cm kiya tha to mujhe ns af ka nai dikhna chahihe to o kr do 
