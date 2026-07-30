@@ -73,6 +73,13 @@ class WebinarRegistrationSerializer(serializers.Serializer):
     def validate_work_email(self, value):
         return value.strip().lower()
 
+    def validate_phone_number(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError("Phone number must contain only digits.")
+        if len(value) != 10:
+            raise serializers.ValidationError("Phone number must be exactly 10 digits.")
+        return value
+
     def validate(self, attrs):
         if attrs.get("team_size") == "10+" and attrs.get("team_size_count") is None:
             raise serializers.ValidationError(
