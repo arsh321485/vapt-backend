@@ -12739,6 +12739,7 @@ class SlackSlashCommandView(APIView):
 
         bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
         uploaded = False
+        cleanup_diag = None
         report_comment = "📄 Vulnerability Management Report"
         if bot_token:
             admin_ch_id = self._get_admin_channel_id(bot_token)
@@ -12746,7 +12747,7 @@ class SlackSlashCommandView(APIView):
                 # Remove any earlier report file(s) posted in this channel
                 # first — only the latest report should be visible, not one
                 # more duplicate message piling up on every download.
-                self._delete_previous_report_uploads(bot_token, admin_ch_id, report_comment)
+                cleanup_diag = self._delete_previous_report_uploads(bot_token, admin_ch_id, report_comment)
                 uploaded = self._upload_file_to_slack(
                     bot_token, admin_ch_id, filename, file_bytes,
                     initial_comment=report_comment,
@@ -12776,6 +12777,21 @@ class SlackSlashCommandView(APIView):
             blocks.append(self._ctx(f"📎 Full {ftype} report uploaded above — open it to view or print."))
         else:
             blocks.append(self._ctx("⚠️ Could not upload the file (check the bot's `files:write` scope) — summary shown above only."))
+        # TEMPORARY diagnostic line — remove once the duplicate-message
+        # cleanup is confirmed working live. Shows exactly why an old
+        # report message wasn't removed (missing scope vs. a match/delete
+        # failure vs. genuinely nothing to clean up).
+        if cleanup_diag is not None:
+            if cleanup_diag["history_ok"] is False:
+                diag_text = f"🔧 _Cleanup debug: conversations.history failed — `{cleanup_diag['history_error']}`_"
+            else:
+                diag_text = (
+                    f"🔧 _Cleanup debug: scanned {cleanup_diag['scanned']}, "
+                    f"matched {cleanup_diag['matched']}, deleted {cleanup_diag['deleted']}"
+                    + (f", delete errors: {cleanup_diag['delete_errors']}" if cleanup_diag['delete_errors'] else "")
+                    + "_"
+                )
+            blocks.append(self._ctx(diag_text))
         return blocks
 
     def _cmd_vulndata(self, text, team_id, user_id):
@@ -13656,8 +13672,14 @@ class SlackSlashCommandView(APIView):
         text, e.g. "📄 Vulnerability Management Report") — so re-running
         /downloadreport (or re-clicking the Download Report tab) replaces
         the old file instead of piling up a new duplicate message every time.
-        Best-effort: failures are logged, never block the new upload.
+        Best-effort: never raises, never blocks the new upload. Returns a
+        diagnostic dict (temporarily surfaced by _cmd_downloadreport too,
+        to debug why old messages kept reappearing live) so a caller can
+        tell exactly what happened: whether the history read itself
+        succeeded, how many candidate messages it scanned, how many matched
+        the report-file pattern, and how many were actually deleted.
         """
+        diag = {"history_ok": None, "history_error": None, "scanned": 0, "matched": 0, "deleted": 0, "delete_errors": []}
         try:
             resp = _http_get(
                 "https://slack.com/api/conversations.history",
@@ -13666,12 +13688,14 @@ class SlackSlashCommandView(APIView):
                 timeout=15,
             )
             data = resp.json() if resp is not None else {}
+            diag["history_ok"] = bool(data.get("ok"))
             if not data.get("ok"):
+                diag["history_error"] = data.get("error")
                 logger.warning(f"[SlackCmd] downloadreport cleanup: conversations.history failed: {data.get('error')} (likely missing channels:history/groups:history bot scope)")
-                return
+                return diag
             messages = data.get("messages", [])
+            diag["scanned"] = len(messages)
             logger.info(f"[SlackCmd] downloadreport cleanup: scanning {len(messages)} messages in channel={channel_id}")
-            matched = 0
             for msg in messages:
                 # Match on the initial_comment text OR the attached file's
                 # own name/title starting with "vaptfix-report-" — belt and
@@ -13686,7 +13710,7 @@ class SlackSlashCommandView(APIView):
                 )
                 if not files or not (text_match or file_match):
                     continue
-                matched += 1
+                diag["matched"] += 1
                 ts = msg.get("ts")
                 del_resp = _http_post(
                     "https://slack.com/api/chat.delete",
@@ -13696,12 +13720,16 @@ class SlackSlashCommandView(APIView):
                 )
                 del_data = del_resp.json() if del_resp is not None else {}
                 if del_data.get("ok"):
+                    diag["deleted"] += 1
                     logger.info(f"[SlackCmd] downloadreport cleanup: deleted previous report message ts={ts}")
                 else:
+                    diag["delete_errors"].append(del_data.get("error"))
                     logger.warning(f"[SlackCmd] downloadreport cleanup: chat.delete failed for ts={ts}: {del_data.get('error')}")
-            logger.info(f"[SlackCmd] downloadreport cleanup: {matched} previous report message(s) matched")
-        except Exception:
+            logger.info(f"[SlackCmd] downloadreport cleanup: {diag['matched']} previous report message(s) matched, {diag['deleted']} deleted")
+        except Exception as exc:
+            diag["history_error"] = f"exception: {exc}"
             logger.exception("[SlackCmd] downloadreport cleanup failed")
+        return diag
 
     def _create_support_ticket(self, team_id, slack_user_id, team_name, message,
                                 vul_name=None, host_name=None, requested_by=None, severity=None):
