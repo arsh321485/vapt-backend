@@ -127,7 +127,6 @@ class MitigationStrategyByTeamAPIView(APIView):
                     )
 
                 report_id = str(latest_doc.get("report_id", ""))
-                admin_id  = latest_doc.get("admin_id", current_admin_id)
 
                 # upload_reports status
                 report_status = "unknown"
@@ -140,16 +139,20 @@ class MitigationStrategyByTeamAPIView(APIView):
                 except Exception as e:
                     logger.warning("Suppressed error: %s", e)
 
-                # Build closed vulnerability keys set
-                # NOTE: filter by admin_id, not created_by — created_by holds
-                # whoever's action actually created the fix_vulnerability
-                # record (often a team member), not the owning admin, so
-                # filtering on it here matched zero closed docs for this
-                # admin and made every vuln in this endpoint show as "open"
-                # even once genuinely closed.
+                # Build closed vulnerability keys set.
+                # NOTE: scope by report_id ALONE, not also admin_id/created_by
+                # — report_id already came from a nessus_reports doc matched
+                # to this exact admin above, so it's inherently admin-unique;
+                # adding an admin_id/created_by filter on TOP of it is both
+                # redundant and unsafe, since these fix-vulnerability records
+                # use inconsistent field naming (some have admin_id, some
+                # only created_by, some have neither) — filtering on any one
+                # of those field names silently drops real records that
+                # happen to be missing that particular field, showing a
+                # genuinely-closed or in-progress vuln as plain "open".
                 closed_vulns = set()
                 for doc in closed_coll.find(
-                    {"report_id": report_id, "admin_id": admin_id},
+                    {"report_id": report_id},
                     {"plugin_name": 1, "host_name": 1, "port": 1},
                 ):
                     closed_vulns.add((
@@ -164,7 +167,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                 # that had made a team's in-progress fixes look untouched.
                 active_status_by_key = {}
                 for doc in fix_coll.find(
-                    {"report_id": report_id, "admin_id": admin_id},
+                    {"report_id": report_id},
                     {"plugin_name": 1, "host_name": 1, "port": 1, "status": 1},
                 ):
                     key = (

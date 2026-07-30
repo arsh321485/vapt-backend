@@ -1,1 +1,6 @@
-slack ke plotform pfix tab ke undr common vuln tab me jiska status inprocess hai to bhi o open show ho rha hai to o check kro 
+download report vale me esa kr do ki jo lateset vali report hai vhi show krvao phile vala remove kr do or lateset vala hi show krna 
+
+
+or common vuln me abhi bhi baki ki aarhi hai in process or baki ki nai aa rha hai 192.168.0.6 vala status open dikh rha hai lekin uski details me in processs hai uski 1 steps closed ho gae hai 
+
+to o check kro mene ss bhi bhej diya hai 
