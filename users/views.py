@@ -9392,6 +9392,8 @@ class SlackSlashCommandView(APIView):
         vulns, _, raw_data = self._get_team_vulns(vapt_team, team_id, user_id)
         if raw_data.get("detail") and not vulns:
             return self._text_block(f"❌ {raw_data.get('detail')}")
+        if raw_data.get("not_member_of_team"):
+            return self._team_not_member_blocks(vapt_team, raw_data)
 
         if sub_action_id == "tfix_sub_vulns":
             return self._format_team_vuln_list(
@@ -9932,6 +9934,8 @@ class SlackSlashCommandView(APIView):
         vulns, _, raw_data = self._get_team_vulns(vapt_team, team_id, user_id)
         if raw_data.get("detail") and not vulns:
             return self._text_block(f"❌ {raw_data.get('detail')}")
+        if raw_data.get("not_member_of_team"):
+            return self._team_not_member_blocks(vapt_team, raw_data)
         return self._format_team_vuln_list(
             vulns, title="📋 Register", action_prefix="treg_list", origin="tregister",
             vapt_team=vapt_team, sev_filter=sev_filter, st_filter=st_filter, offset=offset,
@@ -13157,6 +13161,18 @@ class SlackSlashCommandView(APIView):
         raw_data["not_member_of_team"] = team_lower not in [t.strip().lower() for t in member_teams]
         raw_data["member_teams"] = member_teams
 
+        if raw_data["not_member_of_team"]:
+            # Hard stop — every one of this function's ~14 call sites gets
+            # an empty list here, whether or not that particular caller
+            # bothers to check raw_data. Without this, a member sitting in
+            # (or still assigned to, e.g. via a stray channel join before
+            # the join-event guard existed) a team channel they don't
+            # actually belong to could still pull that team's real vuln
+            # data, since the backend itself doesn't reject the ?team=
+            # param — it just returns whatever matches.
+            raw_data["report_id"] = report_id
+            return [], report_id, raw_data
+
         vulns = [
             {
                 "plugin_name":       r.get("vul_name", ""),
@@ -15950,6 +15966,32 @@ class SlackSlashCommandView(APIView):
         """Small context/description line shown under the header in Slack."""
         return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
+    def _team_not_member_blocks(self, team_name, raw_data):
+        """
+        Shown wherever a team-scoped tab/command finds the caller isn't
+        actually assigned to `team_name` (see _get_team_vulns's
+        not_member_of_team flag, which forces vulns to [] in this case so
+        no other team's real data can leak through regardless of which
+        formatter is asking) — distinct from "on the team but nothing
+        assigned yet", so the message can say so plainly instead of looking
+        like an empty-state bug.
+        """
+        member_teams = raw_data.get("member_teams") or []
+        your_teams = (
+            f"Your team(s): {', '.join(member_teams)}."
+            if member_teams else
+            "You don't appear to be assigned to any team yet."
+        )
+        return [
+            {"type": "header", "text": {"type": "plain_text", "text": f"📋 {team_name}", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"🚫 You're not a member of *{team_name}*.\n\n"
+                f"{your_teams}\n\n"
+                f"Use commands in your own team's channel instead, or ask your admin "
+                f"to add you to *{team_name}* via `/adduser` if this is a mistake."
+            )}},
+        ]
+
     def _format_viewassigned(self, vulns, team_name, raw_data=None, offset=0):
         if not vulns:
             raw_data = raw_data or {}
@@ -15960,21 +16002,7 @@ class SlackSlashCommandView(APIView):
             # same generic "no vulns assigned" text with a confusing debug
             # line (e.g. "admin=not_found"), which looked like an error.
             if raw_data.get("not_member_of_team"):
-                member_teams = raw_data.get("member_teams") or []
-                your_teams = (
-                    f"Your team(s): {', '.join(member_teams)}."
-                    if member_teams else
-                    "You don't appear to be assigned to any team yet."
-                )
-                return [
-                    {"type": "header", "text": {"type": "plain_text", "text": f"📋 {team_name}", "emoji": True}},
-                    {"type": "section", "text": {"type": "mrkdwn", "text": (
-                        f"🚫 You're not a member of *{team_name}*.\n\n"
-                        f"{your_teams}\n\n"
-                        f"Use commands in your own team's channel instead, or ask your admin "
-                        f"to add you to *{team_name}* via `/adduser` if this is a mistake."
-                    )}},
-                ]
+                return self._team_not_member_blocks(team_name, raw_data)
 
             diag = ""
             if raw_data:
