@@ -1,6 +1,7 @@
-download report vale me esa kr do ki jo lateset vali report hai vhi show krvao phile vala remove kr do or lateset vala hi show krna 
+download report me abhi bhi purane vale download report abhi bhi dikh rha hai 
 
 
-or common vuln me abhi bhi baki ki aarhi hai in process or baki ki nai aa rha hai 192.168.0.6 vala status open dikh rha hai lekin uski details me in processs hai uski 1 steps closed ho gae hai 
+or all assets or all vulnerabilities , common vulns me open/review vala tab bhi add kr do 
 
-to o check kro mene ss bhi bhej diya hai 
+
+or common vulns ke particular vuln ka name aata hai vha muje yha all critial high medium low all open closed in process open_view vala dal do 

@@ -11211,8 +11211,13 @@ class SlackSlashCommandView(APIView):
             return True
         if st_filter == "in_progress":
             return "progress" in st
+        if st_filter == "open_review":
+            return "review" in st
         if st_filter == "open":
-            return st == "open" or st.startswith("open/")
+            # Exclusive of "open/review" now that it's its own filter bucket
+            # (below) — otherwise a vuln pending verification would show up
+            # under both "Open" and "Open/Review", double-counted.
+            return st == "open"
         if st_filter == "closed":
             return st == "closed"
         return st == st_filter
@@ -11236,12 +11241,10 @@ class SlackSlashCommandView(APIView):
         }
         st_counts = {
             "all": len(st_base),
-            "open": sum(
-                1 for v in st_base
-                if (self._norm_vuln_status(v) == "open" or self._norm_vuln_status(v).startswith("open/"))
-            ),
+            "open": sum(1 for v in st_base if self._norm_vuln_status(v) == "open"),
             "closed": sum(1 for v in st_base if self._norm_vuln_status(v) == "closed"),
             "in_progress": sum(1 for v in st_base if "progress" in self._norm_vuln_status(v)),
+            "open_review": sum(1 for v in st_base if "review" in self._norm_vuln_status(v)),
         }
         return sev_counts, st_counts
 
@@ -11265,11 +11268,15 @@ class SlackSlashCommandView(APIView):
             "open": host_count(sev_filter, "open"),
             "closed": host_count(sev_filter, "closed"),
             "in_progress": host_count(sev_filter, "in_progress"),
+            "open_review": host_count(sev_filter, "open_review"),
         }
         return sev_counts, st_counts
 
-    def _sev_status_filter_blocks(self, sev_filter, st_filter, sev_counts, st_counts, sev_prefix, st_prefix):
-        """Two action rows: severity + status (Register / Fix shared layout)."""
+    def _sev_status_filter_blocks(self, sev_filter, st_filter, sev_counts, st_counts, sev_prefix, st_prefix, extra_value=""):
+        """Two action rows: severity + status (Register / Fix shared layout).
+        `extra_value` lets callers that need more than sev|st|offset in the
+        button value (e.g. Common Vuln — Assets, which also needs
+        team_key|vuln_idx|list_offset) append it after the offset."""
         sev_buttons = [
             ("all", "All"),
             ("critical", "Critical"),
@@ -11282,6 +11289,7 @@ class SlackSlashCommandView(APIView):
             ("open", f"Open {st_counts.get('open', 0)}"),
             ("closed", f"Closed {st_counts.get('closed', 0)}"),
             ("in_progress", f"In Progress {st_counts.get('in_progress', 0)}"),
+            ("open_review", f"Open/Review {st_counts.get('open_review', 0)}"),
         ]
         return [
             {
@@ -11291,7 +11299,7 @@ class SlackSlashCommandView(APIView):
                         "type": "button",
                         "text": {"type": "plain_text", "text": label, "emoji": True},
                         "action_id": f"{sev_prefix}{k}",
-                        "value": f"{k}|{st_filter}|0",
+                        "value": f"{k}|{st_filter}|0{extra_value}",
                         **({"style": "primary"} if k == sev_filter else {}),
                     }
                     for (k, label) in sev_buttons
@@ -11304,7 +11312,7 @@ class SlackSlashCommandView(APIView):
                         "type": "button",
                         "text": {"type": "plain_text", "text": label, "emoji": True},
                         "action_id": f"{st_prefix}{k}",
-                        "value": f"{sev_filter}|{k}|0",
+                        "value": f"{sev_filter}|{k}|0{extra_value}",
                         **({"style": "primary"} if k == st_filter else {}),
                     }
                     for (k, label) in st_buttons
@@ -11386,7 +11394,7 @@ class SlackSlashCommandView(APIView):
         st_filter = (st_filter or "all").strip().lower()
         if sev_filter not in ("all", "critical", "high", "medium", "low"):
             sev_filter = "all"
-        if st_filter not in ("all", "open", "closed", "in_progress"):
+        if st_filter not in ("all", "open", "closed", "in_progress", "open_review"):
             st_filter = "all"
 
         _, st_counts = self._asset_sev_status_counts(rows, sev_filter, st_filter)
@@ -11613,6 +11621,7 @@ class SlackSlashCommandView(APIView):
         "fix_common_team_", "fix_common_list_pg_", "fix_common_back",
         "fix_common_vuln_", "fix_common_assets_pg_", "fix_common_asset_view_",
         "fix_common_asset_detail_back", "av_detail_manual", "av_detail_automation",
+        "fix_common_asset_sev_", "fix_common_asset_st_",
     )
 
     def _split_vt_marker(self, value):
@@ -11772,21 +11781,71 @@ class SlackSlashCommandView(APIView):
             blocks.append(pg_block)
         return blocks
 
-    def _format_common_vuln_assets(self, grouped, team_key, vuln_idx, list_offset=0, offset=0):
+    def _match_common_asset_status(self, a, st_filter):
+        st = (a.get("status") or "open").strip().lower()
+        if st_filter == "all":
+            return True
+        if st_filter == "in_progress":
+            return "progress" in st
+        if st_filter == "open_review":
+            return "review" in st
+        if st_filter == "open":
+            return st == "open"
+        if st_filter == "closed":
+            return st == "closed"
+        return st == st_filter
+
+    def _format_common_vuln_assets(self, grouped, team_key, vuln_idx, list_offset=0, offset=0, sev_filter="all", st_filter="all"):
         """Asset list for one common vulnerability under a team."""
         PAGE_SIZE = 5
+        sev_filter = (sev_filter or "all").strip().lower()
+        st_filter = (st_filter or "all").strip().lower()
+        if sev_filter not in ("all", "critical", "high", "medium", "low"):
+            sev_filter = "all"
+        if st_filter not in ("all", "open", "closed", "in_progress", "open_review"):
+            st_filter = "all"
+
         team = grouped.get(team_key) or {}
         vulns = team.get("vulns") or []
         if vuln_idx < 0 or vuln_idx >= len(vulns):
             return self._text_block("❌ Vulnerability not found. Go back and try again.")
 
         v = vulns[vuln_idx]
-        assets = v.get("assets") or []
+        all_assets = v.get("assets") or []
+        # Every asset here shares this ONE vuln's severity (severity isn't
+        # tracked per-asset) — so the severity filter is all-or-nothing: a
+        # non-matching severity simply means no assets qualify, same as any
+        # other filter screen showing an empty result for a filter with no
+        # matches, not a bug specific to this list.
+        vuln_sev = (v.get("severity") or "medium").strip().lower()
+        sev_ok = sev_filter == "all" or sev_filter == vuln_sev
+        assets = [a for a in all_assets if sev_ok and self._match_common_asset_status(a, st_filter)]
         count = len(assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = assets[offset: offset + PAGE_SIZE]
         start_num = offset + 1 if page_items else 0
         end_num = offset + len(page_items)
+
+        def _asset_count(sev_f, st_f):
+            _sev_ok = sev_f == "all" or sev_f == vuln_sev
+            if not _sev_ok:
+                return 0
+            return sum(1 for a in all_assets if self._match_common_asset_status(a, st_f))
+
+        sev_counts = {
+            "all": _asset_count("all", st_filter),
+            "critical": _asset_count("critical", st_filter),
+            "high": _asset_count("high", st_filter),
+            "medium": _asset_count("medium", st_filter),
+            "low": _asset_count("low", st_filter),
+        }
+        st_counts = {
+            "all": _asset_count(sev_filter, "all"),
+            "open": _asset_count(sev_filter, "open"),
+            "closed": _asset_count(sev_filter, "closed"),
+            "in_progress": _asset_count(sev_filter, "in_progress"),
+            "open_review": _asset_count(sev_filter, "open_review"),
+        }
         sev_norm = (v.get("severity") or "medium").lower()
         sev_icon = self._SEV_EMOJI_MAP.get(sev_norm, "⚪")
         name = v.get("name") or "Unknown"
@@ -11815,8 +11874,13 @@ class SlackSlashCommandView(APIView):
                     ),
                 },
             },
-            {"type": "divider"},
         ]
+        blocks.extend(self._sev_status_filter_blocks(
+            sev_filter, st_filter, sev_counts, st_counts,
+            sev_prefix="fix_common_asset_sev_", st_prefix="fix_common_asset_st_",
+            extra_value=f"|{team_key}|{vuln_idx}|{list_offset}",
+        ))
+        blocks.append({"type": "divider"})
 
         if not page_items:
             blocks.append({
@@ -11847,7 +11911,7 @@ class SlackSlashCommandView(APIView):
                         "type": "button",
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
                         "action_id": f"fix_common_asset_view_{offset + i}_{safe_host}",
-                        "value": f"{team_key}|{vuln_idx}|{list_offset}|{offset}|{host}",
+                        "value": f"{team_key}|{vuln_idx}|{list_offset}|{offset}|{host}|{sev_filter}|{st_filter}",
                     },
                 })
                 blocks.append({"type": "divider"})
@@ -11861,7 +11925,7 @@ class SlackSlashCommandView(APIView):
         })
         pg_block = self._numbered_pagination_block(
             offset, PAGE_SIZE, count, "fix_common_assets_pg",
-            value_prefix=f"{team_key}|{vuln_idx}|{list_offset}|",
+            value_prefix=f"{team_key}|{vuln_idx}|{list_offset}|{sev_filter}|{st_filter}|",
         )
         if pg_block:
             blocks.append(pg_block)
@@ -11893,8 +11957,10 @@ class SlackSlashCommandView(APIView):
         """
         Button value is either short_id, short_id|<origin_tag> (one of
         _VULN_DETAIL_ORIGINS' keys), or
-        short_id|common|team_key|vuln_idx|list_offset|assets_offset
-        when opened from Common Vuln — Assets.
+        short_id|common|team_key|vuln_idx|list_offset|assets_offset[|sev_filter|st_filter]
+        when opened from Common Vuln — Assets. sev/st_filter are optional
+        (default "all") so older in-flight button values without them still
+        parse fine.
         """
         parts = (value or "").split("|")
         sid = parts[0] if parts else (value or "")
@@ -11906,6 +11972,8 @@ class SlackSlashCommandView(APIView):
                 "vuln_idx": int(parts[3]) if parts[3].isdigit() else 0,
                 "list_offset": int(parts[4]) if parts[4].isdigit() else 0,
                 "assets_offset": int(parts[5]) if parts[5].isdigit() else 0,
+                "sev_filter": parts[6] if len(parts) > 6 and parts[6] else "all",
+                "st_filter": parts[7] if len(parts) > 7 and parts[7] else "all",
             }
         elif len(parts) == 2 and parts[1] in self._VULN_DETAIL_ORIGINS:
             origin_tag = parts[1]
@@ -11921,7 +11989,8 @@ class SlackSlashCommandView(APIView):
                 "action_id": "fix_common_asset_detail_back",
                 "value": (
                     f"{common_ctx['team_key']}|{common_ctx['vuln_idx']}|"
-                    f"{common_ctx['list_offset']}|{common_ctx['assets_offset']}"
+                    f"{common_ctx['list_offset']}|{common_ctx['assets_offset']}|"
+                    f"{common_ctx.get('sev_filter', 'all')}|{common_ctx.get('st_filter', 'all')}"
                 ),
             }],
         }
@@ -13477,13 +13546,26 @@ class SlackSlashCommandView(APIView):
             )
             data = resp.json() if resp is not None else {}
             if not data.get("ok"):
-                logger.warning(f"[SlackCmd] downloadreport cleanup: conversations.history failed: {data.get('error')}")
+                logger.warning(f"[SlackCmd] downloadreport cleanup: conversations.history failed: {data.get('error')} (likely missing channels:history/groups:history bot scope)")
                 return
-            for msg in data.get("messages", []):
-                if comment_marker not in (msg.get("text") or ""):
+            messages = data.get("messages", [])
+            logger.info(f"[SlackCmd] downloadreport cleanup: scanning {len(messages)} messages in channel={channel_id}")
+            matched = 0
+            for msg in messages:
+                # Match on the initial_comment text OR the attached file's
+                # own name/title starting with "vaptfix-report-" — belt and
+                # suspenders in case Slack doesn't echo initial_comment back
+                # verbatim into the top-level message `text` field for every
+                # upload API version.
+                files = msg.get("files") or []
+                text_match = comment_marker in (msg.get("text") or "")
+                file_match = any(
+                    (f.get("name") or f.get("title") or "").startswith("vaptfix-report-")
+                    for f in files
+                )
+                if not files or not (text_match or file_match):
                     continue
-                if not msg.get("files"):
-                    continue
+                matched += 1
                 ts = msg.get("ts")
                 del_resp = _http_post(
                     "https://slack.com/api/chat.delete",
@@ -13492,8 +13574,11 @@ class SlackSlashCommandView(APIView):
                     timeout=10,
                 )
                 del_data = del_resp.json() if del_resp is not None else {}
-                if not del_data.get("ok"):
+                if del_data.get("ok"):
+                    logger.info(f"[SlackCmd] downloadreport cleanup: deleted previous report message ts={ts}")
+                else:
                     logger.warning(f"[SlackCmd] downloadreport cleanup: chat.delete failed for ts={ts}: {del_data.get('error')}")
+            logger.info(f"[SlackCmd] downloadreport cleanup: {matched} previous report message(s) matched")
         except Exception:
             logger.exception("[SlackCmd] downloadreport cleanup failed")
 
@@ -15050,7 +15135,7 @@ class SlackSlashCommandView(APIView):
         st_filter = (st_filter or "all").strip().lower()
         if sev_filter not in ("all", "critical", "high", "medium", "low"):
             sev_filter = "all"
-        if st_filter not in ("all", "open", "closed", "in_progress"):
+        if st_filter not in ("all", "open", "closed", "in_progress", "open_review"):
             st_filter = "all"
 
         # Assign short IDs on the FULL list so View always resolves after filters.
@@ -18085,18 +18170,67 @@ class SlackInteractivityView(APIView):
                 )
                 return
 
-            if action_id.startswith("fix_common_vuln_") or action_id.startswith("fix_common_assets_pg_"):
+            if action_id.startswith("fix_common_vuln_"):
+                # Fresh entry from the team-selector list — value:
+                # team_key|vuln_idx|list_offset (no filter applied yet).
                 value, vt_team = slash._split_vt_marker(value)
                 parts = value.split("|")
                 team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
                 vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-                assets_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
                 data = slash._fetch_common_vulns_data(team_id, slack_user_id)
                 grouped = slash._group_common_vulns_by_team(data if isinstance(data, dict) else {})
                 section = slash._format_common_vuln_assets(
-                    grouped, team_key, vuln_idx,
-                    list_offset=list_offset, offset=assets_offset,
+                    grouped, team_key, vuln_idx, list_offset=list_offset,
+                )
+                if vt_team:
+                    section = slash._tag_common_vuln_blocks_for_team(section, vt_team)
+                    blocks = (
+                        slash._team_nav_buttons_block("tnav_fix", vt_team)
+                        + slash._team_fix_subnav_block(vt_team, active_sub="tfix_sub_common")
+                        + section
+                    )
+                else:
+                    blocks = (
+                        slash._nav_buttons_block(active_action_id="nav_fix")
+                        + slash._fix_subnav_block(active_sub="fix_sub_common")
+                        + section
+                    )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if (
+                action_id.startswith("fix_common_assets_pg_")
+                or action_id.startswith("fix_common_asset_sev_")
+                or action_id.startswith("fix_common_asset_st_")
+            ):
+                value, vt_team = slash._split_vt_marker(value)
+                parts = value.split("|")
+                if action_id.startswith("fix_common_assets_pg_"):
+                    # value: team_key|vuln_idx|list_offset|sev_filter|st_filter|assets_offset
+                    team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                    vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                    list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                    sev_filter = parts[3] if len(parts) > 3 and parts[3] else "all"
+                    st_filter = parts[4] if len(parts) > 4 and parts[4] else "all"
+                    assets_offset = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+                else:
+                    # fix_common_asset_sev_/fix_common_asset_st_ — value from
+                    # _sev_status_filter_blocks's extra_value:
+                    # sev_filter|st_filter|0|team_key|vuln_idx|list_offset
+                    sev_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                    st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                    assets_offset = 0
+                    team_key = parts[3] if len(parts) > 3 and parts[3] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                    vuln_idx = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+                    list_offset = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+                data = slash._fetch_common_vulns_data(team_id, slack_user_id)
+                grouped = slash._group_common_vulns_by_team(data if isinstance(data, dict) else {})
+                section = slash._format_common_vuln_assets(
+                    grouped, team_key, vuln_idx, list_offset=list_offset, offset=assets_offset,
+                    sev_filter=sev_filter, st_filter=st_filter,
                 )
                 if vt_team:
                     section = slash._tag_common_vuln_blocks_for_team(section, vt_team)
@@ -18117,14 +18251,16 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id.startswith("fix_common_asset_view_"):
-                # value: team_key|vuln_idx|list_offset|assets_offset|host[|VT:<team>]
+                # value: team_key|vuln_idx|list_offset|assets_offset|host|sev_filter|st_filter[|VT:<team>]
                 value, vt_team = slash._split_vt_marker(value)
-                parts = value.split("|", 4)
+                parts = value.split("|")
                 team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
                 vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                 assets_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
                 host = parts[4] if len(parts) > 4 else ""
+                asset_sev_filter = parts[5] if len(parts) > 5 and parts[5] else "all"
+                asset_st_filter = parts[6] if len(parts) > 6 and parts[6] else "all"
 
                 data = slash._fetch_common_vulns_data(team_id, slack_user_id)
                 grouped = slash._group_common_vulns_by_team(data if isinstance(data, dict) else {})
@@ -18150,10 +18286,13 @@ class SlackInteractivityView(APIView):
                             "vuln_idx": vuln_idx,
                             "list_offset": list_offset,
                             "assets_offset": assets_offset,
+                            "sev_filter": asset_sev_filter,
+                            "st_filter": asset_st_filter,
                         }
                         action_value = (
                             f"{target.get('short_id')}|common|{team_key}|"
-                            f"{vuln_idx}|{list_offset}|{assets_offset}"
+                            f"{vuln_idx}|{list_offset}|{assets_offset}|"
+                            f"{asset_sev_filter}|{asset_st_filter}"
                         )
                         content = slash._common_asset_vuln_detail_blocks(
                             target, "manual", team_id, common_ctx, action_value,
@@ -18179,17 +18318,21 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id == "fix_common_asset_detail_back":
+                # value: team_key|vuln_idx|list_offset|assets_offset|sev_filter|st_filter
                 value, vt_team = slash._split_vt_marker(value)
                 parts = value.split("|")
                 team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
                 vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                 assets_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                asset_sev_filter = parts[4] if len(parts) > 4 and parts[4] else "all"
+                asset_st_filter = parts[5] if len(parts) > 5 and parts[5] else "all"
                 data = slash._fetch_common_vulns_data(team_id, slack_user_id)
                 grouped = slash._group_common_vulns_by_team(data if isinstance(data, dict) else {})
                 section = slash._format_common_vuln_assets(
                     grouped, team_key, vuln_idx,
                     list_offset=list_offset, offset=assets_offset,
+                    sev_filter=asset_sev_filter, st_filter=asset_st_filter,
                 )
                 if vt_team:
                     section = slash._tag_common_vuln_blocks_for_team(section, vt_team)
