@@ -12596,12 +12596,17 @@ class SlackSlashCommandView(APIView):
 
         bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
         uploaded = False
+        report_comment = "📄 Vulnerability Management Report"
         if bot_token:
             admin_ch_id = self._get_admin_channel_id(bot_token)
             if admin_ch_id:
+                # Remove any earlier report file(s) posted in this channel
+                # first — only the latest report should be visible, not one
+                # more duplicate message piling up on every download.
+                self._delete_previous_report_uploads(bot_token, admin_ch_id, report_comment)
                 uploaded = self._upload_file_to_slack(
                     bot_token, admin_ch_id, filename, file_bytes,
-                    initial_comment="📄 Vulnerability Management Report",
+                    initial_comment=report_comment,
                 )
 
         vulns = data.get("vulnerabilities") or {}
@@ -13453,6 +13458,44 @@ class SlackSlashCommandView(APIView):
         except Exception:
             logger.exception("[SlackUpload] File upload failed")
             return False
+
+    def _delete_previous_report_uploads(self, bot_token, channel_id, comment_marker):
+        """
+        Delete any earlier bot messages in this channel carrying a
+        previously-uploaded report file (matched by their initial_comment
+        text, e.g. "📄 Vulnerability Management Report") — so re-running
+        /downloadreport (or re-clicking the Download Report tab) replaces
+        the old file instead of piling up a new duplicate message every time.
+        Best-effort: failures are logged, never block the new upload.
+        """
+        try:
+            resp = _http_get(
+                "https://slack.com/api/conversations.history",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                params={"channel": channel_id, "limit": 50},
+                timeout=15,
+            )
+            data = resp.json() if resp is not None else {}
+            if not data.get("ok"):
+                logger.warning(f"[SlackCmd] downloadreport cleanup: conversations.history failed: {data.get('error')}")
+                return
+            for msg in data.get("messages", []):
+                if comment_marker not in (msg.get("text") or ""):
+                    continue
+                if not msg.get("files"):
+                    continue
+                ts = msg.get("ts")
+                del_resp = _http_post(
+                    "https://slack.com/api/chat.delete",
+                    headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                    json={"channel": channel_id, "ts": ts},
+                    timeout=10,
+                )
+                del_data = del_resp.json() if del_resp is not None else {}
+                if not del_data.get("ok"):
+                    logger.warning(f"[SlackCmd] downloadreport cleanup: chat.delete failed for ts={ts}: {del_data.get('error')}")
+        except Exception:
+            logger.exception("[SlackCmd] downloadreport cleanup failed")
 
     def _create_support_ticket(self, team_id, slack_user_id, team_name, message,
                                 vul_name=None, host_name=None, requested_by=None, severity=None):
