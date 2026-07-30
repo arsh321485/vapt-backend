@@ -22,6 +22,7 @@ MIN_MITIGATION_ASSET_COUNT = 4
 
 # ── Collection names ────────────────────────────────────────────────────────
 NESSUS_COLLECTION          = "nessus_reports"
+FIX_VULN_COLLECTION        = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 VULN_CARD_COLLECTION       = "vulnerability_cards"
 
@@ -89,6 +90,7 @@ class MitigationStrategyByTeamAPIView(APIView):
             with MongoContext() as db:
                 ensure_performance_indexes(db)
                 nessus_coll     = db[NESSUS_COLLECTION]
+                fix_coll        = db[FIX_VULN_COLLECTION]
                 closed_coll     = db[FIX_VULN_CLOSED_COLLECTION]
                 vuln_card_coll  = db[VULN_CARD_COLLECTION]
 
@@ -155,6 +157,23 @@ class MitigationStrategyByTeamAPIView(APIView):
                         doc.get("host_name", ""),
                         str(doc.get("port", "")),
                     ))
+
+                # Bulk-fetch active fix docs so a vuln's real status
+                # (in_progress / open/review) can be surfaced instead of
+                # collapsing everything that isn't closed down to "open" —
+                # that had made a team's in-progress fixes look untouched.
+                active_status_by_key = {}
+                for doc in fix_coll.find(
+                    {"report_id": report_id, "admin_id": admin_id},
+                    {"plugin_name": 1, "host_name": 1, "port": 1, "status": 1},
+                ):
+                    key = (
+                        doc.get("plugin_name", ""),
+                        doc.get("host_name", ""),
+                        str(doc.get("port", "")),
+                    )
+                    if doc.get("status"):
+                        active_status_by_key[key] = doc["status"]
 
                 # Bulk-fetch all vulnerability_cards for this report
                 vuln_cards = {}
@@ -229,11 +248,16 @@ class MitigationStrategyByTeamAPIView(APIView):
                             if isinstance(risk_raw, str)
                             else ""
                         )
-                        vuln_status = (
-                            "closed"
-                            if (plugin_name, host_name, str(port)) in closed_vulns
-                            else "open"
-                        )
+                        _status_key = (plugin_name, host_name, str(port))
+                        if _status_key in closed_vulns:
+                            vuln_status = "closed"
+                        elif _status_key in active_status_by_key:
+                            # Real status from the active fix doc — e.g.
+                            # "in_progress" / "open/review" — instead of
+                            # collapsing everything not-yet-closed to "open".
+                            vuln_status = active_status_by_key[_status_key]
+                        else:
+                            vuln_status = "open"
 
                         # Lookup assigned_team from vulnerability_cards
                         card = (
