@@ -1,7 +1,9 @@
-download report me abhi bhi purane vale download report abhi bhi dikh rha hai 
+
 
 
 or all assets or all vulnerabilities , common vulns me open/review vala tab bhi add kr do 
 
 
 or common vulns ke particular vuln ka name aata hai vha muje yha all critial high medium low all open closed in process open_view vala dal do 
+
+same as a user side bhi kr do

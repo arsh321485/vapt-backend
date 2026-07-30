@@ -9427,7 +9427,23 @@ class SlackSlashCommandView(APIView):
             st = (v.get("status") or "open").strip().lower()
             return st
 
-        sev_base = [v for v in items if st_filter == "all" or norm_status(v) == st_filter]
+        def status_matches(v, st_f):
+            st = norm_status(v)
+            if st_f == "all":
+                return True
+            if st_f == "progress":
+                return "progress" in st
+            if st_f == "open_review":
+                return "review" in st
+            return st == st_f
+
+        # NOTE: sev_base used to require an EXACT match on st_filter, which
+        # meant it could never match "progress" or "open_review" (real status
+        # values are "in_progress" / "open/review") — every severity count
+        # silently went to 0 whenever a status other than all/open/closed was
+        # selected. Route through the same partial-match rule the actual list
+        # filter (_format_team_vuln_list's matches()) uses.
+        sev_base = [v for v in items if status_matches(v, st_filter)]
         st_base = [v for v in items if sev_filter == "all" or norm_sev(v) == sev_filter]
 
         sev_counts = {
@@ -9442,6 +9458,7 @@ class SlackSlashCommandView(APIView):
             "open": sum(1 for v in st_base if norm_status(v) == "open"),
             "closed": sum(1 for v in st_base if norm_status(v) == "closed"),
             "progress": sum(1 for v in st_base if "progress" in norm_status(v)),
+            "open_review": sum(1 for v in st_base if "review" in norm_status(v)),
         }
 
         def value_for(sev, st):
@@ -9476,6 +9493,7 @@ class SlackSlashCommandView(APIView):
                 for k, label in [
                     ("all", f"All {st_counts['all']}"), ("open", f"Open {st_counts['open']}"),
                     ("closed", f"Closed {st_counts['closed']}"), ("progress", f"In Progress {st_counts['progress']}"),
+                    ("open_review", f"Open/Review {st_counts['open_review']}"),
                 ]
             ],
         }
@@ -9506,6 +9524,8 @@ class SlackSlashCommandView(APIView):
                 st_ok = True
             elif st_filter == "progress":
                 st_ok = "progress" in norm_status(v)
+            elif st_filter == "open_review":
+                st_ok = "review" in norm_status(v)
             else:
                 st_ok = norm_status(v) == st_filter
             return sev_ok and st_ok
@@ -9593,6 +9613,8 @@ class SlackSlashCommandView(APIView):
                 return True
             if st_filter == "progress":
                 return any("progress" in norm_status(v) for v in vs)
+            if st_filter == "open_review":
+                return any("review" in norm_status(v) for v in vs)
             return any(norm_status(v) == st_filter for v in vs)
 
         def asset_matches_sev(vs):
@@ -9605,6 +9627,8 @@ class SlackSlashCommandView(APIView):
                 return True
             if st_filter == "progress":
                 return "progress" in norm_status(v)
+            if st_filter == "open_review":
+                return "review" in norm_status(v)
             return norm_status(v) == st_filter
 
         filtered_assets = [a for a in asset_rows if asset_matches_sev(a["vulns"]) and asset_matches_status(a["vulns"])]
@@ -9693,6 +9717,8 @@ class SlackSlashCommandView(APIView):
                 return True
             if st_filter == "progress":
                 return "progress" in _norm_status(v)
+            if st_filter == "open_review":
+                return "review" in _norm_status(v)
             return _norm_status(v) == st_filter
 
         # Must apply the same sev/status filter the asset list was showing —
