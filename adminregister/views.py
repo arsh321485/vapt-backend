@@ -2863,13 +2863,13 @@ def _title_severity(raw):
 
 
 def _severity_from_description(desc):
-    """Infer severity from embedded vuln short-id in description (e.g. m5, c1)."""
+    """Infer severity from embedded vuln short-id in description (e.g. M5, C1)."""
     if not desc:
         return ""
-    match = re.search(r"\b([chml])\d+\b", str(desc).lower())
+    match = re.search(r"\b([chml])\d+\b", str(desc), re.IGNORECASE)
     if not match:
         return ""
-    return {"c": "Critical", "h": "High", "m": "Medium", "l": "Low"}.get(match.group(1), "")
+    return {"c": "Critical", "h": "High", "m": "Medium", "l": "Low"}.get(match.group(1).lower(), "")
 
 
 def _build_support_severity_lookups(db, report_id, admin_id, admin_email, support_docs):

@@ -8745,7 +8745,10 @@ class SlackStatusIconView(APIView):
     GET /api/admin/users/slack/status-icon/<kind>/
 
     Public (no auth) — Slack fetches image_url directly for Block Kit
-    context/image elements. kind: open | closed | progress | review
+    context/image elements.
+
+    Status kinds: open | closed | progress | review
+    Severity kinds (exact brand RGB circles): critical | high | medium | low
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -8755,6 +8758,10 @@ class SlackStatusIconView(APIView):
         "closed": "status-closed.png",
         "progress": "status-progress.png",
         "review": "status-review.png",
+        "critical": "sev-critical.png",
+        "high": "sev-high.png",
+        "medium": "sev-medium.png",
+        "low": "sev-low.png",
     }
 
     def get(self, request, kind="open"):
@@ -8889,8 +8896,8 @@ class SlackSlashCommandView(APIView):
         "vaptfix-network-security-team":         "Network Security",
         "vaptfix-architectural-flaws-team":      "Architectural Flaws",
     }
-    _SEV_PREFIX = [("Critical", "c"), ("High", "h"), ("Medium", "m"), ("Low", "l")]
-    _SEV_ICONS  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}
+    _SEV_PREFIX = [("Critical", "C"), ("High", "H"), ("Medium", "M"), ("Low", "L")]
+    _SEV_ICONS  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}  # legacy; prefer _sev_icon_image_element
 
     # Admin-dashboard-channel navbar — clicking these updates the SAME
     # message in place (like a tab switcher) instead of requiring the
@@ -8913,7 +8920,7 @@ class SlackSlashCommandView(APIView):
         ("team_sub_team",         "📈 Team Performance"),
         ("team_sub_adduser",      "➕ Add User"),
         ("team_sub_deleteuser",   "🗑️ Delete User"),
-        ("team_sub_deleteteamuser", "🚫 Delete Team User"),
+        ("team_sub_deleteteamuser", "🔄 Update User Role"),
         ("team_sub_externaluser", "🌐 External User"),
     ]
 
@@ -9570,9 +9577,6 @@ class SlackSlashCommandView(APIView):
         start_num = offset + 1 if page_items else 0
         end_num = offset + len(page_items)
 
-        def sev_icon(sev):
-            return self._SEV_EMOJI_MAP.get((sev or "").strip().lower(), "⚪")
-
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": title, "emoji": True}},
             self._ctx(f"{vapt_team} — vulnerabilities assigned to your team."),
@@ -9594,19 +9598,18 @@ class SlackSlashCommandView(APIView):
                 sev = (v.get("risk_factor") or "").strip() or "—"
                 st = (v.get("status") or "open").lower()
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
-                blocks.append({
-                    "type": "context",
-                    "elements": [
-                        self._status_icon_image_element(st),
-                        {"type": "mrkdwn", "text": f"`{sno}` *{name}*"},
-                    ],
-                })
+                ctx_els = [self._status_icon_image_element(st)]
+                sev_el = self._sev_icon_image_element(sev)
+                if sev_el:
+                    ctx_els.append(sev_el)
+                ctx_els.append({"type": "mrkdwn", "text": f"`{sno}` *{name}*"})
+                blocks.append({"type": "context", "elements": ctx_els})
                 fix_value = f"{sid}|{origin}|{vapt_team}|{sev_filter}|{st_filter}|{offset}"
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"`{host}`  |  {sev_icon(sev)} *{sev.upper()}*  |  Status: {st.capitalize()}",
+                        "text": f"`{host}`  |  {self._sev_label_mrkdwn(sev)}  |  Status: {st.capitalize()}",
                     },
                     "accessory": {
                         "type": "button",
@@ -9697,14 +9700,23 @@ class SlackSlashCommandView(APIView):
                     "low": sum(1 for v in vs if norm_sev(v) == "low"),
                 }
                 pills = "  ".join(
-                    f"{self._SEV_EMOJI_MAP.get(k, '⚪')} {k.capitalize()}: {v}"
+                    f"{k.capitalize()}: {v}"
                     for k, v in sev_counts.items() if v
                 ) or "_No open vulns_"
+                ctx_els = []
+                for k, v in sev_counts.items():
+                    if v:
+                        el = self._sev_icon_image_element(k)
+                        if el:
+                            ctx_els.append(el)
+                if ctx_els:
+                    ctx_els.append({"type": "mrkdwn", "text": pills})
+                    blocks.append({"type": "context", "elements": ctx_els})
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*`{sno}`*  `{a['host_name']}`  |  *{len(vs)} Vulns*\n{pills}",
+                        "text": f"*`{sno}`*  `{a['host_name']}`  |  *{len(vs)} Vulns*",
                     },
                     "accessory": {
                         "type": "button",
@@ -9783,20 +9795,18 @@ class SlackSlashCommandView(APIView):
             name = v.get("plugin_name") or "Unknown"
             sev = (v.get("risk_factor") or "").capitalize() or "—"
             st = (v.get("status") or "open").lower()
-            sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
             safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
-            blocks.append({
-                "type": "context",
-                "elements": [
-                    self._status_icon_image_element(st),
-                    {"type": "mrkdwn", "text": f"`{sid}` *{name}*"},
-                ],
-            })
+            ctx_els = [self._status_icon_image_element(st)]
+            sev_el = self._sev_icon_image_element(sev)
+            if sev_el:
+                ctx_els.append(sev_el)
+            ctx_els.append({"type": "mrkdwn", "text": f"`{sid}` *{name}*"})
+            blocks.append({"type": "context", "elements": ctx_els})
             # sid|origin|team|sev|st|list_offset|host|vuln_offset
             fix_value = f"{sid}|tfixassets|{vapt_team}|{sev_filter}|{st_filter}|{list_offset}|{host}|{offset}"
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"{sev_icon} *{sev}*  |  Status: {st.capitalize()}"},
+                "text": {"type": "mrkdwn", "text": f"{self._sev_label_mrkdwn(sev)}  |  Status: {st.capitalize()}"},
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Fix", "emoji": True},
@@ -9913,7 +9923,7 @@ class SlackSlashCommandView(APIView):
         # do not reassign one here, or a click could resolve to a different
         # row than the one that was actually clicked.
         vulns, report_id, _ = self._get_team_vulns(vapt_team, team_id, user_id)
-        target = next((r for r in vulns if r.get("short_id") == sid), None)
+        target = next((r for r in vulns if self._short_ids_match(r.get("short_id"), sid)), None)
 
         if origin == "tregister":
             nav_action, sub_id = "tnav_register", "treg_sub_register"
@@ -10134,7 +10144,7 @@ class SlackSlashCommandView(APIView):
         )
         # Assign a stable per-row short id (independent of request_id, which
         # is a 24-char Mongo id) so the "View" button's value stays short —
-        # matches the c/h/m/l short_id convention used everywhere else.
+        # matches the C/H/M/L short_id convention used everywhere else.
         for i, r in enumerate(filtered):
             r["_row_id"] = f"e{offset + i + 1}"
         count = len(filtered)
@@ -10229,67 +10239,167 @@ class SlackSlashCommandView(APIView):
             },
         ]
 
-    def _build_extend_request_modal(self, vulns, vapt_team):
+    def _build_extend_request_modal(
+        self, vulns, vapt_team,
+        selected_asset=None, selected_short_id=None,
+        days_initial="7", reason_initial="",
+    ):
         """
-        Matches extend.html: vuln dropdown + extension days (1-90) + reason.
-        static_select caps at 100 options — a team with more assigned vulns
-        than that would need an external_select (search-as-you-type, needs
-        its own options-lookup endpoint) instead; not built here as it's a
-        much bigger change than this modal itself.
+        Request Extension modal — Asset → Vulnerability → (auto) Severity,
+        then Extension Days + Reason. Asset/Vuln use dispatch_action so the
+        modal live-updates (same pattern as Update User Role).
         """
-        options = [
-            {
-                "text": {"type": "plain_text", "text": f"{v.get('short_id')} — {(v.get('plugin_name') or 'Unknown')[:60]}"[:75]},
-                "value": v.get("short_id", ""),
-            }
-            for v in vulns[:100] if v.get("short_id")
+        import json as _json
+
+        hosts = sorted({
+            (v.get("host_name") or "").strip()
+            for v in vulns
+            if (v.get("host_name") or "").strip() and v.get("short_id")
+        })
+        asset_options = [
+            {"text": {"type": "plain_text", "text": h[:75]}, "value": h[:150]}
+            for h in hosts
         ]
-        if not options:
-            options = [{"text": {"type": "plain_text", "text": "No vulnerabilities assigned"}, "value": "none"}]
+        if not asset_options:
+            asset_options = [{"text": {"type": "plain_text", "text": "No assets found"}, "value": "none"}]
+
+        asset_element = {
+            "type": "static_select",
+            "action_id": "extend_asset_select",
+            "options": asset_options,
+            "placeholder": {"type": "plain_text", "text": "Select an asset"},
+        }
+        if selected_asset and selected_asset != "none":
+            initial_asset = next((o for o in asset_options if o["value"] == selected_asset), None)
+            if initial_asset:
+                asset_element["initial_option"] = initial_asset
+
+        blocks = [
+            {
+                "type": "input",
+                "block_id": "extend_asset_block",
+                "label": {"type": "plain_text", "text": "Asset"},
+                "dispatch_action": True,
+                "element": asset_element,
+            },
+        ]
+
+        meta = {
+            "team": vapt_team or "",
+            "asset": selected_asset or "",
+            "sid": selected_short_id or "",
+        }
+
+        if selected_asset and selected_asset != "none":
+            asset_vulns = [
+                v for v in vulns
+                if (v.get("host_name") or "").strip() == selected_asset and v.get("short_id")
+            ][:100]
+            vuln_options = [
+                {
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"{v.get('short_id')} — {(v.get('plugin_name') or 'Unknown')[:55]}"[:75],
+                    },
+                    "value": v.get("short_id", ""),
+                }
+                for v in asset_vulns
+            ]
+            if not vuln_options:
+                vuln_options = [{"text": {"type": "plain_text", "text": "No vulnerabilities on this asset"}, "value": "none"}]
+
+            vuln_element = {
+                "type": "static_select",
+                "action_id": "extend_vuln_select",
+                "options": vuln_options,
+                "placeholder": {"type": "plain_text", "text": "Select a vulnerability"},
+            }
+            if selected_short_id:
+                initial_vuln = next((o for o in vuln_options if o["value"] == selected_short_id), None)
+                if initial_vuln:
+                    vuln_element["initial_option"] = initial_vuln
+
+            target = next(
+                (v for v in asset_vulns if self._short_ids_match(v.get("short_id"), selected_short_id)),
+                None,
+            ) if selected_short_id else None
+            sev = ""
+            if target:
+                sev = (target.get("risk_factor") or target.get("sev_label") or "").strip() or "—"
+
+            # Order: Asset (above) → Severity → Vulnerability → Days → Reason
+            if sev:
+                sev_el = self._sev_icon_image_element(sev)
+                sev_ctx = []
+                if sev_el:
+                    sev_ctx.append(sev_el)
+                sev_ctx.append({
+                    "type": "mrkdwn",
+                    "text": f"*Severity:*  {self._sev_label_mrkdwn(sev)}",
+                })
+                blocks.append({"type": "context", "elements": sev_ctx})
+            else:
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": "*Severity:*  _Select a vulnerability below_"}],
+                })
+
+            blocks.append({
+                "type": "input",
+                "block_id": "extend_vuln_block",
+                "label": {"type": "plain_text", "text": "Vulnerability"},
+                "dispatch_action": True,
+                "element": vuln_element,
+            })
+        else:
+            blocks.append({
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": "_Select an asset to load severity and vulnerabilities._",
+                }],
+            })
+
+        days_el = {
+            "type": "number_input",
+            "action_id": "extend_days_input",
+            "is_decimal_allowed": False,
+            "min_value": "1",
+            "max_value": "90",
+            "initial_value": str(days_initial or "7"),
+        }
+        reason_el = {
+            "type": "plain_text_input",
+            "action_id": "extend_reason_input",
+            "multiline": True,
+            "placeholder": {"type": "plain_text", "text": "e.g. \"going on leave\""},
+        }
+        if reason_initial:
+            reason_el["initial_value"] = reason_initial[:3000]
+
+        blocks.extend([
+            {
+                "type": "input",
+                "block_id": "extend_days_block",
+                "label": {"type": "plain_text", "text": "Extension Days"},
+                "element": days_el,
+            },
+            {
+                "type": "input",
+                "block_id": "extend_reason_block",
+                "label": {"type": "plain_text", "text": "Reason"},
+                "element": reason_el,
+            },
+        ])
+
         return {
             "type": "modal",
             "callback_id": "modal_extend_request_submit",
-            "private_metadata": vapt_team,
+            "private_metadata": _json.dumps(meta)[:3000],
             "title": {"type": "plain_text", "text": "Request Extension"},
             "submit": {"type": "plain_text", "text": "Submit Request"},
             "close": {"type": "plain_text", "text": "Cancel"},
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "extend_vuln_block",
-                    "label": {"type": "plain_text", "text": "Vulnerability"},
-                    "element": {
-                        "type": "static_select",
-                        "action_id": "extend_vuln_select",
-                        "options": options,
-                        "placeholder": {"type": "plain_text", "text": "Select a vulnerability"},
-                    },
-                },
-                {
-                    "type": "input",
-                    "block_id": "extend_days_block",
-                    "label": {"type": "plain_text", "text": "Extension Days"},
-                    "element": {
-                        "type": "number_input",
-                        "action_id": "extend_days_input",
-                        "is_decimal_allowed": False,
-                        "min_value": "1",
-                        "max_value": "90",
-                        "initial_value": "7",
-                    },
-                },
-                {
-                    "type": "input",
-                    "block_id": "extend_reason_block",
-                    "label": {"type": "plain_text", "text": "Reason"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "extend_reason_input",
-                        "multiline": True,
-                        "placeholder": {"type": "plain_text", "text": "e.g. \"going on leave\""},
-                    },
-                },
-            ],
+            "blocks": blocks,
         }
 
     def _submit_extend_request(self, vapt_team, short_id, days, reason, team_id, user_id):
@@ -10422,21 +10532,19 @@ class SlackSlashCommandView(APIView):
                 sev = (r.get("severity") or "").strip() or "—"
                 st = r.get("status") or "open"
                 st_display = st.strip().lower().capitalize()
-                sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
                 requester = r.get("requested_by") or "Unknown"
                 raised = self._short_display_date(r.get("requested_at"))
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
-                blocks.append({
-                    "type": "context",
-                    "elements": [
-                        self._status_icon_image_element(st),
-                        {"type": "mrkdwn", "text": f"*`{sno}`*  `{sid}`  *{vuln}*"},
-                    ],
-                })
+                ctx_els = [self._status_icon_image_element(st)]
+                sev_el = self._sev_icon_image_element(sev)
+                if sev_el:
+                    ctx_els.append(sev_el)
+                ctx_els.append({"type": "mrkdwn", "text": f"*`{sno}`*  `{sid}`  *{vuln}*"})
+                blocks.append({"type": "context", "elements": ctx_els})
                 blocks.append({
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"`{host}`  |  {sev_icon} *{sev.upper()}*"},
+                    "text": {"type": "mrkdwn", "text": f"`{host}`  |  {self._sev_label_mrkdwn(sev)}"},
                     "accessory": {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
@@ -11481,16 +11589,27 @@ class SlackSlashCommandView(APIView):
 
         for host, c in page_items:
             counts_txt = "  ".join(
-                f"{emoji} {label}: {c[key]}" for key, emoji, label in self._ASSET_SEV_EMOJI if c[key]
+                f"{label}: {c[key]}" for key, _emoji, label in self._ASSET_SEV_EMOJI if c[key]
             ) or "No open vulnerabilities"
+            ctx_els = []
+            for key, _emoji, _label in self._ASSET_SEV_EMOJI:
+                if c[key]:
+                    el = self._sev_icon_image_element(key)
+                    if el:
+                        ctx_els.append(el)
+            if ctx_els:
+                ctx_els.append({"type": "mrkdwn", "text": counts_txt})
+                blocks.append({"type": "context", "elements": ctx_els})
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"🖥 `{host}`  |  *{c['total']} Vulns*\n      {counts_txt}"},
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"🖥 `{host}`  |  *{c['total']} Vulns*",
+                },
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": "view_fix_asset",
-                    # host|sev|st|list_offset|vuln_offset
                     "value": f"{host}|{sev_filter}|{st_filter}|{offset}|0",
                 },
             })
@@ -11549,20 +11668,18 @@ class SlackSlashCommandView(APIView):
             name = v.get("vul_name") or "Unknown"
             sev  = (v.get("severity") or "").capitalize() or "—"
             st   = v.get("status") or "open"
-            sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
             safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
-            blocks.append({
-                "type": "context",
-                "elements": [
-                    self._status_icon_image_element(st),
-                    {"type": "mrkdwn", "text": f"`{sid}` *{name}*"},
-                ],
-            })
+            ctx_els = [self._status_icon_image_element(st)]
+            sev_el = self._sev_icon_image_element(sev)
+            if sev_el:
+                ctx_els.append(sev_el)
+            ctx_els.append({"type": "mrkdwn", "text": f"`{sid}` *{name}*"})
+            blocks.append({"type": "context", "elements": ctx_els})
             blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"{sev_icon} *{sev}*  |  Status: {st.capitalize()}",
+                    "text": f"{self._sev_label_mrkdwn(sev)}  |  Status: {st.capitalize()}",
                 },
                 "accessory": {
                     "type": "button",
@@ -11792,20 +11909,22 @@ class SlackSlashCommandView(APIView):
         })
 
         blocks.append({"type": "divider"})
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"*{team.get('display_name')}*\n"
-                    f"Total Vulns: *{team.get('total', 0)}*\n"
-                    f"🔴 Critical: {sev.get('critical', 0)}  "
-                    f"🟠 High: {sev.get('high', 0)}  "
-                    f"🟡 Medium: {sev.get('medium', 0)}  "
-                    f"🟢 Low: {sev.get('low', 0)}"
-                ),
-            },
+        sev_summary_els = []
+        for key in ("critical", "high", "medium", "low"):
+            el = self._sev_icon_image_element(key)
+            if el:
+                sev_summary_els.append(el)
+        sev_summary_els.append({
+            "type": "mrkdwn",
+            "text": (
+                f"*{team.get('display_name')}*  ·  Total Vulns: *{team.get('total', 0)}*\n"
+                f"Critical: {sev.get('critical', 0)}  "
+                f"High: {sev.get('high', 0)}  "
+                f"Medium: {sev.get('medium', 0)}  "
+                f"Low: {sev.get('low', 0)}"
+            ),
         })
+        blocks.append({"type": "context", "elements": sev_summary_els})
         blocks.append({"type": "divider"})
 
         if not page_items:
@@ -11818,17 +11937,18 @@ class SlackSlashCommandView(APIView):
                 sno = str(start_num + idx).zfill(2)
                 name = v.get("name") or "Unknown"
                 sev_norm = (v.get("severity") or "medium").lower()
-                sev_icon = self._SEV_EMOJI_MAP.get(sev_norm, "⚪")
                 asset_count = v.get("asset_count") or 0
                 # Encode team + vuln name for detail lookup (base64-ish safe short token via index)
                 vuln_idx = offset + idx
-                blocks.append({
-                    "type": "context",
-                    "elements": [{
-                        "type": "mrkdwn",
-                        "text": f"*`{sno}`*  🖥 *{asset_count} assets*  |  {sev_icon} *{sev_norm.upper()}*",
-                    }],
+                ctx_els = []
+                sev_el = self._sev_icon_image_element(sev_norm)
+                if sev_el:
+                    ctx_els.append(sev_el)
+                ctx_els.append({
+                    "type": "mrkdwn",
+                    "text": f"*`{sno}`*  🖥 *{asset_count} assets*  |  {self._sev_label_mrkdwn(sev_norm)}",
                 })
+                blocks.append({"type": "context", "elements": ctx_els})
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": f"*{name}*"},
@@ -11921,9 +12041,21 @@ class SlackSlashCommandView(APIView):
             "open_review": _asset_count(sev_filter, "open_review"),
         }
         sev_norm = (v.get("severity") or "medium").lower()
-        sev_icon = self._SEV_EMOJI_MAP.get(sev_norm, "⚪")
         name = v.get("name") or "Unknown"
         display = team.get("display_name") or self._COMMON_TEAM_KEY_TO_NAME.get(team_key, team_key)
+
+        header_els = []
+        sev_el = self._sev_icon_image_element(sev_norm)
+        if sev_el:
+            header_els.append(sev_el)
+        header_els.append({
+            "type": "mrkdwn",
+            "text": (
+                f"*{name}*\n"
+                f"Team: {display}  |  {self._sev_label_mrkdwn(sev_norm)}  |  "
+                f"Assets: *{count}*"
+            ),
+        })
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🧩 Common Vuln — Assets", "emoji": True}},
@@ -11937,17 +12069,8 @@ class SlackSlashCommandView(APIView):
                 }],
             },
             {"type": "divider"},
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*{name}*\n"
-                        f"Team: {display}  |  {sev_icon} *{sev_norm.upper()}*  |  "
-                        f"Assets: *{count}*"
-                    ),
-                },
-            },
+            {"type": "context", "elements": header_els},
+            {"type": "divider"},
         ]
         blocks.extend(self._sev_status_filter_blocks(
             sev_filter, st_filter, sev_counts, st_counts,
@@ -12101,7 +12224,7 @@ class SlackSlashCommandView(APIView):
         }
 
     def _extension_page_for_sid(self, results, sid, page_size=4):
-        idx = next((i for i, r in enumerate(results) if r.get("short_id") == sid), 0)
+        idx = next((i for i, r in enumerate(results) if self._short_ids_match(r.get("short_id"), sid)), 0)
         return (idx // page_size) * page_size
 
     def _build_approve_list_blocks(self, results, offset=0):
@@ -12473,10 +12596,8 @@ class SlackSlashCommandView(APIView):
 
     def _build_delete_team_user_modal(self, members, selected_detail_id=None, selected_member_teams=None):
         """
-        "Delete Team User" modal (Team tab) — matches the design/delete-user-team.html
-        reference: pick an EXISTING VaptFix team member (not Slack's native
-        people-picker, since this needs to know their current Member_role list),
-        then check off which specific team(s) to remove them from. Submitting
+        "Update User Role" modal (Team tab) — pick an EXISTING VaptFix team
+        member, then check off which specific team role(s) to remove. Submitting
         calls DELETE /api/admin/users_details/user-detail/<id>/delete-role/
         once per checked team (that endpoint only removes one role per call).
         """
@@ -12520,7 +12641,7 @@ class SlackSlashCommandView(APIView):
                 blocks.append({
                     "type": "input",
                     "block_id": "dtu_team_block",
-                    "label": {"type": "plain_text", "text": "Remove from Team(s)"},
+                    "label": {"type": "plain_text", "text": "Update Team Role(s)"},
                     "element": {
                         "type": "checkboxes",
                         "action_id": "dtu_team_checks",
@@ -12537,8 +12658,8 @@ class SlackSlashCommandView(APIView):
             "type": "modal",
             "callback_id": "modal_deleteteamuser_submit",
             "private_metadata": selected_detail_id or "",
-            "title": {"type": "plain_text", "text": "Delete Team User"},
-            "submit": {"type": "plain_text", "text": "Remove"},
+            "title": {"type": "plain_text", "text": "Update User Role"},
+            "submit": {"type": "plain_text", "text": "Update"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "blocks": blocks,
         }
@@ -12616,7 +12737,7 @@ class SlackSlashCommandView(APIView):
         ident_clean = ident.strip()
         return next(
             (r for r in results
-             if r.get("short_id") == ident_clean.lower() or r.get("request_id") == ident_clean),
+             if self._short_ids_match(r.get("short_id"), ident_clean) or r.get("request_id") == ident_clean),
             None,
         )
 
@@ -12829,10 +12950,10 @@ class SlackSlashCommandView(APIView):
             data = self._call_api("/api/admin/adminregister/register/latest/vulns/", team_id,
                                   slack_user_id=user_id)
             rows = self._assign_severity_short_ids(data.get("rows") or [])
-            target = next((r for r in rows if r.get("short_id") == short_id), None)
+            target = next((r for r in rows if self._short_ids_match(r.get("short_id"), short_id)), None)
             if not target:
                 return self._text_block(
-                    f"❌ No vulnerability found with ID `{short_id}`. "
+                    f"❌ No vulnerability found with ID `{short_id.upper()}`. "
                     f"Run `/vulndata` to see the current list with IDs."
                 )
             steps_data = None
@@ -13444,18 +13565,22 @@ class SlackSlashCommandView(APIView):
                 result.append(entry)
         return result, report_id, raw_data
 
+    def _short_ids_match(self, a, b):
+        """Case-insensitive short_id compare (C1 == c1)."""
+        return (a or "").strip().lower() == (b or "").strip().lower()
+
     def _resolve_vuln_id(self, short_id, team_name, team_id, user_id):
-        """Resolve a short ID (e.g. c2, h1) to the actual vuln dict."""
+        """Resolve a short ID (e.g. C2, H1) to the actual vuln dict."""
         vulns, report_id, _ = self._get_team_vulns(team_name, team_id, user_id)
-        target = next((v for v in vulns if v.get("short_id") == short_id.lower()), None)
+        target = next((v for v in vulns if self._short_ids_match(v.get("short_id"), short_id)), None)
         return target, report_id
 
     def _assign_severity_short_ids(self, items, name_key="vul_name"):
         """
-        Assign deterministic short IDs (c1/h2/m3/l4...) grouped by severity —
+        Assign deterministic short IDs (C1/H2/M3/L4...) grouped by severity —
         same scheme _get_team_vulns uses for per-team vuln lists — so
         admin-wide lists (/vulndata, /request) can be referenced the same
-        short way (e.g. `/vulndata m6`, `/approve m6`) instead of requiring
+        short way (e.g. `/vulndata M6`, `/approve M6`) instead of requiring
         a 24-char Mongo id to be copy-pasted every time.
         """
         grouped = {"Critical": [], "High": [], "Medium": [], "Low": []}
@@ -13832,7 +13957,7 @@ class SlackSlashCommandView(APIView):
         if not vulns:
             return self._text_block(f"✅ No vulnerabilities currently assigned to *{team_name}* team.")
         if vuln_id:
-            target = next((v for v in vulns if v.get("short_id") == vuln_id), None)
+            target = next((v for v in vulns if self._short_ids_match(v.get("short_id"), vuln_id)), None)
             if not target:
                 return self._text_block(
                     f"❌ Vulnerability `{vuln_id}` not found.\n"
@@ -14335,7 +14460,7 @@ class SlackSlashCommandView(APIView):
             return self._text_block(f"✅ No vulnerabilities currently assigned to *{team_name}* team.")
 
         if vuln_id:
-            target = next((v for v in vulns if v.get("short_id") == vuln_id), None)
+            target = next((v for v in vulns if self._short_ids_match(v.get("short_id"), vuln_id)), None)
             if not target:
                 return self._text_block(
                     f"❌ Vulnerability `{vuln_id}` not found.\n"
@@ -14577,9 +14702,9 @@ class SlackSlashCommandView(APIView):
         if sev:
             return sev.title()
         desc = record.get("description") or ""
-        match = re.search(r"\b([chml])\d+\b", str(desc).lower())
+        match = re.search(r"\b([chml])\d+\b", str(desc), re.IGNORECASE)
         if match:
-            return {"c": "Critical", "h": "High", "m": "Medium", "l": "Low"}[match.group(1)]
+            return {"c": "Critical", "h": "High", "m": "Medium", "l": "Low"}[match.group(1).lower()]
         return ""
 
     def _support_tab_blocks(self, team_id, user_id, st_filter="all", team_filter="all", offset=0):
@@ -14715,21 +14840,20 @@ class SlackSlashCommandView(APIView):
                 raised = self._short_display_date(r.get("requested_at"))
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
-                blocks.append({
-                    "type": "context",
-                    "elements": [
-                        self._status_icon_image_element(st),
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*`{sno_txt}`*  `{sid}`  *{vuln}*",
-                        },
-                    ],
+                ctx_els = [self._status_icon_image_element(st)]
+                sev_el = self._sev_icon_image_element(sev_norm)
+                if sev_el:
+                    ctx_els.append(sev_el)
+                ctx_els.append({
+                    "type": "mrkdwn",
+                    "text": f"*`{sno_txt}`*  `{sid}`  *{vuln}*",
                 })
+                blocks.append({"type": "context", "elements": ctx_els})
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"`{host}`  |  {sev_icon_for(sev_norm)} *{sev_label}*",
+                        "text": f"`{host}`  |  {self._sev_label_mrkdwn(sev_label)}",
                     },
                     "accessory": {
                         "type": "button",
@@ -15129,7 +15253,7 @@ class SlackSlashCommandView(APIView):
 
         if response_url and vapt_team:
             rows = self._get_team_support_rows(team_id, user_id, vapt_team)
-            target = next((r for r in rows if r.get("short_id") == sid), None)
+            target = next((r for r in rows if self._short_ids_match(r.get("short_id"), sid)), None)
             if target:
                 detail_blocks = (
                     self._team_nav_buttons_block("tnav_support", vapt_team)
@@ -15156,7 +15280,7 @@ class SlackSlashCommandView(APIView):
             dict(r, severity=self._resolve_support_row_severity(r) or r.get("severity", ""))
             for r in (data.get("results") or [])
         ])
-        target = next((r for r in rows if r.get("short_id") == sid), None)
+        target = next((r for r in rows if self._short_ids_match(r.get("short_id"), sid)), None)
         return target, data
 
     def _format_extension_requests(self, data):
@@ -15230,9 +15354,10 @@ class SlackSlashCommandView(APIView):
             lines.append(f"Reason: {reason}")
         return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
-    # Same emoji-approximation convention as _ASSET_SEV_EMOJI (Block Kit has
-    # no custom colors — closest Slack-native match to the design's exact
-    # RGB severity pills).
+    # Severity brand colors (exact RGB — served as PNG circles; Block Kit
+    # cannot color emoji, so lists use _sev_icon_image_element instead):
+    # Critical rgb(171,39,26) | High rgb(222,37,35) |
+    # Medium rgb(232,170,59) | Low rgb(9,184,127)
     _SEV_EMOJI_MAP = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 
     def _status_icon_kind(self, st):
@@ -15269,6 +15394,51 @@ class SlackSlashCommandView(APIView):
             "image_url": self._status_icon_image_url(st),
             "alt_text": self._status_icon_kind(st),
         }
+
+    def _sev_icon_kind(self, sev):
+        s = (sev or "").strip().lower()
+        return s if s in ("critical", "high", "medium", "low") else None
+
+    def _sev_icon_image_url(self, sev):
+        kind = self._sev_icon_kind(sev)
+        if not kind:
+            return None
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", None) or getattr(
+            settings, "BACKEND_BASE_URL", "https://vaptbackend.secureitlab.com"
+        )
+        return f"{backend.rstrip('/')}/api/admin/users/slack/status-icon/{kind}/"
+
+    def _sev_icon_image_element(self, sev):
+        """Exact-RGB severity circle for Block Kit context rows."""
+        url = self._sev_icon_image_url(sev)
+        kind = self._sev_icon_kind(sev) or "medium"
+        if not url:
+            return None
+        return {
+            "type": "image",
+            "image_url": url,
+            "alt_text": kind,
+        }
+
+    def _sev_icon(self, sev):
+        """Legacy emoji fallback (Slack cannot color these to brand RGB)."""
+        return self._SEV_EMOJI_MAP.get((sev or "").strip().lower(), "⚪")
+
+    def _sev_label_mrkdwn(self, sev):
+        """Severity name for mrkdwn — color comes from adjacent PNG icon."""
+        s = (sev or "").strip()
+        return f"*{s.upper()}*" if s else "*—*"
+
+    def _context_with_sev(self, sev, mrkdwn_text, status=None):
+        """Context row: [status?] [sev RGB circle] + mrkdwn."""
+        elements = []
+        if status is not None:
+            elements.append(self._status_icon_image_element(status))
+        sev_el = self._sev_icon_image_element(sev)
+        if sev_el:
+            elements.append(sev_el)
+        elements.append({"type": "mrkdwn", "text": mrkdwn_text})
+        return {"type": "context", "elements": elements}
 
     def _format_vulndata_list(
         self, data, offset=0, sev_filter="all", st_filter="all",
@@ -15327,20 +15497,18 @@ class SlackSlashCommandView(APIView):
             host = v.get("asset") or v.get("host_name") or "—"
             sev  = (v.get("severity") or v.get("risk_factor") or "").capitalize() or "—"
             st   = v.get("status") or "open"
-            sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
             safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
-            blocks.append({
-                "type": "context",
-                "elements": [
-                    self._status_icon_image_element(st),
-                    {"type": "mrkdwn", "text": f"`{sid}` *{name}*"},
-                ],
-            })
+            ctx_els = [self._status_icon_image_element(st)]
+            sev_el = self._sev_icon_image_element(sev)
+            if sev_el:
+                ctx_els.append(sev_el)
+            ctx_els.append({"type": "mrkdwn", "text": f"`{sid}` *{name}*"})
+            blocks.append({"type": "context", "elements": ctx_els})
             blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"`{host}`  |  {sev_icon} *{sev}*  |  Status: {st.capitalize()}",
+                    "text": f"`{host}`  |  {self._sev_label_mrkdwn(sev)}  |  Status: {st.capitalize()}",
                 },
                 "accessory": {
                     "type": "button",
@@ -15543,27 +15711,23 @@ class SlackSlashCommandView(APIView):
                 if has_fix:
                     btn["style"] = "primary"
 
-                # Top: Fix-tab style PNG status icon + S.No + id + FULL vuln name
-                # (no "..." truncate — full name is always readable here)
-                blocks.append(
-                    {
-                        "type": "context",
-                        "elements": [
-                            self._status_icon_image_element(st),
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*`{sno_txt}`*  `{sid}`  *{name}*",
-                            },
-                        ],
-                    }
-                )
-                # Middle: asset + severity, FIX/VIEW on the RIGHT
+                # Top: status + exact-RGB severity PNG + S.No + id + name
+                ctx_els = [self._status_icon_image_element(st)]
+                sev_el = self._sev_icon_image_element(sev_norm)
+                if sev_el:
+                    ctx_els.append(sev_el)
+                ctx_els.append({
+                    "type": "mrkdwn",
+                    "text": f"*`{sno_txt}`*  `{sid}`  *{name}*",
+                })
+                blocks.append({"type": "context", "elements": ctx_els})
+                # Middle: asset + severity, VIEW on the RIGHT
                 blocks.append(
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"`{asset}`  |  {sev_icon_for(sev_norm)} *{sev_label}*",
+                            "text": f"`{asset}`  |  {self._sev_label_mrkdwn(sev_label)}",
                         },
                         "accessory": btn,
                     }
@@ -16042,8 +16206,8 @@ class SlackSlashCommandView(APIView):
                 }
                 if done:
                     # Same "done" treatment as the website's static green
-                    # "Step N Completed" pill — re-clicking just refreshes
-                    # this same view (harmless; nothing left to complete).
+                    # "Step N Completed" pill — tick + green; re-clicking just
+                    # refreshes this same view (harmless; nothing left to complete).
                     action_row["elements"].append({
                         "type": "button",
                         "text": {"type": "plain_text", "text": f"✅ Step {step_num} Completed", "emoji": True},
@@ -16052,16 +16216,17 @@ class SlackSlashCommandView(APIView):
                         "style": "primary",
                     })
                 elif is_current:
+                    # Incomplete: "?" icon + grey (default) bg until the step
+                    # is marked done — then the button above (tick + green).
                     # '|CS:<fix_vuln_id>' marker — stripped and acted on at
                     # the top of _handle_action, then falls through to this
                     # SAME action_id's normal refresh handling (works whether
                     # this view came from the main Fix flow or Common Vulns).
                     action_row["elements"].append({
                         "type": "button",
-                        "text": {"type": "plain_text", "text": f"✅ Complete Step {step_num}", "emoji": True},
+                        "text": {"type": "plain_text", "text": f"❓ Complete Step {step_num}", "emoji": True},
                         "action_id": action_id or "tav_detail_manual",
                         "value": f"{refresh_value}|CS:{raise_support_fix_vuln_id}",
-                        "style": "primary",
                     })
                 # '|CA:<fix_vuln_id>' marker — same idea as CS but marks EVERY
                 # remaining step completed in one backend call
@@ -16083,7 +16248,7 @@ class SlackSlashCommandView(APIView):
                     all_action_id = f"{action_id}__allstep" if action_id else "tav_detail_manual__allstep"
                     action_row["elements"].append({
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "✅ All Completed", "emoji": True},
+                        "text": {"type": "plain_text", "text": "✅ Complete All Steps", "emoji": True},
                         "action_id": all_action_id,
                         "value": f"{refresh_value}|CA:{raise_support_fix_vuln_id}",
                     })
@@ -16138,7 +16303,7 @@ class SlackSlashCommandView(APIView):
                 "type": "actions",
                 "elements": [{
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "📨 Send Verification", "emoji": True},
+                    "text": {"type": "plain_text", "text": "📨 Send for Retest", "emoji": True},
                     "action_id": action_id or "tav_detail_manual",
                     "value": f"{sv_refresh_value}|SV:{raise_support_fix_vuln_id}",
                     "style": "primary",
@@ -16162,7 +16327,7 @@ class SlackSlashCommandView(APIView):
             return [
                 {"type": "header", "text": {"type": "plain_text", "text": f"🤖 {sid.upper()} — {name}"[:150], "emoji": True}},
                 {"type": "section", "text": {"type": "mrkdwn",
-                    "text": "_No automated fix script available for this vulnerability._"}},
+                    "text": "_Automation script not ready for this vulnerability._"}},
             ]
 
         libs = automation.get("libraries") or []
@@ -16642,7 +16807,7 @@ class SlackSlashCommandView(APIView):
                 "type": "actions",
                 "elements": [{
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "📨 Send for Verification", "emoji": True},
+                    "text": {"type": "plain_text", "text": "📨 Send for Retest", "emoji": True},
                     "style": "primary",
                     "action_id": "send_verification",
                     "value": button_value,
@@ -16886,7 +17051,7 @@ class SlackSlashCommandView(APIView):
             return [
                 {"type": "header", "text": {"type": "plain_text", "text": f"📝 Script Stats: {name[:55]}", "emoji": True}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": (
-                    f"No automated fix script available for `{vuln_id}`.\n"
+                    f"Automation script not ready for `{vuln_id}`.\n"
                     f"Use `/manualfix {vuln_id}` for the step-by-step guide instead."
                 )}},
             ]
@@ -16955,7 +17120,7 @@ class SlackInteractivityView(APIView):
             titles = {
                 "modal_adduser_submit": "Add User",
                 "modal_deleteuser_submit": "Delete User",
-                "modal_deleteteamuser_submit": "Delete Team User",
+                "modal_deleteteamuser_submit": "Update User Role",
                 "modal_reject_submit": "Reject Request",
                 "modal_support_reply_submit": "Send Update",
                 "modal_raise_support_submit": "Raise Support Request",
@@ -16991,6 +17156,8 @@ class SlackInteractivityView(APIView):
                 threading.Thread(target=self._handle_adduser_modal_live, args=(payload,), daemon=True).start()
             elif live_action_id == "dtu_user_select":
                 threading.Thread(target=self._handle_deleteteamuser_modal_live, args=(payload,), daemon=True).start()
+            elif live_action_id in ("extend_asset_select", "extend_vuln_select"):
+                threading.Thread(target=self._handle_extend_request_modal_live, args=(payload,), daemon=True).start()
             return Response({}, status=200)
 
         if ptype != "block_actions":
@@ -17239,13 +17406,13 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id.startswith("reg_view_"):
-                # value is the short_id (c1/h2/m3/l4...)
+                # value is the short_id (C1/H2/M3/L4...)
                 sid = value
                 vd_data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
-                target = next((r for r in rows if r.get("short_id") == sid), None)
+                target = next((r for r in rows if slash._short_ids_match(r.get("short_id"), sid)), None)
                 if not target:
                     content = slash._text_block(f"❌ Vulnerability `{sid}` not found.")
                 else:
@@ -17518,7 +17685,7 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
-                target = next((r for r in rows if r.get("short_id") == v_short_id), None)
+                target = next((r for r in rows if slash._short_ids_match(r.get("short_id"), v_short_id)), None)
                 if not target:
                     blocks = slash._text_block(f"❌ Vulnerability `{v_short_id}` not found. Run `/vulndata` again.")
                 else:
@@ -17770,7 +17937,7 @@ class SlackInteractivityView(APIView):
                 vapt_team = parts[1] if len(parts) > 1 else ""
                 page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                 rows = slash._get_team_fixed_rows(team_id, slack_user_id, vapt_team)
-                target = next((r for r in rows if r.get("short_id") == sid), None)
+                target = next((r for r in rows if slash._short_ids_match(r.get("short_id"), sid)), None)
                 if not target:
                     content_blocks = slash._text_block(f"❌ Vulnerability `{sid}` not found. Reopen the list and try again.")
                 else:
@@ -17810,7 +17977,7 @@ class SlackInteractivityView(APIView):
                 st_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
                 page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
                 rows = slash._get_team_support_rows(team_id, slack_user_id, vapt_team)
-                target = next((r for r in rows if r.get("short_id") == sid), None)
+                target = next((r for r in rows if slash._short_ids_match(r.get("short_id"), sid)), None)
                 if not target:
                     content_blocks = slash._text_block(f"❌ Request `{sid}` not found. Reopen the list and try again.")
                 else:
@@ -18104,7 +18271,7 @@ class SlackInteractivityView(APIView):
                     slack_user_id=slack_user_id,
                 )
                 all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
-                target = next((r for r in all_requests if r.get("short_id") == sid), None)
+                target = next((r for r in all_requests if slash._short_ids_match(r.get("short_id"), sid)), None)
                 vuln_label = (target.get("vul_name") if target else None) or sid
                 view = slash._build_reject_modal(sid, vuln_label)
                 resp = _http_post(
@@ -18136,7 +18303,7 @@ class SlackInteractivityView(APIView):
                     "/api/admin/adminregister/register/latest/vulns/", team_id, slack_user_id=slack_user_id,
                 )
                 rows = slash._assign_severity_short_ids(vd_data.get("rows") or [])
-                target = next((r for r in rows if r.get("short_id") == sid), None)
+                target = next((r for r in rows if slash._short_ids_match(r.get("short_id"), sid)), None)
 
                 if common_ctx and vt_team:
                     fallback_nav, fallback_sub = None, None
@@ -18738,7 +18905,7 @@ class SlackInteractivityView(APIView):
         titles = {
             "modal_adduser_submit": "Add User",
             "modal_deleteuser_submit": "Delete User",
-            "modal_deleteteamuser_submit": "Delete Team User",
+            "modal_deleteteamuser_submit": "Update User Role",
             "modal_reject_submit": "Reject Request",
             "modal_support_reply_submit": "Send Update",
             "modal_raise_support_submit": "Raise Support Request",
@@ -18835,9 +19002,15 @@ class SlackInteractivityView(APIView):
                 reply_text = ((values.get("team_reply_text_block") or {}).get("team_reply_text_input") or {}).get("value") or ""
                 blocks = slash._submit_team_support_reply(meta_json, reply_text, team_id, slack_user_id)
             elif callback_id == "modal_extend_request_submit":
-                vapt_team = view.get("private_metadata") or ""
+                import json as _json
+                meta_raw = view.get("private_metadata") or ""
+                try:
+                    meta = _json.loads(meta_raw) if meta_raw.startswith("{") else {"team": meta_raw}
+                except Exception:
+                    meta = {"team": meta_raw}
+                vapt_team = meta.get("team") or ""
                 vuln_opt = ((values.get("extend_vuln_block") or {}).get("extend_vuln_select") or {}).get("selected_option") or {}
-                short_id = vuln_opt.get("value") or ""
+                short_id = vuln_opt.get("value") or meta.get("sid") or ""
                 days_raw = ((values.get("extend_days_block") or {}).get("extend_days_input") or {}).get("value") or "7"
                 reason = (((values.get("extend_reason_block") or {}).get("extend_reason_input") or {}).get("value") or "").strip()
                 try:
@@ -18845,7 +19018,7 @@ class SlackInteractivityView(APIView):
                 except (TypeError, ValueError):
                     days = 7
                 if not short_id or short_id == "none":
-                    blocks = slash._text_block("❌ Please select a vulnerability.")
+                    blocks = slash._text_block("❌ Please select an asset and a vulnerability.")
                 elif not reason:
                     blocks = slash._text_block("❌ Reason is required.")
                 else:
@@ -19009,7 +19182,7 @@ class SlackInteractivityView(APIView):
 
     def _handle_deleteteamuser_modal_live(self, payload):
         """
-        Live-updates the still-open "Delete Team User" modal the instant an
+        Live-updates the still-open "Update User Role" modal the instant an
         admin picks a member from the dropdown — re-renders with a checkbox
         for each team THAT member currently belongs to (so e.g. Ritika, who
         is on both Patch Management and Configuration Management, only sees
@@ -19049,3 +19222,73 @@ class SlackInteractivityView(APIView):
             timeout=10,
         )
         self._debug_write(f"_handle_deleteteamuser_modal_live: views.update -> {getattr(resp, 'text', None)}")
+
+    def _handle_extend_request_modal_live(self, payload):
+        """
+        Live-updates Request Extension modal when Asset or Vulnerability
+        changes — cascades Asset → Vulnerability list → Severity readout,
+        while preserving Days/Reason already typed.
+        """
+        import json as _json
+        view = payload.get("view") or {}
+        view_id = view.get("id", "")
+        team_id = (payload.get("team") or {}).get("id", "")
+        slack_user_id = (payload.get("user") or {}).get("id", "")
+        live_action = (payload.get("actions") or [{}])[0]
+        action_id = live_action.get("action_id", "")
+        state_values = (view.get("state") or {}).get("values") or {}
+
+        meta_raw = view.get("private_metadata") or ""
+        try:
+            meta = _json.loads(meta_raw) if meta_raw.startswith("{") else {"team": meta_raw}
+        except Exception:
+            meta = {"team": meta_raw}
+        vapt_team = meta.get("team") or ""
+
+        selected_asset = meta.get("asset") or ""
+        selected_sid = meta.get("sid") or ""
+
+        if action_id == "extend_asset_select":
+            selected_asset = (live_action.get("selected_option") or {}).get("value") or ""
+            selected_sid = ""  # reset vuln when asset changes
+        elif action_id == "extend_vuln_select":
+            selected_sid = (live_action.get("selected_option") or {}).get("value") or ""
+            # keep asset from state/meta
+            asset_opt = (
+                (state_values.get("extend_asset_block") or {}).get("extend_asset_select") or {}
+            ).get("selected_option") or {}
+            if asset_opt.get("value"):
+                selected_asset = asset_opt.get("value")
+
+        days_raw = (
+            (state_values.get("extend_days_block") or {}).get("extend_days_input") or {}
+        ).get("value") or "7"
+        reason_raw = (
+            (state_values.get("extend_reason_block") or {}).get("extend_reason_input") or {}
+        ).get("value") or ""
+
+        slash = SlackSlashCommandView()
+        try:
+            vulns, _, _ = slash._get_team_vulns(vapt_team, team_id, slack_user_id)
+            new_view = slash._build_extend_request_modal(
+                vulns, vapt_team,
+                selected_asset=selected_asset or None,
+                selected_short_id=selected_sid or None,
+                days_initial=str(days_raw or "7"),
+                reason_initial=reason_raw or "",
+            )
+        except Exception:
+            self._debug_write(f"_handle_extend_request_modal_live: EXCEPTION\n{traceback.format_exc()}")
+            return
+
+        bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+        if not bot_token or not view_id:
+            self._debug_write("_handle_extend_request_modal_live: missing bot_token or view_id")
+            return
+        resp = _http_post(
+            "https://slack.com/api/views.update",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            json={"view_id": view_id, "view": new_view},
+            timeout=10,
+        )
+        self._debug_write(f"_handle_extend_request_modal_live: action={action_id} views.update -> {getattr(resp, 'text', None)}")
