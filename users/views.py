@@ -3213,6 +3213,145 @@ VAPTFIX_CHANNELS = [
 ADMIN_DASHBOARD_CHANNEL = "vaptfix-admin-dashboard"
 
 
+def _get_admin_onboarding_state(admin):
+    """
+    Returns one of "no_report" / "needs_risk_criteria" / "ready" for a given
+    admin (a users.models.User instance). These are the same two
+    preconditions the website's own onboarding status endpoint reports
+    (see AdminOnboardingStatusAPIView) — a Nessus report must exist, then
+    Risk Criteria (per-severity SLA days) must be configured, before the
+    admin's real dashboard/navbar shows anywhere (Slack or website).
+    """
+    from vaptfix.mongo_client import MongoContext
+    from risk_criteria.models import RiskCriteria
+
+    admin_id = str(admin.id)
+    admin_email = getattr(admin, "email", None)
+    conditions = [{"admin_id": admin_id}]
+    if admin_email:
+        conditions.append({"admin_email": admin_email})
+
+    with MongoContext() as db:
+        has_report = db["nessus_reports"].count_documents({"$or": conditions}) > 0
+
+    if not has_report:
+        return "no_report"
+
+    if not RiskCriteria.objects.filter(admin=admin).exists():
+        return "needs_risk_criteria"
+
+    return "ready"
+
+
+def _build_admin_welcome_blocks():
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "👋 Welcome to VaptFix!", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            "Your Super Admin needs to upload your first vulnerability scan report "
+            "before you can get started.\n\nWe'll post here the moment it's ready — "
+            "no action needed from you right now."
+        )}},
+    ]
+
+
+def _build_admin_risk_criteria_prompt_blocks():
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "📊 Your first report is in!", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            "Before your dashboard opens, set your risk criteria — how many days "
+            "each severity should take to fix (e.g. \"3 days\", \"1 week\")."
+        )}},
+        {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "⚙️ Set Risk Criteria", "emoji": True},
+                "action_id": "open_risk_criteria_modal",
+                "style": "primary",
+            }],
+        },
+    ]
+
+
+def _build_risk_criteria_modal():
+    def _field(block_id, action_id, label, placeholder):
+        return {
+            "type": "input",
+            "block_id": block_id,
+            "label": {"type": "plain_text", "text": label},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": action_id,
+                "placeholder": {"type": "plain_text", "text": placeholder},
+            },
+        }
+    return {
+        "type": "modal",
+        "callback_id": "modal_risk_criteria_submit",
+        "title": {"type": "plain_text", "text": "Set Risk Criteria"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "How many days should each severity take to fix?"}},
+            _field("rc_critical_block", "rc_critical_input", "Critical", "e.g. 1 day"),
+            _field("rc_high_block", "rc_high_input", "High", "e.g. 3 days"),
+            _field("rc_medium_block", "rc_medium_input", "Medium", "e.g. 1 week"),
+            _field("rc_low_block", "rc_low_input", "Low", "e.g. 2 weeks"),
+        ],
+    }
+
+
+def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
+    """
+    Posts whichever message matches this admin's current onboarding state:
+    a welcome message (no report yet), a risk-criteria prompt (report
+    exists but risk criteria doesn't), or the normal navbar+Home dashboard
+    (both preconditions met — delegates to the existing
+    _post_admin_navbar_message so that path is unchanged). Same state
+    /postnavbar, /dashboard, and every other admin entry point checks too,
+    so nothing shows stale/premature dashboard content before the admin has
+    actually finished onboarding. Returns the resolved state.
+    """
+    state = _get_admin_onboarding_state(admin)
+    if state == "ready":
+        SlackEventsView()._post_admin_navbar_message(bot_token, channel_id, team_id)
+        return state
+    blocks = _build_admin_welcome_blocks() if state == "no_report" else _build_admin_risk_criteria_prompt_blocks()
+    text = "VaptFix — Welcome" if state == "no_report" else "VaptFix — Set Risk Criteria"
+    try:
+        _http_post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+            json={"channel": channel_id, "blocks": blocks, "text": text},
+            timeout=15,
+        )
+    except Exception:
+        logger.exception("[SlackEvent] _post_admin_onboarding_message failed")
+    return state
+
+
+def notify_admin_report_uploaded(admin):
+    """
+    Called from upload_report/views.py right after a Super Admin's upload
+    succeeds. If this was that admin's first report (i.e. they were still
+    stuck on the "no_report" welcome message) and they have a Slack admin
+    channel, proactively push them straight to the risk-criteria prompt —
+    they shouldn't have to do anything to discover their report landed.
+    A no-op (and never raises) for admins without a linked Slack workspace.
+    """
+    try:
+        bot_token = getattr(admin, "slack_bot_token", None)
+        team_id = getattr(admin, "slack_team_id", None)
+        if not bot_token or not team_id:
+            return
+        channel_id = SlackSlashCommandView()._get_channel_id_by_name(bot_token, ADMIN_DASHBOARD_CHANNEL)
+        if not channel_id:
+            return
+        _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
+    except Exception:
+        logger.exception("[SlackEvent] notify_admin_report_uploaded failed")
+
+
 def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_id=None):
     """
     Ensures VaptFix Slack channels exist.
@@ -3282,7 +3421,11 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_
 
         if name == ADMIN_DASHBOARD_CHANNEL and name in newly_created and team_id:
             try:
-                SlackEventsView()._post_admin_navbar_message(bot_token, channel_id, team_id)
+                admin = User.objects.filter(slack_team_id=team_id).first()
+                if admin:
+                    _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
+                else:
+                    SlackEventsView()._post_admin_navbar_message(bot_token, channel_id, team_id)
             except Exception:
                 logger.warning("[ensure_vaptfix_channels] Failed to auto-post navbar", exc_info=True)
         elif name in newly_created and team_id:
@@ -6071,7 +6214,7 @@ class SlackEventsView(APIView):
                     if bot_user_id and slack_user_id == bot_user_id:
                         channel_name = self._get_channel_name(admin.slack_bot_token, channel_id)
                         if channel_name == SlackSlashCommandView.ADMIN_CHANNEL:
-                            self._post_admin_navbar_message(admin.slack_bot_token, channel_id, tid)
+                            _post_admin_onboarding_message(admin.slack_bot_token, channel_id, tid, admin)
                         elif channel_name in SlackSlashCommandView.TEAM_CHANNELS:
                             team_name = SlackSlashCommandView.TEAM_CHANNELS[channel_name]
                             self._post_team_navbar_message(admin.slack_bot_token, channel_id, tid, team_name)
@@ -9277,7 +9420,28 @@ class SlackSlashCommandView(APIView):
         )
         return self._format_vulnstats(data)
 
+    def _admin_onboarding_gate_blocks(self, team_id):
+        """
+        Returns the welcome/risk-criteria-prompt blocks if this workspace's
+        admin hasn't finished onboarding yet, else None (meaning: proceed
+        with the normal navbar/dashboard content). Shared by every manual
+        admin entry point (/dashboard, /postnavbar) so none of them can
+        show real dashboard content before the admin actually has a report
+        AND risk criteria configured — same gate the Slack channel's
+        auto-posted welcome message already enforces.
+        """
+        admin = User.objects.filter(slack_team_id=team_id).first()
+        if not admin:
+            return None
+        state = _get_admin_onboarding_state(admin)
+        if state == "ready":
+            return None
+        return _build_admin_welcome_blocks() if state == "no_report" else _build_admin_risk_criteria_prompt_blocks()
+
     def _cmd_dashboard(self, text, team_id, user_id):
+        gate = self._admin_onboarding_gate_blocks(team_id)
+        if gate is not None:
+            return gate
         return [self._dashboard_image_block(team_id)]
 
     def _dashboard_image_block(self, team_id, kind="dashboard", alt_text="VaptFix Admin Dashboard", extra_params=None):
@@ -9312,6 +9476,9 @@ class SlackSlashCommandView(APIView):
         get this automatically the moment their #vaptfix-admin-dashboard
         channel is created (see ensure_vaptfix_channels).
         """
+        gate = self._admin_onboarding_gate_blocks(team_id)
+        if gate is not None:
+            return gate
         section_blocks = self._nav_section_blocks("nav_home", team_id, user_id)
         return self._nav_buttons_block(active_action_id="nav_home") + section_blocks
 
@@ -17175,6 +17342,7 @@ class SlackInteractivityView(APIView):
                 "modal_raise_support_submit": "Raise Support Request",
                 "modal_team_support_reply_submit": "Send Update",
                 "modal_extend_request_submit": "Request Extension",
+                "modal_risk_criteria_submit": "Set Risk Criteria",
             }
             if callback_id not in titles:
                 return Response({}, status=200)
@@ -17964,6 +18132,21 @@ class SlackInteractivityView(APIView):
                     timeout=10,
                 )
                 self._debug_write(f"tex_open_request_modal views.open -> {getattr(resp, 'text', None)}")
+                return
+
+            if action_id == "open_risk_criteria_modal":
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write("open_risk_criteria_modal: missing bot_token or trigger_id")
+                    return
+                view = _build_risk_criteria_modal()
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"open_risk_criteria_modal views.open -> {getattr(resp, 'text', None)}")
                 return
 
             if action_id.startswith("tfixed_pg_"):
@@ -18962,6 +19145,7 @@ class SlackInteractivityView(APIView):
             "modal_raise_support_submit": "Raise Support Request",
             "modal_team_support_reply_submit": "Send Update",
             "modal_extend_request_submit": "Request Extension",
+            "modal_risk_criteria_submit": "Set Risk Criteria",
         }
         if callback_id not in titles:
             return
@@ -19074,6 +19258,39 @@ class SlackInteractivityView(APIView):
                     blocks = slash._text_block("❌ Reason is required.")
                 else:
                     blocks = slash._submit_extend_request(vapt_team, short_id, days, reason, team_id, slack_user_id)
+            elif callback_id == "modal_risk_criteria_submit":
+                critical = ((values.get("rc_critical_block") or {}).get("rc_critical_input") or {}).get("value") or ""
+                high     = ((values.get("rc_high_block") or {}).get("rc_high_input") or {}).get("value") or ""
+                medium   = ((values.get("rc_medium_block") or {}).get("rc_medium_input") or {}).get("value") or ""
+                low      = ((values.get("rc_low_block") or {}).get("rc_low_input") or {}).get("value") or ""
+                if not all([critical.strip(), high.strip(), medium.strip(), low.strip()]):
+                    blocks = slash._text_block("❌ All four severities (Critical/High/Medium/Low) are required.")
+                else:
+                    resp_data = slash._call_api(
+                        "/api/admin/risk_criteria/add-risk/", team_id, method="post",
+                        json_body={"critical": critical.strip(), "high": high.strip(),
+                                   "medium": medium.strip(), "low": low.strip()},
+                        slack_user_id=slack_user_id,
+                    )
+                    if resp_data.get("risk_criteria"):
+                        blocks = slash._text_block(
+                            "✅ Risk criteria saved. Loading your dashboard…"
+                        )
+                        # Transition complete — post the real navbar right
+                        # after, same as the very first upload would have
+                        # if risk criteria had already been set.
+                        try:
+                            admin = User.objects.filter(slack_team_id=team_id).first()
+                            bt = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                            if admin and bt:
+                                admin_ch_id = slash._get_admin_channel_id(bt)
+                                if admin_ch_id:
+                                    _post_admin_onboarding_message(bt, admin_ch_id, team_id, admin)
+                        except Exception:
+                            logger.exception("[SlackInteractivity] risk criteria submit: failed to post navbar")
+                    else:
+                        err = resp_data.get("detail") or resp_data.get("error") or "Could not save risk criteria."
+                        blocks = slash._text_block(f"❌ {err}")
             else:
                 # modal_reject_submit — sid was already known when the modal
                 # was opened (from the clicked row), carried via

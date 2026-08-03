@@ -2015,8 +2015,15 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
 
 class AdminReportStatusAPIView(APIView):
     """
-    Returns whether the admin has any uploaded reports.
-    Frontend should use this to decide whether to show dashboard or waiting screen.
+    Returns whether the admin has any uploaded reports AND whether they've
+    configured Risk Criteria — the same two-step onboarding gate the Slack
+    bot enforces (see users.views._get_admin_onboarding_state). Frontend
+    should use `state` to decide which screen to show:
+      "no_report"           -> waiting screen (Super Admin hasn't uploaded yet)
+      "needs_risk_criteria" -> risk criteria setup form
+      "ready"               -> normal dashboard
+    `has_report`/`show_dashboard` are kept as-is for any existing caller
+    that only checked those two fields before this was extended.
     """
     permission_classes = [IsAuthenticated]
 
@@ -2028,25 +2035,43 @@ class AdminReportStatusAPIView(APIView):
             with MongoContext() as db:
                 doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id))
 
-                if doc:
-                    report_id = doc.get("report_id") or str(doc.get("_id", ""))
-                    return Response({
-                        "has_report": True,
-                        "show_dashboard": True,
-                        "admin_id": admin_id,
-                        "admin_email": admin_email,
-                        "report_id": report_id,
-                        "message": "Report available"
-                    }, status=status.HTTP_200_OK)
-                else:
-                    return Response({
-                        "has_report": False,
-                        "show_dashboard": False,
-                        "admin_id": admin_id,
-                        "admin_email": admin_email,
-                        "report_id": None,
-                        "message": "No report uploaded yet. Please wait for Super Admin to upload a report."
-                    }, status=status.HTTP_200_OK)
+            if not doc:
+                return Response({
+                    "state": "no_report",
+                    "has_report": False,
+                    "has_risk_criteria": False,
+                    "show_dashboard": False,
+                    "admin_id": admin_id,
+                    "admin_email": admin_email,
+                    "report_id": None,
+                    "message": "No report uploaded yet. Please wait for Super Admin to upload a report."
+                }, status=status.HTTP_200_OK)
+
+            report_id = doc.get("report_id") or str(doc.get("_id", ""))
+            has_risk_criteria = bool(RiskCriteria and RiskCriteria.objects.filter(admin=request.user).exists())
+
+            if not has_risk_criteria:
+                return Response({
+                    "state": "needs_risk_criteria",
+                    "has_report": True,
+                    "has_risk_criteria": False,
+                    "show_dashboard": False,
+                    "admin_id": admin_id,
+                    "admin_email": admin_email,
+                    "report_id": report_id,
+                    "message": "Report available — set your Risk Criteria to continue."
+                }, status=status.HTTP_200_OK)
+
+            return Response({
+                "state": "ready",
+                "has_report": True,
+                "has_risk_criteria": True,
+                "show_dashboard": True,
+                "admin_id": admin_id,
+                "admin_email": admin_email,
+                "report_id": report_id,
+                "message": "Report available"
+            }, status=status.HTTP_200_OK)
 
         except Exception as e:
             import traceback
