@@ -571,22 +571,6 @@ class UploadReportView(APIView):
                 # Regular flow: use the requesting user as target admin
                 target_admin = request.user
 
-            # Check if target admin has completed scoping forms
-            try:
-                from scoping.models import ProjectDetail, TestingMethodology
-                has_project = ProjectDetail.objects.filter(admin=target_admin).exists()
-                has_methodology = TestingMethodology.objects.filter(admin=target_admin).exists()
-                scoping_complete = has_project and has_methodology
-            except Exception:
-                scoping_complete = False
-
-            if not scoping_complete:
-                return Response(
-                    {"error": "Admin has not completed the scoping form (Project Details + Testing Methodology). "
-                              "File upload is not allowed until scoping is complete."},
-                    status=403
-                )
-
             member_type = request.data.get("member_type", "external")
 
             if member_type not in {"external", "internal", "both"}:
@@ -780,6 +764,20 @@ class UploadReportView(APIView):
                         "file": uploaded_file.name,
                         "error": str(file_exc)
                     })
+
+            if upload_results:
+                # Best-effort, non-blocking — if this admin was still stuck
+                # on the Slack "welcome" message waiting for their first
+                # report, push them straight to the risk-criteria prompt.
+                # Backgrounded so a Slack API hiccup never adds latency to
+                # (or fails) the actual upload response.
+                try:
+                    from users.views import notify_admin_report_uploaded
+                    threading.Thread(
+                        target=notify_admin_report_uploaded, args=(target_admin,), daemon=True,
+                    ).start()
+                except Exception:
+                    logger.exception("Failed to trigger Slack onboarding notification after upload")
 
             return Response({
                 "success": True,

@@ -18,16 +18,6 @@ from django.db import transaction
 from django.db.utils import DatabaseError
 
 logger = logging.getLogger(__name__)
-def check_admin_scoping_complete(admin_user):
-    """Check if admin has completed both scoping forms (ProjectDetail + TestingMethodology)."""
-    try:
-        from scoping.models import ProjectDetail, TestingMethodology
-        has_project = ProjectDetail.objects.filter(admin=admin_user).exists()
-        has_methodology = TestingMethodology.objects.filter(admin=admin_user).exists()
-        return has_project and has_methodology
-    except Exception as e:
-        logger.error(f"[ScopingCheck] Failed: {e}")
-        return False
 
 
 class UploadReportAdminForm(forms.ModelForm):
@@ -93,15 +83,6 @@ class UploadReportAdminForm(forms.ModelForm):
             admin_user = User.objects.get(id=admin_id)
         except User.DoesNotExist:
             raise forms.ValidationError("Selected admin does not exist.")
-
-        # Check if admin has completed scoping forms
-        scoping_complete = check_admin_scoping_complete(admin_user)
-
-        if not scoping_complete:
-            raise forms.ValidationError(
-                f"Cannot upload report: Admin '{admin_user.email}' has not completed the scoping form "
-                "(Project Details + Testing Methodology). Please ask the admin to complete the scoping form first."
-            )
 
         return admin_user
 
