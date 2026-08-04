@@ -3274,16 +3274,27 @@ def _build_admin_risk_criteria_prompt_blocks():
     ]
 
 
+# Same option list the website's own risk-criteria dropdown shows.
+_RISK_LEVEL_OPTIONS = [
+    "1 Day", "2 Days", "3 Days", "4 Days", "5 Days", "6 Days",
+    "1 Week", "2 Weeks", "3 Weeks", "4 Weeks", "5 Weeks",
+]
+
+
 def _build_risk_criteria_modal():
-    def _field(block_id, action_id, label, placeholder):
+    def _select_options():
+        return [{"text": {"type": "plain_text", "text": label}, "value": label} for label in _RISK_LEVEL_OPTIONS]
+
+    def _field(block_id, action_id, label):
         return {
             "type": "input",
             "block_id": block_id,
             "label": {"type": "plain_text", "text": label},
             "element": {
-                "type": "plain_text_input",
+                "type": "static_select",
                 "action_id": action_id,
-                "placeholder": {"type": "plain_text", "text": placeholder},
+                "placeholder": {"type": "plain_text", "text": "Select"},
+                "options": _select_options(),
             },
         }
     return {
@@ -3294,10 +3305,10 @@ def _build_risk_criteria_modal():
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": "How many days should each severity take to fix?"}},
-            _field("rc_critical_block", "rc_critical_input", "Critical", "e.g. 1 day"),
-            _field("rc_high_block", "rc_high_input", "High", "e.g. 3 days"),
-            _field("rc_medium_block", "rc_medium_input", "Medium", "e.g. 1 week"),
-            _field("rc_low_block", "rc_low_input", "Low", "e.g. 2 weeks"),
+            _field("rc_critical_block", "rc_critical_input", "Critical"),
+            _field("rc_high_block", "rc_high_input", "High"),
+            _field("rc_medium_block", "rc_medium_input", "Medium"),
+            _field("rc_low_block", "rc_low_input", "Low"),
         ],
     }
 
@@ -19260,10 +19271,13 @@ class SlackInteractivityView(APIView):
                 else:
                     blocks = slash._submit_extend_request(vapt_team, short_id, days, reason, team_id, slack_user_id)
             elif callback_id == "modal_risk_criteria_submit":
-                critical = ((values.get("rc_critical_block") or {}).get("rc_critical_input") or {}).get("value") or ""
-                high     = ((values.get("rc_high_block") or {}).get("rc_high_input") or {}).get("value") or ""
-                medium   = ((values.get("rc_medium_block") or {}).get("rc_medium_input") or {}).get("value") or ""
-                low      = ((values.get("rc_low_block") or {}).get("rc_low_input") or {}).get("value") or ""
+                def _rc_selected(block_id, action_id):
+                    opt = ((values.get(block_id) or {}).get(action_id) or {}).get("selected_option") or {}
+                    return opt.get("value") or ""
+                critical = _rc_selected("rc_critical_block", "rc_critical_input")
+                high     = _rc_selected("rc_high_block", "rc_high_input")
+                medium   = _rc_selected("rc_medium_block", "rc_medium_input")
+                low      = _rc_selected("rc_low_block", "rc_low_input")
                 if not all([critical.strip(), high.strip(), medium.strip(), low.strip()]):
                     blocks = slash._text_block("❌ All four severities (Critical/High/Medium/Low) are required.")
                 else:
