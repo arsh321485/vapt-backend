@@ -53,7 +53,31 @@ def _slack_channel_id_by_name(token, channel_name):
     return None
 
 
-def _slack_dm(token, slack_user_id, text):
+_SEVERITY_STYLE = (
+    ("critical", "🔴", "#e01e5a"),
+    ("high",     "🟠", "#e8912d"),
+    ("medium",   "🟡", "#ecb22e"),
+    ("low",      "🟢", "#2eb67d"),
+)
+
+
+def _build_notification_blocks(title, message):
+    """
+    Card-style message matching the demo mockup: a colored vertical bar
+    (via Slack's `attachments` + `color`, the same mechanism GitHub/Jira's
+    own Slack integrations use for this exact look) wrapping a header +
+    detail line, instead of a single plain-text chat line. Picks the
+    severity dot/color from the title (e.g. "[Critical] ...") when present.
+    """
+    icon, color = next(((e, c) for key, e, c in _SEVERITY_STYLE if key in title.lower()), ("🔔", "#1264a3"))
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"{icon} {title}"[:150], "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": message}},
+    ]
+    return blocks, f"{icon} {title}", color
+
+
+def _slack_dm(token, slack_user_id, blocks, fallback_text, color=None):
     """DM a specific Slack user — this is what triggers their personal
     Slack push notification (desktop/mobile), matching the website's bell."""
     if not slack_user_id:
@@ -63,17 +87,27 @@ def _slack_dm(token, slack_user_id, text):
     if not channel_id:
         logger.warning("[SlackNotify] conversations.open failed for user=%s: %s", slack_user_id, opened.get("error"))
         return
-    resp = _slack_post("chat.postMessage", token, {"channel": channel_id, "text": text})
+    payload = {"channel": channel_id, "text": fallback_text}
+    if color:
+        payload["attachments"] = [{"color": color, "blocks": blocks}]
+    else:
+        payload["blocks"] = blocks
+    resp = _slack_post("chat.postMessage", token, payload)
     if not resp.get("ok"):
         logger.warning("[SlackNotify] DM chat.postMessage failed: %s", resp.get("error"))
 
 
-def _slack_channel_post(token, channel_name, text):
+def _slack_channel_post(token, channel_name, blocks, fallback_text, color=None):
     channel_id = _slack_channel_id_by_name(token, channel_name)
     if not channel_id:
         logger.warning("[SlackNotify] channel not found: %s", channel_name)
         return
-    resp = _slack_post("chat.postMessage", token, {"channel": channel_id, "text": text})
+    payload = {"channel": channel_id, "text": fallback_text}
+    if color:
+        payload["attachments"] = [{"color": color, "blocks": blocks}]
+    else:
+        payload["blocks"] = blocks
+    resp = _slack_post("chat.postMessage", token, payload)
     if not resp.get("ok"):
         logger.warning("[SlackNotify] channel chat.postMessage failed for %s: %s", channel_name, resp.get("error"))
 
@@ -95,26 +129,26 @@ def _send_slack_notification(admin_id, recipient_type, title, message, metadata,
         if not admin or not getattr(admin, "slack_bot_token", None):
             return
         token = admin.slack_bot_token
-        text = f"*{title}*\n{message}"
+        blocks, fallback_text, color = _build_notification_blocks(title, message)
 
         if recipient_email:
             # A specific person — either the admin themselves or one team member.
             if recipient_email.strip().lower() == (admin.email or "").strip().lower():
-                _slack_dm(token, getattr(admin, "slack_user_id", None), text)
-                _slack_channel_post(token, _ADMIN_CHANNEL, text)
+                _slack_dm(token, getattr(admin, "slack_user_id", None), blocks, fallback_text, color)
+                _slack_channel_post(token, _ADMIN_CHANNEL, blocks, fallback_text, color)
                 return
             member = UserDetail.objects.filter(admin=admin, email=recipient_email).first()
             if member:
-                _slack_dm(token, getattr(member, "slack_member_id", None), text)
+                _slack_dm(token, getattr(member, "slack_member_id", None), blocks, fallback_text, color)
                 team_name = (metadata or {}).get("assigned_team") or member.team_name or next(iter(member.Member_role or []), None)
                 channel_name = _TEAM_CHANNELS.get(team_name)
                 if channel_name:
-                    _slack_channel_post(token, channel_name, text)
+                    _slack_channel_post(token, channel_name, blocks, fallback_text, color)
             return
 
         if recipient_type == "admin":
-            _slack_dm(token, getattr(admin, "slack_user_id", None), text)
-            _slack_channel_post(token, _ADMIN_CHANNEL, text)
+            _slack_dm(token, getattr(admin, "slack_user_id", None), blocks, fallback_text, color)
+            _slack_channel_post(token, _ADMIN_CHANNEL, blocks, fallback_text, color)
             return
 
         # Broadcast to every user under this admin — DM each one who has a
@@ -122,10 +156,10 @@ def _send_slack_notification(admin_id, recipient_type, title, message, metadata,
         # metadata pins this to one specific team, to avoid spamming all 4
         # team channels with something that isn't really team-specific.
         for member in UserDetail.objects.filter(admin=admin):
-            _slack_dm(token, getattr(member, "slack_member_id", None), text)
+            _slack_dm(token, getattr(member, "slack_member_id", None), blocks, fallback_text, color)
         pinned_channel = _TEAM_CHANNELS.get((metadata or {}).get("assigned_team"))
         if pinned_channel:
-            _slack_channel_post(token, pinned_channel, text)
+            _slack_channel_post(token, pinned_channel, blocks, fallback_text, color)
     except Exception:
         logger.exception("[SlackNotify] _send_slack_notification failed")
 

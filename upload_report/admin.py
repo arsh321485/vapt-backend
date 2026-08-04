@@ -467,6 +467,22 @@ class UploadReportAdmin(admin.ModelAdmin):
                     if mongodb_stored:
                         upload_actual_seconds = time.perf_counter() - op_started
 
+                        # Same Slack onboarding hook as the DRF upload API
+                        # (upload_report/views.py) — this admin panel form is
+                        # a completely separate upload path with its own
+                        # parsing/storage, so it needs its own copy of this
+                        # call or a Super Admin uploading from here (rather
+                        # than the API) would leave the admin stuck on the
+                        # Slack "welcome" message forever despite the report
+                        # having actually landed.
+                        try:
+                            from users.views import notify_admin_report_uploaded
+                            threading.Thread(
+                                target=notify_admin_report_uploaded, args=(admin_user,), daemon=True,
+                            ).start()
+                        except Exception:
+                            logger.exception("Failed to trigger Slack onboarding notification after admin-panel upload")
+
                         # Store actual upload processing time for UploadStatusView ETA
                         if parsed_data.get("type") in ("nessus", "nessus_html"):
                             try:

@@ -3245,11 +3245,12 @@ def _get_admin_onboarding_state(admin):
 
 def _build_admin_welcome_blocks():
     return [
-        {"type": "header", "text": {"type": "plain_text", "text": "👋 Welcome to VaptFix!", "emoji": True}},
+        {"type": "header", "text": {"type": "plain_text", "text": "👋 Welcome to VaptFix, Admin", "emoji": True}},
         {"type": "section", "text": {"type": "mrkdwn", "text": (
-            "Your Super Admin needs to upload your first vulnerability scan report "
-            "before you can get started.\n\nWe'll post here the moment it's ready — "
-            "no action needed from you right now."
+            "You've been set up as the Workspace Admin for this organization. "
+            "From here you will administer your vulnerability management program.\n\n"
+            "To get started, you can upload your existing VA report — or provide "
+            "scope and we'll run the assessment for you."
         )}},
     ]
 
