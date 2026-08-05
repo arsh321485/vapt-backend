@@ -15308,20 +15308,6 @@ class SlackSlashCommandView(APIView):
                 },
                 {
                     "type": "input",
-                    "block_id": "raise_support_issue_type_block",
-                    "optional": True,
-                    "label": {"type": "plain_text", "text": "Issue Type"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "raise_support_issue_type_input",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "e.g. Need clarification",
-                        },
-                    },
-                },
-                {
-                    "type": "input",
                     "block_id": "raise_support_msg_block",
                     "label": {"type": "plain_text", "text": "Message"},
                     "element": {
@@ -15337,7 +15323,7 @@ class SlackSlashCommandView(APIView):
             ],
         }
 
-    def _submit_raise_support(self, meta_json, message, team_id, user_id, issue_type=""):
+    def _submit_raise_support(self, meta_json, message, team_id, user_id):
         """POST the raise-support-request for one step; team-member-authenticated."""
         try:
             meta = json.loads(meta_json or "{}")
@@ -15355,10 +15341,7 @@ class SlackSlashCommandView(APIView):
         resp = self._call_user_api(
             f"/api/user/register/fix-vulnerability/{fix_vuln_id}/raise-support-request/",
             team_id, user_id, method="post",
-            json_body={
-                "step_number": step_number, "description": message.strip(),
-                "issue_type": (issue_type or "").strip() or "General",
-            },
+            json_body={"step_number": step_number, "description": message.strip()},
         )
         if not isinstance(resp, dict):
             return self._text_block("❌ Failed to raise support request.")
@@ -19260,8 +19243,7 @@ class SlackInteractivityView(APIView):
             elif callback_id == "modal_raise_support_submit":
                 meta_json = view.get("private_metadata") or "{}"
                 message = ((values.get("raise_support_msg_block") or {}).get("raise_support_msg_input") or {}).get("value") or ""
-                issue_type = ((values.get("raise_support_issue_type_block") or {}).get("raise_support_issue_type_input") or {}).get("value") or ""
-                blocks = slash._submit_raise_support(meta_json, message, team_id, slack_user_id, issue_type=issue_type)
+                blocks = slash._submit_raise_support(meta_json, message, team_id, slack_user_id)
             elif callback_id == "modal_team_support_reply_submit":
                 meta_json = view.get("private_metadata") or "{}"
                 reply_text = ((values.get("team_reply_text_block") or {}).get("team_reply_text_input") or {}).get("value") or ""

@@ -226,16 +226,14 @@ def _card_support_admin_action(title, message, metadata):
     asset = meta.get("host_name", "")
     team = meta.get("assigned_team", "")
     requested_by = meta.get("requested_by", "")
-    issue_type = meta.get("issue_type", "")
     details = meta.get("description", "")
     pills = [p for p in (f"`{vuln}`" if vuln else "", _sev_pill(meta.get("severity")), f"`{asset}`" if asset else "") if p]
     facts = [
-        ("From", requested_by, False),
-        ("Issue type", issue_type, False),
+        ("From", requested_by, True),
         ("Details", details, True),
     ]
     title_text = f"Support Request — {team}" if team else "Support Request"
-    hint = "Use `/support` to review, then `/support-resolve [ticket-id]` or `/support-reply [ticket-id]`."
+    hint = "Use `/support status` to review and reply from the Support tab."
     blocks = _action_card_blocks("🆘", title_text, pills, facts, hint)
     return blocks, f"🆘 {title_text}", "#1264a3"
 

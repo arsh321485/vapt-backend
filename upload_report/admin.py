@@ -5,7 +5,7 @@ from django.contrib import messages
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.template.response import TemplateResponse
-from .models import UploadReport, FixVulnVerification
+from .models import UploadReport, FixVulnVerification, SupportRequestReview
 from users.models import User
 import hashlib
 import os
@@ -699,6 +699,20 @@ class FixVulnVerificationAdmin(admin.ModelAdmin):
                                 "close_comment": "Auto-closed: approved by superadmin",
                             }},
                         )
+                        # Also close the actual support_requests documents —
+                        # the collection /support status and the Support tab
+                        # read, distinct from "tickets" above; without this
+                        # a resolved vuln's support request stayed "open"
+                        # forever from the admin/team's point of view.
+                        db["support_requests"].update_many(
+                            {"vulnerability_id": fix_vuln_id, "status": "open"},
+                            {"$set": {
+                                "status": "closed",
+                                "closed_at": now,
+                                "closed_by": superadmin_id,
+                                "close_comment": "Auto-closed: approved by superadmin",
+                            }},
+                        )
 
                         try:
                             from notifications.utils import create_notification
@@ -737,5 +751,129 @@ class FixVulnVerificationAdmin(admin.ModelAdmin):
         return TemplateResponse(
             request,
             "admin/upload_report/fixvulnverification/change_list.html",
+            context,
+        )
+
+
+@admin.register(SupportRequestReview)
+class SupportRequestReviewAdmin(admin.ModelAdmin):
+    """
+    Custom admin panel for superadmin to view open support requests and
+    close them directly — independent of the linked vulnerability's own
+    status. Until now a support request only ever closed as a side effect
+    of its vulnerability being verified/closed; this lets superadmin
+    resolve a ticket on its own, earlier if needed.
+    """
+
+    def has_module_permission(self, request):
+        return request.user.is_authenticated and request.user.is_superuser
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_authenticated and request.user.is_superuser
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_queryset(self, request):
+        return SupportRequestReview.objects.none()
+
+    def _get_open_requests(self):
+        from vaptfix.mongo_client import get_shared_client, get_shared_db
+        client = get_shared_client()
+        db = get_shared_db(client)
+        docs = list(db["support_requests"].find({"status": "open"}).sort("requested_at", -1))
+        result = []
+        for doc in docs:
+            requested_at = doc.get("requested_at")
+            result.append({
+                "request_id":     str(doc["_id"]),
+                "vul_name":       doc.get("vul_name") or "General",
+                "host_name":      doc.get("host_name") or "-",
+                "assigned_team":  doc.get("assigned_team", ""),
+                "requested_by":   doc.get("requested_by", ""),
+                "description":    doc.get("description", ""),
+                "requested_at":   requested_at.strftime("%Y-%m-%d %H:%M UTC") if requested_at else "-",
+            })
+        return result
+
+    def changelist_view(self, request, extra_context=None):
+        if not (request.user.is_authenticated and request.user.is_superuser):
+            from django.contrib.auth.views import redirect_to_login
+            return redirect_to_login(request.get_full_path())
+
+        if request.method == "POST":
+            request_id = request.POST.get("request_id", "").strip()
+            if request_id:
+                try:
+                    from bson import ObjectId
+                    from vaptfix.mongo_client import get_shared_client, get_shared_db
+                    import datetime as _dt
+                    client = get_shared_client()
+                    db = get_shared_db(client)
+                    support_coll = db["support_requests"]
+
+                    doc = support_coll.find_one({"_id": ObjectId(request_id)})
+                    if doc and doc.get("status") == "open":
+                        now = _dt.datetime.utcnow()
+                        superadmin_id = str(request.user.id)
+                        support_coll.update_one(
+                            {"_id": ObjectId(request_id)},
+                            {"$set": {
+                                "status": "closed",
+                                "closed_at": now,
+                                "closed_by": superadmin_id,
+                                "close_comment": "Manually closed by superadmin",
+                            }},
+                        )
+
+                        try:
+                            from notifications.utils import create_notification
+                            _admin_id = doc.get("admin_id", "")
+                            _vuln_label = doc.get("vul_name") or "your support request"
+                            _requested_by = doc.get("requested_by", "")
+                            _title = f"Support Request Closed: {_vuln_label[:80]}"
+                            _msg = f"Your support request for '{_vuln_label}' has been closed by superadmin."
+                            _meta = {
+                                "support_request_id": request_id,
+                                "vul_name": doc.get("vul_name", ""),
+                                "host_name": doc.get("host_name", ""),
+                            }
+                            if _admin_id:
+                                create_notification(_admin_id, 'admin', 'support_request_closed', _title, _msg, _meta)
+                                if _requested_by and "@" in _requested_by:
+                                    create_notification(
+                                        _admin_id, 'user', 'support_request_closed', _title, _msg, _meta,
+                                        recipient_email=_requested_by,
+                                    )
+                        except Exception:
+                            pass
+
+                        messages.success(request, f"✅ Support request for '{doc.get('vul_name') or 'General'}' closed.")
+                    else:
+                        messages.warning(request, "Support request not found or already closed.")
+                except Exception as exc:
+                    messages.error(request, f"Error closing support request: {exc}")
+
+            return HttpResponseRedirect(
+                reverse("admin:upload_report_supportrequestreview_changelist")
+            )
+
+        open_requests = self._get_open_requests()
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Support Requests",
+            "opts": self.model._meta,
+            "open_requests": open_requests,
+            "cl": type("FakeCL", (), {"opts": self.model._meta})(),
+        }
+        return TemplateResponse(
+            request,
+            "admin/upload_report/supportrequestreview/change_list.html",
             context,
         )
