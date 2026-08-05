@@ -1976,6 +1976,7 @@ FIX_VULN_COLLECTION        = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 FIX_VULN_STEPS_COLLECTION  = "fix_vulnerability_steps"
 TICKETS_COLLECTION         = "tickets"
+SUPPORT_REQUEST_COLLECTION = "support_requests"
 
 
 def _su_normalize_iso(val):
@@ -2591,6 +2592,20 @@ class SuperAdminApproveVerificationAPIView(APIView):
                 {"$set": {
                     "status": "closed",
                     "closed_at": now,
+                    "close_comment": "Auto-closed: vulnerability verified and approved by superadmin",
+                }},
+            )
+            # Also close the actual support_requests documents — this is
+            # the collection /support status and the Support tab actually
+            # read, distinct from the "tickets" collection above; without
+            # this a resolved vulnerability's support request stayed
+            # "open" forever from the admin/team's point of view.
+            db[SUPPORT_REQUEST_COLLECTION].update_many(
+                {"vulnerability_id": fix_vuln_id, "status": "open"},
+                {"$set": {
+                    "status": "closed",
+                    "closed_at": now,
+                    "closed_by": superadmin_id,
                     "close_comment": "Auto-closed: vulnerability verified and approved by superadmin",
                 }},
             )

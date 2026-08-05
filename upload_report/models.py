@@ -60,3 +60,15 @@ class FixVulnVerification(models.Model):
         managed = False
         verbose_name = 'Pending Verification'
         verbose_name_plural = 'Pending Verifications'
+
+
+class SupportRequestReview(models.Model):
+    """Proxy model for Django admin — no DB table created (managed=False).
+    Used only to show the open support-requests panel in superadmin, so
+    they can close a ticket directly instead of only ever having it
+    auto-close as a side effect of closing the linked vulnerability."""
+    class Meta:
+        app_label = 'upload_report'
+        managed = False
+        verbose_name = 'Support Request'
+        verbose_name_plural = 'Support Requests'
