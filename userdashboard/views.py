@@ -1405,6 +1405,7 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                         "reason":             reason,
                         "report_id":          report_id,
                         "request_id":         str(result.inserted_id),
+                        "assigned_team":      payload["team_name"],
                     }
                     create_notification(admin_user, 'admin', 'extension_requested', _n_title, _n_msg, _n_meta)
                 except Exception:

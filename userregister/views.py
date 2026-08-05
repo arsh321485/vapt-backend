@@ -2659,6 +2659,7 @@ from rest_framework import serializers as drf_serializers
 class _RaiseSupportRequestSerializer(drf_serializers.Serializer):
     step_number  = drf_serializers.IntegerField(min_value=1)
     description  = drf_serializers.CharField()
+    issue_type   = drf_serializers.CharField(required=False, allow_blank=True, default="General")
 
 
 # ─── UserRaiseSupportRequestAPIView ──────────────────────────────────────────
@@ -2680,6 +2681,7 @@ class UserRaiseSupportRequestAPIView(APIView):
 
         step_number = serializer.validated_data["step_number"]
         description = serializer.validated_data["description"]
+        issue_type  = (serializer.validated_data.get("issue_type") or "General").strip() or "General"
         user_id     = str(request.user.id)
 
         # Get user's teams
@@ -2745,6 +2747,7 @@ class UserRaiseSupportRequestAPIView(APIView):
                 "assigned_team_members": vuln.get("assigned_team_members", []),
                 "step_number":           step_number,
                 "description":           description,
+                "issue_type":            issue_type,
                 "status":                "open",
                 "requested_by":          request.user.email,
                 "requested_at":          datetime.utcnow(),
@@ -2766,6 +2769,10 @@ class UserRaiseSupportRequestAPIView(APIView):
                     "host_name":          support_doc.get("host_name"),
                     "assigned_team":      assigned_team,
                     "step_number":        step_number,
+                    "severity":           vuln.get("risk_factor", ""),
+                    "requested_by":       request.user.email,
+                    "description":        description,
+                    "issue_type":         issue_type,
                 }
                 if admin_user:
                     _admin_title = f"New Support Request: {support_doc.get('vul_name', '')}"
