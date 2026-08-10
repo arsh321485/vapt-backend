@@ -93,7 +93,7 @@ class UploadReportView(APIView):
             return f"{mins} min {secs} sec"
         return f"{secs} sec"
 
-    def _estimate_processing_seconds(self, file_size_bytes: int, ext: str, member_type: str) -> int:
+    def _estimate_processing_seconds(self, file_size_bytes: int, ext: str) -> int:
         size_mb = (file_size_bytes or 0) / (1024 * 1024)
 
         if ext in (".nessus", ".xml", ".html", ".htm"):
@@ -102,9 +102,6 @@ class UploadReportView(APIView):
             estimate = 8 + (size_mb * 1.5)
         else:
             estimate = 6 + (size_mb * 1.0)
-
-        if member_type == "both":
-            estimate *= 1.35
 
         return int(max(8, min(estimate, 3600)))
 
@@ -572,13 +569,11 @@ class UploadReportView(APIView):
                 # Regular flow: use the requesting user as target admin
                 target_admin = request.user
 
-            member_type = request.data.get("member_type", "external")
-
-            if member_type not in {"external", "internal", "both"}:
-                return Response(
-                    {"error": "member_type must be external, internal or both"},
-                    status=400
-                )
+            # member_type is no longer a frontend-supplied field — the upload
+            # request now carries only "file" (+ optional admin_id). Fixed
+            # internally so the rest of the pipeline (UploadReport.member_type,
+            # MongoDB documents, asset "exposure" field) keeps working unchanged.
+            member_type = "external"
 
             # ✅ MULTIPLE FILES
             uploaded_files = request.FILES.getlist("file")
@@ -594,7 +589,7 @@ class UploadReportView(APIView):
                 file_start = time.perf_counter()
                 file_size_bytes = int(getattr(uploaded_file, "size", 0) or 0)
                 ext = os.path.splitext(uploaded_file.name)[1].lower()
-                estimated_seconds = self._estimate_processing_seconds(file_size_bytes, ext, member_type)
+                estimated_seconds = self._estimate_processing_seconds(file_size_bytes, ext)
                 timings_ms = {
                     "save_and_hash_ms": 0,
                     "duplicate_check_ms": 0,
@@ -673,13 +668,9 @@ class UploadReportView(APIView):
                     elif "rows" in parsed_data:
                         parsed_count = parsed_data.get("rows", 1)
 
-                    member_types_to_create = (
-                        ["external", "internal"]
-                        if member_type == "both"
-                        else [member_type]
-                    )
-
-                    for mt in member_types_to_create:
+                    # member_type is now fixed to "external" — no more "both"
+                    # expansion into two records per file.
+                    for mt in [member_type]:
                         mongo_start = time.perf_counter()
                         upload_report = UploadReport.objects.create(
                             file=relative_filename,
@@ -789,13 +780,18 @@ class UploadReportView(APIView):
             if upload_results:
                 # Best-effort, non-blocking — if this admin was still stuck
                 # on the Slack "welcome" message waiting for their first
-                # report, push them straight to the risk-criteria prompt.
-                # Backgrounded so a Slack API hiccup never adds latency to
-                # (or fails) the actual upload response.
+                # report, wait for the mitigation-card agent to finish for
+                # the report(s) just uploaded, then push them straight to
+                # the risk-criteria prompt. Backgrounded so a Slack API
+                # hiccup (or the multi-minute card-generation wait itself)
+                # never adds latency to (or fails) the actual upload response.
                 try:
                     from users.views import notify_admin_report_uploaded
+                    report_ids = [r["report_id"] for r in upload_results if r.get("report_id")]
                     threading.Thread(
-                        target=notify_admin_report_uploaded, args=(target_admin,), daemon=True,
+                        target=notify_admin_report_uploaded,
+                        args=(target_admin, report_ids),
+                        daemon=True,
                     ).start()
                 except Exception:
                     logger.exception("Failed to trigger Slack onboarding notification after upload")
@@ -1442,6 +1438,114 @@ def _get_mongo_client_and_db():
     """Return (client, db) using the shared MongoDB connection pool."""
     client = get_shared_client()
     return client, get_shared_db(client)
+
+
+def _fmt_seconds_for_status(seconds) -> str:
+    sec = max(0, int(seconds or 0))
+    mins, rem = divmod(sec, 60)
+    if mins > 0:
+        return f"{mins} min {rem} sec"
+    return f"{rem} sec"
+
+
+class UploadCardsStatusAPIView(APIView):
+    """
+    GET /upload_report/upload/<report_id>/status/
+
+    Frontend polls this after an upload response comes back, so it can
+    redirect only once the background mitigation-card generation agent
+    (_auto_generate_cards_bg) has actually finished for this report —
+    instead of redirecting the moment the (fast) upload response returns,
+    while GPT-4o card generation is still running in the background.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            obj_id = ObjectId(report_id)
+        except (InvalidId, TypeError):
+            return Response({"error": "Invalid report_id"}, status=400)
+
+        report = UploadReport.objects.filter(_id=obj_id).select_related("admin").first()
+        if not report:
+            return Response({"error": "Upload report not found"}, status=404)
+
+        # Ownership check — same rule as the rest of the upload_report endpoints
+        report_admin_id = getattr(report.admin, "id", None)
+        if report_admin_id != request.user.id and not request.user.is_superuser:
+            return Response({"error": "Access denied: report belongs to a different admin"}, status=403)
+
+        try:
+            _, db = _get_mongo_client_and_db()
+        except Exception as exc:
+            return Response({"error": "Cannot connect to database", "detail": str(exc)}, status=500)
+
+        nessus_doc = db[NESSUS_COLLECTION].find_one(
+            {"report_id": str(report_id)},
+            {
+                "total_vulnerabilities": 1,
+                "cards_generation_complete": 1,
+                "cards_generated_count": 1,
+                "cards_generation_started_at": 1,
+            },
+        )
+
+        # Mongo document not committed yet (rare race right after upload) —
+        # still initializing, report as not complete with a short ETA.
+        if not nessus_doc:
+            return Response({
+                "report_id": str(report_id),
+                "cards_generation_complete": False,
+                "cards_total": int(getattr(report, "parsed_count", 0) or 0),
+                "cards_generated": 0,
+                "elapsed_seconds": 0,
+                "estimated_total_seconds": 45,
+                "estimated_total_text": "45 sec",
+                "remaining_seconds": 45,
+                "remaining_time_text": "45 sec",
+            }, status=200)
+
+        cards_total = int(nessus_doc.get("total_vulnerabilities", 0) or 0)
+        complete = bool(nessus_doc.get("cards_generation_complete", False))
+
+        # Nothing to generate for this report — treat as immediately complete.
+        if cards_total == 0 and not complete:
+            db[NESSUS_COLLECTION].update_one(
+                {"report_id": str(report_id)},
+                {"$set": {"cards_generation_complete": True, "cards_generated_count": 0}},
+            )
+            complete = True
+
+        if complete:
+            cards_generated = int(nessus_doc.get("cards_generated_count", cards_total) or cards_total)
+        else:
+            cards_generated = db[VULN_CARD_COLLECTION].count_documents({"report_id": str(report_id)})
+
+        started_at = nessus_doc.get("cards_generation_started_at")
+        if started_at and getattr(started_at, "tzinfo", None):
+            started_at = started_at.replace(tzinfo=None)
+        elapsed_seconds = (
+            max(0, int((datetime.datetime.utcnow() - started_at).total_seconds()))
+            if started_at else 0
+        )
+
+        # Same ETA heuristic used by _auto_generate_cards_bg's caller and the
+        # scoping-app onboarding status view: ~45s startup + ~2s/vulnerability.
+        estimated_total_seconds = max(45, 45 + (cards_total * 2))
+        remaining_seconds = max(0, estimated_total_seconds - elapsed_seconds)
+
+        return Response({
+            "report_id": str(report_id),
+            "cards_generation_complete": complete,
+            "cards_total": cards_total,
+            "cards_generated": min(cards_generated, cards_total) if cards_total else cards_generated,
+            "elapsed_seconds": elapsed_seconds,
+            "elapsed_time_text": _fmt_seconds_for_status(elapsed_seconds),
+            "estimated_total_seconds": estimated_total_seconds,
+            "estimated_total_text": _fmt_seconds_for_status(estimated_total_seconds),
+            "remaining_seconds": remaining_seconds,
+            "remaining_time_text": _fmt_seconds_for_status(remaining_seconds),
+        }, status=200)
 
 
 class GenerateVulnerabilityCardView(APIView):

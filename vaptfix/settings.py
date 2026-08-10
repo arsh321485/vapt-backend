@@ -216,6 +216,7 @@ SLACK_SCOPES = [
     'team:read',
     'commands',
     'files:write',
+    'files:read',  # needed to download a report file the admin uploads via the Slack "Upload Report" modal
 ]
 
 JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "")

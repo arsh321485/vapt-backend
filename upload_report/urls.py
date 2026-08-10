@@ -3,6 +3,7 @@ from .views import (
     UploadReportView,
     UploadReportLocationAPIView,
     UploadReportDetailAPIView,
+    UploadCardsStatusAPIView,
     serve_report_file,
     UploadReportListByAdminAPIView,
     UploadReportDeleteAPIView,
@@ -35,6 +36,14 @@ urlpatterns = [
         "upload/<str:report_id>/",
         UploadReportDetailAPIView.as_view(),
         name="upload_report_detail",
+    ),
+
+    # Poll this after upload to know when the background mitigation-card
+    # agent has finished for this report — redirect only once it's done.
+    path(
+        "upload/<str:report_id>/status/",
+        UploadCardsStatusAPIView.as_view(),
+        name="upload_cards_status",
     ),
      
     path(
