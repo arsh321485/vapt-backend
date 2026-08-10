@@ -23,6 +23,17 @@ except ImportError:
     BS4_AVAILABLE = False
     BeautifulSoup = None
 
+# lxml is a much faster BS4 backend than the stdlib "html.parser" — for a
+# large, deeply-nested Nessus HTML export (tens of thousands of tags),
+# html.parser's tree-building is O(n^2)-ish and can take 50+ seconds, while
+# lxml parses the same document in ~4 seconds. Falls back to html.parser if
+# lxml isn't installed rather than failing the upload outright.
+try:
+    import lxml  # noqa: F401
+    _HTML_PARSER_BACKEND = "lxml"
+except ImportError:
+    _HTML_PARSER_BACKEND = "html.parser"
+
 # python-docx import with safe fallback
 try:
     import docx as _docx
@@ -834,7 +845,7 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
 
     # Parse once with BS4. For very large files, avoid full-document get_text()
     # because it is extremely expensive and can stall processing.
-    soup = BeautifulSoup(content, "html.parser")
+    soup = BeautifulSoup(content, _HTML_PARSER_BACKEND)
     quick_probe = content[:2_000_000].lower()
 
     # Verify this is a Nessus report - check for multiple indicators
@@ -1136,7 +1147,7 @@ def parse_html(file_path: str) -> Dict[str, Any]:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as fp:
             content = fp.read()
         
-        soup = BeautifulSoup(content, "html.parser")
+        soup = BeautifulSoup(content, _HTML_PARSER_BACKEND)
         
         # Extract title
         title = ""
