@@ -3318,10 +3318,11 @@ def _build_upload_report_modal():
                 "element": {
                     "type": "file_input",
                     "action_id": "upload_file_input",
-                    "filetypes": [
-                        "pdf", "csv", "xlsx", "xls", "xml", "nessus",
-                        "html", "htm", "docx", "doc",
-                    ],
+                    # No "filetypes" restriction — Slack's views.open rejects the
+                    # whole modal with "invalid_arguments" if the list contains
+                    # any extension it doesn't recognize (e.g. "nessus" isn't a
+                    # standard one), so filtering happens where it already did
+                    # for the website flow: UploadReportView.ALLOWED_EXTENSIONS.
                     "max_files": 1,
                 },
             },
