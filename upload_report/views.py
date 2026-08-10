@@ -83,7 +83,7 @@ class UploadReportView(APIView):
 
     ALLOWED_EXTENSIONS = {
         '.pdf', '.csv', '.xlsx', '.xls', '.xml', '.nessus',
-        '.html', '.htm', '.bmp', '.tiff'
+        '.html', '.htm', '.bmp', '.tiff', '.docx', '.doc'
     }
 
     def _seconds_to_text(self, seconds: float) -> str:
@@ -218,9 +218,9 @@ class UploadReportView(APIView):
                 "report_type": parsed_data.get("type", "unknown"),
             }
 
-            # For Nessus and AWS Inspector reports, use structured format
-            # (both produce the same vulnerabilities_by_host shape)
-            if parsed_data.get("type") in ("nessus_html", "nessus", "aws"):
+            # For Nessus, AWS Inspector, and validated custom reports, use structured
+            # format (all three produce the same vulnerabilities_by_host shape)
+            if parsed_data.get("type") in ("nessus_html", "nessus", "aws", "custom"):
                 # FIXED: Now using _prepare_hosts_for_storage which KEEPS risk_factor
                 hosts_payload = self._prepare_hosts_for_storage(
                     parsed_data.get("vulnerabilities_by_host", [])
@@ -256,8 +256,8 @@ class UploadReportView(APIView):
         """
         report_type = parsed_data.get("type")
         
-        # Nessus reports (HTML or XML) and AWS Inspector reports
-        if report_type in ("nessus_html", "nessus", "aws"):
+        # Nessus reports (HTML or XML), AWS Inspector reports, and validated custom reports
+        if report_type in ("nessus_html", "nessus", "aws", "custom"):
             preview = {
                 "type": report_type,
                 "scan_info": parsed_data.get("scan_info", {}),
@@ -647,9 +647,28 @@ class UploadReportView(APIView):
                     if "error" in parsed_data:
                         raise Exception(parsed_data["error"])
 
+                    # 🔹 Custom file gate — anything that isn't a recognized Nessus
+                    # export or AWS Inspector CSV falls through to generic parsing
+                    # (pdf/csv/excel/html). Before it's allowed anywhere near
+                    # storage or the mitigation agent, an LLM call validates that
+                    # it actually contains vulnerability data (asset + finding +
+                    # severity) and extracts it into the same structured shape.
+                    # Fails closed: not valid -> reject the upload outright.
+                    if parsed_data.get("type") in ("pdf", "csv", "excel", "html", "docx", "doc"):
+                        from .custom_report_ai import validate_and_extract_custom_report
+                        validation_result = validate_and_extract_custom_report(
+                            parsed_data, uploaded_file.name
+                        )
+                        if not validation_result.get("valid"):
+                            raise Exception(
+                                validation_result.get("reason")
+                                or "This file does not appear to contain vulnerability scan data."
+                            )
+                        parsed_data = validation_result
+
                     # 🔹 Parsed count
                     parsed_count = 1
-                    if parsed_data.get("type") in ("nessus", "nessus_html", "aws"):
+                    if parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
                         parsed_count = parsed_data.get("total_vulnerabilities", 1) or 1
                     elif "rows" in parsed_data:
                         parsed_count = parsed_data.get("rows", 1)
@@ -685,7 +704,7 @@ class UploadReportView(APIView):
                         )
 
                         # Store actual upload processing time for UploadStatusView ETA
-                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws"):
+                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
                             upload_processing_seconds = int(round(time.perf_counter() - file_start))
                             try:
                                 from vaptfix.mongo_client import get_shared_client, get_shared_db
@@ -708,10 +727,10 @@ class UploadReportView(APIView):
                             except Exception as _mce:
                                 logger.warning(f"[UploadCache] Could not clear mitigation_by_team cache: {_mce}")
 
-                        # Auto-generate vulnerability cards in background (Nessus + AWS reports —
-                        # both share the same vulnerabilities_by_host structure)
+                        # Auto-generate vulnerability cards in background (Nessus, AWS, and
+                        # validated custom reports — all share the same vulnerabilities_by_host structure)
                         print(f"[AutoGenCards] mongodb_stored={mongodb_stored}, report_type={parsed_data.get('type')}", flush=True)
-                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws"):
+                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
                             t = threading.Thread(
                                 target=_auto_generate_cards_bg,
                                 args=(report_id, target_admin.email, str(target_admin.id)),

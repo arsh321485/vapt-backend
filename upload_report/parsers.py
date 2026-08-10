@@ -1,6 +1,6 @@
 """
 Complete file parsers module for handling various report formats.
-Supports: PDF, CSV, Excel, XML, Nessus (.nessus), Nessus HTML
+Supports: PDF, DOCX, CSV, Excel, XML, Nessus (.nessus), Nessus HTML, AWS Inspector CSV
 """
 
 import os
@@ -8,6 +8,8 @@ import re
 import html
 import json
 import time
+import shutil
+import subprocess
 import defusedxml.ElementTree as ET
 from typing import Dict, Any, List, Optional
 import pandas as pd
@@ -20,6 +22,14 @@ try:
 except ImportError:
     BS4_AVAILABLE = False
     BeautifulSoup = None
+
+# python-docx import with safe fallback
+try:
+    import docx as _docx
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+    _docx = None
 
 
 # Guardrails for very large Nessus HTML exports to avoid pathological runtimes.
@@ -255,6 +265,110 @@ def parse_pdf(file_path: str) -> Dict[str, Any]:
         }
     except Exception as exc:
         return {"error": f"PDF parse error: {exc}"}
+
+
+# ==================== DOCX PARSER ==================== #
+
+def parse_docx(file_path: str) -> Dict[str, Any]:
+    """
+    Parse a Word .docx file and extract its text content.
+
+    Walks the document body in order (not document.paragraphs and
+    document.tables separately) so table rows stay attached to the
+    surrounding paragraph text — pentest reports commonly put fields like
+    "Host(s) Affected" in a table right under the finding's narrative text,
+    and losing that ordering would separate the asset from its finding.
+    """
+    if not DOCX_AVAILABLE:
+        return {"error": "python-docx is required. Install: pip install python-docx"}
+
+    try:
+        document = _docx.Document(file_path)
+    except Exception as exc:
+        return {"error": f"DOCX parse error: {exc}"}
+
+    try:
+        parts: List[str] = []
+        body = document.element.body
+        for child in body.iterchildren():
+            tag = child.tag.rsplit("}", 1)[-1]
+            if tag == "p":
+                para = _docx.text.paragraph.Paragraph(child, document)
+                text = (para.text or "").strip()
+                if text:
+                    parts.append(text)
+            elif tag == "tbl":
+                table = _docx.table.Table(child, document)
+                for row in table.rows:
+                    cells = [(c.text or "").strip() for c in row.cells]
+                    row_text = " | ".join(c for c in cells if c)
+                    if row_text:
+                        parts.append(row_text)
+
+        full_text = "\n".join(parts).strip()
+        return {
+            "type": "docx",
+            "paragraph_count": len(document.paragraphs),
+            "table_count": len(document.tables),
+            "text_preview": full_text[:5000],
+            "text_full": full_text,
+        }
+    except Exception as exc:
+        return {"error": f"DOCX content extraction error: {exc}"}
+
+
+# ==================== LEGACY DOC PARSER ==================== #
+
+def parse_doc(file_path: str) -> Dict[str, Any]:
+    """
+    Parse a legacy Word .doc (97-2003 binary) file.
+
+    There's no reliable pure-Python library for the old OLE-based binary
+    format the way python-docx handles .docx, so this shells out to the
+    `antiword` command-line tool. Install it on the server with:
+      - Debian/Ubuntu : apt-get install antiword
+      - macOS         : brew install antiword
+
+    Unlike parse_docx(), antiword flattens everything to plain text — table
+    structure (e.g. a "Host(s) Affected" table) is not preserved, it just
+    comes through as text in reading order, which is still enough for the
+    GPT validation/extraction step downstream.
+    """
+    if not shutil.which("antiword"):
+        return {
+            "error": (
+                "Legacy .doc files require the 'antiword' tool, which is not installed "
+                "on this server (install with `apt-get install antiword` on Linux, or "
+                "`brew install antiword` on macOS). Alternatively, re-save the file as "
+                ".docx and re-upload."
+            )
+        }
+
+    try:
+        result = subprocess.run(
+            ["antiword", file_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": "DOC parse error: text extraction timed out."}
+    except Exception as exc:
+        return {"error": f"DOC parse error: {exc}"}
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        return {"error": f"DOC parse error: {stderr or 'antiword could not read this file'}"}
+
+    full_text = (result.stdout or "").strip()
+    if not full_text:
+        return {"error": "DOC parse error: no readable text found in this file."}
+
+    return {
+        "type": "doc",
+        "text_preview": full_text[:5000],
+        "text_full": full_text,
+    }
 
 
 # ==================== CSV PARSER ==================== #
@@ -1076,7 +1190,13 @@ def dispatch_parse(file_path: str, filename: str) -> Dict[str, Any]:
     # PDF files
     if ext == '.pdf':
         return parse_pdf(file_path)
-    
+
+    # Word files
+    if ext == '.docx':
+        return parse_docx(file_path)
+    if ext == '.doc':
+        return parse_doc(file_path)
+
     # CSV files — check for AWS Inspector export first, fall back to generic CSV
     if ext == '.csv':
         if _sniff_is_aws_inspector_csv(file_path):
