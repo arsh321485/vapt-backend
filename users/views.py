@@ -3249,9 +3249,18 @@ def _build_admin_welcome_blocks():
         {"type": "section", "text": {"type": "mrkdwn", "text": (
             "You've been set up as the Workspace Admin for this organization. "
             "From here you will administer your vulnerability management program.\n\n"
-            "To get started, you can upload your existing VA report — or provide "
+            "To get started, upload your existing VA report right here — or provide "
             "scope and we'll run the assessment for you."
         )}},
+        {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "📤 Upload Report", "emoji": True},
+                "action_id": "open_upload_report_modal",
+                "style": "primary",
+            }],
+        },
     ]
 
 
@@ -3279,6 +3288,45 @@ _RISK_LEVEL_OPTIONS = [
     "1 Day", "2 Days", "3 Days", "4 Days", "5 Days", "6 Days",
     "1 Week", "2 Weeks", "3 Weeks", "4 Weeks", "5 Weeks",
 ]
+
+
+def _build_upload_report_modal():
+    """
+    Modal shown from the welcome message's "Upload Report" button — a native
+    Slack file_input element, so the admin never has to leave Slack to get
+    their report into VaptFix. Submission is handled by
+    SlackSlashCommandView._submit_upload_report(), which forwards the file
+    to the exact same /upload_report/upload/ endpoint the website form
+    posts to (Nessus/AWS Inspector/custom-file detection, validation, and
+    mitigation-agent triggering all run identically either way).
+    """
+    return {
+        "type": "modal",
+        "callback_id": "modal_upload_report_submit",
+        "title": {"type": "plain_text", "text": "Upload Report"},
+        "submit": {"type": "plain_text", "text": "Upload"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                "Upload a Nessus report, AWS Inspector export, or any other "
+                "vulnerability/pentest report."
+            )}},
+            {
+                "type": "input",
+                "block_id": "upload_file_block",
+                "label": {"type": "plain_text", "text": "Report file"},
+                "element": {
+                    "type": "file_input",
+                    "action_id": "upload_file_input",
+                    "filetypes": [
+                        "pdf", "csv", "xlsx", "xls", "xml", "nessus",
+                        "html", "htm", "docx", "doc",
+                    ],
+                    "max_files": 1,
+                },
+            },
+        ],
+    }
 
 
 def _build_risk_criteria_modal():
@@ -3342,24 +3390,92 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
     return state
 
 
-def notify_admin_report_uploaded(admin):
+def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800, poll_interval=6):
     """
-    Called from upload_report/views.py right after a Super Admin's upload
-    succeeds. If this was that admin's first report (i.e. they were still
-    stuck on the "no_report" welcome message) and they have a Slack admin
-    channel, proactively push them straight to the risk-criteria prompt —
-    they shouldn't have to do anything to discover their report landed.
-    A no-op (and never raises) for admins without a linked Slack workspace.
+    Background watcher (runs in its own daemon thread): blocks until
+    _auto_generate_cards_bg has finished generating mitigation cards for
+    ALL of the given report_ids — checking the same "cards_generation_complete"
+    flag the website's /upload/<report_id>/status/ polling endpoint reads —
+    or max_wait_seconds elapses as a safety cap so an admin is never stuck
+    forever if a card-generation run hangs. Once done (or timed out), posts
+    whichever onboarding message is next for this admin: the risk-criteria
+    prompt (first report) or straight to the real dashboard (risk criteria
+    already configured).
+
+    Shared by both the website upload flow (notify_admin_report_uploaded)
+    and the Slack "Upload Report" modal (_submit_upload_report) — an admin
+    should never see the risk-criteria prompt for a report whose fix
+    recommendations aren't actually ready yet, no matter which platform
+    they uploaded from.
     """
+    import time as _time
+    from vaptfix.mongo_client import MongoContext
+
+    report_ids = [str(r) for r in (report_ids or []) if r]
+    if not report_ids:
+        return
+
+    deadline = _time.time() + max_wait_seconds
+    try:
+        while _time.time() < deadline:
+            with MongoContext() as db:
+                # Count explicit completions, not "not incomplete" — a
+                # report_id whose Mongo document hasn't been written yet
+                # (race right after upload) matches neither "True" nor
+                # "$ne: True" against a nonexistent document, so counting
+                # the negative would wrongly read as "0 pending" the moment
+                # any of the report_ids simply doesn't exist yet.
+                completed = db["nessus_reports"].count_documents({
+                    "report_id": {"$in": report_ids},
+                    "cards_generation_complete": True,
+                })
+            if completed >= len(report_ids):
+                break
+            _time.sleep(poll_interval)
+        else:
+            logger.warning(
+                f"[UploadWatch] gave up waiting for report_ids={report_ids} after {max_wait_seconds}s"
+            )
+    except Exception:
+        logger.exception(f"[UploadWatch] polling failed for report_ids={report_ids}")
+
     try:
         bot_token = getattr(admin, "slack_bot_token", None)
         team_id = getattr(admin, "slack_team_id", None)
         if not bot_token or not team_id:
             return
-        channel_id = SlackSlashCommandView()._get_channel_id_by_name(bot_token, ADMIN_DASHBOARD_CHANNEL)
+        channel_id = SlackSlashCommandView()._get_admin_channel_id(bot_token)
         if not channel_id:
             return
         _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
+    except Exception:
+        logger.exception("[UploadWatch] failed to post onboarding message")
+
+
+def notify_admin_report_uploaded(admin, report_ids=None):
+    """
+    Called from upload_report/views.py right after an admin's upload
+    succeeds, with the report_id(s) that were just created. If they have a
+    linked Slack admin channel, waits in the background for the
+    mitigation-card agent to finish for those reports, then proactively
+    pushes them to the risk-criteria prompt (or straight to the dashboard
+    if risk criteria is already set) — they shouldn't have to do anything
+    to discover their report is ready. A no-op (and never raises) for
+    admins without a linked Slack workspace or with nothing to watch.
+    """
+    try:
+        bot_token = getattr(admin, "slack_bot_token", None)
+        team_id = getattr(admin, "slack_team_id", None)
+        if not bot_token or not team_id or not report_ids:
+            return
+        channel_id = SlackSlashCommandView()._get_channel_id_by_name(bot_token, ADMIN_DASHBOARD_CHANNEL)
+        if not channel_id:
+            return
+        threading.Thread(
+            target=_watch_reports_and_post_onboarding,
+            args=(report_ids, admin),
+            daemon=True,
+        ).start()
     except Exception:
         logger.exception("[SlackEvent] notify_admin_report_uploaded failed")
 
@@ -3568,7 +3684,7 @@ class SlackOAuthUrlView(APIView):
         slack_url = (
             f"https://slack.com/oauth/v2/authorize?"
             f"client_id={client_id}"
-            f"&scope=chat:write,channels:read,channels:manage,channels:join,groups:read,groups:write,mpim:write,im:write,users:read,users:read.email,commands,files:write"
+            f"&scope=chat:write,channels:read,channels:manage,channels:join,groups:read,groups:write,mpim:write,im:write,users:read,users:read.email,commands,files:write,files:read"
             f"&user_scope=identity.basic,identity.email,identity.avatar,identity.team"
             f"&redirect_uri={redirect_uri}"
             f"&state={state}"
@@ -6666,6 +6782,7 @@ class SlackInstallView(APIView):
             "chat:write", "channels:manage", "channels:join",
             "mpim:write", "groups:write", "im:write",
             "users:read", "users:read.email", "commands", "files:write",
+            "files:read",
         ]))
         user_scopes = "identity.basic,identity.email,identity.avatar,identity.team"
 
@@ -9310,6 +9427,85 @@ class SlackSlashCommandView(APIView):
         else:
             resp = _http_get(url, headers=headers, timeout=15)
         return resp.json()
+
+    def _submit_upload_report(self, values, team_id, slack_user_id):
+        """
+        Handles the "Upload Report" modal submit. Downloads the file the
+        admin attached via Slack's native file_input element, forwards it
+        to the exact same /upload_report/upload/ endpoint the website form
+        posts to (so Nessus/AWS Inspector/custom-file detection,
+        validation, and mitigation-agent triggering all run identically
+        either way), then kicks off the same background watcher the
+        website flow uses so the risk-criteria prompt only appears once
+        the mitigation cards are actually ready.
+        """
+        file_list = _find_by_action_id(values, "upload_file_input").get("files") or []
+        file_obj = file_list[0] if file_list else None
+        if not file_obj:
+            return self._text_block("❌ Please attach a file.")
+
+        file_name = file_obj.get("name") or "report"
+        download_url = file_obj.get("url_private_download") or file_obj.get("url_private")
+        if not download_url:
+            return self._text_block("❌ Could not read the uploaded file from Slack.")
+
+        bot_token = self._get_bot_token(team_id, slack_user_id=slack_user_id)
+        if not bot_token:
+            return self._text_block("❌ Could not find a bot token for this workspace.")
+
+        try:
+            file_resp = _http_get(
+                download_url,
+                headers={"Authorization": f"Bearer {bot_token}"},
+                timeout=30,
+            )
+            if file_resp.status_code != 200:
+                return self._text_block(
+                    f"❌ Could not download *{file_name}* from Slack (status {file_resp.status_code})."
+                )
+            file_bytes = file_resp.content
+        except Exception as exc:
+            logger.exception("[SlackUploadReport] file download failed")
+            return self._text_block(f"❌ Could not download *{file_name}* from Slack: {exc}")
+
+        token = self._get_admin_token(team_id, slack_user_id=slack_user_id)
+        if not token:
+            return self._text_block("❌ Your Slack workspace is not linked to a VaptFix admin account.")
+
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+        try:
+            upload_resp = _http_post(
+                f"{backend}/api/admin/upload_report/upload/",
+                headers={"Authorization": f"Bearer {token}"},
+                files={"file": (file_name, file_bytes)},
+                timeout=180,
+            )
+            upload_data = upload_resp.json()
+        except Exception as exc:
+            logger.exception("[SlackUploadReport] upload API call failed")
+            return self._text_block(f"❌ Upload failed: {exc}")
+
+        results = upload_data.get("results") or []
+        errors = upload_data.get("errors") or []
+
+        if not results:
+            reason = (errors[0].get("error") if errors else None) or upload_data.get("error") or "Upload failed."
+            return self._text_block(f"❌ *{file_name}*: {reason}")
+
+        report_ids = [r["report_id"] for r in results if r.get("report_id")]
+        admin = User.objects.filter(slack_team_id=team_id).first()
+        if report_ids and admin:
+            threading.Thread(
+                target=_watch_reports_and_post_onboarding,
+                args=(report_ids, admin),
+                daemon=True,
+            ).start()
+
+        report_type = (results[0].get("report_type") or "").replace("_", " ") or "report"
+        return self._text_block(
+            f"✅ *{file_name}* uploaded and recognized as a *{report_type}* file! "
+            "I'm generating fix recommendations now — I'll message you here once they're ready."
+        )
 
     def _get_member_token(self, team_id, slack_user_id):
         """
@@ -17355,6 +17551,7 @@ class SlackInteractivityView(APIView):
                 "modal_team_support_reply_submit": "Send Update",
                 "modal_extend_request_submit": "Request Extension",
                 "modal_risk_criteria_submit": "Set Risk Criteria",
+                "modal_upload_report_submit": "Upload Report",
             }
             if callback_id not in titles:
                 return Response({}, status=200)
@@ -18159,6 +18356,21 @@ class SlackInteractivityView(APIView):
                     timeout=10,
                 )
                 self._debug_write(f"open_risk_criteria_modal views.open -> {getattr(resp, 'text', None)}")
+                return
+
+            if action_id == "open_upload_report_modal":
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write("open_upload_report_modal: missing bot_token or trigger_id")
+                    return
+                view = _build_upload_report_modal()
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"open_upload_report_modal views.open -> {getattr(resp, 'text', None)}")
                 return
 
             if action_id.startswith("tfixed_pg_"):
@@ -19158,6 +19370,7 @@ class SlackInteractivityView(APIView):
             "modal_team_support_reply_submit": "Send Update",
             "modal_extend_request_submit": "Request Extension",
             "modal_risk_criteria_submit": "Set Risk Criteria",
+            "modal_upload_report_submit": "Upload Report",
         }
         if callback_id not in titles:
             return
@@ -19306,6 +19519,8 @@ class SlackInteractivityView(APIView):
                     else:
                         err = resp_data.get("detail") or resp_data.get("error") or "Could not save risk criteria."
                         blocks = slash._text_block(f"❌ {err}")
+            elif callback_id == "modal_upload_report_submit":
+                blocks = slash._submit_upload_report(values, team_id, slack_user_id)
             else:
                 # modal_reject_submit — sid was already known when the modal
                 # was opened (from the clicked row), carried via
