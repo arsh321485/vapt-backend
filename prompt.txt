@@ -1,8 +1,20 @@
-jb tk file upload nai hoti tb tk done vali button nai aani chahihe or agent create ho jaye tbhi redirect krna hai to vhi pr jo polling status vala jo api hai na o lgana hai 
-|
 
+    "success": true,
+    "message": "Files Uploaded Successfully",
+    "count": 0,
+    "results": [],
+    "errors": [
+        {
+            "file": "Ibdaa_Int_July_dpeeds.html",
+            "error": "Could not validate this file right now — please try again."
+        }
+    ],
+    "total_processing_time_seconds": 0.03,
+    "total_processing_time_text": "0 sec"
+}
 
+nessue ki file support q nai kr rhi hai frendend me error aa rhi hai to o btao mujhe 
 
-or ese 2-2 msg q aa rhe hai ek hi aana chahihe 
+ki kya issue hai 
 
-to mujhe btao plan fir code krna
+to me frendend developer ko bta sku

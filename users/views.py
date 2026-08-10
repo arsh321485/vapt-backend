@@ -3395,6 +3395,19 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
     if state == "ready":
         SlackEventsView()._post_admin_navbar_message(bot_token, channel_id, team_id)
         return state
+
+    # Idempotency guard — several independent triggers can all resolve to
+    # "post the message for this state" within moments of each other:
+    # ensure_vaptfix_channels()'s direct post-on-creation + the
+    # member_joined_channel event that same conversations.join fires, or two
+    # near-simultaneous uploads each spawning their own
+    # _watch_reports_and_post_onboarding watcher that both land on "post
+    # the risk-criteria prompt" around the same time. Only the first of any
+    # such race actually posts; cache.add() is atomic across workers.
+    dedup_key = f"slack_onboarding_msg:{team_id}:{channel_id}:{state}"
+    if not cache.add(dedup_key, True, timeout=120):
+        return state
+
     blocks = _build_admin_welcome_blocks() if state == "no_report" else _build_admin_risk_criteria_prompt_blocks()
     text = "VaptFix — Welcome" if state == "no_report" else "VaptFix — Set Risk Criteria"
     try:
