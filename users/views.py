@@ -3362,6 +3362,24 @@ def _build_risk_criteria_modal():
     }
 
 
+def _try_claim_admin_channel_first_post(team_id, channel_id):
+    """
+    Returns True the first time it's called for a given (team_id, channel_id)
+    within the window, False on any repeat call within it.
+
+    ensure_vaptfix_channels() posts the onboarding message directly right
+    after it creates+joins #vaptfix-admin-dashboard via conversations.create
+    + conversations.join — but that same conversations.join also makes Slack
+    fire a real member_joined_channel EVENT for the bot's own membership,
+    and that event handler posts the identical onboarding message again,
+    producing the duplicate "Welcome to VaptFix, Admin" message seen in
+    Slack. cache.add() is atomic, so only whichever of the two call sites
+    reaches it first actually gets to post.
+    """
+    key = f"slack_admin_channel_first_post:{team_id}:{channel_id}"
+    return cache.add(key, True, timeout=120)
+
+
 def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
     """
     Posts whichever message matches this admin's current onboarding state:
@@ -3394,10 +3412,10 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
 def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800, poll_interval=6):
     """
     Background watcher (runs in its own daemon thread): blocks until
-    _auto_generate_cards_bg has finished generating mitigation cards for
-    ALL of the given report_ids — checking the same "cards_generation_complete"
-    flag the website's /upload/<report_id>/status/ polling endpoint reads —
-    or max_wait_seconds elapses as a safety cap so an admin is never stuck
+    GET /upload_report/upload/<report_id>/status/ — the exact same
+    polling endpoint the website frontend uses — reports
+    "cards_generation_complete": true for ALL of the given report_ids, or
+    max_wait_seconds elapses as a safety cap so an admin is never stuck
     forever if a card-generation run hangs. Once done (or timed out), posts
     whichever onboarding message is next for this admin: the risk-criteria
     prompt (first report) or straight to the real dashboard (risk criteria
@@ -3407,30 +3425,41 @@ def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800,
     and the Slack "Upload Report" modal (_submit_upload_report) — an admin
     should never see the risk-criteria prompt for a report whose fix
     recommendations aren't actually ready yet, no matter which platform
-    they uploaded from.
+    they uploaded from. Goes through the real status API (not a direct
+    Mongo read) so there's exactly one place — that endpoint — that decides
+    what "complete" means.
     """
     import time as _time
-    from vaptfix.mongo_client import MongoContext
+    from rest_framework_simplejwt.tokens import RefreshToken as _RT
 
     report_ids = [str(r) for r in (report_ids or []) if r]
     if not report_ids:
         return
 
+    backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+    token = str(_RT.for_user(admin).access_token)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def _all_complete():
+        for rid in report_ids:
+            try:
+                resp = _http_get(
+                    f"{backend}/api/admin/upload_report/upload/{rid}/status/",
+                    headers=headers,
+                    timeout=15,
+                )
+                data = resp.json()
+            except Exception:
+                logger.exception(f"[UploadWatch] status check failed for report_id={rid}")
+                return False
+            if not data.get("cards_generation_complete"):
+                return False
+        return True
+
     deadline = _time.time() + max_wait_seconds
     try:
         while _time.time() < deadline:
-            with MongoContext() as db:
-                # Count explicit completions, not "not incomplete" — a
-                # report_id whose Mongo document hasn't been written yet
-                # (race right after upload) matches neither "True" nor
-                # "$ne: True" against a nonexistent document, so counting
-                # the negative would wrongly read as "0 pending" the moment
-                # any of the report_ids simply doesn't exist yet.
-                completed = db["nessus_reports"].count_documents({
-                    "report_id": {"$in": report_ids},
-                    "cards_generation_complete": True,
-                })
-            if completed >= len(report_ids):
+            if _all_complete():
                 break
             _time.sleep(poll_interval)
         else:
@@ -3552,7 +3581,8 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_
             try:
                 admin = User.objects.filter(slack_team_id=team_id).first()
                 if admin:
-                    _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
+                    if _try_claim_admin_channel_first_post(team_id, channel_id):
+                        _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
                 else:
                     SlackEventsView()._post_admin_navbar_message(bot_token, channel_id, team_id)
             except Exception:
@@ -6351,7 +6381,8 @@ class SlackEventsView(APIView):
                     if bot_user_id and slack_user_id == bot_user_id:
                         channel_name = self._get_channel_name(admin.slack_bot_token, channel_id)
                         if channel_name == SlackSlashCommandView.ADMIN_CHANNEL:
-                            _post_admin_onboarding_message(admin.slack_bot_token, channel_id, tid, admin)
+                            if _try_claim_admin_channel_first_post(tid, channel_id):
+                                _post_admin_onboarding_message(admin.slack_bot_token, channel_id, tid, admin)
                         elif channel_name in SlackSlashCommandView.TEAM_CHANNELS:
                             team_name = SlackSlashCommandView.TEAM_CHANNELS[channel_name]
                             self._post_team_navbar_message(admin.slack_bot_token, channel_id, tid, team_name)
