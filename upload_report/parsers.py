@@ -279,6 +279,170 @@ def parse_excel(file_path: str) -> Dict[str, Any]:
         return {"error": f"Excel parse error: {exc}"}
 
 
+# ==================== AWS INSPECTOR CSV PARSER ==================== #
+
+# Columns that uniquely identify an AWS Inspector export (subset is enough
+# to sniff the file without depending on AWS not reordering/adding columns).
+AWS_INSPECTOR_SNIFF_COLUMNS = {"AWS Account Id", "Resource ID", "Finding Type", "Vulnerability Id"}
+
+# Per VAPTFIX_AWS_Inspector_Field_Mapping.xlsx — only these columns are kept,
+# everything else in the AWS export is discarded as redundant/AWS-internal.
+_AWS_ASSET_COLUMNS = {
+    "account_id": "AWS Account Id",
+    "resource_type": "Resource Type",
+    "public_ipv4": "Resource Public Ipv4",
+    # "operating-system" is filled separately by _normalize_aws_platform() below —
+    # for AWS_LAMBDA_FUNCTION resources the "Platform" column is a language
+    # RUNTIME (e.g. "JAVA_17"), not an OS, so it needs translating first.
+}
+
+
+def _normalize_aws_platform(resource_type: str, platform: str) -> str:
+    """
+    AWS Inspector's "Platform" column is the actual OS for EC2/ECR resources
+    (e.g. "AMAZON_LINUX_2", "DEBIAN_12") — those pass through untouched.
+
+    For AWS_LAMBDA_FUNCTION resources, "Platform" is instead the language
+    runtime (e.g. "JAVA_17", "PYTHON_3_11", "NODEJS_18_X"). Left as-is, the
+    downstream OS-detection (_detect_os) doesn't recognize it and silently
+    falls back to "windows", producing PowerShell/Registry mitigation steps
+    for what is actually a Java/Python/Node function running on Amazon Linux.
+    All AWS Lambda runtimes execute on Amazon Linux under the hood, so map
+    the runtime string onto that real OS instead of losing it.
+    """
+    platform = (platform or "").strip()
+    if (resource_type or "").strip().upper() == "AWS_LAMBDA_FUNCTION":
+        if platform:
+            runtime_label = platform.replace("_", " ").title()
+            return f"Amazon Linux 2 (AWS Lambda — {runtime_label} runtime)"
+        return "Amazon Linux 2 (AWS Lambda execution environment)"
+    return platform
+
+
+def _sniff_is_aws_inspector_csv(file_path: str) -> bool:
+    """Peek at the header row to detect an AWS Inspector export."""
+    try:
+        with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as fp:
+            header_line = fp.readline()
+        columns = {c.strip().strip('"') for c in header_line.split(",")}
+        return AWS_INSPECTOR_SNIFF_COLUMNS.issubset(columns)
+    except Exception:
+        return False
+
+
+def parse_aws_inspector_csv(file_path: str) -> Dict[str, Any]:
+    """
+    Parse an AWS Inspector CSV export into the same vulnerabilities_by_host
+    shape the Nessus parsers produce, so it can reuse storage, preview, and
+    the mitigation-card generation pipeline unchanged.
+
+    Field selection follows VAPTFIX_AWS_Inspector_Field_Mapping.xlsx exactly.
+    One host entry per AWS "Resource ID" (asset); one vulnerability entry
+    per finding row for that resource.
+    """
+    try:
+        df = pd.read_csv(file_path, dtype=str, keep_default_na=False)
+    except Exception as exc:
+        return {"error": f"AWS Inspector CSV parse error: {exc}"}
+
+    missing = [c for c in ("AWS Account Id", "Resource ID", "Title") if c not in df.columns]
+    if missing:
+        return {"error": f"Not a recognized AWS Inspector export — missing columns: {', '.join(missing)}"}
+
+    def _get(row, col: str) -> str:
+        val = row.get(col, "")
+        if val is None:
+            return ""
+        val = str(val).strip()
+        return "" if val.lower() == "nan" else val
+
+    host_map: Dict[str, Dict[str, Any]] = {}
+    vulnerabilities_by_host: List[Dict[str, Any]] = []
+    total_vulns = 0
+
+    for _, row in df.iterrows():
+        title = _get(row, "Title")
+        if not title:
+            continue  # skip rows without a usable finding
+
+        resource_id = _get(row, "Resource ID") or "unknown-resource"
+
+        host_entry = host_map.get(resource_id)
+        if not host_entry:
+            resource_type_val = _get(row, "Resource Type")
+            host_info = {
+                key: _get(row, col) for key, col in _AWS_ASSET_COLUMNS.items()
+            }
+            host_info["operating-system"] = _normalize_aws_platform(
+                resource_type_val, _get(row, "Platform")
+            )
+            host_entry = {
+                "host_name": resource_id,
+                "host_information": host_info,
+                "vulnerabilities": [],
+            }
+            host_map[resource_id] = host_entry
+            vulnerabilities_by_host.append(host_entry)
+
+        severity = _get(row, "Severity")
+        risk_factor = severity.title() if severity else ""
+
+        affected_package = _get(row, "Affected Packages")
+        file_path_field = _get(row, "File Path")
+        port_range = _get(row, "Port Range")
+        vendor = _get(row, "Vendor")
+        epss_score = _get(row, "Epss Score")
+        description = _get(row, "Description")
+
+        # Context block for the AI mitigation agent — same idea as Nessus's
+        # plugin_output field, built from the technical columns we kept.
+        context_bits = []
+        if affected_package:
+            context_bits.append(f"Affected Package: {affected_package}")
+        if file_path_field:
+            context_bits.append(f"File Path: {file_path_field}")
+        if port_range:
+            context_bits.append(f"Port Range: {port_range}")
+        if vendor:
+            context_bits.append(f"Source: {vendor}")
+        if epss_score:
+            context_bits.append(f"EPSS Score: {epss_score}")
+
+        vuln = {
+            "plugin_id": _get(row, "Vulnerability Id") or None,
+            "plugin_name": title,
+            "synopsis": "",
+            "description": description,
+            "description_points": _split_text_to_points(description),
+            "solution": "",
+            "see_also": [],
+            "risk_factor": risk_factor,
+            "cvss_v3_base_score": _get(row, "Inspector Score"),
+            "plugin_information": "",
+            "plugin_output": "\n".join(context_bits),
+            "plugin_output_url": None,
+            # AWS-specific extras (kept alongside the Nessus-shaped fields above)
+            "cve_id": _get(row, "Vulnerability Id"),
+            "category": _get(row, "Finding Type"),
+            "source": vendor,
+            "affected_package": affected_package,
+            "file_path": file_path_field,
+            "port": port_range,
+            "epss_score": epss_score,
+        }
+        host_entry["vulnerabilities"].append(vuln)
+        total_vulns += 1
+
+    total_hosts = len(vulnerabilities_by_host)
+    return {
+        "type": "aws",
+        "scan_info": {"source": "AWS Inspector", "parser": "aws_inspector_csv"},
+        "total_hosts": total_hosts,
+        "total_vulnerabilities": total_vulns,
+        "vulnerabilities_by_host": vulnerabilities_by_host,
+    }
+
+
 # ==================== NESSUS XML PARSER ==================== #
 
 # def parse_nessus_xml(file_path: str) -> Dict[str, Any]:
@@ -913,8 +1077,14 @@ def dispatch_parse(file_path: str, filename: str) -> Dict[str, Any]:
     if ext == '.pdf':
         return parse_pdf(file_path)
     
-    # CSV files
+    # CSV files — check for AWS Inspector export first, fall back to generic CSV
     if ext == '.csv':
+        if _sniff_is_aws_inspector_csv(file_path):
+            result = parse_aws_inspector_csv(file_path)
+            if "error" not in result:
+                return result
+            # Sniffed as AWS Inspector but structured parse failed — fall
+            # back to generic CSV rather than losing the upload entirely.
         return parse_csv(file_path)
     
     # Excel files
