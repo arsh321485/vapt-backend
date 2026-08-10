@@ -1227,8 +1227,27 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "plugin_output_url": first_plugin_output_url,
                 })
 
+        # Record the ACTUAL denominator for completion tracking. total_vulnerabilities
+        # (the parsed report's raw count) is NOT the same number as len(vulns_to_process):
+        # vulns without a plugin_name or a description are filtered out above and will
+        # never get a card, so total_vulnerabilities is always >= this. The status API
+        # must compare cards_generated against THIS number, or it reports
+        # cards_generation_complete=true while cards_generated is still short of the
+        # (unreachable) raw total — e.g. 65/93 "complete".
+        db[NESSUS_COLLECTION].update_one(
+            {"report_id": report_id},
+            {"$set": {"cards_expected_count": len(vulns_to_process)}}
+        )
+
         if not vulns_to_process:
             logger.info(f"[AutoGenCards] No vulnerabilities to process for report_id={report_id}")
+            # Nothing will ever be generated for this report — mark complete now
+            # rather than leaving cards_generation_complete unset forever (which
+            # would make the status endpoint poll indefinitely).
+            db[NESSUS_COLLECTION].update_one(
+                {"report_id": report_id},
+                {"$set": {"cards_generation_complete": True, "cards_generated_count": 0}}
+            )
             return
 
         print(f"[AutoGenCards] {len(vulns_to_process)} total vulnerabilities to process for report_id={report_id}", flush=True)
@@ -1484,6 +1503,7 @@ class UploadCardsStatusAPIView(APIView):
             {"report_id": str(report_id)},
             {
                 "total_vulnerabilities": 1,
+                "cards_expected_count": 1,
                 "cards_generation_complete": 1,
                 "cards_generated_count": 1,
                 "cards_generation_started_at": 1,
@@ -1505,21 +1525,38 @@ class UploadCardsStatusAPIView(APIView):
                 "remaining_time_text": "45 sec",
             }, status=200)
 
-        cards_total = int(nessus_doc.get("total_vulnerabilities", 0) or 0)
-        complete = bool(nessus_doc.get("cards_generation_complete", False))
+        # cards_expected_count (set by _auto_generate_cards_bg once it knows which
+        # vulns will actually get a card) is the correct denominator — total_vulnerabilities
+        # is the raw parsed count and can be HIGHER, because vulns without a plugin_name
+        # or a description are filtered out and never get a card. Comparing generated
+        # counts against the raw total made "cards_generation_complete: true" show up
+        # while cards_generated was still short (e.g. 65/93) and would never catch up.
+        # Fall back to total_vulnerabilities for reports generated before this field existed.
+        if "cards_expected_count" in nessus_doc:
+            cards_total = int(nessus_doc.get("cards_expected_count") or 0)
+        else:
+            cards_total = int(nessus_doc.get("total_vulnerabilities", 0) or 0)
+
+        raw_complete = bool(nessus_doc.get("cards_generation_complete", False))
 
         # Nothing to generate for this report — treat as immediately complete.
-        if cards_total == 0 and not complete:
+        if cards_total == 0 and not raw_complete:
             db[NESSUS_COLLECTION].update_one(
                 {"report_id": str(report_id)},
                 {"$set": {"cards_generation_complete": True, "cards_generated_count": 0}},
             )
-            complete = True
+            raw_complete = True
 
-        if complete:
+        if raw_complete:
             cards_generated = int(nessus_doc.get("cards_generated_count", cards_total) or cards_total)
         else:
             cards_generated = db[VULN_CARD_COLLECTION].count_documents({"report_id": str(report_id)})
+
+        # Defensive backstop, per the exact bug report: never actually report
+        # complete=true unless generated has genuinely caught up to total —
+        # regardless of what the raw Mongo flag says. Guards against any future
+        # mismatch between how completion gets marked and how the total is counted.
+        complete = raw_complete and (cards_total == 0 or cards_generated >= cards_total)
 
         started_at = nessus_doc.get("cards_generation_started_at")
         if started_at and getattr(started_at, "tzinfo", None):

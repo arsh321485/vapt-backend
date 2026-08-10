@@ -3397,15 +3397,20 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
         return state
 
     # Idempotency guard — several independent triggers can all resolve to
-    # "post the message for this state" within moments of each other:
-    # ensure_vaptfix_channels()'s direct post-on-creation + the
-    # member_joined_channel event that same conversations.join fires, or two
-    # near-simultaneous uploads each spawning their own
-    # _watch_reports_and_post_onboarding watcher that both land on "post
-    # the risk-criteria prompt" around the same time. Only the first of any
-    # such race actually posts; cache.add() is atomic across workers.
+    # "post the message for this state": ensure_vaptfix_channels()'s direct
+    # post-on-creation + the member_joined_channel event that same
+    # conversations.join fires, or multiple _watch_reports_and_post_onboarding
+    # watchers (e.g. _auto_generate_cards_bg itself running more than once
+    # for the same report_id) that all eventually see "complete" and land on
+    # "post the risk-criteria prompt" — sometimes minutes apart, not just
+    # moments apart. So this is NOT a short debounce window: the key is
+    # scoped to this exact state (a later, genuinely different state — e.g.
+    # needs_risk_criteria -> ready — gets its own fresh key and posts fine)
+    # and never expires, so a stale duplicate can't sneak back in after a
+    # timeout. cache.add() is atomic — only the first of any simultaneous
+    # callers actually wins the race and posts.
     dedup_key = f"slack_onboarding_msg:{team_id}:{channel_id}:{state}"
-    if not cache.add(dedup_key, True, timeout=120):
+    if not cache.add(dedup_key, True, timeout=None):
         return state
 
     blocks = _build_admin_welcome_blocks() if state == "no_report" else _build_admin_risk_criteria_prompt_blocks()
