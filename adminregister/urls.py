@@ -41,7 +41,10 @@ urlpatterns = [
     # path('register/host/<str:host_name>/vulns/', VulnerabilitiesByHostDetailAPIView.as_view(), name='vulnerabilities-by-host-detail'),
 
     path(
-        "fix-vulnerability/report/<str:report_id>/asset/<str:host_name>/create/",
+        # <path:...> (not <str:...>) — AWS asset "host_name" values are full
+        # ARNs (e.g. arn:aws:ecr:...:repository/<name>/sha256:<digest>) which
+        # contain literal "/" characters that <str:> would refuse to match.
+        "fix-vulnerability/report/<str:report_id>/asset/<path:host_name>/create/",
         FixVulnerabilityCreateAPIView.as_view(),
     ),
 
@@ -54,7 +57,7 @@ urlpatterns = [
 
     # Get all closed vulnerabilities for a report + asset
     path(
-        "closed-vulnerabilities/report/<str:report_id>/asset/<str:host_name>/",
+        "closed-vulnerabilities/report/<str:report_id>/asset/<path:host_name>/",
         ClosedVulnerabilitiesByAssetAPIView.as_view(),
         name="closed-vulnerabilities-by-asset"
     ),
@@ -110,7 +113,7 @@ urlpatterns = [
 
     # Get support requests by host_name
     path(
-        "support-requests/host/<str:host_name>/",
+        "support-requests/host/<path:host_name>/",
         SupportRequestByHostNameAPIView.as_view(),
         name="support-requests-by-host"
     ),

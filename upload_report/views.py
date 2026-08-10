@@ -218,8 +218,9 @@ class UploadReportView(APIView):
                 "report_type": parsed_data.get("type", "unknown"),
             }
 
-            # For Nessus reports, use structured format
-            if parsed_data.get("type") in ("nessus_html", "nessus"):
+            # For Nessus and AWS Inspector reports, use structured format
+            # (both produce the same vulnerabilities_by_host shape)
+            if parsed_data.get("type") in ("nessus_html", "nessus", "aws"):
                 # FIXED: Now using _prepare_hosts_for_storage which KEEPS risk_factor
                 hosts_payload = self._prepare_hosts_for_storage(
                     parsed_data.get("vulnerabilities_by_host", [])
@@ -255,8 +256,8 @@ class UploadReportView(APIView):
         """
         report_type = parsed_data.get("type")
         
-        # Nessus reports (HTML or XML)
-        if report_type in ("nessus_html", "nessus"):
+        # Nessus reports (HTML or XML) and AWS Inspector reports
+        if report_type in ("nessus_html", "nessus", "aws"):
             preview = {
                 "type": report_type,
                 "scan_info": parsed_data.get("scan_info", {}),
@@ -648,7 +649,7 @@ class UploadReportView(APIView):
 
                     # 🔹 Parsed count
                     parsed_count = 1
-                    if parsed_data.get("type") in ("nessus", "nessus_html"):
+                    if parsed_data.get("type") in ("nessus", "nessus_html", "aws"):
                         parsed_count = parsed_data.get("total_vulnerabilities", 1) or 1
                     elif "rows" in parsed_data:
                         parsed_count = parsed_data.get("rows", 1)
@@ -684,7 +685,7 @@ class UploadReportView(APIView):
                         )
 
                         # Store actual upload processing time for UploadStatusView ETA
-                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html"):
+                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws"):
                             upload_processing_seconds = int(round(time.perf_counter() - file_start))
                             try:
                                 from vaptfix.mongo_client import get_shared_client, get_shared_db
@@ -707,9 +708,10 @@ class UploadReportView(APIView):
                             except Exception as _mce:
                                 logger.warning(f"[UploadCache] Could not clear mitigation_by_team cache: {_mce}")
 
-                        # Auto-generate vulnerability cards in background (only for nessus reports)
+                        # Auto-generate vulnerability cards in background (Nessus + AWS reports —
+                        # both share the same vulnerabilities_by_host structure)
                         print(f"[AutoGenCards] mongodb_stored={mongodb_stored}, report_type={parsed_data.get('type')}", flush=True)
-                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html"):
+                        if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws"):
                             t = threading.Thread(
                                 target=_auto_generate_cards_bg,
                                 args=(report_id, target_admin.email, str(target_admin.id)),
