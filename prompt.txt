@@ -1,5 +1,8 @@
-upload report pr cilck krne bad kuch ho hi nai rha hai o check kro 
+jb tk file upload nai hoti tb tk done vali button nai aani chahihe or agent create ho jaye tbhi redirect krna hai to vhi pr jo polling status vala jo api hai na o lgana hai 
+|
 
-or first ss hai o slack bot vala vha pr jata hai jb slack se login krta hai to mujhe jb admin login kr rha hai to mujhe usko vaptfix-admin-dashboard pr jana chahihe 
 
-to mujhe plan btao fir code krna 
+
+or ese 2-2 msg q aa rhe hai ek hi aana chahihe 
+
+to mujhe btao plan fir code krna
