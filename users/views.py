@@ -3848,9 +3848,17 @@ class SlackOAuthCallbackView(APIView):
             django_access_token = str(refresh.access_token)
             django_refresh_token = str(refresh)
 
-            # ✅ Step 5: postMessage to parent then redirect to Slack
+            # ✅ Step 5: postMessage to parent then redirect to Slack — straight
+            # into #vaptfix-admin-dashboard (not the workspace root, which
+            # Slack's client defaults to opening on the generic Slackbot DM).
             team_id = team_info.get("id")
-            slack_redirect_url = f"https://app.slack.com/client/{team_id}" if team_id else "https://slack.com"
+            admin_channel_id = channels.get(ADMIN_DASHBOARD_CHANNEL)
+            if team_id and admin_channel_id:
+                slack_redirect_url = f"https://app.slack.com/client/{team_id}/{admin_channel_id}"
+            elif team_id:
+                slack_redirect_url = f"https://app.slack.com/client/{team_id}"
+            else:
+                slack_redirect_url = "https://slack.com"
             html = f"""
             <html>
             <head><title>Slack Connected</title></head>
@@ -18371,6 +18379,23 @@ class SlackInteractivityView(APIView):
                     timeout=10,
                 )
                 self._debug_write(f"open_upload_report_modal views.open -> {getattr(resp, 'text', None)}")
+                # Surface a visible error instead of the click silently doing
+                # nothing — views.open can reject the modal (invalid_blocks,
+                # expired trigger_id, missing scope, etc.) and previously
+                # that only ever showed up in the server-side debug log.
+                try:
+                    resp_json = resp.json()
+                except Exception:
+                    resp_json = {}
+                if not resp_json.get("ok"):
+                    err = resp_json.get("error", "unknown_error")
+                    self._post_response_url(
+                        response_url,
+                        {"response_type": "ephemeral", "replace_original": False,
+                         "text": f"❌ Could not open the Upload Report dialog: `{err}`. "
+                                 "Please try clicking the button again."},
+                        action_id,
+                    )
                 return
 
             if action_id.startswith("tfixed_pg_"):
