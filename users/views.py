@@ -3429,7 +3429,20 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
     return state
 
 
-def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800, poll_interval=6):
+def _slack_progress_bar(pct, width=20):
+    pct = max(0, min(100, pct))
+    filled = int(round((pct / 100) * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _upload_in_progress_key(team_id):
+    return f"slack_upload_in_progress:{team_id}"
+
+
+def _watch_reports_and_post_onboarding(
+    report_ids, admin, max_wait_seconds=1800, poll_interval=6,
+    progress_channel_id=None, progress_ts=None, file_label=None,
+):
     """
     Background watcher (runs in its own daemon thread): blocks until
     GET /upload_report/upload/<report_id>/status/ — the exact same
@@ -3440,6 +3453,12 @@ def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800,
     whichever onboarding message is next for this admin: the risk-criteria
     prompt (first report) or straight to the real dashboard (risk criteria
     already configured).
+
+    If progress_channel_id/progress_ts are given (the Slack "Upload Report"
+    modal flow posts a placeholder message and passes its coordinates here),
+    that same message is live-updated with a text progress bar on every poll
+    — so the admin sees generation actually happening instead of just an
+    initial "uploaded" message and then silence until the next channel post.
 
     Shared by both the website upload flow (notify_admin_report_uploaded)
     and the Slack "Upload Report" modal (_submit_upload_report) — an admin
@@ -3462,8 +3481,28 @@ def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800,
     backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
     token = str(_RT.for_user(admin).access_token)
     headers = {"Authorization": f"Bearer {token}"}
+    bot_token = getattr(admin, "slack_bot_token", None)
+    team_id = getattr(admin, "slack_team_id", None)
 
-    def _all_complete():
+    def _update_progress_message(text):
+        if not (bot_token and progress_channel_id and progress_ts):
+            return
+        try:
+            _http_post(
+                "https://slack.com/api/chat.update",
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                json={"channel": progress_channel_id, "ts": progress_ts,
+                      "text": text, "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]},
+                timeout=15,
+            )
+        except Exception:
+            logger.exception("[UploadWatch] failed to update progress message")
+
+    def _poll_once():
+        """Returns (all_complete, total_generated, total_cards) across every report_id."""
+        complete = True
+        total_generated = 0
+        total_cards = 0
         for rid in report_ids:
             try:
                 resp = _http_get(
@@ -3474,20 +3513,29 @@ def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800,
                 data = resp.json()
             except Exception:
                 logger.exception(f"[UploadWatch] status check failed for report_id={rid}")
-                return False
+                return False, total_generated, total_cards
             logger.info(
                 f"[UploadWatch] report_id={rid} complete={data.get('cards_generation_complete')} "
                 f"generated={data.get('cards_generated')}/{data.get('cards_total')}"
             )
+            total_generated += int(data.get("cards_generated") or 0)
+            total_cards += int(data.get("cards_total") or 0)
             if not data.get("cards_generation_complete"):
-                return False
-        return True
+                complete = False
+        return complete, total_generated, total_cards
 
+    label = f"*{file_label}*" if file_label else "your report"
     all_done = False
     deadline = _time.time() + max_wait_seconds
     try:
         while _time.time() < deadline:
-            if _all_complete():
+            complete, generated, total = _poll_once()
+            pct = int(round((generated / total) * 100)) if total else 0
+            _update_progress_message(
+                f"⏳ Generating fix recommendations for {label}...\n"
+                f"`{_slack_progress_bar(pct)}` {pct}% ({generated}/{total} cards)"
+            )
+            if complete:
                 all_done = True
                 break
             _time.sleep(poll_interval)
@@ -3497,6 +3545,17 @@ def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800,
             )
     except Exception:
         logger.exception(f"[UploadWatch] polling failed for report_ids={report_ids}")
+
+    if all_done:
+        _update_progress_message(f"✅ Fix recommendations for {label} are ready!")
+    else:
+        _update_progress_message(
+            f"⚠️ Still generating fix recommendations for {label} — this is taking longer than expected. "
+            "I'll keep working on it in the background."
+        )
+
+    if team_id:
+        cache.delete(_upload_in_progress_key(team_id))
 
     logger.info(f"[UploadWatch] Done waiting for report_ids={report_ids} — all_done={all_done}, posting onboarding message next")
 
@@ -9521,14 +9580,32 @@ class SlackSlashCommandView(APIView):
             logger.warning("[SlackUploadReport] No file found in modal submission values")
             return self._text_block("❌ Please attach a file.")
 
+        # One upload-and-generate cycle at a time per workspace — prevents a second
+        # "Upload Report" click while the first is still generating cards from
+        # racing it (duplicate progress messages, two watchers, etc). Released by
+        # the watcher once it finishes (success, failure, or timeout) — see
+        # _watch_reports_and_post_onboarding. Any early-return failure path below
+        # must release it too (the watcher never gets spawned to do it for us).
+        if not cache.add(_upload_in_progress_key(team_id), True, timeout=1800):
+            logger.info(f"[SlackUploadReport] Rejected — upload already in progress for team_id={team_id}")
+            return self._text_block(
+                "⏳ A report is already being processed for your workspace. "
+                "Please wait for it to finish before uploading another."
+            )
+
+        def _fail(text):
+            cache.delete(_upload_in_progress_key(team_id))
+            logger.warning(f"[SlackUploadReport] {text}")
+            return self._text_block(f"❌ {text}")
+
         file_name = file_obj.get("name") or "report"
         download_url = file_obj.get("url_private_download") or file_obj.get("url_private")
         if not download_url:
-            return self._text_block("❌ Could not read the uploaded file from Slack.")
+            return _fail("Could not read the uploaded file from Slack.")
 
         bot_token = self._get_bot_token(team_id, slack_user_id=slack_user_id)
         if not bot_token:
-            return self._text_block("❌ Could not find a bot token for this workspace.")
+            return _fail("Could not find a bot token for this workspace.")
 
         try:
             file_resp = _http_get(
@@ -9537,17 +9614,15 @@ class SlackSlashCommandView(APIView):
                 timeout=30,
             )
             if file_resp.status_code != 200:
-                return self._text_block(
-                    f"❌ Could not download *{file_name}* from Slack (status {file_resp.status_code})."
-                )
+                return _fail(f"Could not download *{file_name}* from Slack (status {file_resp.status_code}).")
             file_bytes = file_resp.content
         except Exception as exc:
             logger.exception("[SlackUploadReport] file download failed")
-            return self._text_block(f"❌ Could not download *{file_name}* from Slack: {exc}")
+            return _fail(f"Could not download *{file_name}* from Slack: {exc}")
 
         token = self._get_admin_token(team_id, slack_user_id=slack_user_id)
         if not token:
-            return self._text_block("❌ Your Slack workspace is not linked to a VaptFix admin account.")
+            return _fail("Your Slack workspace is not linked to a VaptFix admin account.")
 
         backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
         try:
@@ -9560,7 +9635,7 @@ class SlackSlashCommandView(APIView):
             upload_data = upload_resp.json()
         except Exception as exc:
             logger.exception("[SlackUploadReport] upload API call failed")
-            return self._text_block(f"❌ Upload failed: {exc}")
+            return _fail(f"Upload failed: {exc}")
 
         results = upload_data.get("results") or []
         errors = upload_data.get("errors") or []
@@ -9569,25 +9644,52 @@ class SlackSlashCommandView(APIView):
 
         if not results:
             reason = (errors[0].get("error") if errors else None) or upload_data.get("error") or "Upload failed."
-            logger.warning(f"[SlackUploadReport] Upload rejected for '{file_name}': {reason}")
-            return self._text_block(f"❌ *{file_name}*: {reason}")
+            return _fail(f"*{file_name}*: {reason}")
 
         report_ids = [r["report_id"] for r in results if r.get("report_id")]
         admin = User.objects.filter(slack_team_id=team_id).first()
-        if report_ids and admin:
-            logger.info(f"[SlackUploadReport] Spawning watcher for report_ids={report_ids} admin={admin.email}")
-            threading.Thread(
-                target=_watch_reports_and_post_onboarding,
-                args=(report_ids, admin),
-                daemon=True,
-            ).start()
-        else:
-            logger.warning(f"[SlackUploadReport] NOT spawning watcher — report_ids={report_ids} admin_found={bool(admin)} team_id={team_id}")
+        if not (report_ids and admin):
+            return _fail("Upload succeeded but couldn't start fix-generation tracking. Contact support.")
+
+        # Post the live progress message the watcher will keep updating (% bar)
+        # as cards generate, in place of leaving the admin with just the initial
+        # "uploaded" confirmation and silence until the risk-criteria prompt.
+        progress_channel_id = None
+        progress_ts = None
+        try:
+            admin_channel_id = self._get_admin_channel_id(bot_token)
+            if admin_channel_id:
+                init_text = f"⏳ Generating fix recommendations for *{file_name}*...\n`{_slack_progress_bar(0)}` 0%"
+                post_resp = _http_post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                    json={"channel": admin_channel_id, "text": init_text,
+                          "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": init_text}}]},
+                    timeout=15,
+                )
+                post_data = post_resp.json()
+                if post_data.get("ok"):
+                    progress_channel_id = admin_channel_id
+                    progress_ts = post_data.get("ts")
+        except Exception:
+            logger.exception("[SlackUploadReport] failed to post initial progress message")
+
+        logger.info(f"[SlackUploadReport] Spawning watcher for report_ids={report_ids} admin={admin.email}")
+        threading.Thread(
+            target=_watch_reports_and_post_onboarding,
+            args=(report_ids, admin),
+            kwargs={
+                "progress_channel_id": progress_channel_id,
+                "progress_ts": progress_ts,
+                "file_label": file_name,
+            },
+            daemon=True,
+        ).start()
 
         report_type = (results[0].get("report_type") or "").replace("_", " ") or "report"
         return self._text_block(
             f"✅ *{file_name}* uploaded and recognized as a *{report_type}* file! "
-            "I'm generating fix recommendations now — I'll message you here once they're ready."
+            "Watch the channel for a live progress update — I'll message you again once fix recommendations are ready."
         )
 
     def _get_member_token(self, team_id, slack_user_id):

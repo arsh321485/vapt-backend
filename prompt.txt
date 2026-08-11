@@ -1,0 +1,5 @@
+Aapke server pe abhi bhi chal raha watcher thread (jo har 6 sec me poll kar raha hai) — agle poll pe khud hi complete: true dekh lega aur risk-criteria message automatically post ho jayega, kuch dobara upload karne ki zaroorat nahi. 5-10 sec me Slack check karo.
+
+file upload hone ke bad agent create hote hai lekin admin ko kese smj aayega ki agent create  ho rhe hai to uske liye msg dedo or upload report ki btn fir remove kr do vha proper msg de do or loading % me dikhana hoga to o bhi kr skte ho fir jese hi complete hota hai to set risk cri ki btn aani chahihe 
+
+esa krke do mujhe 

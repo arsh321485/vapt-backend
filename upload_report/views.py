@@ -1227,16 +1227,25 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "plugin_output_url": first_plugin_output_url,
                 })
 
-        # Record the ACTUAL denominator for completion tracking. total_vulnerabilities
-        # (the parsed report's raw count) is NOT the same number as len(vulns_to_process):
-        # vulns without a plugin_name or a description are filtered out above and will
-        # never get a card, so total_vulnerabilities is always >= this. The status API
-        # must compare cards_generated against THIS number, or it reports
-        # cards_generation_complete=true while cards_generated is still short of the
-        # (unreachable) raw total — e.g. 65/93 "complete".
+        # Record the ACTUAL denominator for completion tracking. Neither
+        # total_vulnerabilities (raw parsed count) NOR len(vulns_to_process) match
+        # how many cards will actually exist at the end:
+        #   - total_vulnerabilities is always >= len(vulns_to_process), since vulns
+        #     without a plugin_name/description are filtered out above.
+        #   - len(vulns_to_process) is itself always >= the final card count, because
+        #     vulnerability_cards is unique per (report_id, vulnerability_name,
+        #     host_name) — the SAME plugin reported on the SAME host but on multiple
+        #     ports (e.g. an SSL issue on both 443 and 8443) collapses into ONE card,
+        #     so vulns_to_process legitimately contains more entries than distinct
+        #     cards that will ever exist.
+        # The only number that actually matches the eventual card count is the
+        # distinct (host_name, plugin_name) pairs — count that directly, or the
+        # status endpoint reports cards_generation_complete=true while
+        # cards_generated stays forever short of an unreachable total (e.g. 65/93).
+        cards_expected_count = len({(v["host_name"], v["plugin_name"]) for v in vulns_to_process})
         db[NESSUS_COLLECTION].update_one(
             {"report_id": report_id},
-            {"$set": {"cards_expected_count": len(vulns_to_process)}}
+            {"$set": {"cards_expected_count": cards_expected_count}}
         )
 
         if not vulns_to_process:
