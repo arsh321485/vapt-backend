@@ -3256,8 +3256,8 @@ def _build_admin_welcome_blocks():
             "type": "actions",
             "elements": [{
                 "type": "button",
-                "text": {"type": "plain_text", "text": "📤 Upload Report", "emoji": True},
-                "action_id": "open_upload_report_modal",
+                "text": {"type": "plain_text", "text": "📋 Enter Your Scope", "emoji": True},
+                "action_id": "open_provide_scope",
                 "style": "primary",
             }],
         },
@@ -3324,6 +3324,136 @@ def _build_upload_report_modal():
                     # standard one), so filtering happens where it already did
                     # for the website flow: UploadReportView.ALLOWED_EXTENSIONS.
                     "max_files": 1,
+                },
+            },
+        ],
+    }
+
+
+def _build_provide_scope_blocks():
+    """
+    Shown when the welcome message's "Enter Your Scope" button is clicked —
+    mirrors the website's "Provide Your Scope" screen exactly: two ways to
+    get started, upload an existing report or hand over targets for VaptFix
+    to test. Rendered in-place via response_url replace_original (a wizard
+    step, not a new message), matching the website's card-based flow.
+    """
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "📋 Provide Your Scope", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            "Choose how you want to start — upload an existing scan report, "
+            "or enter the assets VaptFix should test."
+        )}},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📤 Upload Report", "emoji": True},
+                    "action_id": "open_upload_report_modal",
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📋 Enter Your Scope", "emoji": True},
+                    "action_id": "open_enter_scope_options",
+                },
+            ],
+        },
+    ]
+
+
+def _build_enter_scope_options_blocks():
+    """
+    Shown after "Enter Your Scope" is picked from the Provide Your Scope
+    screen — the CSV-vs-manual choice, matching the website's "Enter Your
+    Scope" screen. Each button opens its own modal (file_input elements
+    require a real modal — they can't live in a plain channel message).
+    """
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "📋 Enter Your Scope", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            "Add targets with a CSV file, or enter IPs/hosts manually."
+        )}},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📄 CSV File", "emoji": True},
+                    "action_id": "open_scope_csv_modal",
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✍️ Manual Entry", "emoji": True},
+                    "action_id": "open_scope_manual_modal",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "← Back", "emoji": True},
+                    "action_id": "back_to_provide_scope",
+                },
+            ],
+        },
+    ]
+
+
+def _build_scope_csv_modal():
+    """
+    No Scope Name / Testing Type fields — matches the website's "Enter
+    Your Scope" screen, which only ever asks for the file itself.
+    /api/admin/scope/create/ auto-generates a name from the filename and
+    defaults testing_type to black_box when neither is sent.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "modal_scope_csv_submit",
+        "title": {"type": "plain_text", "text": "Upload CSV"},
+        "submit": {"type": "plain_text", "text": "Upload"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                "Upload a CSV of assets/IPs. One row per target works best."
+            )}},
+            {
+                "type": "input",
+                "block_id": "scope_csv_file_block",
+                "label": {"type": "plain_text", "text": "CSV File"},
+                "element": {
+                    "type": "file_input",
+                    "action_id": "scope_csv_file_input",
+                    "max_files": 1,
+                },
+            },
+        ],
+    }
+
+
+def _build_scope_manual_modal():
+    """No Scope Name / Testing Type fields — see _build_scope_csv_modal."""
+    return {
+        "type": "modal",
+        "callback_id": "modal_scope_manual_submit",
+        "title": {"type": "plain_text", "text": "Enter Scope"},
+        "submit": {"type": "plain_text", "text": "Submit Scope"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                "Add one IP, hostname, or CIDR range per line. You can paste a list at once."
+            )}},
+            {
+                "type": "input",
+                "block_id": "scope_targets_block",
+                "label": {"type": "plain_text", "text": "Targets"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "scope_targets_input",
+                    "multiline": True,
+                    "placeholder": {"type": "plain_text", "text": (
+                        "192.168.1.10\n192.168.1.0/24\napp.example.com\n\n"
+                        "One target per line (commas also work)."
+                    )},
                 },
             },
         ],
@@ -9691,6 +9821,104 @@ class SlackSlashCommandView(APIView):
             f"✅ *{file_name}* uploaded and recognized as a *{report_type}* file! "
             "Watch the channel for a live progress update — I'll message you again once fix recommendations are ready."
         )
+
+    def _submit_scope(self, values, team_id, slack_user_id, mode):
+        """
+        Handles both the "Upload CSV" and "Enter Scope" (manual) modal
+        submits — forwards to the exact same /api/admin/scope/create/
+        endpoint the website's "Provide Your Scope" flow posts to, so a
+        scope entered via Slack shows up identically to one entered on the
+        website (same Scope/ScopeEntry records, same super-admin visibility).
+        mode is "csv" or "manual".
+        """
+        logger.info(f"[SlackScopeSubmit] mode={mode} team_id={team_id} slack_user_id={slack_user_id}")
+
+        # No name/testing_type fields — /api/admin/scope/create/ auto-generates
+        # a name (from the filename, or a timestamp for manual entry) and
+        # defaults testing_type to black_box when neither is sent, same as
+        # the website's "Provide Your Scope" flow never asking for either.
+        token = self._get_admin_token(team_id, slack_user_id=slack_user_id)
+        if not token:
+            return self._text_block("❌ Your Slack workspace is not linked to a VaptFix admin account.")
+
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        if mode == "csv":
+            file_list = _find_by_action_id(values, "scope_csv_file_input").get("files") or []
+            file_obj = file_list[0] if file_list else None
+            if not file_obj:
+                return self._text_block("❌ Please attach a CSV file.")
+
+            file_name = file_obj.get("name") or "scope.csv"
+            download_url = file_obj.get("url_private_download") or file_obj.get("url_private")
+            if not download_url:
+                return self._text_block("❌ Could not read the uploaded file from Slack.")
+
+            bot_token = self._get_bot_token(team_id, slack_user_id=slack_user_id)
+            if not bot_token:
+                return self._text_block("❌ Could not find a bot token for this workspace.")
+
+            try:
+                file_resp = _http_get(download_url, headers={"Authorization": f"Bearer {bot_token}"}, timeout=30)
+                if file_resp.status_code != 200:
+                    return self._text_block(f"❌ Could not download *{file_name}* from Slack (status {file_resp.status_code}).")
+                file_bytes = file_resp.content
+            except Exception as exc:
+                logger.exception("[SlackScopeSubmit] CSV download failed")
+                return self._text_block(f"❌ Could not download *{file_name}* from Slack: {exc}")
+
+            try:
+                resp = _http_post(
+                    f"{backend}/api/admin/scope/create/",
+                    headers=headers,
+                    files={"file": (file_name, file_bytes)},
+                    timeout=60,
+                )
+                data = resp.json()
+            except Exception as exc:
+                logger.exception("[SlackScopeSubmit] scope create API call failed (csv)")
+                return self._text_block(f"❌ Could not submit scope: {exc}")
+
+        else:  # manual
+            targets_raw = ((values.get("scope_targets_block") or {}).get("scope_targets_input") or {}).get("value") or ""
+            # parse_targets_string on the backend only splits on newlines —
+            # accept comma-separated input too by normalizing it first, so
+            # "192.168.1.10, app.example.com" on one line still works.
+            targets = targets_raw.replace(",", "\n")
+            if not targets.strip():
+                return self._text_block("❌ Please enter at least one target.")
+
+            try:
+                resp = _http_post(
+                    f"{backend}/api/admin/scope/create/",
+                    headers=headers,
+                    data={"targets": targets},
+                    timeout=30,
+                )
+                data = resp.json()
+            except Exception as exc:
+                logger.exception("[SlackScopeSubmit] scope create API call failed (manual)")
+                return self._text_block(f"❌ Could not submit scope: {exc}")
+
+        processing = data.get("processing") or {}
+        created_count = processing.get("created_count", 0)
+        scope_data = data.get("scope") or {}
+
+        if not scope_data and not created_count:
+            reason = data.get("message") or "Could not create scope."
+            logger.warning(f"[SlackScopeSubmit] rejected: {reason}")
+            return self._text_block(f"❌ {reason}")
+
+        name = scope_data.get("name") or "your scope"
+        error_count = processing.get("error_count", 0)
+        logger.info(f"[SlackScopeSubmit] Scope created — name={name} created={created_count} errors={error_count}")
+
+        summary = f"✅ Scope *{name}* submitted with {created_count} target(s)."
+        if error_count:
+            summary += f" ({error_count} entries had issues and were skipped.)"
+        summary += "\nOur team will review and begin testing — we'll notify you here once your first report is ready."
+        return self._text_block(summary)
 
     def _get_member_token(self, team_id, slack_user_id):
         """
@@ -17737,6 +17965,8 @@ class SlackInteractivityView(APIView):
                 "modal_extend_request_submit": "Request Extension",
                 "modal_risk_criteria_submit": "Set Risk Criteria",
                 "modal_upload_report_submit": "Upload Report",
+                "modal_scope_csv_submit": "Upload CSV",
+                "modal_scope_manual_submit": "Enter Scope",
             }
             if callback_id not in titles:
                 return Response({}, status=200)
@@ -18571,6 +18801,59 @@ class SlackInteractivityView(APIView):
                         {"response_type": "ephemeral", "replace_original": False,
                          "text": f"❌ Could not open the Upload Report dialog: `{err}`. "
                                  "Please try clicking the button again."},
+                        action_id,
+                    )
+                return
+
+            if action_id == "open_provide_scope":
+                # In-place wizard navigation (replaces the welcome message's own
+                # content) — matches the website's "Provide Your Scope" screen.
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": _build_provide_scope_blocks()},
+                    action_id,
+                )
+                return
+
+            if action_id == "open_enter_scope_options":
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": _build_enter_scope_options_blocks()},
+                    action_id,
+                )
+                return
+
+            if action_id == "back_to_provide_scope":
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": _build_provide_scope_blocks()},
+                    action_id,
+                )
+                return
+
+            if action_id in ("open_scope_csv_modal", "open_scope_manual_modal"):
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write(f"{action_id}: missing bot_token or trigger_id")
+                    return
+                view = _build_scope_csv_modal() if action_id == "open_scope_csv_modal" else _build_scope_manual_modal()
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"{action_id} views.open -> {getattr(resp, 'text', None)}")
+                try:
+                    resp_json = resp.json()
+                except Exception:
+                    resp_json = {}
+                if not resp_json.get("ok"):
+                    err = resp_json.get("error", "unknown_error")
+                    self._post_response_url(
+                        response_url,
+                        {"response_type": "ephemeral", "replace_original": False,
+                         "text": f"❌ Could not open the scope dialog: `{err}`. Please try clicking the button again."},
                         action_id,
                     )
                 return
@@ -19573,6 +19856,8 @@ class SlackInteractivityView(APIView):
             "modal_extend_request_submit": "Request Extension",
             "modal_risk_criteria_submit": "Set Risk Criteria",
             "modal_upload_report_submit": "Upload Report",
+            "modal_scope_csv_submit": "Upload CSV",
+            "modal_scope_manual_submit": "Enter Scope",
         }
         if callback_id not in titles:
             return
@@ -19723,6 +20008,10 @@ class SlackInteractivityView(APIView):
                         blocks = slash._text_block(f"❌ {err}")
             elif callback_id == "modal_upload_report_submit":
                 blocks = slash._submit_upload_report(values, team_id, slack_user_id)
+            elif callback_id == "modal_scope_csv_submit":
+                blocks = slash._submit_scope(values, team_id, slack_user_id, mode="csv")
+            elif callback_id == "modal_scope_manual_submit":
+                blocks = slash._submit_scope(values, team_id, slack_user_id, mode="manual")
             else:
                 # modal_reject_submit — sid was already known when the modal
                 # was opened (from the clicked row), carried via
