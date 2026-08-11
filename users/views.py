@@ -3411,17 +3411,19 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
     # callers actually wins the race and posts.
     dedup_key = f"slack_onboarding_msg:{team_id}:{channel_id}:{state}"
     if not cache.add(dedup_key, True, timeout=None):
+        logger.info(f"[OnboardingMsg] Skipped duplicate post — state={state} already posted for team_id={team_id} channel_id={channel_id}")
         return state
 
     blocks = _build_admin_welcome_blocks() if state == "no_report" else _build_admin_risk_criteria_prompt_blocks()
     text = "VaptFix — Welcome" if state == "no_report" else "VaptFix — Set Risk Criteria"
     try:
-        _http_post(
+        resp = _http_post(
             "https://slack.com/api/chat.postMessage",
             headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
             json={"channel": channel_id, "blocks": blocks, "text": text},
             timeout=15,
         )
+        logger.info(f"[OnboardingMsg] Posted state={state} to channel_id={channel_id} -> {getattr(resp, 'text', None)}")
     except Exception:
         logger.exception("[SlackEvent] _post_admin_onboarding_message failed")
     return state
@@ -3452,7 +3454,10 @@ def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800,
 
     report_ids = [str(r) for r in (report_ids or []) if r]
     if not report_ids:
+        logger.warning("[UploadWatch] called with no report_ids — nothing to watch")
         return
+
+    logger.info(f"[UploadWatch] Starting watch for report_ids={report_ids} admin={getattr(admin, 'email', None)}")
 
     backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
     token = str(_RT.for_user(admin).access_token)
@@ -3470,14 +3475,20 @@ def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800,
             except Exception:
                 logger.exception(f"[UploadWatch] status check failed for report_id={rid}")
                 return False
+            logger.info(
+                f"[UploadWatch] report_id={rid} complete={data.get('cards_generation_complete')} "
+                f"generated={data.get('cards_generated')}/{data.get('cards_total')}"
+            )
             if not data.get("cards_generation_complete"):
                 return False
         return True
 
+    all_done = False
     deadline = _time.time() + max_wait_seconds
     try:
         while _time.time() < deadline:
             if _all_complete():
+                all_done = True
                 break
             _time.sleep(poll_interval)
         else:
@@ -3487,15 +3498,20 @@ def _watch_reports_and_post_onboarding(report_ids, admin, max_wait_seconds=1800,
     except Exception:
         logger.exception(f"[UploadWatch] polling failed for report_ids={report_ids}")
 
+    logger.info(f"[UploadWatch] Done waiting for report_ids={report_ids} — all_done={all_done}, posting onboarding message next")
+
     try:
         bot_token = getattr(admin, "slack_bot_token", None)
         team_id = getattr(admin, "slack_team_id", None)
         if not bot_token or not team_id:
+            logger.warning(f"[UploadWatch] admin={getattr(admin, 'email', None)} has no slack_bot_token/slack_team_id — cannot post")
             return
         channel_id = SlackSlashCommandView()._get_admin_channel_id(bot_token)
         if not channel_id:
+            logger.warning(f"[UploadWatch] could not resolve admin channel_id for team_id={team_id}")
             return
-        _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
+        resolved_state = _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
+        logger.info(f"[UploadWatch] Posted onboarding message for report_ids={report_ids}, resolved_state={resolved_state}")
     except Exception:
         logger.exception("[UploadWatch] failed to post onboarding message")
 
@@ -9497,9 +9513,12 @@ class SlackSlashCommandView(APIView):
         website flow uses so the risk-criteria prompt only appears once
         the mitigation cards are actually ready.
         """
+        logger.info(f"[SlackUploadReport] Modal submitted — team_id={team_id} slack_user_id={slack_user_id}")
+
         file_list = _find_by_action_id(values, "upload_file_input").get("files") or []
         file_obj = file_list[0] if file_list else None
         if not file_obj:
+            logger.warning("[SlackUploadReport] No file found in modal submission values")
             return self._text_block("❌ Please attach a file.")
 
         file_name = file_obj.get("name") or "report"
@@ -9546,18 +9565,24 @@ class SlackSlashCommandView(APIView):
         results = upload_data.get("results") or []
         errors = upload_data.get("errors") or []
 
+        logger.info(f"[SlackUploadReport] Upload API response — results={len(results)} errors={len(errors)} for '{file_name}'")
+
         if not results:
             reason = (errors[0].get("error") if errors else None) or upload_data.get("error") or "Upload failed."
+            logger.warning(f"[SlackUploadReport] Upload rejected for '{file_name}': {reason}")
             return self._text_block(f"❌ *{file_name}*: {reason}")
 
         report_ids = [r["report_id"] for r in results if r.get("report_id")]
         admin = User.objects.filter(slack_team_id=team_id).first()
         if report_ids and admin:
+            logger.info(f"[SlackUploadReport] Spawning watcher for report_ids={report_ids} admin={admin.email}")
             threading.Thread(
                 target=_watch_reports_and_post_onboarding,
                 args=(report_ids, admin),
                 daemon=True,
             ).start()
+        else:
+            logger.warning(f"[SlackUploadReport] NOT spawning watcher — report_ids={report_ids} admin_found={bool(admin)} team_id={team_id}")
 
         report_type = (results[0].get("report_type") or "").replace("_", " ") or "report"
         return self._text_block(
