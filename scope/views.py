@@ -1,3 +1,5 @@
+import os
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -41,22 +43,23 @@ class ScopeCreateAPIView(APIView):
     - File upload (file field)
     - Manual targets (targets field)
 
-    Required: name, testing_type
+    Required: nothing beyond the file/targets themselves — matches the
+    website/Slack "Provide Your Scope" flow, which never asks the admin for
+    a scope name or testing type. Both are optional and auto-filled:
+      - name: derived from the uploaded filename, or a timestamped default
+        for manual entry.
+      - testing_type: defaults to "black_box" (same as the model default).
     Optional: expand_subnets (default: true)
     """
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        # Get testing_type from request body
-        testing_type = request.data.get("testing_type", "").strip()
+        # testing_type is optional — default to black_box (matches the
+        # Scope model's own default) rather than requiring the admin to
+        # pick one; nothing in the website/Slack UI asks for it.
+        testing_type = request.data.get("testing_type", "").strip() or "black_box"
         valid_types = ["white_box", "grey_box", "black_box"]
-
-        if not testing_type:
-            return Response(
-                {"message": "testing_type is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
         if testing_type not in valid_types:
             return Response(
@@ -64,13 +67,11 @@ class ScopeCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Get name (required)
+        # name is optional — auto-generate from the uploaded filename (file
+        # mode) or a timestamp (manual mode) once we know which one this is,
+        # further down. request.data.get(...) here just captures an explicit
+        # name if one WAS given (e.g. by a caller that still wants to set it).
         name = request.data.get("name", "").strip()
-        if not name:
-            return Response(
-                {"message": "Scope name is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
         # Get expand_subnets option
         expand_subnets_str = request.data.get("expand_subnets", "true")
@@ -109,6 +110,14 @@ class ScopeCreateAPIView(APIView):
         else:
             source_type = "manual"
             values = parse_targets_string(targets_str)
+
+        # Auto-generate a name if the caller didn't send one — the website
+        # and Slack flows never ask for it.
+        if not name:
+            if source_type == "file":
+                name = os.path.splitext(file_obj.name)[0][:255] or "Uploaded Scope"
+            else:
+                name = f"Manual Scope - {timezone.now().strftime('%b %d, %Y %H:%M')}"
 
         if not values:
             return Response(
@@ -153,6 +162,12 @@ class ScopeCreateAPIView(APIView):
             testing_type=testing_type
         )
 
+        # Keep the original uploaded file so the Super Admin can view/download
+        # exactly what the admin submitted, not just the parsed entries.
+        if source_type == "file" and file_obj:
+            file_obj.seek(0)
+            scope.source_file.save(file_obj.name, file_obj, save=True)
+
         # Create entries
         created_entries = []
         errors = []
@@ -179,7 +194,7 @@ class ScopeCreateAPIView(APIView):
 
         return Response({
             "message": "Scope created successfully",
-            "scope": ScopeSerializer(scope).data,
+            "scope": ScopeSerializer(scope, context={"request": request}).data,
             "processing": {
                 "source": source_type,
                 "total_parsed": len(values),
@@ -214,7 +229,7 @@ class ScopeListAPIView(APIView):
             scopes = scopes.filter(testing_type=testing_type)
 
         scopes = list(scopes)
-        serializer = ScopeListSerializer(scopes, many=True)
+        serializer = ScopeListSerializer(scopes, many=True, context={"request": request})
         return Response({
             "count": len(scopes),
             "scopes": serializer.data
@@ -236,7 +251,7 @@ class ScopeDetailAPIView(APIView):
 
     def get(self, request, scope_id):
         scope = self.get_object(scope_id)
-        serializer = ScopeSerializer(scope)
+        serializer = ScopeSerializer(scope, context={"request": request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def patch(self, request, scope_id):
@@ -280,7 +295,7 @@ class ScopeDetailAPIView(APIView):
         if serializer.is_valid():
             serializer.save()
             return Response(
-                ScopeSerializer(scope).data,
+                ScopeSerializer(scope, context={"request": request}).data,
                 status=status.HTTP_200_OK
             )
 
@@ -624,7 +639,7 @@ class ScopeLockAPIView(APIView):
 
             return Response({
                 "message": "Scope locked successfully. Email notification sent to admin.",
-                "scope": ScopeSerializer(scope).data
+                "scope": ScopeSerializer(scope, context={"request": request}).data
             }, status=status.HTTP_200_OK)
 
         else:  # unlock
@@ -641,7 +656,7 @@ class ScopeLockAPIView(APIView):
 
             return Response({
                 "message": "Scope unlocked successfully",
-                "scope": ScopeSerializer(scope).data
+                "scope": ScopeSerializer(scope, context={"request": request}).data
             }, status=status.HTTP_200_OK)
 
 
@@ -680,7 +695,7 @@ class ScopesByAdminAPIView(APIView):
 
     def get(self, request, admin_id):
         scopes = list(Scope.objects.filter(admin_id=admin_id).prefetch_related("entries").select_related("admin"))
-        serializer = ScopeListSerializer(scopes, many=True)
+        serializer = ScopeListSerializer(scopes, many=True, context={"request": request})
         count = len(scopes)
 
         if not scopes:

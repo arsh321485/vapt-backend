@@ -4,6 +4,10 @@ from django.utils import timezone
 import uuid
 
 
+def scope_source_file_path(instance, filename):
+    return f"scope_files/{instance.admin_id}/{filename}"
+
+
 class Scope(models.Model):
     """
     Represents a penetration testing scope containing multiple entries (IPs, URLs, subnets).
@@ -31,6 +35,14 @@ class Scope(models.Model):
         max_length=20,
         choices=TESTING_TYPE_CHOICES,
         default="black_box"
+    )
+    # The original uploaded CSV/XLSX/etc, kept so the Super Admin can view/
+    # download exactly what the admin submitted — not just the parsed
+    # ScopeEntry rows. Blank for scopes entered manually (no source file).
+    source_file = models.FileField(
+        upload_to=scope_source_file_path,
+        null=True,
+        blank=True,
     )
     is_locked = models.BooleanField(default=False)
     locked_by = models.EmailField(null=True, blank=True)

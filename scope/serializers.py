@@ -1,3 +1,5 @@
+import os
+
 from rest_framework import serializers
 from .models import Scope, ScopeEntry
 
@@ -24,6 +26,8 @@ class ScopeSerializer(serializers.ModelSerializer):
     entries = ScopeEntrySerializer(many=True, read_only=True)
     admin_email = serializers.EmailField(source="admin.email", read_only=True)
     entry_count = serializers.SerializerMethodField()
+    source_file = serializers.SerializerMethodField()
+    source_file_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Scope
@@ -40,6 +44,8 @@ class ScopeSerializer(serializers.ModelSerializer):
             "updated_at",
             "entries",
             "entry_count",
+            "source_file",
+            "source_file_name",
         ]
         read_only_fields = [
             "id",
@@ -54,11 +60,25 @@ class ScopeSerializer(serializers.ModelSerializer):
     def get_entry_count(self, obj):
         return len(obj.entries.all())
 
+    def get_source_file(self, obj):
+        # Absolute URL when we have the request (so a Super Admin viewing
+        # another admin's scope gets a directly downloadable link), relative
+        # otherwise. None for scopes entered manually (no source file).
+        if not obj.source_file:
+            return None
+        request = self.context.get("request")
+        return request.build_absolute_uri(obj.source_file.url) if request else obj.source_file.url
+
+    def get_source_file_name(self, obj):
+        return os.path.basename(obj.source_file.name) if obj.source_file else None
+
 
 class ScopeListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for listing scopes (without entries)."""
     admin_email = serializers.EmailField(source="admin.email", read_only=True)
     entry_count = serializers.SerializerMethodField()
+    source_file = serializers.SerializerMethodField()
+    source_file_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Scope
@@ -74,10 +94,21 @@ class ScopeListSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "entry_count",
+            "source_file",
+            "source_file_name",
         ]
 
     def get_entry_count(self, obj):
         return len(obj.entries.all())
+
+    def get_source_file(self, obj):
+        if not obj.source_file:
+            return None
+        request = self.context.get("request")
+        return request.build_absolute_uri(obj.source_file.url) if request else obj.source_file.url
+
+    def get_source_file_name(self, obj):
+        return os.path.basename(obj.source_file.name) if obj.source_file else None
 
 
 class ScopeUpdateSerializer(serializers.ModelSerializer):
