@@ -3256,7 +3256,7 @@ def _build_admin_welcome_blocks():
             "type": "actions",
             "elements": [{
                 "type": "button",
-                "text": {"type": "plain_text", "text": "📋 Enter Your Scope", "emoji": True},
+                "text": {"type": "plain_text", "text": "📋 Provide Your Scope", "emoji": True},
                 "action_id": "open_provide_scope",
                 "style": "primary",
             }],
@@ -3288,6 +3288,15 @@ _RISK_LEVEL_OPTIONS = [
     "1 Day", "2 Days", "3 Days", "4 Days", "5 Days", "6 Days",
     "1 Week", "2 Weeks", "3 Weeks", "4 Weeks", "5 Weeks",
 ]
+
+# Pre-selected in the modal so the admin can just hit Save — still fully
+# changeable via each dropdown before submitting.
+_RISK_CRITERIA_DEFAULTS = {
+    "critical": "2 Days",
+    "high": "4 Days",
+    "medium": "2 Weeks",
+    "low": "4 Weeks",
+}
 
 
 def _build_upload_report_modal():
@@ -3464,7 +3473,12 @@ def _build_risk_criteria_modal():
     def _select_options():
         return [{"text": {"type": "plain_text", "text": label}, "value": label} for label in _RISK_LEVEL_OPTIONS]
 
-    def _field(block_id, action_id, label):
+    def _field(block_id, action_id, label, key):
+        # Pre-selected with the default for this severity (Critical=2 Days,
+        # High=4 Days, Medium=2 Weeks, Low=4 Weeks) so the dropdown never
+        # shows a blank "Select" — the admin can still pick a different
+        # option before hitting Save.
+        default_value = _RISK_CRITERIA_DEFAULTS[key]
         return {
             "type": "input",
             "block_id": block_id,
@@ -3474,6 +3488,7 @@ def _build_risk_criteria_modal():
                 "action_id": action_id,
                 "placeholder": {"type": "plain_text", "text": "Select"},
                 "options": _select_options(),
+                "initial_option": {"text": {"type": "plain_text", "text": default_value}, "value": default_value},
             },
         }
     return {
@@ -3484,10 +3499,10 @@ def _build_risk_criteria_modal():
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": "How many days should each severity take to fix?"}},
-            _field("rc_critical_block", "rc_critical_input", "Critical"),
-            _field("rc_high_block", "rc_high_input", "High"),
-            _field("rc_medium_block", "rc_medium_input", "Medium"),
-            _field("rc_low_block", "rc_low_input", "Low"),
+            _field("rc_critical_block", "rc_critical_input", "Critical", "critical"),
+            _field("rc_high_block", "rc_high_input", "High", "high"),
+            _field("rc_medium_block", "rc_medium_input", "Medium", "medium"),
+            _field("rc_low_block", "rc_low_input", "Low", "low"),
         ],
     }
 
@@ -9588,6 +9603,7 @@ class SlackSlashCommandView(APIView):
                 "/verifications":  self._cmd_verifications,
                 "/approvefix":     self._cmd_verify,
                 "/postnavbar":     self._cmd_postnavbar,
+                "/riskcriteria":   self._cmd_riskcriteria,
             }
             team_name = None
         elif channel_name in self.TEAM_CHANNELS:
@@ -10064,6 +10080,30 @@ class SlackSlashCommandView(APIView):
         if gate is not None:
             return gate
         return [self._dashboard_image_block(team_id)]
+
+    def _cmd_riskcriteria(self, text, team_id, user_id):
+        """
+        /riskcriteria — lets an admin reopen the Set Risk Criteria modal any
+        time after initial onboarding (that modal is otherwise only shown
+        once, during the "needs_risk_criteria" onboarding step). Reuses the
+        exact same open_risk_criteria_modal button/modal/submit handler as
+        the onboarding prompt — clicking it and saving updates the same
+        RiskCriteria record.
+        """
+        return [
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                "⚙️ *Risk Criteria* — how many days each severity should take to fix."
+            )}},
+            {
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "⚙️ Update Risk Criteria", "emoji": True},
+                    "action_id": "open_risk_criteria_modal",
+                    "style": "primary",
+                }],
+            },
+        ]
 
     def _dashboard_image_block(self, team_id, kind="dashboard", alt_text="VaptFix Admin Dashboard", extra_params=None):
         """

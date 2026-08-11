@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.utils import timezone
+from django.utils.html import format_html
 from django.contrib import messages
 from .models import Scope, ScopeEntry
 from .utils import send_scope_lock_notification
@@ -7,16 +8,16 @@ from .utils import send_scope_lock_notification
 
 @admin.register(Scope)
 class ScopeAdmin(admin.ModelAdmin):
-    list_display = ["name", "admin", "testing_type", "is_locked", "locked_by", "locked_at", "entry_count", "created_at"]
-    list_filter = ["testing_type", "is_locked", "created_at"]
+    list_display = ["name", "admin", "is_locked", "locked_by", "locked_at", "entry_count", "download_file", "created_at"]
+    list_filter = ["is_locked", "created_at"]
     search_fields = ["name", "admin__email"]
-    readonly_fields = ["id", "created_at", "updated_at", "locked_by", "locked_at"]
+    readonly_fields = ["id", "created_at", "updated_at", "locked_by", "locked_at", "download_file"]
     list_per_page = 25
     ordering = ["-created_at"]
 
     fieldsets = (
         ("Scope Information", {
-            "fields": ("id", "name", "admin", "testing_type")
+            "fields": ("id", "name", "admin", "testing_type", "source_file", "download_file")
         }),
         ("Lock Status", {
             "fields": ("is_locked", "locked_by", "locked_at"),
@@ -34,6 +35,13 @@ class ScopeAdmin(admin.ModelAdmin):
         """Display the number of entries in the scope."""
         return obj.entries.count()
     entry_count.short_description = "Entries"
+
+    def download_file(self, obj):
+        """Downloadable link to the original CSV/file the admin submitted, if any."""
+        if obj.source_file:
+            return format_html('<a href="{}" target="_blank">⬇ Download</a>', obj.source_file.url)
+        return "— (entered manually)"
+    download_file.short_description = "Source File"
 
     def lock_selected_scopes(self, request, queryset):
         """Lock selected scopes and send email notifications."""
@@ -117,7 +125,10 @@ class ScopeAdmin(admin.ModelAdmin):
         return request.user.is_superuser
 
 
-@admin.register(ScopeEntry)
+# Not registered — no separate "Scope entrys" tab in the admin sidebar.
+# Entries are still visible per-scope (Scope.entry_count / the Scope's own
+# detail page); this class is kept so it can be re-registered easily if a
+# dedicated entries list is ever needed again.
 class ScopeEntryAdmin(admin.ModelAdmin):
     list_display = ["value", "entry_type", "is_internal", "scope_name", "scope_locked", "created_at"]
     list_filter = ["entry_type", "is_internal", "scope__testing_type", "created_at"]
