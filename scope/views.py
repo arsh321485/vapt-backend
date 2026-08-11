@@ -151,7 +151,7 @@ class ScopeCreateAPIView(APIView):
             # Check if the new entries exactly match an existing scope's entries
             if new_entry_values == existing_entry_values:
                 return Response(
-                    {"message": f"This file has already been uploaded for scope '{name}' with {testing_type.replace('_', ' ')} testing"},
+                    {"message": f"This file has already been uploaded for scope '{name}'"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -286,7 +286,7 @@ class ScopeDetailAPIView(APIView):
                 existing_entry_values = {entry.value.lower() for entry in existing_scope.entries.all()}
                 if current_entry_values == existing_entry_values:
                     return Response(
-                        {"message": f"A scope with the same targets already exists for '{new_name}' with {new_testing_type.replace('_', ' ')} testing"},
+                        {"message": f"A scope with the same targets already exists for '{new_name}'"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -847,7 +847,7 @@ class ScopeDataByNameAPIView(APIView):
 
         if not scopes.exists():
             return Response(
-                {"message": f"Scope '{scope_name}' with {testing_type.replace('_', ' ')} testing not found for this admin"},
+                {"message": f"Scope '{scope_name}' not found for this admin"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
