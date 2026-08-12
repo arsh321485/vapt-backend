@@ -16252,7 +16252,7 @@ class SlackSlashCommandView(APIView):
         count   = len(results)
         blocks  = [
             {"type": "header", "text": {"type": "plain_text", "text": "⏳ Timeline Extension Requests", "emoji": True}},
-            self._ctx("Pending team requests to extend mitigation deadlines. Use `/approve` or `/reject` to respond — decided ones move to History."),
+            self._ctx("Pending team requests to extend mitigation deadlines."),
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*Pending Requests:* {count}"}},
             {"type": "divider"},
         ]
@@ -16450,7 +16450,7 @@ class SlackSlashCommandView(APIView):
         header_title = "📋 All Vulnerabilities" if show_filters else "🔍 Vulnerability Data"
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": header_title, "emoji": True}},
-            self._ctx("All vulnerabilities in your latest report. Use `/vulndata [id]` for details, `/vulndata automation` for script stats."),
+            self._ctx("All vulnerabilities in your latest report."),
         ]
         if show_filters:
             blocks.extend(self._sev_status_filter_blocks(

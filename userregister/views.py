@@ -1443,18 +1443,80 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     )
 
                 if completed_steps >= total_steps:
+                    # All steps done — used to just flag "ready for Send
+                    # Verification" and wait for a manual step + later
+                    # superadmin approval. New flow: all-steps-complete
+                    # closes the vulnerability immediately; superadmin
+                    # review only happens later if someone explicitly
+                    # requests a retest (UserSendVerificationAPIView, which
+                    # now reopens an already-CLOSED vuln into "open/review"
+                    # instead of gating the very first close).
+                    now = datetime.utcnow()
+                    closed_doc = fix_doc.copy()
+                    closed_doc["fix_vulnerability_id"] = str(fix_doc["_id"])
+                    closed_doc.pop("_id", None)
+                    closed_doc.update({
+                        "status": "closed",
+                        "closed_at": now,
+                        "closed_by": "system_auto",
+                        "close_reason": "all_steps_completed",
+                    })
+                    closed_coll.insert_one(closed_doc)
+                    fix_coll.delete_one({"_id": ObjectId(fix_vuln_id)})
+
+                    db[TICKETS_COLLECTION].update_many(
+                        {"fix_vulnerability_id": fix_vuln_id, "status": "open"},
+                        {"$set": {
+                            "status": "closed",
+                            "closed_at": now,
+                            "close_comment": "Auto-closed: all remediation steps completed",
+                        }},
+                    )
+                    db[SUPPORT_REQUEST_COLLECTION].update_many(
+                        {"vulnerability_id": fix_vuln_id, "status": "open"},
+                        {"$set": {
+                            "status": "closed",
+                            "closed_at": now,
+                            "closed_by": "system_auto",
+                            "close_comment": "Auto-closed: all remediation steps completed",
+                        }},
+                    )
+
+                    try:
+                        from notifications.utils import create_notification
+                        _vuln_name = fix_doc.get("plugin_name", "")
+                        _asset     = fix_doc.get("host_name", "")
+                        _team      = fix_doc.get("assigned_team", "")
+                        _n_title = f"Vulnerability Closed: {_vuln_name[:80]}"
+                        _n_msg   = (
+                            f"All remediation steps completed for '{_vuln_name}' on {_asset}. "
+                            f"Team: {_team}. Vulnerability closed automatically."
+                        )
+                        _n_meta = {
+                            "vulnerability_name":   _vuln_name,
+                            "asset":                _asset,
+                            "assigned_team":        _team,
+                            "fix_vulnerability_id": fix_vuln_id,
+                        }
+                        if _admin_id_cache:
+                            create_notification(_admin_id_cache, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
+                            create_notification(_admin_id_cache, 'user', 'vuln_closed', _n_title, _n_msg, _n_meta)
+                    except Exception:
+                        pass
+
                     _msg = (
-                        f"All {total_steps} steps completed at once. Click 'Send Verification' to notify superadmin."
+                        f"All {total_steps} steps completed at once. Vulnerability closed."
                         if complete_all
-                        else f"All steps completed. Click 'Send Verification' to notify superadmin."
+                        else "All steps completed. Vulnerability closed."
                     )
                     return Response(
                         {
                             "message": _msg,
-                            "status": "open",
+                            "status": "closed",
                             "all_steps_completed": True,
                             "completed_steps": completed_steps,
                             "total_steps": total_steps,
+                            "closed_at": now.isoformat(),
                             "step_saved": {
                                 "fix_vulnerability_id": fix_vuln_id,
                                 "fix_vulnerability_step_id": step_id,
@@ -1514,8 +1576,12 @@ class UserFixVulnerabilityStepsAPIView(APIView):
 class UserSendVerificationAPIView(APIView):
     """
     POST /api/user/register/fix-vulnerability/<fix_vuln_id>/send-verification/
-    User manually sends verification request after all steps are done.
-    Sets status = "open/review" and notifies superadmin.
+    Steps-complete now auto-closes a vulnerability (see
+    UserFixVulnerabilityStepsAPIView), so this endpoint's real job now is
+    RETEST: reopening an already-CLOSED vuln into "open/review" so
+    superadmin can re-verify and close it again. Also kept as a fallback
+    for the (now rare) case of an all-steps-done vuln that somehow never
+    got auto-closed.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1526,13 +1592,62 @@ class UserSendVerificationAPIView(APIView):
                 steps_coll  = db[FIX_VULN_STEPS_COLLECTION]
                 closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
 
-                # Already closed?
+                # Already closed — this IS the retest trigger: reopen it
+                # into "open/review" instead of rejecting the request.
                 closed_doc = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
                 if closed_doc:
+                    now = datetime.utcnow()
+                    reopened_doc = closed_doc.copy()
+                    reopened_doc.pop("_id", None)
+                    reopened_doc.pop("fix_vulnerability_id", None)
+                    for _stale in ("closed_at", "closed_by", "close_reason", "approved_by_superadmin", "approved_at"):
+                        reopened_doc.pop(_stale, None)
+                    reopened_doc.update({
+                        "status": "open/review",
+                        "verification_sent_at": now,
+                        "retest_requested_by": str(request.user.id),
+                    })
+                    fix_coll.update_one(
+                        {"_id": ObjectId(fix_vuln_id)},
+                        {"$set": reopened_doc},
+                        upsert=True,
+                    )
+                    closed_coll.delete_one({"_id": closed_doc["_id"]})
+
+                    _admin_id_retest = closed_doc.get("admin_id", "") or closed_doc.get("created_by", "")
+                    if _admin_id_retest:
+                        _clear_admin_dashboard_cache(_admin_id_retest)
+
+                    try:
+                        from notifications.utils import create_notification
+                        from users.models import User as _UserModel
+                        _vuln_name = closed_doc.get("plugin_name", "")
+                        _asset     = closed_doc.get("host_name", "")
+                        _team      = closed_doc.get("assigned_team", "")
+                        _n_title = f"Retest Requested: {_vuln_name[:80]}"
+                        _n_msg   = (
+                            f"Retest requested for previously-closed '{_vuln_name}' on {_asset}. "
+                            f"Team: {_team}. Please review and approve to close."
+                        )
+                        _n_meta = {
+                            "vulnerability_name":   _vuln_name,
+                            "asset":                _asset,
+                            "assigned_team":        _team,
+                            "fix_vulnerability_id": fix_vuln_id,
+                        }
+                        for _su in _UserModel.objects.filter(is_superuser=True):
+                            create_notification(str(_su.id), 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
+                        if _admin_id_retest:
+                            create_notification(_admin_id_retest, 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
+                            create_notification(_admin_id_retest, 'user', 'vuln_verification_request', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                    except Exception:
+                        pass
+
                     return Response(
                         {
-                            "message": "This vulnerability is already verified and closed.",
-                            "status": "closed",
+                            "message": "Retest requested. Superadmin will review and close.",
+                            "status": "open/review",
+                            "verification_sent_at": now.isoformat(),
                         },
                         status=status.HTTP_200_OK,
                     )
