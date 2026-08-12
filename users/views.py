@@ -3213,6 +3213,143 @@ VAPTFIX_CHANNELS = [
 ADMIN_DASHBOARD_CHANNEL = "vaptfix-admin-dashboard"
 
 
+# ─── Slack access control ─────────────────────────────────────────────────
+# Central place deciding who can see what across the whole Slack bot:
+#   • #vaptfix-admin-dashboard data is admin-only.
+#   • Admins get NO access to any team channel (#vaptfix-*-team) — the
+#     admin sees admin data through the admin channel only.
+#   • A team member only sees the team(s) their admin actually assigned
+#     them to (UserDetail.Member_role) — a brand-new/unassigned member
+#     (still on the "Viewer" default, or with no UserDetail at all) sees
+#     no team's data until the admin adds them via /adduser.
+# Used by SlackSlashCommandView (slash commands, channel-aware) and by
+# SlackInteractivityView (_handle_action — channel-aware via the clicked
+# message's channel; _handle_view_submission — identity-only, since a
+# view_submission payload carries no channel context).
+
+_ADMIN_ONLY_ERROR_BLOCKS = [{
+    "type": "section",
+    "text": {
+        "type": "mrkdwn",
+        "text": (
+            "🔒 *Access Denied*\n"
+            "`#vaptfix-admin-dashboard` is available only to VaptFix Admin accounts.\n"
+            "Team members, please use your team channel instead."
+        ),
+    },
+}]
+
+_TEAM_SIDE_BLOCKED_FOR_ADMIN_BLOCKS = [{
+    "type": "section",
+    "text": {
+        "type": "mrkdwn",
+        "text": (
+            "You're logged in as an Admin. The User-side dashboard is available only to User accounts. "
+            "You're logged in as an Admin.\n"
+            "User-side features are not available for Admin accounts.\n"
+            "🔒 Admin accounts cannot access the User-side view."
+        ),
+    },
+}]
+
+
+def _no_team_access_blocks(team_display=None):
+    detail = f"You don't have access to *{team_display}* data.\n" if team_display else "You don't have access to this team's data.\n"
+    return [{
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"🔒 *Access Denied*\n{detail}Ask your admin to add you to this team first.",
+        },
+    }]
+
+
+def _slack_identity(team_id, slack_user_id):
+    """
+    Resolve a Slack (team_id, slack_user_id) pair to (admin, is_admin,
+    member_detail). `admin` is the users.models.User this Slack workspace
+    belongs to (None if the workspace isn't connected to a VaptFix admin
+    yet). `member_detail` is the requester's UserDetail row, if they're a
+    known (non-admin) team member of that admin.
+    """
+    from users_details.models import UserDetail
+    admin = User.objects.filter(slack_team_id=team_id).first()
+    if not admin:
+        return None, False, None
+    admin_slack_ids = {u.slack_user_id for u in User.objects.filter(slack_team_id=team_id) if u.slack_user_id}
+    is_admin = slack_user_id in admin_slack_ids
+    detail = None
+    if not is_admin:
+        detail = UserDetail.objects.filter(admin=admin, slack_member_id=slack_user_id).first()
+    return admin, is_admin, detail
+
+
+def _authorize_channel_access(channel_name, team_id, slack_user_id):
+    """
+    Returns (True, None) if this Slack identity may use `channel_name`,
+    else (False, blocks) with ready-to-send Slack Block Kit content
+    explaining the denial.
+    """
+    admin, is_admin, detail = _slack_identity(team_id, slack_user_id)
+    if not admin:
+        # Workspace not fully connected yet — let existing per-command
+        # handling deal with it rather than blocking everything.
+        return True, None
+
+    if channel_name == ADMIN_DASHBOARD_CHANNEL:
+        if not is_admin:
+            return False, _ADMIN_ONLY_ERROR_BLOCKS
+        return True, None
+
+    team_display = SlackSlashCommandView.TEAM_CHANNELS.get(channel_name)
+    if team_display:
+        if is_admin:
+            return False, _TEAM_SIDE_BLOCKED_FOR_ADMIN_BLOCKS
+        member_roles = list((detail.Member_role or [])) if detail else []
+        if team_display not in member_roles:
+            return False, _no_team_access_blocks(team_display)
+        return True, None
+
+    # Not a VaptFix-managed channel at all — nothing to gate.
+    return True, None
+
+
+# view_submission payloads (modal submits) carry no channel context, so this
+# is identity-only: which modals are admin-exclusive vs. team-exclusive.
+_ADMIN_ONLY_VIEW_CALLBACKS = {
+    "modal_adduser_submit", "modal_deleteuser_submit", "modal_deleteteamuser_submit",
+    "modal_reject_submit", "modal_support_reply_submit", "modal_risk_criteria_submit",
+    "modal_upload_report_submit", "modal_scope_csv_submit", "modal_scope_manual_submit",
+}
+_TEAM_ONLY_VIEW_CALLBACKS = {
+    "modal_raise_support_submit", "modal_team_support_reply_submit", "modal_extend_request_submit",
+}
+
+
+def _authorize_view_submission(callback_id, team_id, slack_user_id):
+    """
+    Identity-only counterpart to _authorize_channel_access, for modal
+    submits. Defense-in-depth — the primary gate is on the button that
+    opens the modal in the first place (_handle_action, channel-aware).
+    """
+    if callback_id not in _ADMIN_ONLY_VIEW_CALLBACKS and callback_id not in _TEAM_ONLY_VIEW_CALLBACKS:
+        return True, None
+    admin, is_admin, detail = _slack_identity(team_id, slack_user_id)
+    if not admin:
+        return True, None
+    if callback_id in _ADMIN_ONLY_VIEW_CALLBACKS:
+        if not is_admin:
+            return False, _ADMIN_ONLY_ERROR_BLOCKS
+        return True, None
+    # team-only
+    if is_admin:
+        return False, _TEAM_SIDE_BLOCKED_FOR_ADMIN_BLOCKS
+    member_roles = list((detail.Member_role or [])) if detail else []
+    if not any(r != "Viewer" for r in member_roles):
+        return False, _no_team_access_blocks()
+    return True, None
+
+
 def _get_admin_onboarding_state(admin):
     """
     Returns one of "no_report" / "needs_risk_criteria" / "ready" for a given
@@ -3767,11 +3904,14 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_
 
     headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
 
-    # List existing channels — Slack always stores names as lowercase
+    # List existing channels — include private ones too, since
+    # #vaptfix-admin-dashboard is now created private (below) and would
+    # otherwise never be found here on repeat calls, causing a doomed retry
+    # against conversations.create every time.
     resp = _http_get(
         "https://slack.com/api/conversations.list",
         headers=headers,
-        params={"types": "public_channel", "limit": 1000}, timeout=15
+        params={"types": "public_channel,private_channel", "limit": 1000}, timeout=15
     )
     existing = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
 
@@ -3782,10 +3922,17 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_
         if name in existing:
             channel_ids[name] = existing[name]
         else:
+            # #vaptfix-admin-dashboard holds admin-only data (uploads, risk
+            # criteria, dashboard) — created PRIVATE so it never shows up in
+            # the workspace's public channel browser for anyone to just join
+            # themselves. Team channels stay public, unchanged. The real
+            # protection is the _authorize_channel_access() gate below (works
+            # even on already-public legacy channels) — this is a second layer.
+            is_admin_channel = (name == ADMIN_DASHBOARD_CHANNEL)
             create_resp = _http_post(
                 "https://slack.com/api/conversations.create",
                 headers=headers,
-                json={"name": name, "is_private": False}, timeout=15
+                json={"name": name, "is_private": is_admin_channel}, timeout=15
             )
             ch_data = create_resp.json()
             if ch_data.get("ok"):
@@ -9570,21 +9717,9 @@ class SlackSlashCommandView(APIView):
         response_url = data.get("response_url", "")
 
         if channel_name == self.ADMIN_CHANNEL:
-            # Block non-admins with a clear message instead of showing empty data
-            workspace_users   = User.objects.filter(slack_team_id=team_id)
-            admin_slack_ids   = {u.slack_user_id for u in workspace_users if u.slack_user_id}
-            if admin_slack_ids and user_id not in admin_slack_ids:
-                return Response({
-                    "response_type": "ephemeral",
-                    "text": (
-                        "❌ *Access Denied* — `#vaptfix-admin-dashboard` is for VaptFix admins only.\n\n"
-                        "Team members, please use commands in your team channel:\n"
-                        "• `#vaptfix-patch-management-team`\n"
-                        "• `#vaptfix-configuration-management-team`\n"
-                        "• `#vaptfix-network-security-team`\n"
-                        "• `#vaptfix-architectural-flaws-team`"
-                    ),
-                })
+            allowed, deny_blocks = _authorize_channel_access(channel_name, team_id, user_id)
+            if not allowed:
+                return Response({"response_type": "ephemeral", "blocks": deny_blocks})
             handlers = {
                 "/teamoverview":   self._cmd_teamoverview,
                 "/vulnstats":      self._cmd_vulnstats,
@@ -9607,6 +9742,9 @@ class SlackSlashCommandView(APIView):
             }
             team_name = None
         elif channel_name in self.TEAM_CHANNELS:
+            allowed, deny_blocks = _authorize_channel_access(channel_name, team_id, user_id)
+            if not allowed:
+                return Response({"response_type": "ephemeral", "blocks": deny_blocks})
             team_name = self.TEAM_CHANNELS[channel_name]
             handlers = {
                 "/viewassigned":     self._cmd_viewassigned,
@@ -18117,6 +18255,24 @@ class SlackInteractivityView(APIView):
 
     def _handle_action(self, action_id, value, team_id, slack_user_id, response_url, trigger_id="", channel_id=""):
         self._debug_write(f"_handle_action: START action={action_id} value={value!r}")
+
+        # Access-control gate — resolve which VaptFix channel this button
+        # click happened in and deny anything outside what this Slack
+        # identity is allowed to see (admin-dashboard vs. team channels vs.
+        # unassigned members). Same helper the slash-command dispatcher
+        # uses, so there's exactly one place deciding who sees what.
+        if channel_id:
+            _gate_bot_token = SlackSlashCommandView()._get_bot_token(team_id, slack_user_id=slack_user_id)
+            _gate_channel_name = (
+                SlackEventsView()._get_channel_name(_gate_bot_token, channel_id) if _gate_bot_token else None
+            )
+            if _gate_channel_name:
+                _gate_allowed, _gate_deny_blocks = _authorize_channel_access(_gate_channel_name, team_id, slack_user_id)
+                if not _gate_allowed:
+                    self._debug_write(f"_handle_action: DENIED action={action_id} channel={_gate_channel_name} user={slack_user_id}")
+                    self._post_response_url(response_url, {"replace_original": True, "blocks": _gate_deny_blocks}, action_id)
+                    return
+
         # Back Step / View Next Steps / All Completed sit in the SAME actions
         # row as another button reusing the surrounding Manual-detail view's
         # action_id (e.g. "tav_detail_manual") — Slack rejects two buttons
@@ -19904,6 +20060,23 @@ class SlackInteractivityView(APIView):
 
         slash = SlackSlashCommandView()
         title = titles[callback_id]
+
+        # Access-control gate (defense-in-depth; primary gate is on the
+        # button that opens these modals, in _handle_action). No channel
+        # context is available in a view_submission payload, so this checks
+        # Slack identity only.
+        _gate_allowed, _gate_deny_blocks = _authorize_view_submission(callback_id, team_id, slack_user_id)
+        if not _gate_allowed:
+            self._debug_write(f"_handle_view_submission: DENIED callback={callback_id} user={slack_user_id}")
+            bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+            if bot_token and view_id:
+                _http_post(
+                    "https://slack.com/api/views.update",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"view_id": view_id, "view": slash._build_result_modal(title, _gate_deny_blocks)},
+                    timeout=10,
+                )
+            return
 
         try:
             if callback_id == "modal_adduser_submit":
