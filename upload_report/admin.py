@@ -720,9 +720,18 @@ class FixVulnVerificationAdmin(admin.ModelAdmin):
                             _asset = fix_doc.get("host_name", "")
                             _team = fix_doc.get("assigned_team", "")
                             _admin_id = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
+                            _closed_by_name = fix_doc.get("closed_by_name", "")
                             _title = f"Vulnerability Verified & Closed: {_vuln[:80]}"
-                            _msg = f"{_vuln} on {_asset} has been verified and closed by superadmin. Team: {_team}."
-                            _meta = {"vulnerability_name": _vuln, "asset": _asset, "fix_vulnerability_id": fix_vuln_id, "assigned_team": _team}
+                            _msg = (
+                                f"{_vuln} on {_asset}"
+                                + (f" (fixed by {_closed_by_name})" if _closed_by_name else "")
+                                + f" has been verified and closed by superadmin ({request.user.email}). Team: {_team}."
+                            )
+                            _meta = {
+                                "vulnerability_name": _vuln, "asset": _asset,
+                                "fix_vulnerability_id": fix_vuln_id, "assigned_team": _team,
+                                "closed_by_name": _closed_by_name, "approved_by_name": request.user.email,
+                            }
                             if _admin_id:
                                 create_notification(_admin_id, 'admin', 'vuln_closed', _title, _msg, _meta)
                                 create_notification(_admin_id, 'user', 'vuln_closed', _title, _msg, _meta)

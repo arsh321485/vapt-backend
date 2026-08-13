@@ -7002,11 +7002,12 @@ class SlackEventsView(APIView):
         When a member joins a Slack channel:
         1. Find the admin who owns this workspace (by slack_team_id)
         2. Fetch user info from Slack
-        3. Resolve the channel they joined to a team (Network Security etc.)
-        4. Save to UserDetail (if not already exists) with that team as
-           Member_role — falls back to "Viewer" only for non-team channels
-        5. Create Django User + generate set-password link
-        6. Send same welcome email that normal user-add flow sends
+        3. Save to UserDetail (if not already exists) with Member_role =
+           ["Viewer"] — a channel join NEVER grants real team access on its
+           own (team channels are public/self-joinable); only the admin's
+           explicit /adduser does that.
+        4. Create Django User + generate set-password link
+        5. Send same welcome email that normal user-add flow sends
         """
         try:
             logger.info(f"[SlackEvent] _save_slack_member_to_user_detail: slack_user_id={slack_user_id} team_id={team_id} channel_id={channel_id}")
@@ -7070,12 +7071,17 @@ class SlackEventsView(APIView):
             first_name = parts[0] if parts else "Slack"
             last_name = " ".join(parts[1:]) if len(parts) > 1 else "User"
 
-            # Resolve which team (if any) this channel belongs to, so
-            # Member_role reflects the actual team channel the admin invited
-            # them to instead of always defaulting to "Viewer".
+            # Which team channel (if any) this is — kept for logging/
+            # slack_channel_ids bookkeeping only. It must NEVER grant real
+            # team access on its own: team channels are public, so anyone in
+            # the workspace could self-join one (e.g. Architectural Flaws)
+            # and silently get that team's data. Real access is granted
+            # ONLY by the admin's explicit /adduser — every brand-new member
+            # discovered this way starts as "Viewer" (no team data) no
+            # matter which channel they were seen joining.
             resolved_team = self._resolve_channel_team_role(admin.slack_bot_token, channel_id)
-            initial_roles = [resolved_team] if resolved_team else ["Viewer"]
-            logger.info(f"[SlackEvent] channel_id={channel_id} resolved_team={resolved_team}")
+            initial_roles = ["Viewer"]
+            logger.info(f"[SlackEvent] channel_id={channel_id} resolved_team={resolved_team} (not auto-granted — Viewer only)")
 
             # Save to UserDetail — skip if already exists for this admin+email
             from users_details.models import UserDetail
@@ -7108,19 +7114,12 @@ class SlackEventsView(APIView):
                     _upd["slack_member_id"] = slack_user_id
                 if not user_detail.platform:
                     _upd["platform"] = "slack"
-                # Only let a channel join ESTABLISH a team assignment when
-                # the user has none yet (still stuck on the "Viewer"
-                # fallback) — once the admin has deliberately assigned a
-                # real team (via /adduser or an earlier join), joining some
-                # OTHER channel must never silently expand their access on
-                # top of that. Without this guard, any member who joins
-                # (or is added to) an unrelated team channel instantly
-                # gained that team's full data access too.
-                if resolved_team:
-                    existing_roles = list(user_detail.Member_role or [])
-                    real_roles = [r for r in existing_roles if r != "Viewer"]
-                    if not real_roles and resolved_team not in existing_roles:
-                        _upd["Member_role"] = [resolved_team]
+                # A channel join NEVER establishes or expands a team
+                # assignment, even for a user still stuck on "Viewer" —
+                # team channels are public and self-joinable, so this used
+                # to let anyone silently grant themselves real team access
+                # just by joining (e.g. Architectural Flaws). Real access is
+                # granted ONLY by the admin's explicit /adduser.
                 if channel_id:
                     existing_ids = list(user_detail.slack_channel_ids or [])
                     if channel_id not in existing_ids:
@@ -8081,10 +8080,10 @@ _DASHBOARD_HTML_HEAD = """<!DOCTYPE html>
       --slack-sub: #616061;
       --slack-border: #e8e8e8;
       --accent: rgb(14, 106, 111);
-      --critical: #e01e5a;
-      --high: #e8912d;
-      --medium: #ecb22e;
-      --low: #2eb67d;
+      --critical: #58120a;
+      --high: #dd231c;
+      --medium: #f09f0e;
+      --low: #18b985;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -8304,12 +8303,12 @@ def _dashboard_bar_height(n, m):
 def _dashboard_gauge_gradient(score):
     score = max(0, min(10, score or 0))
     deg = (score / 10) * 360
-    color = "#e01e5a" if score >= 7 else ("#e8912d" if score >= 4 else "#2eb67d")
+    color = "#58120a" if score >= 7 else ("#dd231c" if score >= 4 else "#18b985")
     return f"conic-gradient({color} 0deg {deg}deg, #eee {deg}deg 360deg)"
 
 
 def _dashboard_donut_gradient(counts):
-    colors = {"critical": "#e01e5a", "high": "#e8912d", "medium": "#ecb22e", "low": "#2eb67d"}
+    colors = {"critical": "#58120a", "high": "#dd231c", "medium": "#f09f0e", "low": "#18b985"}
     order = ["medium", "low", "high", "critical"]
     total = sum(counts.values())
     if total == 0:
@@ -8549,20 +8548,20 @@ _TEAM_OVERVIEW_HTML_HEAD = """<!DOCTYPE html>
     .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
 
     /* Critical */
-    .sev.critical { color: #b42318; background: #fee2e2; }
-    .dot-critical { background: #b42318; }
+    .sev.critical { color: #58120a; background: #fee2e2; }
+    .dot-critical { background: #58120a; }
 
     /* High */
-    .sev.high { color: #dc2626; background: #fee2e2; }
-    .dot-high { background: #dc2626; }
+    .sev.high { color: #dd231c; background: #fee2e2; }
+    .dot-high { background: #dd231c; }
 
     /* Medium */
-    .sev.medium { color: rgb(245, 158, 11); background: #fef3c7; }
-    .dot-medium { background: rgb(245, 158, 11); }
+    .sev.medium { color: rgb(240, 159, 14); background: #fef3c7; }
+    .dot-medium { background: rgb(240, 159, 14); }
 
     /* Low */
-    .sev.low { color: #16a34a; background: #dcfce7; }
-    .dot-low { background: #16a34a; }
+    .sev.low { color: #18b985; background: #dcfce7; }
+    .dot-low { background: #18b985; }
 
     .no-vuln { font-size: 0.8rem; color: #9ca3af; margin-top: 8px; }
     .full-width { grid-column: 1 / -1; }
@@ -8639,10 +8638,10 @@ _TEAM_PERFORMANCE_HTML_HEAD = """<!DOCTYPE html>
       --slack-sub: #616061;
       --slack-border: #e8e8e8;
       --team-blue: #2563eb;
-      --critical: #e01e5a;
-      --high: #e8912d;
-      --medium: #ecb22e;
-      --low: #2eb67d;
+      --critical: #58120a;
+      --high: #dd231c;
+      --medium: #f09f0e;
+      --low: #18b985;
       --closed: #16a34a;
       --open: #dc2626;
       --closure: #ea580c;
@@ -8920,7 +8919,7 @@ _SUPPORT_DETAIL_HTML_HEAD = """<!DOCTYPE html>
     :root {
       --slack-text: #1d1c1d; --slack-sub: #616061; --slack-border: #e8e8e8;
       --accent: rgb(14,106,111); --open: #16a34a; --closed: #6b7280;
-      --critical: #e01e5a; --high: #e8912d; --medium: #ecb22e; --low: #2eb67d;
+      --critical: #58120a; --high: #dd231c; --medium: #f09f0e; --low: #18b985;
       --purple: #5b4b8a; --line: #d1d5db;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -9331,7 +9330,7 @@ _VULNSTATS_HTML_HEAD = """<!DOCTYPE html>
   <title>Vulnerability Statistics | VaptFix</title>
   <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
   <style>
-    :root{--slack-text:#1d1c1d;--slack-sub:#616061;--slack-border:#e8e8e8;--accent:rgb(14,106,111);--critical:#e01e5a;--high:#e8912d;--medium:#ecb22e;--low:#2eb67d}
+    :root{--slack-text:#1d1c1d;--slack-sub:#616061;--slack-border:#e8e8e8;--accent:rgb(14,106,111);--critical:#58120a;--high:#dd231c;--medium:#f09f0e;--low:#18b985}
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:"Lato",sans-serif;background:#f4f6f8;color:var(--slack-text);font-size:15px;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:24px 16px}
     .dash{width:100%;max-width:760px;border:1px solid var(--slack-border);border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.05);background:#fff}
@@ -12517,8 +12516,8 @@ class SlackSlashCommandView(APIView):
 
     # Severity emoji — Block Kit has no custom colors, this is the closest
     # Slack-native approximation to the design's exact RGB pills
-    # (critical rgb(180,35,24), high rgb(220,38,38), medium rgb(245,158,11),
-    # low rgb(16,185,129)).
+    # (critical rgb(88,18,10), high rgb(221,35,28), medium rgb(240,159,14),
+    # low rgb(24,185,133)).
     _ASSET_SEV_EMOJI = [("critical", "🔴", "Critical"), ("high", "🟠", "High"), ("medium", "🟡", "Medium"), ("low", "🟢", "Low")]
 
     def _format_asset_list(self, rows, offset=0, sev_filter="all", st_filter="all"):
@@ -14635,15 +14634,19 @@ class SlackSlashCommandView(APIView):
             if not ok:
                 logger.warning(f"[SlackCmd] invite failed for team={team_name!r}: {data.get('error')}")
             results[team_name] = ok
-            if ok and not already_in and team_id:
-                # A genuinely fresh invite — this person could not have seen
-                # this channel's navbar before (they weren't in it), and
-                # /adduser alone should be enough for them to land straight
-                # on the Home dashboard, same as an admin never having to
-                # type a command. If the channel already has one posted
-                # (e.g. an earlier teammate's /adduser already triggered it),
-                # skip reposting — avoids a fresh navbar spamming existing
-                # members every single time one more person is added.
+            if ok and team_id:
+                # /adduser alone should be enough for the member to land
+                # straight on the Home dashboard, same as an admin never
+                # having to type a command — so always try to ensure a
+                # navbar is visible here, even if they were ALREADY a
+                # channel member beforehand (e.g. they'd auto-joined it
+                # earlier without a real team assignment — see
+                # _save_slack_member_to_user_detail — so this may be the
+                # first time /adduser is what actually grants them access).
+                # _ensure_team_navbar_posted itself already checks recent
+                # channel history and skips reposting if one is already
+                # there, so this never spams an existing, already-onboarded
+                # team.
                 self._ensure_team_navbar_posted(bot_token, channel_id, team_id, team_name)
         return results
 
@@ -16311,10 +16314,8 @@ class SlackSlashCommandView(APIView):
 
     # Severity brand colors (exact RGB — served as PNG circles; Block Kit
     # cannot color emoji, so lists use _sev_icon_image_element instead):
-    # Critical rgb(127,29,29) | High rgb(222,37,35) |
-    # Medium rgb(232,170,59) | Low rgb(9,184,127)
-    # (Critical deliberately darker/deeper than High so the two reds read
-    # as distinct severities instead of near-identical at icon size.)
+    # Critical rgb(88,18,10) | High rgb(221,35,28) |
+    # Medium rgb(240,159,14) | Low rgb(24,185,133)
     _SEV_EMOJI_MAP = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 
     def _status_icon_kind(self, st):
