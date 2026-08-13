@@ -54,10 +54,10 @@ def _slack_channel_id_by_name(token, channel_name):
 
 
 _SEVERITY_STYLE = (
-    ("critical", "🔴", "#e01e5a"),
-    ("high",     "🟠", "#e8912d"),
-    ("medium",   "🟡", "#ecb22e"),
-    ("low",      "🟢", "#2eb67d"),
+    ("critical", "🔴", "#58120a"),
+    ("high",     "🟠", "#dd231c"),
+    ("medium",   "🟡", "#f09f0e"),
+    ("low",      "🟢", "#18b985"),
 )
 
 _SEV_EMOJI = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
@@ -169,10 +169,12 @@ def _card_extension_approved(title, message, metadata):
     vuln = meta.get("vulnerability_name", "")
     asset = meta.get("asset", "")
     days = meta.get("extension_days") or meta.get("requested_days")
+    decided_by = meta.get("decided_by", "")
     facts = [
         ("Vulnerability", vuln, True),
         ("Asset / IP", asset, False),
         ("Extension", f"+{days} day(s)" if days else "", False),
+        ("Approved by", decided_by, True),
     ]
     body = "Your timeline extension request has been approved by admin."
     blocks = _rich_card_blocks(
@@ -187,10 +189,12 @@ def _card_extension_rejected(title, message, metadata):
     vuln = meta.get("vulnerability_name", "")
     asset = meta.get("asset", "")
     reason = meta.get("admin_comment", "")
+    decided_by = meta.get("decided_by", "")
     facts = [
         ("Vulnerability", vuln, True),
         ("Asset / IP", asset, False),
         ("Status", "Rejected", False),
+        ("Rejected by", decided_by, False),
         ("Admin reason", reason, True),
     ]
     body = "Your timeline extension request has been rejected by admin."
@@ -250,6 +254,7 @@ def _card_mitigation_submitted(title, message, metadata):
         # ever supports the manual step-by-step flow, so this is a fixed
         # label rather than sourced from metadata.
         ("Method", "Manual Fix", False),
+        ("Submitted by", submitted_by, True),
     ]
     body = f"{submitted_by} has submitted a mitigation for review." if submitted_by else "A mitigation has been submitted for review."
     blocks = _rich_card_blocks(
@@ -264,13 +269,20 @@ def _card_vuln_closed(title, message, metadata):
     vuln = meta.get("vulnerability_name", "")
     asset = meta.get("asset", "")
     team = meta.get("assigned_team", "")
+    # closed_by_name = the team member whose steps actually fixed it;
+    # approved_by_name = the superadmin who approved it (retest path only —
+    # absent for a straight auto-close, which needs no approval). Falls back
+    # to the team name if we somehow don't have a person's name yet.
+    closed_by = meta.get("closed_by_name") or team
+    approved_by = meta.get("approved_by_name", "")
     facts = [
         ("Vulnerability", vuln, True),
         ("Asset / IP", asset, False),
-        ("Closed by", team, False),
-        ("Team", team, True),
+        ("Closed by", closed_by, False),
+        ("Team", team, False),
+        ("Approved by", approved_by, True),
     ]
-    body = "This vulnerability has been verified and closed by the assigned team."
+    body = f"This vulnerability has been verified and closed{f' by {closed_by}' if closed_by else ''}."
     blocks = _rich_card_blocks(
         "🔔", f"Vulnerability Verified & Closed: {vuln}", "success", "Verified and closed successfully",
         body, facts, ["Added by vaptfix", "Status: Closed"],

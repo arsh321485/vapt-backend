@@ -887,6 +887,7 @@ class AdminMitigationTimelineExtensionStatusAPIView(APIView):
                         "extension_days": _ext_days,
                         "admin_comment": admin_comment,
                         "status":       new_status,
+                        "decided_by":   getattr(request.user, "email", ""),
                     }
                     if new_status == "approved":
                         _notif_type = 'extension_approved'

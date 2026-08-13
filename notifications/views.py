@@ -74,7 +74,11 @@ class AdminNotificationUnreadCountView(APIView):
 
 
 class AdminMarkNotificationReadView(APIView):
-    """PATCH /api/notifications/admin/<notif_id>/mark-read/"""
+    """
+    PATCH /api/notifications/admin/<notif_id>/mark-read/
+    Marking as read now permanently removes the notification — once seen,
+    it's gone for good (no read-history is kept).
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def patch(self, request, notif_id):
@@ -85,28 +89,30 @@ class AdminMarkNotificationReadView(APIView):
 
         admin_id = str(request.user.id)
         with MongoContext() as db:
-            result = db[COLLECTION].update_one(
-                {"_id": obj_id, "admin_id": admin_id, "recipient_type": "admin"},
-                {"$set": {"is_read": True}}
+            result = db[COLLECTION].delete_one(
+                {"_id": obj_id, "admin_id": admin_id, "recipient_type": "admin"}
             )
-        if result.matched_count == 0:
+        if result.deleted_count == 0:
             return Response({"detail": "Notification not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response({"detail": "Marked as read", "id": notif_id}, status=status.HTTP_200_OK)
+        return Response({"detail": "Notification cleared", "id": notif_id}, status=status.HTTP_200_OK)
 
 
 class AdminMarkAllNotificationsReadView(APIView):
-    """PATCH /api/notifications/admin/mark-all-read/"""
+    """
+    PATCH /api/notifications/admin/mark-all-read/
+    Marking as read now permanently removes the notifications — once seen,
+    they're gone for good (no read-history is kept).
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def patch(self, request):
         admin_id = str(request.user.id)
         with MongoContext() as db:
-            result = db[COLLECTION].update_many(
-                {"admin_id": admin_id, "recipient_type": "admin", "is_read": False},
-                {"$set": {"is_read": True}}
+            result = db[COLLECTION].delete_many(
+                {"admin_id": admin_id, "recipient_type": "admin", "is_read": False}
             )
         return Response(
-            {"detail": "All notifications marked as read", "updated": result.modified_count},
+            {"detail": "All notifications cleared", "deleted": result.deleted_count},
             status=status.HTTP_200_OK
         )
 
@@ -158,7 +164,11 @@ class UserNotificationUnreadCountView(APIView):
 
 
 class UserMarkNotificationReadView(APIView):
-    """PATCH /api/notifications/user/<notif_id>/mark-read/"""
+    """
+    PATCH /api/notifications/user/<notif_id>/mark-read/
+    Marking as read now permanently removes the notification — once seen,
+    it's gone for good (no read-history is kept).
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def patch(self, request, notif_id):
@@ -173,22 +183,25 @@ class UserMarkNotificationReadView(APIView):
             return Response({"detail": "User not linked to any admin"}, status=status.HTTP_403_FORBIDDEN)
 
         with MongoContext() as db:
-            result = db[COLLECTION].update_one(
+            result = db[COLLECTION].delete_one(
                 {
                     "_id": obj_id,
                     "admin_id": admin_id,
                     "recipient_type": "user",
                     "recipient_email": {"$in": [user_email, ""]},
-                },
-                {"$set": {"is_read": True}}
+                }
             )
-        if result.matched_count == 0:
+        if result.deleted_count == 0:
             return Response({"detail": "Notification not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response({"detail": "Marked as read", "id": notif_id}, status=status.HTTP_200_OK)
+        return Response({"detail": "Notification cleared", "id": notif_id}, status=status.HTTP_200_OK)
 
 
 class UserMarkAllNotificationsReadView(APIView):
-    """PATCH /api/notifications/user/mark-all-read/"""
+    """
+    PATCH /api/notifications/user/mark-all-read/
+    Marking as read now permanently removes the notifications — once seen,
+    they're gone for good (no read-history is kept).
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def patch(self, request):
@@ -198,16 +211,15 @@ class UserMarkAllNotificationsReadView(APIView):
             return Response({"detail": "User not linked to any admin"}, status=status.HTTP_403_FORBIDDEN)
 
         with MongoContext() as db:
-            result = db[COLLECTION].update_many(
+            result = db[COLLECTION].delete_many(
                 {
                     "admin_id": admin_id,
                     "recipient_type": "user",
                     "recipient_email": {"$in": [user_email, ""]},
                     "is_read": False,
-                },
-                {"$set": {"is_read": True}}
+                }
             )
         return Response(
-            {"detail": "All notifications marked as read", "updated": result.modified_count},
+            {"detail": "All notifications cleared", "deleted": result.deleted_count},
             status=status.HTTP_200_OK
         )

@@ -2804,9 +2804,12 @@ class SuperAdminApproveVerificationAPIView(APIView):
                 _asset     = fix_doc.get("host_name", "")
                 _team      = fix_doc.get("assigned_team", "")
                 _admin_id  = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
+                _closed_by_name = fix_doc.get("closed_by_name", "")
                 _n_title = f"Vulnerability Verified & Closed: {_vuln_name[:80]}"
                 _n_msg   = (
-                    f"{_vuln_name} on {_asset} has been verified and closed by superadmin. "
+                    f"{_vuln_name} on {_asset}"
+                    + (f" (fixed by {_closed_by_name})" if _closed_by_name else "")
+                    + f" has been verified and closed by superadmin ({request.user.email}). "
                     f"Team: {_team}."
                 )
                 _n_meta = {
@@ -2814,6 +2817,8 @@ class SuperAdminApproveVerificationAPIView(APIView):
                     "asset":                _asset,
                     "assigned_team":        _team,
                     "fix_vulnerability_id": fix_vuln_id,
+                    "closed_by_name":       _closed_by_name,
+                    "approved_by_name":     request.user.email,
                 }
                 if _admin_id:
                     create_notification(_admin_id, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)

@@ -1452,6 +1452,19 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     # now reopens an already-CLOSED vuln into "open/review"
                     # instead of gating the very first close).
                     now = datetime.utcnow()
+                    # Resolve the actual team member's display name (not
+                    # just their email/id) for the "Closed by" notification
+                    # field — UserDetail carries first/last name, request.user
+                    # (users.models.User) doesn't.
+                    _closer_name = ""
+                    try:
+                        _closer_detail = UserDetail.objects.filter(email=request.user.email).first() if UserDetail else None
+                        if _closer_detail and (_closer_detail.first_name or _closer_detail.last_name):
+                            _closer_name = f"{_closer_detail.first_name or ''} {_closer_detail.last_name or ''}".strip()
+                    except Exception:
+                        pass
+                    _closer_name = _closer_name or getattr(request.user, "email", "")
+
                     closed_doc = fix_doc.copy()
                     closed_doc["fix_vulnerability_id"] = str(fix_doc["_id"])
                     closed_doc.pop("_id", None)
@@ -1459,6 +1472,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         "status": "closed",
                         "closed_at": now,
                         "closed_by": "system_auto",
+                        "closed_by_name": _closer_name,
                         "close_reason": "all_steps_completed",
                     })
                     closed_coll.insert_one(closed_doc)
@@ -1497,6 +1511,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                             "asset":                _asset,
                             "assigned_team":        _team,
                             "fix_vulnerability_id": fix_vuln_id,
+                            "closed_by_name":       _closer_name,
                         }
                         if _admin_id_cache:
                             create_notification(_admin_id_cache, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
@@ -1624,9 +1639,17 @@ class UserSendVerificationAPIView(APIView):
                         _vuln_name = closed_doc.get("plugin_name", "")
                         _asset     = closed_doc.get("host_name", "")
                         _team      = closed_doc.get("assigned_team", "")
+                        _requester_name = ""
+                        try:
+                            _rd = UserDetail.objects.filter(email=request.user.email).first() if UserDetail else None
+                            if _rd and (_rd.first_name or _rd.last_name):
+                                _requester_name = f"{_rd.first_name or ''} {_rd.last_name or ''}".strip()
+                        except Exception:
+                            pass
+                        _requester_name = _requester_name or getattr(request.user, "email", "")
                         _n_title = f"Retest Requested: {_vuln_name[:80]}"
                         _n_msg   = (
-                            f"Retest requested for previously-closed '{_vuln_name}' on {_asset}. "
+                            f"Retest requested by {_requester_name} for previously-closed '{_vuln_name}' on {_asset}. "
                             f"Team: {_team}. Please review and approve to close."
                         )
                         _n_meta = {
@@ -1634,6 +1657,7 @@ class UserSendVerificationAPIView(APIView):
                             "asset":                _asset,
                             "assigned_team":        _team,
                             "fix_vulnerability_id": fix_vuln_id,
+                            "requested_by":         _requester_name,
                         }
                         for _su in _UserModel.objects.filter(is_superuser=True):
                             create_notification(str(_su.id), 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
@@ -1740,9 +1764,17 @@ class UserSendVerificationAPIView(APIView):
                     _asset     = fix_doc.get("host_name", "")
                     _team      = fix_doc.get("assigned_team", "")
                     _admin_id  = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
+                    _requester_name = ""
+                    try:
+                        _rd = UserDetail.objects.filter(email=request.user.email).first() if UserDetail else None
+                        if _rd and (_rd.first_name or _rd.last_name):
+                            _requester_name = f"{_rd.first_name or ''} {_rd.last_name or ''}".strip()
+                    except Exception:
+                        pass
+                    _requester_name = _requester_name or getattr(request.user, "email", "")
                     _n_title = f"Verification Request: {_vuln_name[:80]}"
                     _n_msg   = (
-                        f"All remediation steps completed for '{_vuln_name}' on {_asset}. "
+                        f"All remediation steps completed for '{_vuln_name}' on {_asset} by {_requester_name}. "
                         f"Team: {_team}. Please review and approve to close."
                     )
                     _n_meta = {
@@ -1750,6 +1782,7 @@ class UserSendVerificationAPIView(APIView):
                         "asset":                _asset,
                         "assigned_team":        _team,
                         "fix_vulnerability_id": fix_vuln_id,
+                        "requested_by":         _requester_name,
                     }
                     for _su in _UserModel.objects.filter(is_superuser=True):
                         create_notification(str(_su.id), 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
