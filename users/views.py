@@ -11392,8 +11392,7 @@ class SlackSlashCommandView(APIView):
             team_id, user_id,
             f"⏳ *Timeline Extension Request* — *{vapt_team}*\n"
             f"Vulnerability: `{plugin_name}` {icon} {sev} on `{host_name}`\n"
-            f"Requested: +{days} day(s) | Reason: {reason}\n"
-            f"Use `/request` to review, then `/approve [request-id]` or `/reject [request-id]`."
+            f"Requested: +{days} day(s) | Reason: {reason}"
         )
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "⏳ Extension Request Submitted", "emoji": True}},
@@ -15390,8 +15389,7 @@ class SlackSlashCommandView(APIView):
             team_id, user_id,
             f"⏳ *Timeline Extension Request* — *{team_name}*\n"
             f"Vulnerability: `{plugin_name}` {icon} {sev} on `{host_name}`\n"
-            f"Requested: +{days} day(s) | Reason: {reason}\n"
-            f"Use `/request` to review, then `/approve [request-id]` or `/reject [request-id]`."
+            f"Requested: +{days} day(s) | Reason: {reason}"
         )
         return [
             {"type": "header", "text": {"type": "plain_text", "text": "⏳ Extension Request Submitted", "emoji": True}},
@@ -16313,8 +16311,10 @@ class SlackSlashCommandView(APIView):
 
     # Severity brand colors (exact RGB — served as PNG circles; Block Kit
     # cannot color emoji, so lists use _sev_icon_image_element instead):
-    # Critical rgb(171,39,26) | High rgb(222,37,35) |
+    # Critical rgb(127,29,29) | High rgb(222,37,35) |
     # Medium rgb(232,170,59) | Low rgb(9,184,127)
+    # (Critical deliberately darker/deeper than High so the two reds read
+    # as distinct severities instead of near-identical at icon size.)
     _SEV_EMOJI_MAP = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 
     def _status_icon_kind(self, st):
@@ -17304,21 +17304,24 @@ class SlackSlashCommandView(APIView):
         if nav_elements:
             blocks.append({"type": "actions", "elements": nav_elements})
 
-        # Completing every step doesn't auto-transition status on its own —
-        # the backend requires this separate explicit call to move
-        # "in_progress" -> "open/review" and notify the superadmin (see
-        # UserSendVerificationAPIView). Without a button for it here, status
-        # got stuck at "in_process" forever even once all steps were done.
-        if (
-            team_view and total > 0 and completed >= total
-            and (v.get("status") or "").strip().lower() not in ("open/review", "closed")
-        ):
+        # All-steps-complete now auto-closes the vulnerability (see
+        # UserFixVulnerabilityStepsAPIView) — Send for Retest's job is to
+        # REOPEN an already-closed vuln into "open/review" for the
+        # superadmin to re-verify (UserSendVerificationAPIView). Shown
+        # whenever the vuln is closed; the completed>=total fallback covers
+        # the rare case of a not-yet-closed vuln with all steps done.
+        _v_status_lower = (v.get("status") or "").strip().lower()
+        _show_retest_btn = team_view and (
+            _v_status_lower == "closed"
+            or (total > 0 and completed >= total and _v_status_lower != "open/review")
+        )
+        if _show_retest_btn:
             sv_refresh_value = f"{action_value if action_value is not None else sid}|SP:{offset}"
             blocks.append({
                 "type": "actions",
                 "elements": [{
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "📨 Send for Retest", "emoji": True},
+                    "text": {"type": "plain_text", "text": "🔁 Send for Retest", "emoji": True},
                     "action_id": action_id or "tav_detail_manual",
                     "value": f"{sv_refresh_value}|SV:{raise_support_fix_vuln_id}",
                     "style": "primary",
@@ -19318,34 +19321,52 @@ class SlackInteractivityView(APIView):
                 }, action_id)
                 return
 
-            if action_id in ("av_approve_row", "av_reject_row"):
-                # Timeline Extension row's Approve/Reject click — navigate to
-                # that tab's own paginated list, landing on the page that
-                # actually contains this specific request.
+            if action_id == "av_approve_row":
+                # Timeline Extension row's own Approve click — approve THIS
+                # request immediately (no intermediate "pick a request"
+                # screen), then redraw the same Extension Requests tab so
+                # the now-decided request drops off the pending list.
+                sid = value
+                slash._cmd_approve(sid, team_id, slack_user_id)
                 ext_data = slash._call_api(
                     "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
                     slack_user_id=slack_user_id,
                 )
-                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
-                is_approve = action_id == "av_approve_row"
-                # Page offset must be computed against the SAME filtered
-                # list the builder below will actually paginate (it drops
-                # rejected/approved opposite-status items) — otherwise the
-                # jump lands on the wrong page.
-                filtered = [r for r in all_requests if r.get("status", "review") != ("rejected" if is_approve else "approved")]
-                page_offset = slash._extension_page_for_sid(filtered, value)
-                content = slash._build_history_view_blocks(
-                    all_requests, history_view=("approve" if is_approve else "reject"), offset=page_offset,
-                )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_request")
-                    + slash._request_subnav_block(active_sub="req_sub_history")
-                    + content
+                    + slash._request_subnav_block(active_sub="req_sub_extensions")
+                    + slash._format_extension_requests(ext_data)
                 )
                 self._post_response_url(response_url, {
                     "replace_original": True,
                     "blocks": blocks,
                 }, action_id)
+                return
+
+            if action_id == "av_reject_row":
+                # Timeline Extension row's own Reject click — go straight to
+                # the reason modal for THIS request (same modal
+                # av_list_reject_row uses), no intermediate list screen.
+                sid = value
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
+                    return
+                ext_data = slash._call_api(
+                    "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                    slack_user_id=slack_user_id,
+                )
+                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
+                target = next((r for r in all_requests if slash._short_ids_match(r.get("short_id"), sid)), None)
+                vuln_label = (target.get("vul_name") if target else None) or sid
+                view = slash._build_reject_modal(sid, vuln_label)
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
                 return
 
             if action_id in ("av_approve_list_prev", "av_approve_list_next", "av_reject_list_prev", "av_reject_list_next"):
