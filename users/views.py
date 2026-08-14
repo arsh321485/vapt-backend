@@ -20105,6 +20105,7 @@ class SlackInteractivityView(APIView):
                         "text": "❌ Could not download script — missing plugin ID or channel.",
                     }, action_id)
                     return
+
                 os_params = {"os": dl_host_os} if dl_host_os else None
                 automation = slash._call_user_api(
                     f"/api/user/automation-scripts/match/{dl_plugin_id}/", team_id, slack_user_id, params=os_params,
@@ -20129,7 +20130,6 @@ class SlackInteractivityView(APIView):
                     initial_comment=(
                         f"🤖 Automated fix script for `{dl_sid}` — {automation.get('vulnerability', '')}"
                     ),
-                    thread_ts=message_ts or None,
                 )
                 if not uploaded:
                     self._post_response_url(response_url, {
