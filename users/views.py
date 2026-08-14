@@ -3421,7 +3421,7 @@ _RISK_CRITERIA_DEFAULTS = {
 }
 
 
-def _build_upload_report_modal():
+def _build_upload_report_modal(latest_report=None):
     """
     Modal shown from the welcome message's "Upload Report" button — a native
     Slack file_input element, so the admin never has to leave Slack to get
@@ -3430,7 +3430,33 @@ def _build_upload_report_modal():
     to the exact same /upload_report/upload/ endpoint the website form
     posts to (Nessus/AWS Inspector/custom-file detection, validation, and
     mitigation-agent triggering all run identically either way).
+
+    `latest_report` — result of GET /api/admin/upload_report/latest-report/,
+    checked fresh every time this modal is opened. If a report already
+    exists, this shows its info INSTEAD of a file_input — re-uploading a
+    new report from this modal is intentionally not offered once one is on
+    file.
     """
+    if latest_report and latest_report.get("report_id"):
+        file_name   = latest_report.get("file_name") or "—"
+        uploaded_at = latest_report.get("uploaded_at") or ""
+        uploaded_label = uploaded_at.split("T")[0] if "T" in uploaded_at else uploaded_at
+        return {
+            "type": "modal",
+            "callback_id": "modal_upload_report_info",
+            "title": {"type": "plain_text", "text": "Upload Report"},
+            "close": {"type": "plain_text", "text": "Close"},
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": (
+                    "✅ *A report is already on file for your account.*"
+                )}},
+                {"type": "section", "fields": [
+                    {"type": "mrkdwn", "text": f"*File*\n`{file_name}`"},
+                    {"type": "mrkdwn", "text": f"*Uploaded*\n{uploaded_label or '—'}"},
+                ]},
+            ],
+        }
+
     return {
         "type": "modal",
         "callback_id": "modal_upload_report_submit",
@@ -10827,7 +10853,7 @@ class SlackSlashCommandView(APIView):
                     f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
                     params={"os": os_param} if os_param else None,
                 )
-                content = self._format_vulndata_automation_detail(v, automation)
+                content = self._format_vulndata_automation_detail(v, automation, can_download=True)
         else:
             steps_data = None
             if not report_id:
@@ -17316,14 +17342,16 @@ class SlackSlashCommandView(APIView):
 
         return blocks
 
-    def _format_vulndata_automation_detail(self, v, automation):
+    def _format_vulndata_automation_detail(self, v, automation, can_download=False):
         """
-        Automation Fix side of the Vuln Details toggle — read-only, matches
-        Manual's "view only" rule (no run/mark-fixed actions for admins).
-        Uses the admin-only /api/admin/automation-scripts/match/<plugin_id>/
-        endpoint, which has the same rich fields as the website. The actual
-        script file isn't embedded here (no admin download route exists) —
-        `/autofix` is still the way to get it, same as the team-facing view.
+        Automation Fix side of the Vuln Details toggle — shared by both the
+        admin view (/api/admin/automation-scripts/match/<plugin_id>/, truly
+        read-only — no run/mark-fixed actions for admins, and no admin
+        download route exists) and the team-member view
+        (/api/user/automation-scripts/match/<plugin_id>/). `can_download`
+        distinguishes the two: only the team-member call site passes True,
+        which adds a real "Download Script" button instead of just telling
+        them to separately type /autofix.
         """
         sid  = v.get("short_id", "?")
         name = v.get("vul_name") or v.get("plugin_name") or "Unknown"
@@ -17339,7 +17367,11 @@ class SlackSlashCommandView(APIView):
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Automated Fix: {name}"[:150], "emoji": True}},
-            self._ctx("Read-only — ready-made fix script from the automation library. Use `/autofix` to download it."),
+            self._ctx(
+                "Ready-made fix script from the automation library — use the Download button below."
+                if can_download else
+                "Read-only — script preview only."
+            ),
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*Severity*\n{automation.get('severity') or '—'}"},
                 {"type": "mrkdwn", "text": f"*OS*\n{automation.get('os') or '—'}"},
@@ -17365,9 +17397,23 @@ class SlackSlashCommandView(APIView):
                 "text": f"*Install command*\n`{automation['command_download_libraries']}`"}})
         add_section("Before running", "considerations_before")
 
-        blocks.append(self._ctx(
-            f"Script: `{automation.get('fix_script_name') or '—'}` — run `/autofix {sid}` to get it."
-        ))
+        if can_download:
+            plugin_id = v.get("plugin_id") or ""
+            host_os = v.get("host_os") or ""
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "⬇️ Download Script", "emoji": True},
+                    "action_id": "vulndata_autofix_download",
+                    "value": f"{plugin_id}|{sid}|{host_os}",
+                    "style": "primary",
+                }],
+            })
+        else:
+            blocks.append(self._ctx(
+                f"Script: `{automation.get('fix_script_name') or '—'}` — team members can download this in their team channel."
+            ))
         return blocks
 
     def _format_vulndata_automation(self, data):
@@ -18963,7 +19009,12 @@ class SlackInteractivityView(APIView):
                 if not bot_token or not trigger_id:
                     self._debug_write("open_upload_report_modal: missing bot_token or trigger_id")
                     return
-                view = _build_upload_report_modal()
+                # Checked fresh on every open — see _build_upload_report_modal's
+                # docstring for why an existing report skips the file_input.
+                latest_report = slash._call_api(
+                    "/api/admin/upload_report/latest-report/", team_id, slack_user_id=slack_user_id,
+                )
+                view = _build_upload_report_modal(latest_report if isinstance(latest_report, dict) else None)
                 resp = _http_post(
                     "https://slack.com/api/views.open",
                     headers={"Authorization": f"Bearer {bot_token}"},
@@ -19978,6 +20029,70 @@ class SlackInteractivityView(APIView):
                     ],
                 }, action_id)
                 return
+
+            if action_id == "vulndata_autofix_download":
+                # Value format here is "plugin_id|sid|host_os" — NOT the
+                # usual "fix_vuln_id|vuln_id|team_name" this dispatcher
+                # otherwise assumes, so parse fresh rather than reusing the
+                # generic parts/vuln_id/team_name parsed above. Uses the
+                # clicked message's own channel_id (already a parameter of
+                # this method) to post the file, so no team_name -> channel
+                # lookup is needed either.
+                dl_parts     = value.split("|")
+                dl_plugin_id = dl_parts[0] if len(dl_parts) > 0 else ""
+                dl_sid       = dl_parts[1] if len(dl_parts) > 1 else ""
+                dl_host_os   = dl_parts[2] if len(dl_parts) > 2 else ""
+                if not dl_plugin_id or not channel_id:
+                    self._post_response_url(response_url, {
+                        "response_type": "ephemeral",
+                        "text": "❌ Could not download script — missing plugin ID or channel.",
+                    }, action_id)
+                    return
+                os_params = {"os": dl_host_os} if dl_host_os else None
+                automation = slash._call_user_api(
+                    f"/api/user/automation-scripts/match/{dl_plugin_id}/", team_id, slack_user_id, params=os_params,
+                )
+                script_resp = slash._call_user_api_raw(
+                    f"/api/user/automation-scripts/download/{dl_plugin_id}/", team_id, slack_user_id, params=os_params,
+                )
+                if script_resp is None or script_resp.status_code != 200 or not script_resp.content:
+                    self._post_response_url(response_url, {
+                        "response_type": "ephemeral",
+                        "text": "❌ Could not download the script right now — please try again.",
+                    }, action_id)
+                    return
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                filename = (
+                    automation.get("fix_script_name")
+                    or automation.get("script_name")
+                    or f"plugin_{dl_plugin_id}_fix.py"
+                )
+                uploaded = bool(bot_token) and slash._upload_file_to_slack(
+                    bot_token, channel_id, filename, script_resp.content,
+                    initial_comment=(
+                        f"🤖 Automated fix script for `{dl_sid}` — {automation.get('vulnerability', '')}"
+                    ),
+                )
+                if not uploaded:
+                    self._post_response_url(response_url, {
+                        "response_type": "ephemeral",
+                        "text": "❌ Could not upload the script file — please try again.",
+                    }, action_id)
+                return
+
+            if action_id in ("mitigate_all", "mitigate_step"):
+                # A double-click (or Slack's at-least-once webhook delivery)
+                # firing this SAME button twice in quick succession used to
+                # complete TWO steps instead of one — step-complete always
+                # marks "whichever step is next pending", so a second call
+                # arriving before the first one's redraw lands completes the
+                # step AFTER the one the user actually clicked. A short
+                # per-vuln lock makes every click after the first one within
+                # this window a silent no-op instead of a second real call.
+                lock_key = f"step_complete_lock:{fix_vuln_id}"
+                if not cache.add(lock_key, True, timeout=5):
+                    self._debug_write(f"_handle_action: {action_id} ignored — step-complete lock held for fix_vuln_id={fix_vuln_id}")
+                    return
 
             if action_id == "mitigate_all":
                 json_body = {"complete_all": True}
