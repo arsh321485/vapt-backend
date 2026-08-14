@@ -3227,41 +3227,26 @@ ADMIN_DASHBOARD_CHANNEL = "vaptfix-admin-dashboard"
 # message's channel; _handle_view_submission — identity-only, since a
 # view_submission payload carries no channel context).
 
-_ADMIN_ONLY_ERROR_BLOCKS = [{
-    "type": "section",
-    "text": {
-        "type": "mrkdwn",
-        "text": (
-            "🔒 *Access Denied*\n"
-            "`#vaptfix-admin-dashboard` is available only to VaptFix Admin accounts.\n"
-            "Team members, please use your team channel instead."
-        ),
-    },
-}]
+_ADMIN_ONLY_ERROR_BLOCKS = [
+    {"type": "header", "text": {"type": "plain_text", "text": "🔒 Access Denied", "emoji": True}},
+    {"type": "section", "text": {"type": "mrkdwn", "text": (
+        "`#vaptfix-admin-dashboard` is available only to VaptFix Admin accounts.\n"
+        "Team members, please use your team channel instead."
+    )}},
+]
 
-_TEAM_SIDE_BLOCKED_FOR_ADMIN_BLOCKS = [{
-    "type": "section",
-    "text": {
-        "type": "mrkdwn",
-        "text": (
-            "You're logged in as an Admin. The User-side dashboard is available only to User accounts. "
-            "You're logged in as an Admin.\n"
-            "User-side features are not available for Admin accounts.\n"
-            "🔒 Admin accounts cannot access the User-side view."
-        ),
-    },
-}]
+_TEAM_SIDE_BLOCKED_FOR_ADMIN_BLOCKS = [
+    {"type": "header", "text": {"type": "plain_text", "text": "🔒 Access Denied", "emoji": True}},
+    {"type": "section", "text": {"type": "mrkdwn", "text": "Your current Admin account does not have access to this section."}},
+]
 
 
 def _no_team_access_blocks(team_display=None):
     detail = f"You don't have access to *{team_display}* data.\n" if team_display else "You don't have access to this team's data.\n"
-    return [{
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": f"🔒 *Access Denied*\n{detail}Ask your admin to add you to this team first.",
-        },
-    }]
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "🔒 Access Denied", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"{detail}Ask your admin to add you to this team first."}},
+    ]
 
 
 def _slack_identity(team_id, slack_user_id):
