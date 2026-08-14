@@ -3556,13 +3556,46 @@ def _build_enter_scope_options_blocks():
     ]
 
 
-def _build_scope_csv_modal():
+def _build_scope_info_modal(latest_scope):
+    """
+    Shown INSTEAD of the file/manual scope-entry form when a scope already
+    exists for this admin — checked fresh via GET /api/admin/scope/ every
+    time either "Enter Your Scope" button is clicked, same pattern as
+    _build_upload_report_modal. Entering a new scope from here once one is
+    on file is intentionally not offered.
+    """
+    name       = latest_scope.get("name") or "—"
+    entries    = latest_scope.get("entry_count")
+    created_at = latest_scope.get("created_at") or ""
+    created_label = created_at.split("T")[0] if "T" in created_at else created_at
+    return {
+        "type": "modal",
+        "callback_id": "modal_scope_info",
+        "title": {"type": "plain_text", "text": "Enter Scope"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                "✅ *A scope is already on file for your account.*"
+            )}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*Name*\n{name}"},
+                {"type": "mrkdwn", "text": f"*Entries*\n{entries if entries is not None else '—'}"},
+                {"type": "mrkdwn", "text": f"*Created*\n{created_label or '—'}"},
+            ]},
+        ],
+    }
+
+
+def _build_scope_csv_modal(latest_scope=None):
     """
     No Scope Name / Testing Type fields — matches the website's "Enter
     Your Scope" screen, which only ever asks for the file itself.
     /api/admin/scope/create/ auto-generates a name from the filename and
     defaults testing_type to black_box when neither is sent.
+    `latest_scope` — see _build_scope_info_modal.
     """
+    if latest_scope:
+        return _build_scope_info_modal(latest_scope)
     return {
         "type": "modal",
         "callback_id": "modal_scope_csv_submit",
@@ -3587,8 +3620,10 @@ def _build_scope_csv_modal():
     }
 
 
-def _build_scope_manual_modal():
+def _build_scope_manual_modal(latest_scope=None):
     """No Scope Name / Testing Type fields — see _build_scope_csv_modal."""
+    if latest_scope:
+        return _build_scope_info_modal(latest_scope)
     return {
         "type": "modal",
         "callback_id": "modal_scope_manual_submit",
@@ -14715,12 +14750,17 @@ class SlackSlashCommandView(APIView):
             return False
         return self._post_to_channel(bot_token, team_ch_id, message)
 
-    def _upload_file_to_slack(self, bot_token, channel_id, filename, content_bytes, initial_comment=""):
+    def _upload_file_to_slack(self, bot_token, channel_id, filename, content_bytes, initial_comment="", thread_ts=None):
         """
         Upload a file to a Slack channel using the modern (2024+) external
         upload flow — a separate feature from posting messages, requiring the
         files:write bot scope: (1) get an upload URL, (2) POST the raw bytes
         to it, (3) finalize the upload attaching it to the channel.
+        `thread_ts`, if given, posts it as a threaded reply under that
+        message instead of a new top-level message at the bottom of the
+        channel (Slack has no way to insert a new message earlier in the
+        timeline — threading is the closest equivalent to "post it right
+        here").
         Returns True on success.
         """
         try:
@@ -14742,14 +14782,17 @@ class SlackSlashCommandView(APIView):
                 logger.warning(f"[SlackUpload] upload POST failed: status={step2.status_code}")
                 return False
 
+            upload_json = {
+                "files": [{"id": file_id, "title": filename}],
+                "channel_id": channel_id,
+                "initial_comment": initial_comment,
+            }
+            if thread_ts:
+                upload_json["thread_ts"] = thread_ts
             step3 = _http_post(
                 "https://slack.com/api/files.completeUploadExternal",
                 headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
-                json={
-                    "files": [{"id": file_id, "title": filename}],
-                    "channel_id": channel_id,
-                    "initial_comment": initial_comment,
-                },
+                json=upload_json,
                 timeout=15,
             ).json()
             if not step3.get("ok"):
@@ -18231,6 +18274,12 @@ class SlackInteractivityView(APIView):
         response_url  = payload.get("response_url", "")
         trigger_id    = payload.get("trigger_id", "")
         channel_id    = (payload.get("channel") or {}).get("id", "")
+        # ts of the message the clicked button lives in — lets a handler
+        # (e.g. the automation "Download Script" button) reply in a THREAD
+        # under that exact message instead of posting a new top-level
+        # message at the bottom of the channel, which is where a fresh
+        # chat.postMessage/file upload always lands otherwise.
+        message_ts    = (payload.get("message") or {}).get("ts", "")
 
         self._debug_write(
             f"post(): received action_id={action_id} value={value!r} "
@@ -18244,7 +18293,7 @@ class SlackInteractivityView(APIView):
 
         threading.Thread(
             target=self._handle_action,
-            args=(action_id, value, team_id, slack_user_id, response_url, trigger_id, channel_id),
+            args=(action_id, value, team_id, slack_user_id, response_url, trigger_id, channel_id, message_ts),
             daemon=True,
         ).start()
 
@@ -18288,7 +18337,7 @@ class SlackInteractivityView(APIView):
             logger.exception(f"[SlackInteractivity] response_url POST failed for action={action_id}")
             self._debug_write(f"_post_response_url: action={action_id} raised {exc!r}")
 
-    def _handle_action(self, action_id, value, team_id, slack_user_id, response_url, trigger_id="", channel_id=""):
+    def _handle_action(self, action_id, value, team_id, slack_user_id, response_url, trigger_id="", channel_id="", message_ts=""):
         self._debug_write(f"_handle_action: START action={action_id} value={value!r}")
 
         # Access-control gate — resolve which VaptFix channel this button
@@ -19072,7 +19121,15 @@ class SlackInteractivityView(APIView):
                 if not bot_token or not trigger_id:
                     self._debug_write(f"{action_id}: missing bot_token or trigger_id")
                     return
-                view = _build_scope_csv_modal() if action_id == "open_scope_csv_modal" else _build_scope_manual_modal()
+                # Checked fresh on every open — see _build_scope_info_modal's
+                # docstring for why an existing scope skips the entry form.
+                scope_list = slash._call_api("/api/admin/scope/", team_id, slack_user_id=slack_user_id)
+                scopes = (scope_list or {}).get("scopes") or []
+                latest_scope = max(scopes, key=lambda s: s.get("created_at") or "") if scopes else None
+                view = (
+                    _build_scope_csv_modal(latest_scope) if action_id == "open_scope_csv_modal"
+                    else _build_scope_manual_modal(latest_scope)
+                )
                 resp = _http_post(
                     "https://slack.com/api/views.open",
                     headers={"Authorization": f"Bearer {bot_token}"},
@@ -20072,6 +20129,7 @@ class SlackInteractivityView(APIView):
                     initial_comment=(
                         f"🤖 Automated fix script for `{dl_sid}` — {automation.get('vulnerability', '')}"
                     ),
+                    thread_ts=message_ts or None,
                 )
                 if not uploaded:
                     self._post_response_url(response_url, {
