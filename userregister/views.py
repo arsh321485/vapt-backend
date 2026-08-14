@@ -1267,6 +1267,22 @@ class UserFixVulnerabilityStepsAPIView(APIView):
 
     def post(self, request, fix_vuln_id):
         try:
+            # Short idempotency lock — a double/triple-click (website or
+            # Slack, same underlying endpoint) hitting this within a couple
+            # seconds used to complete an EXTRA step: "complete whichever
+            # step is next pending" reads the current count then writes,
+            # and that read+write isn't atomic across two back-to-back
+            # requests, so the second one sees the first one's write and
+            # completes the step after the one actually clicked. A short
+            # per-vuln lock rejects a second request in this window instead
+            # of silently completing an extra step.
+            lock_key = f"step_complete_lock:{fix_vuln_id}"
+            if not cache.add(lock_key, True, timeout=3):
+                return Response(
+                    {"detail": "Please wait — your last update is still processing.", "status": "open"},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+
             user_id  = str(request.user.id)
             comment  = request.data.get("comment", "")
             step_status    = request.data.get("status", "completed")
