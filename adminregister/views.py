@@ -1713,7 +1713,14 @@ class FixVulnerabilityStepsAPIView(APIView):
             assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
             if not assigned_team:
                 assigned_team = self._infer_assigned_team(plugin_name)
-            assigned_team_members = fix_doc.get("assigned_team_members", [])
+            # Live lookup, not a stale snapshot — fix_doc.assigned_team_members was
+            # only ever set (if at all) when the fix-vulnerability record was first
+            # created, so it never reflected team members added afterwards. Same
+            # get_team_members() helper already used above for the vuln-register view.
+            assigned_team_members = (
+                get_team_members(db=db, team_name=assigned_team, admin_id=admin_id)
+                if assigned_team else []
+            )
             mitigation_table = vuln_card.get("mitigation_table", [])
             artifacts_tools = vuln_card.get("artifacts_tools")
 
