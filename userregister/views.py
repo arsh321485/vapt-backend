@@ -1627,6 +1627,15 @@ class UserSendVerificationAPIView(APIView):
                 # into "open/review" instead of rejecting the request.
                 closed_doc = closed_coll.find_one({"fix_vulnerability_id": fix_vuln_id})
                 if closed_doc:
+                    # 🔹 Plan gate — retesting a closed vuln is a Premium feature.
+                    _owning_admin_id = closed_doc.get("admin_id", "") or closed_doc.get("created_by", "")
+                    if _owning_admin_id:
+                        from billing.enforcement import assert_can_request_testing, PlanLimitExceeded
+                        try:
+                            assert_can_request_testing(_owning_admin_id)
+                        except PlanLimitExceeded as e:
+                            return Response({"error": str(e)}, status=403)
+
                     now = datetime.utcnow()
                     reopened_doc = closed_doc.copy()
                     reopened_doc.pop("_id", None)

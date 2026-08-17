@@ -643,6 +643,14 @@ def user_download_script(request, plugin_id):
             status=403
         )
 
+    # 🔹 Plan gate — automation scripts are a Premium feature.
+    from billing.enforcement import assert_can_use_automation_scripts, PlanLimitExceeded
+    admin_id, _admin_email, _teams = _resolve_admin_and_teams(request)
+    try:
+        assert_can_use_automation_scripts(admin_id)
+    except PlanLimitExceeded as e:
+        return Response({"error": str(e)}, status=403)
+
     os_param = request.query_params.get("os")
     doc, available_os = _fetch_script(plugin_id, os=os_param)
     if not doc:

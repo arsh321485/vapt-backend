@@ -44,6 +44,9 @@ python-docx==1.2.0
 beautifulsoup4==4.14.2
 lxml==6.0.2
 
+# Payments
+stripe==15.5.0
+
 # AI / LLM integration
 openai>=1.0.0
 crewai>=0.80.0

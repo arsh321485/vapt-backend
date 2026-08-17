@@ -55,6 +55,14 @@ class ScopeCreateAPIView(APIView):
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
+        # 🔹 Plan gate — submitting scope for VaptFix to test is a Premium
+        # (Management + Testing) feature, not available on Freemium.
+        from billing.enforcement import assert_can_request_testing, PlanLimitExceeded
+        try:
+            assert_can_request_testing(request.user)
+        except PlanLimitExceeded as e:
+            return Response({"message": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
         # testing_type is optional — default to black_box (matches the
         # Scope model's own default) rather than requiring the admin to
         # pick one; nothing in the website/Slack UI asks for it.
