@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
@@ -6,12 +7,31 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Force UTF-8 stdout/stderr — on Windows, the default console codepage
+# (cp1252) can't encode the emoji/en-dash characters sprinkled through this
+# codebase's log/print statements (upload_report's CrewAI pipeline, Slack
+# bot replies, etc.). An uncaught UnicodeEncodeError there can abort
+# whatever background job was mid-print (e.g. vulnerability-card
+# generation silently finishing 0/N — see retry_incomplete_card_generation).
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
+
 
 MONGO_DB_URL = os.getenv("MONGO_DB_URL") or os.getenv("MONGO_URI")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
+
+# Stripe (billing)
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+BILLING_SALES_EMAIL = os.getenv("BILLING_SALES_EMAIL", "info@vaptfix.ai")
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
@@ -81,6 +101,7 @@ INSTALLED_APPS = [
     "automation_scripts_api",
     "partners",
     "webinar",
+    "billing",
 ]
 
 MIDDLEWARE = [

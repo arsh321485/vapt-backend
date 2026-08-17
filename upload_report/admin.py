@@ -91,7 +91,7 @@ class UploadReportAdminForm(forms.ModelForm):
 class UploadReportAdmin(admin.ModelAdmin):
     form = UploadReportAdminForm
 
-    list_display = ('_id', 'file', 'status', 'parsed_count', 'get_admin_id', 'get_admin_email', 'uploaded_at')
+    list_display = ('_id', 'file', 'status', 'parsed_count', 'get_admin_id', 'get_admin_email', 'get_cards_status', 'uploaded_at')
     search_fields = ('file',)
     list_filter = ('uploaded_at',)
     readonly_fields = ()
@@ -107,6 +107,36 @@ class UploadReportAdmin(admin.ModelAdmin):
     def get_admin_email(self, obj):
         return getattr(obj.admin, "email", None)
     get_admin_email.short_description = "Admin Email"
+
+    def get_cards_status(self, obj):
+        """
+        Surfaces vulnerability-card generation state that was previously
+        invisible — a report could silently finish 0/N cards (e.g. a
+        transient GPT-4o/Mongo failure) and the admin had no way to see it
+        without querying MongoDB directly. Run
+        `python manage.py retry_incomplete_card_generation` to fix any
+        "Incomplete" rows shown here.
+        """
+        try:
+            from vaptfix.mongo_client import MongoContext
+            with MongoContext() as db:
+                doc = db["nessus_reports"].find_one(
+                    {"report_id": str(obj._id)},
+                    {"cards_expected_count": 1, "cards_generated_count": 1, "cards_generation_complete": 1},
+                )
+        except Exception:
+            return "—"
+
+        if not doc:
+            return "—"
+        expected = int(doc.get("cards_expected_count") or 0)
+        generated = int(doc.get("cards_generated_count") or 0)
+        if expected == 0:
+            return "—"
+        if generated >= expected:
+            return f"✅ {generated}/{expected}"
+        return f"⚠️ Incomplete {generated}/{expected}"
+    get_cards_status.short_description = "Cards"
 
     def _generate_file_hash(self, uploaded_file):
         """Generate SHA256 hash for the uploaded file."""
@@ -335,8 +365,11 @@ class UploadReportAdmin(admin.ModelAdmin):
                 except Exception as _upe:
                     logger.warning(f"[AdminUploadBG] Could not store upload_processing_seconds: {_upe}")
 
-            # Auto-generate vulnerability cards in background (only for nessus reports)
-            if parsed_data.get("type") in ("nessus", "nessus_html"):
+            # Auto-generate vulnerability cards in background (Nessus, AWS, and
+            # validated custom reports — matches the condition in views.py's
+            # UploadReportView so admin-panel uploads don't silently skip
+            # card generation for anything but native Nessus files).
+            if parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
                 from .views import _auto_generate_cards_bg
                 t = threading.Thread(
                     target=_auto_generate_cards_bg,
@@ -507,8 +540,10 @@ class UploadReportAdmin(admin.ModelAdmin):
                             )
                         )
 
-                        # Auto-generate vulnerability cards in background (only for nessus reports, only on new upload)
-                        if parsed_data.get("type") in ("nessus", "nessus_html") and not change:
+                        # Auto-generate vulnerability cards in background (Nessus, AWS, and
+                        # validated custom reports — see matching fix in _parse_and_store_report_bg
+                        # above; only on new upload)
+                        if parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom") and not change:
                             from .views import _auto_generate_cards_bg
                             report_id = str(obj._id)
                             t = threading.Thread(

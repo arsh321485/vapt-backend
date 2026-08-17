@@ -569,6 +569,13 @@ class UploadReportView(APIView):
                 # Regular flow: use the requesting user as target admin
                 target_admin = request.user
 
+            # 🔹 Plan gate — Freemium allows only 1 report upload total.
+            from billing.enforcement import assert_can_upload_report, PlanLimitExceeded
+            try:
+                assert_can_upload_report(target_admin)
+            except PlanLimitExceeded as e:
+                return Response({"error": str(e)}, status=403)
+
             # member_type is no longer a frontend-supplied field — the upload
             # request now carries only "file" (+ optional admin_id). Fixed
             # internally so the rest of the pipeline (UploadReport.member_type,
@@ -641,6 +648,15 @@ class UploadReportView(APIView):
 
                     if "error" in parsed_data:
                         raise Exception(parsed_data["error"])
+
+                    # 🔹 Plan gate — Freemium allows up to 5 internal IPs per report.
+                    from billing.enforcement import assert_asset_within_limit, PlanLimitExceeded
+                    report_host_count = parsed_data.get("total_hosts")
+                    if report_host_count:
+                        try:
+                            assert_asset_within_limit(target_admin, int(report_host_count))
+                        except PlanLimitExceeded as e:
+                            raise Exception(str(e))
 
                     # 🔹 Custom file gate — anything that isn't a recognized Nessus
                     # export or AWS Inspector CSV falls through to generic parsing
@@ -1431,10 +1447,21 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         )
         print(f"[AutoGenCards] Done for report_id={report_id} — generated={generated}, cached={cached}, errors={errors}, actual_in_db={actual_count}", flush=True)
 
-        # Mark generation as complete in nessus_reports so UploadStatusView knows
+        # Only mark complete if generation actually reached the expected count —
+        # a report that silently failed every vulnerability (errors == expected)
+        # used to get marked complete anyway, permanently hiding the failure from
+        # both the status endpoint and any retry tooling. Leaving it incomplete
+        # here lets retry_incomplete_card_generation (management command) find
+        # and retry it later.
+        is_complete = actual_count >= cards_expected_count
+        if not is_complete:
+            logger.warning(
+                f"[AutoGenCards] report_id={report_id} finished short: "
+                f"{actual_count}/{cards_expected_count} cards (errors={errors}) — left incomplete for retry"
+            )
         db[NESSUS_COLLECTION].update_one(
             {"report_id": report_id},
-            {"$set": {"cards_generation_complete": True, "cards_generated_count": actual_count}}
+            {"$set": {"cards_generation_complete": is_complete, "cards_generated_count": actual_count}}
         )
 
         # Cards just changed team assignments for this report — clear the cached
