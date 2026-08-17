@@ -1060,7 +1060,22 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                 assigned_team    = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
                 if not assigned_team:
                     assigned_team = self._infer_assigned_team(plugin_name)
-                assigned_members = fix_doc.get("assigned_team_members", [])
+                # Live lookup, not a stale snapshot — fix_doc.assigned_team_members was
+                # only ever set (if at all) when the fix-vulnerability record was first
+                # created, so it never reflected team members added afterwards.
+                assigned_members = []
+                owning_admin_id = fix_doc.get("admin_id") or fix_doc.get("created_by")
+                if assigned_team and owning_admin_id:
+                    try:
+                        from users_details.models import UserDetail as _UD
+                        for m in _UD.objects.filter(admin_id=owning_admin_id, Member_role__contains=assigned_team):
+                            assigned_members.append({
+                                "user_id": str(m.pk),
+                                "name": f"{m.first_name} {m.last_name}".strip(),
+                                "email": m.email,
+                            })
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
                 mitigation_table = vuln_card.get("mitigation_table", [])
                 artifacts_tools  = vuln_card.get("artifacts_tools")
                 post_guide       = vuln_card.get("post_mitigation_troubleshooting_guide", [])
