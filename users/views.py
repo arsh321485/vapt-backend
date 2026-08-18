@@ -13639,7 +13639,10 @@ class SlackSlashCommandView(APIView):
         user_element = {
             "type": "static_select",
             "action_id": "dtu_user_select",
-            "options": user_options or [{"text": {"type": "plain_text", "text": "No team members found"}, "value": ""}],
+            # value must be non-empty — Slack's static_select schema rejects
+            # "" with invalid_arguments ("must be more than 0 characters"),
+            # which used to silently kill the whole views.open/update call.
+            "options": user_options or [{"text": {"type": "plain_text", "text": "No team members found"}, "value": "__none__"}],
         }
         initial_option = next((o for o in user_options if o["value"] == selected_detail_id), None)
         if initial_option:
