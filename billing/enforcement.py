@@ -35,14 +35,26 @@ def is_freemium(admin) -> bool:
 
 
 def assert_can_upload_report(admin):
+    """
+    Freemium gets one upload DAY, not one upload EVER — any number of files
+    uploaded on the same calendar day are allowed (they merge into a single
+    report, see upload_report/merge_service.py), but the moment a day passes
+    with an upload already on record, uploading again is blocked.
+    """
     if not is_freemium(admin):
         return
+    from django.utils import timezone
     from upload_report.models import UploadReport
-    existing = UploadReport.objects.filter(admin=admin).count()
-    if existing >= FREEMIUM_LIMITS["report_upload_limit"]:
+
+    now = timezone.now()
+    start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    has_upload_before_today = UploadReport.objects.filter(
+        admin=admin, uploaded_at__lt=start_of_today
+    ).exists()
+    if has_upload_before_today:
         raise PlanLimitExceeded(
-            f"Freemium plan allows only {FREEMIUM_LIMITS['report_upload_limit']} report upload. "
-            "Upgrade to Premium to upload more reports."
+            "Freemium plan allows report uploads on one day only. "
+            "Upgrade to Premium to keep uploading on new days."
         )
 
 
