@@ -34,6 +34,24 @@ def get_admin_asset_count(admin_id: str) -> int:
         return 0
 
 
+def get_admin_scope_asset_count(admin_id: str) -> int:
+    """
+    Unique target count across all of this admin's submitted scopes — the
+    Management+Testing mode equivalent of get_admin_asset_count(). This mode
+    never uploads a report, so nessus_reports has nothing to count; the
+    billable assets are whatever was submitted via scope/create/ instead.
+    """
+    try:
+        from scope.models import ScopeEntry
+        # djongo can't translate COUNT(*) over a SELECT DISTINCT subquery
+        # (.distinct().count()) — dedupe in Python instead.
+        values = ScopeEntry.objects.filter(scope__admin_id=admin_id).values_list("value", flat=True)
+        return len({v.lower() for v in values if v})
+    except Exception as e:
+        logger.error(f"[Billing] scope asset count failed for admin_id={admin_id}: {e}")
+        return 0
+
+
 def get_admin_asset_breakdown(admin_id: str):
     """Debug/detail helper — list of {host_name, report_count} for an admin's assets."""
     try:
