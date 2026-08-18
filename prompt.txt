@@ -1,6 +1,2 @@
-slack ke plotform data show q nai ho rha hai tab se nai ho rhe hai kya issue hai explain kro mujhe 
-
-jese hi set risk criteria krte hai to automatik tab show hote hai 
-
-
-home fix  etc
+mene abhi new mail id se vaptfix se slack se as a admin login sonamali151709@gmail.com se 
+upload report or set risk criteai set kiya but tab open nai ho rhe hai home ,fx vale o check kro ki kya issue hai 

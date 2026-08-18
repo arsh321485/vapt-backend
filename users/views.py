@@ -9641,6 +9641,11 @@ class SlackSlashCommandView(APIView):
     _SEV_PREFIX = [("Critical", "C"), ("High", "H"), ("Medium", "M"), ("Low", "L")]
     _SEV_ICONS  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}  # legacy; prefer _sev_icon_image_element
 
+    # Commands answered synchronously (see post()) instead of via the
+    # background-thread + response_url pattern — only Mongo lookups + Block
+    # Kit assembly, no outbound HTTP/GPT calls, so they're always fast.
+    _SYNC_COMMANDS = {"/postnavbar", "/postteamnav", "/riskcriteria", "/dashboard"}
+
     # Admin-dashboard-channel navbar — clicking these updates the SAME
     # message in place (like a tab switcher) instead of requiring the
     # admin to type a slash command. Kept in one place so both the
@@ -9825,6 +9830,23 @@ class SlackSlashCommandView(APIView):
                 "response_type": "ephemeral",
                 "text": f"❌ Unknown command `{command}` for this channel.",
             })
+
+        # Fast commands (Mongo lookups + Block Kit assembly only — no
+        # outbound HTTP/GPT calls) respond synchronously instead of via the
+        # fire-and-forget background-thread + response_url pattern below.
+        # That pattern is unsafe against gunicorn's --max-requests worker
+        # recycling: if the worker handling this request gets recycled while
+        # the daemon thread is still running, the thread is killed mid-flight
+        # and the "Processing..." placeholder is stuck forever with no retry
+        # path. These commands measured well under 1s locally — comfortably
+        # inside Slack's 3s ack window — so there's no need to risk it.
+        if command in self._SYNC_COMMANDS:
+            try:
+                blocks = handler(text, team_id, user_id, team_name) if team_name is not None else handler(text, team_id, user_id)
+                return Response({"response_type": "in_channel", "blocks": blocks})
+            except Exception as exc:
+                logger.exception(f"[SlackCmd] {command} failed (sync path): {exc}")
+                return Response({"response_type": "ephemeral", "text": f"❌ `{command}` failed: {exc}"})
 
         # Ack Slack immediately; process and reply via response_url in background
         threading.Thread(
