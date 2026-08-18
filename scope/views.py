@@ -55,13 +55,12 @@ class ScopeCreateAPIView(APIView):
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        # 🔹 Plan gate — submitting scope for VaptFix to test is a Premium
-        # (Management + Testing) feature, not available on Freemium.
-        from billing.enforcement import assert_can_request_testing, PlanLimitExceeded
-        try:
-            assert_can_request_testing(request.user)
-        except PlanLimitExceeded as e:
-            return Response({"message": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        # Note: submitting scope itself is NOT plan-gated (unlike the retest
+        # endpoint) — a Freemium admin needs to be able to provide scope to
+        # even get a Premium/Management+Testing quote and start checkout
+        # (billing.views.PlanEstimateView / PremiumCheckoutView price off of
+        # it). VaptFix actually acting on that scope is the paid part, gated
+        # by the Premium subscription itself, not this submission step.
 
         # testing_type is optional — default to black_box (matches the
         # Scope model's own default) rather than requiring the admin to

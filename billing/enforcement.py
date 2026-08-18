@@ -65,8 +65,11 @@ def assert_can_use_automation_scripts(admin):
 
 
 def assert_can_request_testing(admin):
-    """Gates both new 'Management + Testing' scope submissions and
-    retest requests on already-closed vulnerabilities."""
+    """Gates retest requests on already-closed vulnerabilities. NOT used on
+    scope submission itself (scope/views.py ScopeCreateAPIView) — a Freemium
+    admin has to be able to submit scope to get a Management+Testing quote
+    and start checkout in the first place; VaptFix acting on it is the part
+    that actually requires an active Premium subscription."""
     if is_freemium(admin) and not FREEMIUM_LIMITS["testing_retesting"]:
         raise PlanLimitExceeded(
             "Testing/retesting is not available on the Freemium plan. Upgrade to Premium."

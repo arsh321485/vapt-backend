@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from users.utils import Util
-from .asset_service import get_admin_asset_count
+from .asset_service import get_admin_asset_count, get_admin_scope_asset_count
 from .models import Subscription, SalesLead
 from .plans import (
     PLAN_FREEMIUM, PLAN_PREMIUM, PLAN_CUSTOM,
@@ -42,9 +42,8 @@ class PlanEstimateView(APIView):
         mode = serializer.validated_data.get("mode")
         billing_cycle = serializer.validated_data.get("billing_cycle")
 
-        asset_count = get_admin_asset_count(str(request.user.id))
-
         if plan == PLAN_FREEMIUM:
+            asset_count = get_admin_asset_count(str(request.user.id))
             return Response({
                 "plan": plan,
                 "asset_count": asset_count,
@@ -55,6 +54,19 @@ class PlanEstimateView(APIView):
             })
 
         if plan == PLAN_PREMIUM:
+            if mode not in (MODE_MANAGEMENT, MODE_MANAGEMENT_TESTING):
+                return Response(
+                    {"mode": "mode is required for Premium plan."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Mode A bills on uploaded-report assets; Mode B never uploads a
+            # report — it bills on the scope submitted via /api/admin/scope/create/.
+            if mode == MODE_MANAGEMENT:
+                asset_count = get_admin_asset_count(str(request.user.id))
+            else:
+                asset_count = get_admin_scope_asset_count(str(request.user.id))
+
             if asset_count > PREMIUM_ASSET_CEILING:
                 return Response({
                     "plan": plan,
@@ -72,15 +84,10 @@ class PlanEstimateView(APIView):
                     )
                 amount = calculate_management_amount(asset_count, billing_cycle)
                 rate = MANAGEMENT_BILLING_CYCLES[billing_cycle]["rate_per_ip"]
-            elif mode == MODE_MANAGEMENT_TESTING:
+            else:
                 amount = calculate_management_testing_amount(asset_count)
                 rate = MANAGEMENT_TESTING_RATE_PER_IP_YEAR
                 billing_cycle = "annual"
-            else:
-                return Response(
-                    {"mode": "mode is required for Premium plan."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
 
             return Response({
                 "plan": plan,
@@ -93,6 +100,7 @@ class PlanEstimateView(APIView):
             })
 
         # Custom
+        asset_count = get_admin_asset_count(str(request.user.id)) + get_admin_scope_asset_count(str(request.user.id))
         return Response({
             "plan": plan,
             "asset_count": asset_count,
@@ -153,7 +161,14 @@ class PremiumCheckoutView(APIView):
         billing_cycle = serializer.validated_data.get("billing_cycle") or "annual"
 
         admin = request.user
-        asset_count = get_admin_asset_count(str(admin.id))
+        # Mode A bills on uploaded-report assets; Mode B never uploads a
+        # report — it bills on the scope submitted via /api/admin/scope/create/.
+        if mode == MODE_MANAGEMENT:
+            asset_count = get_admin_asset_count(str(admin.id))
+            no_assets_detail = "Upload a report first — no assets found to bill for."
+        else:
+            asset_count = get_admin_scope_asset_count(str(admin.id))
+            no_assets_detail = "Provide your scope first — no targets found to bill for."
 
         if asset_count > PREMIUM_ASSET_CEILING:
             return Response(
@@ -162,7 +177,7 @@ class PremiumCheckoutView(APIView):
             )
         if asset_count == 0:
             return Response(
-                {"detail": "Upload a report first — no assets found to bill for."},
+                {"detail": no_assets_detail},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
