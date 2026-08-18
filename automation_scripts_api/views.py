@@ -132,27 +132,63 @@ def _resolve_admin_and_teams(request):
     return str(detail.admin.id), getattr(detail.admin, "email", None), teams
 
 
+def _normalize_vuln_name(name: str) -> str:
+    """Case/whitespace-insensitive key for matching a vulnerability name
+    against the automation_scripts library's own "vulnerability" field."""
+    return (name or "").strip().lower()
+
+
 def _load_latest_report_plugin_ids(db, admin_id, admin_email):
     """
     Finds the admin's most recently uploaded nessus report and returns
-    (report_id, uploaded_at, set_of_plugin_ids_present_in_it).
+    (report_id, uploaded_at, set_of_plugin_ids_present_in_it, set_of_normalized_vuln_names_present_in_it).
+
+    plugin_ids alone only ever works for native Nessus uploads — AWS
+    Inspector and custom/CSV reports store a different ID scheme (or none
+    at all: custom always has plugin_id=None) in that same field, so their
+    vulnerabilities can never match automation_scripts (which is indexed
+    by real Nessus plugin IDs) through plugin_id. The name set lets callers
+    fall back to matching by vulnerability name for those report types.
     """
     coll = db[NESSUS_COLLECTION]
     doc = coll.find_one({"admin_id": str(admin_id)}, sort=[("uploaded_at", -1)])
     if not doc and admin_email:
         doc = coll.find_one({"admin_email": admin_email}, sort=[("uploaded_at", -1)])
     if not doc:
-        return None, None, set()
+        return None, None, set(), set()
 
     plugin_ids = set()
+    vuln_names = set()
     for host in doc.get("vulnerabilities_by_host", []):
         for v in host.get("vulnerabilities", []):
             try:
                 plugin_ids.add(int(v.get("plugin_id")))
             except (TypeError, ValueError):
-                continue
+                pass
+            name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+            for key in _vuln_name_lookup_keys(name):
+                vuln_names.add(_normalize_vuln_name(key))
 
-    return doc.get("report_id"), doc.get("uploaded_at"), plugin_ids
+    return doc.get("report_id"), doc.get("uploaded_at"), plugin_ids, vuln_names
+
+
+def _fetch_scripts_by_name(name_keys, os=None):
+    """
+    automation_scripts docs whose "vulnerability" field matches one of the
+    given normalized names — the fallback path for AWS/custom reports,
+    whose vulnerabilities don't carry a real Nessus plugin_id to match on.
+    automation_scripts is a small curated reference library (not one row
+    per scan finding), so fetching it whole and matching in Python is fine.
+    """
+    if not name_keys:
+        return []
+    with MongoContext() as db:
+        all_docs = list(db["automation_scripts"].find({}, {"_id": 0}))
+    matched = [d for d in all_docs if _normalize_vuln_name(d.get("vulnerability", "")) in name_keys]
+    if os:
+        os_l = os.strip().lower()
+        matched = [d for d in matched if (d.get("os") or "").strip().lower() == os_l]
+    return matched
 
 
 def _fetch_script(plugin_id, os=None):
@@ -470,6 +506,38 @@ def admin_match_scripts_bulk(request):
     return Response({"results": results})
 
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def admin_match_scripts_by_name(request):
+    """
+    Body: { "vulnerability_names": ["Outdated OpenSSL", "Missing HSTS Header"], "os": "Windows" }
+
+    Same idea as /match/bulk/ but for AWS Inspector / custom-report
+    vulnerabilities, which don't carry a real Nessus plugin_id to send
+    there (AWS: its own finding ID; custom: always none) — matches against
+    the automation_scripts library by vulnerability name instead. The
+    returned doc's OWN plugin_id (a real Nessus ID from the script
+    library) is what /download/<plugin_id>/ then takes.
+    """
+    names = request.data.get("vulnerability_names", [])
+    os_param = request.data.get("os")
+    if not isinstance(names, list):
+        return Response({"error": "vulnerability_names must be a list"}, status=400)
+
+    name_keys = {_normalize_vuln_name(n) for n in names if isinstance(n, str) and n.strip()}
+    matched = _fetch_scripts_by_name(name_keys, os=os_param)
+    matched_by_key = {_normalize_vuln_name(d.get("vulnerability", "")): d for d in matched}
+
+    results = []
+    for n in names:
+        doc = matched_by_key.get(_normalize_vuln_name(n)) if isinstance(n, str) else None
+        if doc:
+            results.append(_build_response(doc))
+        else:
+            results.append({"matched": False, "vulnerability_name": n, "message": "No automated fix available for this vulnerability."})
+    return Response({"results": results})
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def admin_list_scripts(request):
@@ -503,7 +571,7 @@ def admin_download_stats(request):
         )
 
     with MongoContext() as db:
-        report_id, uploaded_at, plugin_ids = _load_latest_report_plugin_ids(db, admin_id, admin_email)
+        report_id, uploaded_at, plugin_ids, vuln_names = _load_latest_report_plugin_ids(db, admin_id, admin_email)
 
         if not report_id:
             return Response(
@@ -514,12 +582,24 @@ def admin_download_stats(request):
         docs = list(db["automation_scripts"].find(
             {"plugin_id": {"$in": list(plugin_ids)}},
             {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1}
-        ).sort("download_count", -1))
+        ))
+        # AWS/custom report vulnerabilities don't carry a real Nessus
+        # plugin_id (AWS: its own finding ID; custom: always None) — match
+        # those by vulnerability name instead, against the same library.
+        seen_keys = {(d.get("plugin_id"), (d.get("os") or "").strip().lower()) for d in docs}
+        for d in _fetch_scripts_by_name(vuln_names):
+            key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
+            if key not in seen_keys:
+                seen_keys.add(key)
+                docs.append({"plugin_id": d.get("plugin_id"), "vulnerability": d.get("vulnerability"), "severity": d.get("severity"), "download_count": d.get("download_count") or 0, "os": d.get("os")})
+        docs.sort(key=lambda d: d.get("download_count", 0), reverse=True)
+
+        all_plugin_ids = list({d.get("plugin_id") for d in docs if d.get("plugin_id") is not None})
 
         team_count_by_key = {}
-        if member_emails:
+        if member_emails and all_plugin_ids:
             for row in db["script_user_downloads"].find(
-                {"plugin_id": {"$in": list(plugin_ids)}, "user_email": {"$in": member_emails}},
+                {"plugin_id": {"$in": all_plugin_ids}, "user_email": {"$in": member_emails}},
                 {"_id": 0, "plugin_id": 1, "os": 1, "download_count": 1},
             ):
                 key = (row["plugin_id"], (row.get("os") or "").strip().lower())
@@ -619,6 +699,30 @@ def user_match_scripts_bulk(request):
         else _not_found_response(pid)
         for pid in int_ids
     ]
+    return Response({"results": results})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def user_match_scripts_by_name(request):
+    """User-side counterpart to admin_match_scripts_by_name — same AWS/
+    custom-report fallback, same request/response shape."""
+    names = request.data.get("vulnerability_names", [])
+    os_param = request.data.get("os")
+    if not isinstance(names, list):
+        return Response({"error": "vulnerability_names must be a list"}, status=400)
+
+    name_keys = {_normalize_vuln_name(n) for n in names if isinstance(n, str) and n.strip()}
+    matched = _fetch_scripts_by_name(name_keys, os=os_param)
+    matched_by_key = {_normalize_vuln_name(d.get("vulnerability", "")): d for d in matched}
+
+    results = []
+    for n in names:
+        doc = matched_by_key.get(_normalize_vuln_name(n)) if isinstance(n, str) else None
+        if doc:
+            results.append(_build_response(doc))
+        else:
+            results.append({"matched": False, "vulnerability_name": n, "message": "No automated fix available for this vulnerability."})
     return Response({"results": results})
 
 
@@ -725,7 +829,7 @@ def user_download_stats(request):
         )
 
     with MongoContext() as db:
-        report_id, uploaded_at, plugin_ids = _load_latest_report_plugin_ids(db, admin_id, admin_email)
+        report_id, uploaded_at, plugin_ids, vuln_names = _load_latest_report_plugin_ids(db, admin_id, admin_email)
 
         if not report_id:
             return Response(
@@ -736,12 +840,23 @@ def user_download_stats(request):
         docs = list(db["automation_scripts"].find(
             {"plugin_id": {"$in": list(plugin_ids)}},
             {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1}
-        ).sort("download_count", -1))
+        ))
+        # AWS/custom report vulnerabilities don't carry a real Nessus
+        # plugin_id — match those by vulnerability name against the library.
+        seen_keys = {(d.get("plugin_id"), (d.get("os") or "").strip().lower()) for d in docs}
+        for d in _fetch_scripts_by_name(vuln_names):
+            key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
+            if key not in seen_keys:
+                seen_keys.add(key)
+                docs.append({"plugin_id": d.get("plugin_id"), "vulnerability": d.get("vulnerability"), "severity": d.get("severity"), "download_count": d.get("download_count") or 0, "os": d.get("os")})
+        docs.sort(key=lambda d: d.get("download_count", 0), reverse=True)
+
+        all_plugin_ids = list({d.get("plugin_id") for d in docs if d.get("plugin_id") is not None})
 
         team_count_by_key = {}
-        if member_emails:
+        if member_emails and all_plugin_ids:
             for row in db["script_user_downloads"].find(
-                {"plugin_id": {"$in": list(plugin_ids)}, "user_email": {"$in": member_emails}},
+                {"plugin_id": {"$in": all_plugin_ids}, "user_email": {"$in": member_emails}},
                 {"_id": 0, "plugin_id": 1, "os": 1, "download_count": 1},
             ):
                 key = (row["plugin_id"], (row.get("os") or "").strip().lower())
