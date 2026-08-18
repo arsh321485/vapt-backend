@@ -6,6 +6,9 @@ class AdminAssetSerializer(serializers.Serializer):
     total_vulnerabilities = serializers.IntegerField()
     severity_counts = serializers.DictField(child=serializers.IntegerField())
     host_information = serializers.DictField(child=serializers.CharField(allow_blank=True), required=False, allow_null=True)
+    # "web_app" | "firewall" | "server" | "other" — drives the Assets/Web App/
+    # Firewall/Server tabs on the frontend. See upload_report/asset_classification.py.
+    asset_type = serializers.CharField(required=False)
 
     
 class AssetHostVulnSerializer(serializers.Serializer):

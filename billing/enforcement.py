@@ -34,6 +34,20 @@ def is_freemium(admin) -> bool:
     return sub is None or sub.plan == PLAN_FREEMIUM
 
 
+def _is_unlimited_admin(admin) -> bool:
+    """
+    Emails in BILLING_UNLIMITED_ADMIN_EMAILS (settings/.env) skip the
+    asset-count, automation-scripts, and testing/retesting Freemium limits —
+    NOT is_freemium() itself, so assert_can_upload_report's 1-upload-per-day
+    limit still applies to them like any other Freemium admin. Intended for
+    internal/demo accounts that need to exercise the product without an
+    actual paid plan, while still exercising the same-day-upload flow.
+    """
+    from django.conf import settings
+    email = (getattr(admin, "email", "") or "").strip().lower()
+    return bool(email) and email in getattr(settings, "BILLING_UNLIMITED_ADMIN_EMAILS", [])
+
+
 def assert_can_upload_report(admin):
     """
     Freemium gets one upload DAY, not one upload EVER — any number of files
@@ -59,7 +73,7 @@ def assert_can_upload_report(admin):
 
 
 def assert_asset_within_limit(admin, asset_count: int):
-    if not is_freemium(admin):
+    if _is_unlimited_admin(admin) or not is_freemium(admin):
         return
     limit = FREEMIUM_LIMITS["max_internal_ips"]
     if asset_count > limit:
@@ -70,6 +84,8 @@ def assert_asset_within_limit(admin, asset_count: int):
 
 
 def assert_can_use_automation_scripts(admin):
+    if _is_unlimited_admin(admin):
+        return
     if is_freemium(admin) and not FREEMIUM_LIMITS["automation_scripts"]:
         raise PlanLimitExceeded(
             "Automation scripts are not available on the Freemium plan. Upgrade to Premium."
@@ -82,6 +98,8 @@ def assert_can_request_testing(admin):
     admin has to be able to submit scope to get a Management+Testing quote
     and start checkout in the first place; VaptFix acting on it is the part
     that actually requires an active Premium subscription."""
+    if _is_unlimited_admin(admin):
+        return
     if is_freemium(admin) and not FREEMIUM_LIMITS["testing_retesting"]:
         raise PlanLimitExceeded(
             "Testing/retesting is not available on the Freemium plan. Upgrade to Premium."

@@ -55,6 +55,7 @@ Return ONLY a single JSON object, no markdown fences, no commentary, matching ex
   "hosts": [
     {{
       "host_name": "<asset/host identifier>",
+      "operating_system": "<OS/platform string if stated for this asset (e.g. 'Microsoft Windows Server 2016'), else \\"\\">",
       "vulnerabilities": [
         {{
           "plugin_name": "<vulnerability/finding name>",
@@ -214,9 +215,10 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
             })
 
         if vulns:
+            os_str = (h.get("operating_system") or "").strip()
             vulnerabilities_by_host.append({
                 "host_name": host_name,
-                "host_information": {},
+                "host_information": {"operating-system": os_str} if os_str else {},
                 "vulnerabilities": vulns,
             })
             total_vulnerabilities += len(vulns)
