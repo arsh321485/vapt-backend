@@ -591,6 +591,15 @@ class UploadReportView(APIView):
             upload_results = []
             errors = []
 
+            # Same-day merge target — if the admin already uploaded something
+            # today (this request or an earlier one today), every file in
+            # THIS request also merges into that same report_id instead of
+            # each starting its own. Set once the first file of the day is
+            # stored below, so a 2nd/3rd file in this same request merges
+            # into the 1st rather than each other.
+            from .merge_service import get_todays_report_id, merge_hosts_into_report
+            todays_report_id = get_todays_report_id(target_admin)
+
             for uploaded_file in uploaded_files:
                 file_path = None
                 file_start = time.perf_counter()
@@ -650,13 +659,42 @@ class UploadReportView(APIView):
                         raise Exception(parsed_data["error"])
 
                     # 🔹 Plan gate — Freemium allows up to 5 internal IPs per report.
+                    # Over the limit gives the caller two ways forward instead of
+                    # a hard reject: resubmit with trim_over_limit=true to keep
+                    # the first N hosts and drop the rest (stay on Freemium), or
+                    # don't — the over_limit/asset_count/limit/upgrade_url fields
+                    # in the error are enough to build a "keep vs upgrade" choice
+                    # (this is what the Slack upload flow's 2-button prompt uses).
                     from billing.enforcement import assert_asset_within_limit, PlanLimitExceeded
+                    from billing.plans import FREEMIUM_LIMITS
                     report_host_count = parsed_data.get("total_hosts")
                     if report_host_count:
                         try:
                             assert_asset_within_limit(target_admin, int(report_host_count))
                         except PlanLimitExceeded as e:
-                            raise Exception(str(e))
+                            limit = FREEMIUM_LIMITS["max_internal_ips"]
+                            trim_flag = str(request.data.get("trim_over_limit", "")).lower() in ("true", "1", "yes")
+                            if trim_flag and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
+                                kept_hosts = (parsed_data.get("vulnerabilities_by_host") or [])[:limit]
+                                parsed_data["vulnerabilities_by_host"] = kept_hosts
+                                parsed_data["total_hosts"] = len(kept_hosts)
+                                parsed_data["total_vulnerabilities"] = sum(
+                                    len(h.get("vulnerabilities") or []) for h in kept_hosts
+                                )
+                                # Falls through to normal processing below with
+                                # the trimmed data — no error, no `continue`.
+                            else:
+                                errors.append({
+                                    "file": uploaded_file.name,
+                                    "error": str(e),
+                                    "over_limit": True,
+                                    "asset_count": int(report_host_count),
+                                    "limit": limit,
+                                    "upgrade_url": "https://vaptfix.ai/pricingplan",
+                                })
+                                if file_path and os.path.exists(file_path):
+                                    os.remove(file_path)
+                                continue
 
                     # 🔹 Custom file gate — anything that isn't a recognized Nessus
                     # export or AWS Inspector CSV falls through to generic parsing
@@ -698,17 +736,38 @@ class UploadReportView(APIView):
                             parsed_count=parsed_count,
                         )
 
-                        report_id = str(upload_report._id)
+                        is_structured = parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom")
+                        is_merge = bool(todays_report_id) and is_structured
 
-                        mongodb_stored = self._store_in_mongodb(
-                            parsed_data=parsed_data,
-                            report_id=report_id,
-                            location_id="",
-                            location_name="",
-                            admin_email=target_admin.email,
-                            original_filename=uploaded_file.name,
-                            member_type=mt
-                        )
+                        if is_merge:
+                            # Same-day merge — fold this file's hosts/vulns into
+                            # the report that already exists for today instead
+                            # of creating a separate one.
+                            report_id = todays_report_id
+                            hosts_payload = self._prepare_hosts_for_storage(
+                                parsed_data.get("vulnerabilities_by_host", [])
+                            )
+                            try:
+                                merge_hosts_into_report(_get_mongo_client_and_db()[1], report_id, hosts_payload)
+                                mongodb_stored = True
+                            except Exception as _merge_err:
+                                logger.error(f"[MergeUpload] merge failed for report_id={report_id}: {_merge_err}")
+                                mongodb_stored = False
+                        else:
+                            report_id = str(upload_report._id)
+                            mongodb_stored = self._store_in_mongodb(
+                                parsed_data=parsed_data,
+                                report_id=report_id,
+                                location_id="",
+                                location_name="",
+                                admin_email=target_admin.email,
+                                original_filename=uploaded_file.name,
+                                member_type=mt
+                            )
+                            # Any further file (this request or a later one
+                            # today) merges into this report from here on.
+                            if mongodb_stored and is_structured and not todays_report_id:
+                                todays_report_id = report_id
 
                         # Store actual upload processing time for UploadStatusView ETA
                         if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):

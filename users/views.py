@@ -3480,7 +3480,7 @@ def _build_upload_report_modal(latest_report=None):
                     # any extension it doesn't recognize (e.g. "nessus" isn't a
                     # standard one), so filtering happens where it already did
                     # for the website flow: UploadReportView.ALLOWED_EXTENSIONS.
-                    "max_files": 1,
+                    "max_files": 10,
                 },
             },
         ],
@@ -9926,8 +9926,7 @@ class SlackSlashCommandView(APIView):
         logger.info(f"[SlackUploadReport] Modal submitted — team_id={team_id} slack_user_id={slack_user_id}")
 
         file_list = _find_by_action_id(values, "upload_file_input").get("files") or []
-        file_obj = file_list[0] if file_list else None
-        if not file_obj:
+        if not file_list:
             logger.warning("[SlackUploadReport] No file found in modal submission values")
             return self._text_block("❌ Please attach a file.")
 
@@ -9949,27 +9948,38 @@ class SlackSlashCommandView(APIView):
             logger.warning(f"[SlackUploadReport] {text}")
             return self._text_block(f"❌ {text}")
 
-        file_name = file_obj.get("name") or "report"
-        download_url = file_obj.get("url_private_download") or file_obj.get("url_private")
-        if not download_url:
-            return _fail("Could not read the uploaded file from Slack.")
-
         bot_token = self._get_bot_token(team_id, slack_user_id=slack_user_id)
         if not bot_token:
             return _fail("Could not find a bot token for this workspace.")
 
-        try:
-            file_resp = _http_get(
-                download_url,
-                headers={"Authorization": f"Bearer {bot_token}"},
-                timeout=30,
-            )
-            if file_resp.status_code != 200:
-                return _fail(f"Could not download *{file_name}* from Slack (status {file_resp.status_code}).")
-            file_bytes = file_resp.content
-        except Exception as exc:
-            logger.exception("[SlackUploadReport] file download failed")
-            return _fail(f"Could not download *{file_name}* from Slack: {exc}")
+        # Download every attached file from Slack first (max_files: 10 on the
+        # modal — see _build_upload_report_modal) — all of them go up to the
+        # backend together, same as a multi-file website upload. Files from
+        # the same calendar day merge into one report server-side
+        # (upload_report/merge_service.py), so it doesn't matter whether the
+        # admin attaches them all here or uploads them one at a time later.
+        multipart_files = []
+        file_names = []
+        for file_obj in file_list:
+            file_name = file_obj.get("name") or "report"
+            download_url = file_obj.get("url_private_download") or file_obj.get("url_private")
+            if not download_url:
+                return _fail(f"Could not read *{file_name}* from Slack.")
+            try:
+                file_resp = _http_get(
+                    download_url,
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    timeout=30,
+                )
+                if file_resp.status_code != 200:
+                    return _fail(f"Could not download *{file_name}* from Slack (status {file_resp.status_code}).")
+            except Exception as exc:
+                logger.exception("[SlackUploadReport] file download failed")
+                return _fail(f"Could not download *{file_name}* from Slack: {exc}")
+            multipart_files.append(("file", (file_name, file_resp.content)))
+            file_names.append(file_name)
+
+        file_name = ", ".join(file_names)  # used below for progress-message labels
 
         token = self._get_admin_token(team_id, slack_user_id=slack_user_id)
         if not token:
@@ -9980,7 +9990,7 @@ class SlackSlashCommandView(APIView):
             upload_resp = _http_post(
                 f"{backend}/api/admin/upload_report/upload/",
                 headers={"Authorization": f"Bearer {token}"},
-                files={"file": (file_name, file_bytes)},
+                files=multipart_files,
                 timeout=180,
             )
             upload_data = upload_resp.json()
@@ -9994,17 +10004,48 @@ class SlackSlashCommandView(APIView):
         logger.info(f"[SlackUploadReport] Upload API response — results={len(results)} errors={len(errors)} for '{file_name}'")
 
         if not results:
+            over_limit_err = next((e for e in errors if e.get("over_limit")), None)
+            if over_limit_err:
+                cache.delete(_upload_in_progress_key(team_id))  # released — a retry re-acquires it
+                token = uuid.uuid4().hex
+                cache.set(
+                    f"slack_pending_upload_{token}",
+                    {"team_id": team_id, "slack_user_id": slack_user_id, "files": multipart_files, "file_name": file_name},
+                    timeout=900,
+                )
+                self._post_over_limit_choice(
+                    bot_token, team_id, over_limit_err.get("asset_count"), over_limit_err.get("limit"), token,
+                )
+                return self._text_block(
+                    "⚠️ This report goes over your plan's asset limit — check the channel to choose how to proceed."
+                )
             reason = (errors[0].get("error") if errors else None) or upload_data.get("error") or "Upload failed."
             return _fail(f"*{file_name}*: {reason}")
 
-        report_ids = [r["report_id"] for r in results if r.get("report_id")]
+        # Same-day files can come back sharing one merged report_id — dedupe
+        # so the watcher below polls each report once, not once per file.
+        report_ids = list(dict.fromkeys(r["report_id"] for r in results if r.get("report_id")))
         admin = User.objects.filter(slack_team_id=team_id).first()
         if not (report_ids and admin):
             return _fail("Upload succeeded but couldn't start fix-generation tracking. Contact support.")
 
-        # Post the live progress message the watcher will keep updating (% bar)
-        # as cards generate, in place of leaving the admin with just the initial
-        # "uploaded" confirmation and silence until the risk-criteria prompt.
+        self._post_upload_progress_and_watch(bot_token, admin, report_ids, file_name)
+
+        report_type = (results[0].get("report_type") or "").replace("_", " ") or "report"
+        return self._text_block(
+            f"✅ *{file_name}* uploaded and recognized as a *{report_type}* file! "
+            "Watch the channel for a live progress update — I'll message you again once fix recommendations are ready."
+        )
+
+    def _post_upload_progress_and_watch(self, bot_token, admin, report_ids, file_name):
+        """
+        Posts the live progress message and spawns the watcher thread that
+        keeps it updated (% bar) until card generation for report_ids
+        finishes — shared by a normal upload and a "keep same plan, trim
+        extra IPs" retry, since both end the same way: some report_ids now
+        have new content that needs cards generated before the admin should
+        be told it's ready.
+        """
         progress_channel_id = None
         progress_ts = None
         try:
@@ -10037,11 +10078,50 @@ class SlackSlashCommandView(APIView):
             daemon=True,
         ).start()
 
-        report_type = (results[0].get("report_type") or "").replace("_", " ") or "report"
-        return self._text_block(
-            f"✅ *{file_name}* uploaded and recognized as a *{report_type}* file! "
-            "Watch the channel for a live progress update — I'll message you again once fix recommendations are ready."
-        )
+    def _post_over_limit_choice(self, bot_token, team_id, asset_count, limit, token):
+        """
+        Posts the "this report goes over your Freemium asset limit" message
+        with the two options — Keep same plan (trims to the first `limit`
+        hosts, see upload_keep_trim in _handle_action) or Upgrade (a plain
+        link button, straight to the pricing page, no server round trip).
+        """
+        admin_channel_id = self._get_admin_channel_id(bot_token)
+        if not admin_channel_id:
+            return
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                f"⚠️ This report has *{asset_count} assets* — your Freemium plan allows up to *{limit}*.\n"
+                "How do you want to proceed?"
+            )}},
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Keep same plan — remove extra IPs", "emoji": True},
+                        "action_id": "upload_keep_trim",
+                        "value": token,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Upgrade plan", "emoji": True},
+                        "action_id": "upload_upgrade_redirect",
+                        "value": token,
+                        "style": "primary",
+                        "url": "https://vaptfix.ai/pricingplan",
+                    },
+                ],
+            },
+        ]
+        try:
+            _http_post(
+                "https://slack.com/api/chat.postMessage",
+                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                json={"channel": admin_channel_id, "text": "This report goes over your plan's asset limit.", "blocks": blocks},
+                timeout=15,
+            )
+        except Exception:
+            logger.exception("[SlackUploadReport] failed to post over-limit choice message")
 
     def _submit_scope(self, values, team_id, slack_user_id, mode):
         """
@@ -19396,6 +19476,83 @@ class SlackInteractivityView(APIView):
                     timeout=10,
                 )
                 self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
+                return
+
+            if action_id == "upload_keep_trim":
+                # "Keep same plan — remove extra IPs": resubmit the files we
+                # cached when the over-limit choice was first posted, this
+                # time with trim_over_limit=true so the backend keeps only
+                # the first N hosts (Freemium's limit) and drops the rest,
+                # then proceeds exactly like a normal successful upload.
+                pending = cache.get(f"slack_pending_upload_{value}")
+                if not pending:
+                    self._post_response_url(response_url, {
+                        "replace_original": True,
+                        "text": "❌ This has expired — please upload the report again.",
+                    }, action_id)
+                    return
+                cache.delete(f"slack_pending_upload_{value}")
+
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "text": "⏳ Retrying with the extra assets removed...",
+                }, action_id)
+
+                if not cache.add(_upload_in_progress_key(pending["team_id"]), True, timeout=1800):
+                    self._post_response_url(response_url, {
+                        "replace_original": True,
+                        "text": "⏳ A report is already being processed for your workspace. Please wait for it to finish.",
+                    }, action_id)
+                    return
+
+                retry_admin_token = slash._get_admin_token(pending["team_id"], slack_user_id=pending.get("slack_user_id"))
+                backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+                try:
+                    upload_resp = _http_post(
+                        f"{backend}/api/admin/upload_report/upload/",
+                        headers={"Authorization": f"Bearer {retry_admin_token}"},
+                        files=pending["files"],
+                        data={"trim_over_limit": "true"},
+                        timeout=180,
+                    )
+                    upload_data = upload_resp.json()
+                except Exception as exc:
+                    cache.delete(_upload_in_progress_key(pending["team_id"]))
+                    logger.exception("[SlackUploadReport] retry upload API call failed")
+                    self._post_response_url(response_url, {"replace_original": True, "text": f"❌ Retry failed: {exc}"}, action_id)
+                    return
+
+                results = upload_data.get("results") or []
+                if not results:
+                    cache.delete(_upload_in_progress_key(pending["team_id"]))
+                    reason = ((upload_data.get("errors") or [{}])[0].get("error")) or "Retry failed."
+                    self._post_response_url(response_url, {"replace_original": True, "text": f"❌ {reason}"}, action_id)
+                    return
+
+                retry_report_ids = list(dict.fromkeys(r["report_id"] for r in results if r.get("report_id")))
+                retry_admin = User.objects.filter(slack_team_id=pending["team_id"]).first()
+                retry_bot_token = slash._get_bot_token(pending["team_id"], slack_user_id=pending.get("slack_user_id"))
+                if retry_report_ids and retry_admin and retry_bot_token:
+                    slash._post_upload_progress_and_watch(
+                        retry_bot_token, retry_admin, retry_report_ids, pending.get("file_name") or "report",
+                    )
+                    self._post_response_url(response_url, {
+                        "replace_original": True,
+                        "text": "✅ Kept within your plan's limit — watch the channel for a live progress update.",
+                    }, action_id)
+                else:
+                    cache.delete(_upload_in_progress_key(pending["team_id"]))
+                    self._post_response_url(response_url, {
+                        "replace_original": True,
+                        "text": "❌ Retry succeeded but couldn't start tracking. Contact support.",
+                    }, action_id)
+                return
+
+            if action_id == "upload_upgrade_redirect":
+                # Plain `url` button (see _post_over_limit_choice) — Slack
+                # navigates there directly, no server work needed beyond
+                # cleaning up the cached pending-upload entry.
+                cache.delete(f"slack_pending_upload_{value}")
                 return
 
             if action_id == "team_sub_deleteteamuser":
