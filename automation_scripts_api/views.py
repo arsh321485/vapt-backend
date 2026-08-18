@@ -1,4 +1,5 @@
 import datetime
+import re
 from pathlib import Path
 
 from django.http import FileResponse
@@ -134,8 +135,11 @@ def _resolve_admin_and_teams(request):
 
 def _normalize_vuln_name(name: str) -> str:
     """Case/whitespace-insensitive key for matching a vulnerability name
-    against the automation_scripts library's own "vulnerability" field."""
-    return (name or "").strip().lower()
+    against the automation_scripts library's own "vulnerability" field.
+    Collapses ALL whitespace runs (tabs, double spaces, newlines — not just
+    leading/trailing) to a single space before lowercasing, so "TLS  Version
+    1.0" / "tls version 1.0" / "TLS Version 1.0 " all resolve to the same key."""
+    return re.sub(r"\s+", " ", (name or "")).strip().lower()
 
 
 def _load_latest_report_plugin_ids(db, admin_id, admin_email):
