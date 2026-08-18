@@ -33,6 +33,13 @@ STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 BILLING_SALES_EMAIL = os.getenv("BILLING_SALES_EMAIL", "info@vaptfix.ai")
 
+# Admin emails exempt from the asset-count/automation/testing Freemium limits
+# (e.g. internal demo accounts) — the 1-upload-per-day limit still applies to
+# them same as any other Freemium admin. Comma-separated, case-insensitive.
+BILLING_UNLIMITED_ADMIN_EMAILS = [
+    e.strip().lower() for e in os.getenv("BILLING_UNLIMITED_ADMIN_EMAILS", "").split(",") if e.strip()
+]
+
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY environment variable must be set")

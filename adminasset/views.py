@@ -23,6 +23,7 @@ def _clear_dashboard_cache(user_id):
         cache.delete(key)
 
 from .serializers import AdminAssetSerializer,AssetHostVulnSerializer,HoldAssetSerializer,HoldAssetListSerializer
+from upload_report.asset_classification import classify_asset_type
 # Import User for organisation_name lookup
 try:
     from users.models import User
@@ -174,7 +175,8 @@ class ReportAssetsAPIView(APIView):
                                 "medium": 0,
                                 "low": 0
                             },
-                            "host_information": host.get("host_information") or {}
+                            "host_information": host.get("host_information") or {},
+                            "_vulns_for_classification": [],
                         }
 
                     entry = assets[host_name]
@@ -184,6 +186,7 @@ class ReportAssetsAPIView(APIView):
                         if (_pname, host_name) in _held_vuln_set or (_pname, host_name) in _deleted_vuln_set:
                             continue
                         entry["total_vulnerabilities"] += 1
+                        entry["_vulns_for_classification"].append(v)
                         risk = (v.get("risk_factor") or v.get("severity") or "").lower()
 
                         if risk.startswith("crit"):
@@ -205,6 +208,9 @@ class ReportAssetsAPIView(APIView):
                         "total_vulnerabilities": a["total_vulnerabilities"],
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
+                        "asset_type": classify_asset_type(
+                            a["asset"], a["host_information"], a["_vulns_for_classification"]
+                        ),
                     })
 
                 serializer = AdminAssetSerializer(final, many=True)
@@ -915,7 +921,8 @@ class AdminAssetsAPIView(APIView):
                                 "medium": 0,
                                 "low": 0
                             },
-                            "host_information": host.get("host_information") or {}
+                            "host_information": host.get("host_information") or {},
+                            "_vulns_for_classification": [],
                         }
 
                     entry = assets[host_name]
@@ -925,6 +932,7 @@ class AdminAssetsAPIView(APIView):
                         if (_pname, host_name) in _held_vuln_set or (_pname, host_name) in _deleted_vuln_set:
                             continue
                         entry["total_vulnerabilities"] += 1
+                        entry["_vulns_for_classification"].append(v)
                         risk = (v.get("risk_factor") or v.get("severity") or "").lower()
 
                         if risk.startswith("crit"):
@@ -946,6 +954,9 @@ class AdminAssetsAPIView(APIView):
                         "total_vulnerabilities": a["total_vulnerabilities"],
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
+                        "asset_type": classify_asset_type(
+                            a["asset"], a["host_information"], a["_vulns_for_classification"]
+                        ),
                     })
 
                 serializer = AdminAssetSerializer(final, many=True)
