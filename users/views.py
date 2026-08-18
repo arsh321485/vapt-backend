@@ -19398,12 +19398,37 @@ class SlackInteractivityView(APIView):
             if action_id == "team_sub_deleteteamuser":
                 # Remove a member from ONE specific team (not the whole
                 # roster) — distinct from team_sub_deleteuser's full
-                # deactivate/delete. Needs the member list up front to
-                # populate the "Select User" dropdown.
+                # deactivate/delete.
+                #
+                # Open the modal FIRST with a "Loading…" placeholder, THEN
+                # fetch the member list and views.update it in — trigger_id
+                # is only valid for ~3s from the original click, and this
+                # thread already eats into that budget just by being
+                # scheduled; doing the _call_api member-list fetch (a real
+                # network round trip, ~1.3s even warm) BEFORE views.open used
+                # to blow the window entirely, so the modal silently never
+                # opened. views.update has no such time limit once the modal
+                # is already open.
                 bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
                 if not bot_token or not trigger_id:
                     self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
                     return
+                loading_view = slash._build_delete_team_user_modal([])
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": loading_view},
+                    timeout=10,
+                )
+                self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
+                try:
+                    resp_json = resp.json()
+                except Exception:
+                    resp_json = {}
+                view_id = (resp_json.get("view") or {}).get("id")
+                if not resp_json.get("ok") or not view_id:
+                    return
+
                 try:
                     data = slash._call_api(
                         "/api/admin/users_details/list-user-details/", team_id,
@@ -19412,14 +19437,17 @@ class SlackInteractivityView(APIView):
                     members = data if isinstance(data, list) else (data.get("results") or data.get("users") or [])
                 except Exception:
                     members = []
-                view = slash._build_delete_team_user_modal(members)
-                resp = _http_post(
-                    "https://slack.com/api/views.open",
+                if not members:
+                    return  # already showing "No team members found" from the loading_view
+
+                update_view = slash._build_delete_team_user_modal(members)
+                resp2 = _http_post(
+                    "https://slack.com/api/views.update",
                     headers={"Authorization": f"Bearer {bot_token}"},
-                    json={"trigger_id": trigger_id, "view": view},
+                    json={"view_id": view_id, "view": update_view},
                     timeout=10,
                 )
-                self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
+                self._debug_write(f"_handle_action: {action_id} views.update -> {getattr(resp2, 'text', None)}")
                 return
 
             if action_id in dict(slash._TEAM_SUBTABS):
