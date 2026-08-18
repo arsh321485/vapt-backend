@@ -1,6 +1,6 @@
-https://claude.ai/code/artifact/bd9f7206-ca62-4b54-ad44-841b1599e165?via=auto_preview
+slack ke plotform data show q nai ho rha hai tab se nai ho rhe hai kya issue hai explain kro mujhe 
+
+jese hi set risk criteria krte hai to automatik tab show hote hai 
 
 
-Premium or ek hai management +testing vala to mujhe uska bhi api chahihe 
-
-ye file me upload kr dena mene aapko ss bhej diya hai 
+home fix  etc
