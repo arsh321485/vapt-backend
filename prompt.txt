@@ -1,24 +1,3 @@
-Automated Fix panel ka exact API path code se nikal ke backend ko clear answer de deta hoon.
+magic link client ko jayegi within 15 min me ke undr o sign up krega uske email id se or o mail id pr fir jo file superadmin ne upload ki hai o us client ke espe chl jayegi o fir o vaptfix ki sari funality dekh skta hai 
 
-Backend ko yeh bata sakte ho — Automated Fix panel ka intended data /match/ APIs se aata hai, mock se nahi. Jo screenshot mein nfh_c3_ripple20_isolate.py (VLAN isolation only) dikh raha hai, woh fallback mock hai, real match response nahi.
-
-Panel yeh APIs use karta hai (:automation-data prop):
-
-User
-
-Nessus (plugin_id numeric hai): POST /api/user/automation-scripts/match/bulk/
-body: { "plugin_ids": [...] }
-AWS / Custom (plugin_id nahi hai): POST /api/user/automation-scripts/match/by-name/
-body: { "vulnerability_names": ["..."] }
-Accordion open fallback: GET /api/user/automation-scripts/match/{plugin_id}/
-Admin — same paths under /api/admin/automation-scripts/...
-
-UI fields yahi response se aate hain: automation_possible, fix_script_name / script_name, script_description, plugin_id, os, available_os, fix_script_path.
-
-Agar match empty/matched: false aaye, panel hardcoded defaults dikhata hai — screenshot wala Critical text exactly wahi mock hai.
-
-Alag APIs (panel content nahi):
-
-Thumbs: GET/POST .../automation-scripts/feedback/{plugin_id}/
-Download arrow abhi download API call nahi karta — local .py file save hoti hai. Count ke liye GET .../download/{plugin_id}/ alag hai.
-Backend se confirm: is vuln pe /match/bulk/ ya /match/by-name/ 200 + matched: true de raha hai ya nahi. Nahi de raha to UI mock hi dikhayegi.
+to abhi plan btao 

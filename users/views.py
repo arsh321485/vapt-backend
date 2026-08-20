@@ -1491,13 +1491,9 @@ class MicrosoftTeamsCallbackView(APIView):
             if user:
                 logger.info(f"[TeamsOAuth] Processing user: id={user.id} email={user.email} login_provider={user.login_provider}")
 
-                # Platform enforcement: block email-only admins (email accounts stay email-only)
-                if admin_id_from_state and user.login_provider == "email":
-                    logger.warning(f"[TeamsOAuth] Blocked — user {user.email} is email-only login")
-                    return JsonResponse({
-                        "error": "Your account uses email login. Please sign in with your email and password.",
-                        "platform_conflict": True,
-                    }, status=400)
+                # Email-provider admins are allowed to also connect Teams (additive
+                # login — they keep their password AND gain Teams login). Only the
+                # Slack<->Teams mutual-exclusivity check below still blocks.
 
                 # Platform enforcement: block if admin already connected Slack
                 if user.login_provider == "slack" and user.slack_bot_token:
@@ -4054,11 +4050,16 @@ class UserLoginPlatformView(APIView):
     """
     GET /api/users/user-login-platform/?email=user@company.com
     Returns which platform the user's admin is on (slack / microsoft_teams / email).
-    Frontend uses this to decide: show Slack button, Teams button, or password field.
+    Frontend uses this to decide which login options to show — the OAuth
+    "platform" button AND, independently, the password field. Login methods
+    are additive (an admin can have email+password AND one of Slack/Teams
+    connected at the same time), so "platform" alone no longer tells the
+    whole story — check "has_password" too before hiding the password field.
 
     Response:
     {
         "platform": "slack",          -- or "microsoft_teams" or "email"
+        "has_password": true,         -- password login also available?
         "admin_id": "uuid-of-admin",
         "found": true
     }
@@ -4081,6 +4082,7 @@ class UserLoginPlatformView(APIView):
                 platform = "email"
             return Response({
                 "platform": platform,
+                "has_password": admin_user.has_usable_password(),
                 "admin_id": str(admin_user.id),
                 "found": True,
                 "role": "admin",
@@ -4267,15 +4269,12 @@ class SlackOAuthCallbackView(APIView):
             if not user:
                 user, _ = User.objects.get_or_create(
                     email=email,
-                    defaults={"login_provider": "slack", "password": ""},
+                    defaults={"login_provider": "slack", "password": make_password(None)},
                 )
 
-            # Platform enforcement: block email-only admins (email accounts stay email-only)
-            if admin_id_from_state and user.login_provider == "email":
-                return self._html_response(
-                    success=False,
-                    error="Your account uses email login. Please sign in with your email and password.",
-                )
+            # Email-provider admins are allowed to also connect Slack (additive
+            # login — they keep their password AND gain Slack login). Only the
+            # Slack<->Teams mutual-exclusivity check below still blocks.
 
             # Platform enforcement: block if admin already connected Teams
             if user.login_provider == "microsoft_teams" and user.ms_access_token:
