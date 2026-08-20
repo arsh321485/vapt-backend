@@ -16,6 +16,8 @@ from .views import (
     AdminLatestReportAPIView,
     ReportHeaderAPIView,
     download_report_view,
+    GenerateReportClaimInviteView,
+    ValidateReportClaimInviteView,
 )
 
 app_name = 'upload_report'
@@ -108,5 +110,17 @@ urlpatterns = [
         "verifications/approve/",
         SuperAdminApproveVerificationAPIView.as_view(),
         name="superadmin_verification_approve",
+    ),
+
+    # Magic-link report handoff — Super Admin generates, signup page validates.
+    path(
+        "claim-invite/generate/",
+        GenerateReportClaimInviteView.as_view(),
+        name="generate_report_claim_invite",
+    ),
+    path(
+        "claim-invite/validate/",
+        ValidateReportClaimInviteView.as_view(),
+        name="validate_report_claim_invite",
     ),
 ]

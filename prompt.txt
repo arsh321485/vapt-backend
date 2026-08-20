@@ -1,3 +1,9 @@
-magic link client ko jayegi within 15 min me ke undr o sign up krega uske email id se or o mail id pr fir jo file superadmin ne upload ki hai o us client ke espe chl jayegi o fir o vaptfix ki sari funality dekh skta hai 
+jo allready hai o to vese hi rhega na 
 
-to abhi plan btao 
+jese ki magic link se usne email ko select kiya hai to o slack ya ms team me se ek plotform se bhi ja skta hai na 
+
+
+agr usne slack/ms team  se kiya hai to email se bhi ho skta hai 
+
+bta do mujhe ye bhi 
+

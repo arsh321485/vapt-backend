@@ -379,6 +379,20 @@ class AdminSignupVerifyOTPView(APIView):
         # Use queryset delete for Djongo compatibility (model instance pk can be None).
         SignupOTPSession.objects.filter(email=email).delete()
 
+        # Report-claim magic link (optional) — if this signup came from a
+        # Super Admin's invite link, hand off the pending report(s) now
+        # that a real account exists. Silently no-ops if absent/expired/
+        # already used — never blocks normal signup.
+        invite_token = request.data.get("invite_token")
+        if invite_token:
+            from .invite_utils import claim_invite
+            try:
+                claimed = claim_invite(invite_token, user)
+                if claimed:
+                    logger.info(f"[ReportInvite] Email signup claimed {claimed} report(s) for {user.email}")
+            except Exception as e:
+                logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
+
         # Generate tokens
         refresh = RefreshToken.for_user(user)
 
@@ -1022,6 +1036,9 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 "redirect_uri": frontend_redirect,
                 "nonce": secrets.token_urlsafe(8),
                 "admin_id": admin_id,
+                # Report-claim magic link (optional) — carried through the
+                # Teams OAuth round trip, same as the Slack flow.
+                "invite_token": request.GET.get("invite_token"),
             }
             state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
 
@@ -1409,11 +1426,13 @@ class MicrosoftTeamsCallbackView(APIView):
             # State can be either base64-encoded JSON or a plain random string
             frontend_redirect = settings.FRONTEND_URL if hasattr(settings, 'FRONTEND_URL') else "http://localhost:3000"
             admin_id_from_state = None
+            invite_token_from_state = None
             try:
                 decoded_state = base64.urlsafe_b64decode(state + "==").decode()
                 state_data = json.loads(decoded_state)
                 frontend_redirect = state_data.get("redirect_uri", frontend_redirect)
                 admin_id_from_state = state_data.get("admin_id")
+                invite_token_from_state = state_data.get("invite_token")
             except (UnicodeDecodeError, json.JSONDecodeError, Exception):
                 # State is a plain string (not base64-encoded JSON), use default redirect
                 logger.info(f"State is plain string: {state}, using default redirect: {frontend_redirect}")
@@ -1487,6 +1506,17 @@ class MicrosoftTeamsCallbackView(APIView):
                 logger.info(f"[TeamsOAuth] get_or_create by email={email}: created={created} user_id={user.id if user else None}")
             else:
                 created = False
+
+            # Report-claim magic link (optional) — only makes sense for a
+            # brand-new account. Silently no-ops if absent/expired/already used.
+            if created and invite_token_from_state and user:
+                from .invite_utils import claim_invite
+                try:
+                    claimed = claim_invite(invite_token_from_state, user)
+                    if claimed:
+                        logger.info(f"[ReportInvite] Teams signup claimed {claimed} report(s) for {user.email}")
+                except Exception as e:
+                    logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
 
             if user:
                 logger.info(f"[TeamsOAuth] Processing user: id={user.id} email={user.email} login_provider={user.login_provider}")
@@ -4125,6 +4155,10 @@ class SlackOAuthUrlView(APIView):
         state_data = {
             "admin_id": admin_id,
             "nonce": str(uuid.uuid4()),
+            # Report-claim magic link (optional) — carried through Slack's
+            # OAuth round trip so the callback knows to hand off a pending
+            # report once the new admin account exists.
+            "invite_token": request.data.get("invite_token"),
         }
         state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
 
@@ -4229,10 +4263,12 @@ class SlackOAuthCallbackView(APIView):
             # Decode state to get UI admin_id (if provided)
             decoded_state = None
             admin_id_from_state = None
+            invite_token_from_state = None
             try:
                 decoded_state = base64.urlsafe_b64decode(state + "==").decode()
                 decoded_state = json.loads(decoded_state)
                 admin_id_from_state = decoded_state.get("admin_id")
+                invite_token_from_state = decoded_state.get("invite_token")
             except Exception:
                 # Backward compatible: older callbacks may have state as plain uuid string
                 admin_id_from_state = None
@@ -4266,11 +4302,25 @@ class SlackOAuthCallbackView(APIView):
             else:
                 user = None
 
+            newly_created = False
             if not user:
-                user, _ = User.objects.get_or_create(
+                user, newly_created = User.objects.get_or_create(
                     email=email,
                     defaults={"login_provider": "slack", "password": make_password(None)},
                 )
+
+            # Report-claim magic link (optional) — only makes sense for a
+            # brand-new account (this is how a superadmin's invite hands off
+            # a pending report to a client who didn't have VaptFix before).
+            # Silently no-ops if absent/expired/already used.
+            if newly_created and invite_token_from_state:
+                from .invite_utils import claim_invite
+                try:
+                    claimed = claim_invite(invite_token_from_state, user)
+                    if claimed:
+                        logger.info(f"[ReportInvite] Slack signup claimed {claimed} report(s) for {user.email}")
+                except Exception as e:
+                    logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
 
             # Email-provider admins are allowed to also connect Slack (additive
             # login — they keep their password AND gain Slack login). Only the
