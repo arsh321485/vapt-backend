@@ -886,8 +886,86 @@ class UploadReportView(APIView):
                 {"error": "Upload failed", "detail": str(exc)},
                 status=500
             )
-      
-        
+
+
+
+class GenerateReportClaimInviteView(APIView):
+    """
+    Super Admin only. Turns already-uploaded report(s) (owned by the
+    Super Admin's own account today) into a 15-minute magic link — whoever
+    completes VaptFix signup (Slack / MS Team / Email) using that link
+    within the window gets the report(s) reassigned to their brand-new
+    admin account.
+
+    We don't know the client's email ahead of time, so the link itself is
+    the sole authorization — see users/invite_utils.py for that trade-off.
+
+    POST body: { "report_ids": ["<report_id>", ...] }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.is_superuser:
+            return Response({"error": "Only Super Admin can generate a claim invite."}, status=403)
+
+        report_ids = request.data.get("report_ids")
+        if not report_ids or not isinstance(report_ids, list):
+            return Response({"error": "report_ids (non-empty list) is required."}, status=400)
+
+        from vaptfix.mongo_client import get_shared_db
+        db = get_shared_db()
+
+        # Only allow inviting away reports the caller actually owns right
+        # now — prevents a superadmin from accidentally (or maliciously)
+        # handing off another admin's data via this endpoint.
+        owned = list(db["nessus_reports"].find(
+            {"report_id": {"$in": report_ids}, "admin_id": str(request.user.id)},
+            {"report_id": 1, "original_filename": 1, "_id": 0},
+        ))
+        owned_ids = [d["report_id"] for d in owned]
+        missing = [rid for rid in report_ids if rid not in owned_ids]
+        if missing:
+            return Response({
+                "error": "Some report_ids are not owned by you (or don't exist).",
+                "missing": missing,
+            }, status=400)
+
+        from users.invite_utils import create_invite, INVITE_TTL_SECONDS
+        token = create_invite(owned_ids, request.user.id)
+
+        frontend_base = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+        invite_url = f"{frontend_base}/signup?invite={token}"
+
+        return Response({
+            "success": True,
+            "invite_url": invite_url,
+            "token": token,
+            "expires_in_seconds": INVITE_TTL_SECONDS,
+            "report_ids": owned_ids,
+            "files": [d.get("original_filename") for d in owned],
+        }, status=201)
+
+
+class ValidateReportClaimInviteView(APIView):
+    """
+    Public. Frontend calls this when the signup page loads with ?invite=<token>
+    so it can show "You're claiming N report(s)" (or "This link has expired")
+    before the person picks Slack / MS Team / Email to sign up with.
+    """
+    permission_classes = []
+    authentication_classes = []
+
+    def get(self, request):
+        token = request.query_params.get("token") or request.query_params.get("invite")
+        from users.invite_utils import peek_invite
+        data = peek_invite(token)
+        if not data:
+            return Response({"valid": False}, status=200)
+        return Response({
+            "valid": True,
+            "report_count": len(data.get("report_ids") or []),
+        }, status=200)
+
 
 class UploadReportLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
