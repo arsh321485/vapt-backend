@@ -89,7 +89,7 @@ class PlanEstimateView(APIView):
                 rate = MANAGEMENT_TESTING_RATE_PER_IP_YEAR
                 billing_cycle = "annual"
 
-            return Response({
+            response_data = {
                 "plan": plan,
                 "mode": mode,
                 "billing_cycle": billing_cycle,
@@ -97,7 +97,23 @@ class PlanEstimateView(APIView):
                 "price_per_ip": str(rate),
                 "amount_due": str(amount),
                 "currency": "usd",
-            })
+            }
+
+            # Management+Testing never uploads a report — its asset_count
+            # comes entirely from scope/create/. A brand-new admin hasn't
+            # submitted one yet, so asset_count=0 here isn't a calculation
+            # error, it's "nothing to price yet" — $0.00 alone reads as a
+            # real (wrong) total, so flag it explicitly and point the
+            # frontend at the endpoint that actually unblocks it.
+            if mode == MODE_MANAGEMENT_TESTING and asset_count == 0:
+                response_data["needs_scope"] = True
+                response_data["message"] = (
+                    "No scope submitted yet — pricing can't be calculated until you "
+                    "provide your target IPs/URLs."
+                )
+                response_data["scope_submit_endpoint"] = "/api/admin/scope/create/"
+
+            return Response(response_data)
 
         # Custom
         asset_count = get_admin_asset_count(str(request.user.id)) + get_admin_scope_asset_count(str(request.user.id))
