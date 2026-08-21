@@ -20633,12 +20633,27 @@ class SlackInteractivityView(APIView):
                 if not all([critical.strip(), high.strip(), medium.strip(), low.strip()]):
                     blocks = slash._text_block("❌ All four severities (Critical/High/Medium/Low) are required.")
                 else:
-                    resp_data = slash._call_api(
-                        "/api/admin/risk_criteria/add-risk/", team_id, method="post",
-                        json_body={"critical": critical.strip(), "high": high.strip(),
-                                   "medium": medium.strip(), "low": low.strip()},
-                        slack_user_id=slack_user_id,
+                    payload = {"critical": critical.strip(), "high": high.strip(),
+                               "medium": medium.strip(), "low": low.strip()}
+                    # Reopening this modal (e.g. via /riskcriteria) must UPDATE
+                    # the admin's existing record, not create a new one each
+                    # time — check for one first (list is newest-first).
+                    existing = slash._call_api(
+                        "/api/admin/risk_criteria/risks/", team_id, slack_user_id=slack_user_id,
                     )
+                    existing_list = (existing.get("risk_criteria") or []) if isinstance(existing, dict) else []
+                    existing_id = existing_list[0].get("_id") if existing_list else None
+
+                    if existing_id:
+                        resp_data = slash._call_api(
+                            f"/api/admin/risk_criteria/risks/{existing_id}/update/", team_id, method="patch",
+                            json_body=payload, slack_user_id=slack_user_id,
+                        )
+                    else:
+                        resp_data = slash._call_api(
+                            "/api/admin/risk_criteria/add-risk/", team_id, method="post",
+                            json_body=payload, slack_user_id=slack_user_id,
+                        )
                     if resp_data.get("risk_criteria"):
                         blocks = slash._text_block(
                             "✅ Risk criteria saved. Loading your dashboard…"

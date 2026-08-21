@@ -1,3 +1,4 @@
+import re
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from bson import ObjectId
@@ -5,6 +6,23 @@ from bson import ObjectId
 from .models import UserDetail
 
 User = get_user_model()
+
+# Letters (incl. accented), spaces, hyphens, apostrophes, periods (for
+# initials like "J.") — no digits or other symbols.
+_NAME_RE = re.compile(r"^[A-Za-zÀ-ɏ' \-.]+$")
+
+
+def _validate_person_name(value: str, field_label: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        raise serializers.ValidationError(f"{field_label} is required.")
+    if any(ch.isdigit() for ch in value):
+        raise serializers.ValidationError(f"{field_label} cannot contain numbers.")
+    if not _NAME_RE.match(value):
+        raise serializers.ValidationError(
+            f"{field_label} can only contain letters, spaces, hyphens, and apostrophes."
+        )
+    return value
 
 
 def _extract_domain(email: str) -> str:
@@ -156,6 +174,12 @@ class UserDetailCreateSerializer(serializers.ModelSerializer):
         except User.DoesNotExist:
             raise serializers.ValidationError("Admin with this ID does not exist")
 
+    def validate_first_name(self, value):
+        return _validate_person_name(value, "First name")
+
+    def validate_last_name(self, value):
+        return _validate_person_name(value, "Last name")
+
     def validate(self, attrs):
         admin_user = attrs.get("admin_id")
         _enforce_user_type_email_domain(
@@ -240,6 +264,12 @@ class UserDetailUpdateSerializer(serializers.ModelSerializer):
             except User.DoesNotExist:
                 raise serializers.ValidationError("Admin with this ID does not exist")
         return None
+
+    def validate_first_name(self, value):
+        return _validate_person_name(value, "First name")
+
+    def validate_last_name(self, value):
+        return _validate_person_name(value, "Last name")
 
     def validate(self, attrs):
         current_instance = getattr(self, "instance", None)

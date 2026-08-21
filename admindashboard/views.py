@@ -1797,6 +1797,27 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                     if pname:
                         closed_vuln_keys.add((pname, hname))
 
+                # ── currently-active hosts — vulnerability_cards is populated once
+                # at card-generation time and never touched by hold/unhold/delete
+                # (those only update nessus_reports + their own hold_assets /
+                # deleted_assets / hold_vulnerabilities / deleted_vulnerabilities
+                # collections), so without this check a held or deleted asset's
+                # cards would still be counted here.
+                active_host_names = set()
+                for host in doc.get("vulnerabilities_by_host", []):
+                    hn = (host.get("host_name") or host.get("host") or "").strip()
+                    if hn:
+                        active_host_names.add(hn)
+
+                held_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["hold_vulnerabilities"].find({"report_id": report_id})
+                }
+                deleted_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["deleted_vulnerabilities"].find({"report_id": report_id})
+                }
+
                 # ── initialize team buckets ─────────────────────────────────────
                 all_teams = TEAM_NAMES + ["Unassigned"]
 
@@ -1814,6 +1835,16 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                 for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
                     plugin_name = (card.get("vulnerability_name") or "").strip()
                     host_name   = (card.get("host_name") or "").strip()
+
+                    # Whole asset held/deleted → its cards no longer belong to
+                    # the active report. Per-vulnerability held/deleted → this
+                    # specific (host, vuln) pair was pulled out on its own.
+                    if host_name not in active_host_names:
+                        continue
+                    key = (plugin_name, host_name)
+                    if key in held_vuln_keys or key in deleted_vuln_keys:
+                        continue
+
                     raw_team    = (card.get("assigned_team", "") or "").strip()
                     team_key    = team_names_lower.get(raw_team.lower(), "") or "Unassigned"
 
