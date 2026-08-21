@@ -720,19 +720,25 @@ class MicrosoftTeamsOAuthSerializer(serializers.Serializer):
             raise serializers.ValidationError("Invalid Microsoft token")
 
     def create_or_get_user(self, microsoft_user_data):
-        """Create or get user from Microsoft data"""
+        """
+        Create or get user from Microsoft data. Returns (user, created) —
+        the caller needs `created` to know whether this is a first-time
+        signup (e.g. to trigger the set-password email).
+        """
         email = microsoft_user_data['email']
-        
+
         try:
             user = User.objects.get(email=email)
             logger.info(f"Existing user found: {email}")
-            return user
-            
+            return user, False
+
         except User.DoesNotExist:
+            # NOTE: User has no firstname/lastname fields — passing them
+            # here used to raise TypeError on every brand-new Teams signup
+            # through this endpoint. given_name/family_name from Microsoft
+            # aren't persisted anywhere on this model today.
             user = User.objects.create_user(
                 email=email,
-                firstname=microsoft_user_data.get('given_name', ''),
-                lastname=microsoft_user_data.get('family_name', ''),
                 password=None,
                 is_active=True,
                 is_staff=True,
@@ -740,9 +746,9 @@ class MicrosoftTeamsOAuthSerializer(serializers.Serializer):
             )
             user.set_unusable_password()
             user.save(update_fields=['password', 'is_active', 'is_staff', 'login_provider'])
-            
+
             logger.info(f"New user created via Microsoft OAuth: {email}")
-            return user
+            return user, True
 
 # Other serializers remain the same...
 class CreateChannelSerializer(serializers.Serializer):

@@ -17,6 +17,7 @@ from .views import (
     # SetPasswordView,
     UserForgotPasswordView,
     UserSetPasswordView,
+    SendSetPasswordEmailView,
     GoogleOAuthView,
     MicrosoftTeamsOAuthUrlView,
     MicrosoftTeamsCallbackView,
@@ -118,6 +119,7 @@ urlpatterns = [
     path('change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('forgot-password/', SendPasswordResetEmailView.as_view(), name='forgot-password'),
     path('reset-password/<uid>/<token>/', UserPasswordResetView.as_view(), name='reset-password'),
+    path('send-set-password/', SendSetPasswordEmailView.as_view(), name='send-set-password'),
     
     
     # User Member Password APIs
