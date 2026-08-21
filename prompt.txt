@@ -1,1 +1,3 @@
-ye mujhe btao ki kya krna hai slack ke plotform hai na to btao mujhe 
+me aapko ye puch rhi hai ki jo automation script hai 
+SMB Signing Not Required  ye vali vulns ke automation sript ready hai to mujhe baki ke admin ke yha q nai dikh rhi hai te btao mujhe
+details me explan krna mujhe
