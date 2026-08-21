@@ -1,6 +1,7 @@
 from rest_framework import generics, permissions, status, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from vaptfix.mongo_client import MongoContext
 from django.contrib.auth import get_user_model
 from bson import ObjectId
@@ -1132,8 +1133,15 @@ class UserDetailCreateView(generics.CreateAPIView):
                         }
                     logger.warning(f"[UserDetailCreate] Slack lookup failed for {email}")
             else:
-                logger.warning(f"[UserDetailCreate] Slack sync skipped: missing slack_bot_token for admin_id={admin_user.id}")
-                slack_sync_result = {"status": "skipped", "error": "missing_slack_bot_token"}
+                # Not applicable, not a failure — this admin has no Slack
+                # connected at all (e.g. Email/Teams-only admin), so
+                # attempting Slack sync was never on the table to begin
+                # with. Log for our own visibility only; leaving
+                # slack_sync_result unset keeps it out of the response
+                # (see `if slack_sync_result:` below) so the frontend
+                # doesn't surface a confusing "missing_slack_bot_token"
+                # toast to admins who were never going to use Slack.
+                logger.info(f"[UserDetailCreate] Slack sync not applicable (no slack_bot_token) for admin_id={admin_user.id}")
 
             response_data = {
                 "message": "User detail created successfully",
@@ -1153,6 +1161,13 @@ class UserDetailCreateView(generics.CreateAPIView):
                 response_data["slack_sync"] = slack_sync_result
 
             return Response(response_data, status=status.HTTP_201_CREATED)
+
+        except DRFValidationError as e:
+            # Field-validation failures (e.g. numbers in first_name/last_name,
+            # domain-mismatch checks) belong in a normal 400 response — the
+            # broad `except Exception` below would otherwise turn them into
+            # a confusing 500 "Failed to create user detail".
+            return Response({"error": "Validation failed", "detail": e.detail}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as e:
             logger.error(f"Error creating user detail: {str(e)}", exc_info=True)

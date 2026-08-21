@@ -1,9 +1,3 @@
-jo allready hai o to vese hi rhega na 
+add user krte hai to ye vali error aa rhi hai 
 
-jese ki magic link se usne email ko select kiya hai to o slack ya ms team me se ek plotform se bhi ja skta hai na 
-
-
-agr usne slack/ms team  se kiya hai to email se bhi ho skta hai 
-
-bta do mujhe ye bhi 
-
+or first name last name me number bhi add ho rhi hai firstname last name me string hi aana chahihe for example bharti 
