@@ -609,6 +609,141 @@ class UserPasswordResetView(APIView):
             status=status.HTTP_200_OK
         )
 
+
+def send_set_password_email(user, provider_label):
+    """
+    First-time "set your password" email for an admin who just signed up
+    via Slack/MS Teams (never chose a password) — deliberately NOT the
+    forgot-password flow/wording (no "you requested a reset"). Reuses the
+    same uid/token + submit endpoint as forgot-password
+    (UserPasswordResetView, POST /reset-password/<uid>/<token>/) since that
+    view already unconditionally calls set_password() regardless of the
+    account's current password state.
+
+    Caller is responsible for only invoking this for a brand-new account
+    that doesn't have a usable password yet — see the is_new_user +
+    has_usable_password() checks at each call site.
+    """
+    from django.utils.http import urlsafe_base64_encode
+    from django.utils.encoding import force_bytes
+    from django.contrib.auth.tokens import PasswordResetTokenGenerator
+
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = PasswordResetTokenGenerator().make_token(user)
+    frontend_base = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+    reset_link = f"{frontend_base}/reset-password/{uid}/{token}"
+
+    logo_b64 = None
+    try:
+        logo_path = os.path.join(str(settings.BASE_DIR), "users", "static", "users", "logo.png")
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+    except Exception:
+        logger.warning("Suppressed error loading logo for set-password email", exc_info=True)
+
+    logo_html = (
+        f'<img src="data:image/png;base64,{logo_b64}" alt="VAPTFIX" style="height:60px;" />'
+        if logo_b64 else '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+    )
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"></head>
+    <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:40px 0;">
+        <tr>
+          <td align="center">
+            <table width="600" cellpadding="0" cellspacing="0"
+                   style="background:#ffffff; border-radius:8px; overflow:hidden;
+                          box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+              <tr>
+                <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
+                            border-bottom:1px solid #e8eaed;">
+                  {logo_html}
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:40px;">
+                  <h2 style="color:#1a1a2e; margin:0 0 8px 0;">Set your VaptFix password</h2>
+                  <hr style="border:none; border-top:2px solid #1a73e8; margin:0 0 24px 0; width:60px; text-align:left;" />
+                  <p style="color:#444; font-size:15px; line-height:1.6;">
+                    You signed up with {provider_label}. Set a password so you can also
+                    sign in with email.
+                  </p>
+                  <div style="text-align:center; margin:28px 0;">
+                    <a href="{reset_link}"
+                       style="background-color:#1a73e8; color:#ffffff; padding:14px 32px;
+                              text-decoration:none; border-radius:6px; font-size:15px;
+                              font-weight:bold; display:inline-block;">
+                      Set Password
+                    </a>
+                  </div>
+                  <hr style="border:none; border-top:1px solid #e8eaed; margin:24px 0;" />
+                  <p style="color:#444; font-size:14px; margin:0;">
+                    Best regards,<br/>
+                    <strong>Security Management Team</strong><br/>
+                    VAPTFIX
+                  </p>
+                </td>
+              </tr>
+              <tr>
+                <td style="background-color:#f4f6f8; padding:20px 40px; text-align:center;">
+                  <p style="color:#888; font-size:12px; margin:0;">
+                    &copy; 2026 VAPTFIX. All rights reserved.
+                  </p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+    """
+
+    data = {
+        "to_email": user.email,
+        "subject": "Set your VaptFix password",
+        "html_content": html_content,
+        "inline_logo_b64": logo_b64,
+    }
+    success, err = Util.send_mail(data)
+    if not success:
+        logger.warning(f"[SetPasswordEmail] Failed to send to {user.email}: {err}")
+    return success
+
+
+class SendSetPasswordEmailView(APIView):
+    """
+    POST /api/admin/users/send-set-password/
+    Auth required — uses the logged-in admin's own email. Manual resend of
+    the first-time set-password email (Settings → "Set Password"), for a
+    Slack/Teams admin who missed/lost the automatic one. Deliberately not
+    the forgot-password endpoint — refuses if a password is already set.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        if user.has_usable_password():
+            return Response(
+                {"error": "A password is already set for this account. Use forgot-password instead."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        provider_label = {
+            "slack": "Slack",
+            "microsoft_teams": "Microsoft Teams",
+        }.get(user.login_provider, "Slack/Microsoft Teams")
+
+        success = send_set_password_email(user, provider_label)
+        if not success:
+            return Response({"error": "Failed to send email"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"msg": "Set-password link sent. Please check your email."}, status=status.HTTP_200_OK)
+
+
 # USER MEMBER FORGOT PASSWORD VIEW
 class UserForgotPasswordView(generics.GenericAPIView):
     serializer_class = UserForgotPasswordSerializer
@@ -1518,6 +1653,14 @@ class MicrosoftTeamsCallbackView(APIView):
                 except Exception as e:
                     logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
 
+            # First-time signup, no password yet — send the set-password
+            # email (not forgot-password). Never blocks the flow.
+            if created and user and not user.has_usable_password() and user.email:
+                try:
+                    send_set_password_email(user, "Microsoft Teams")
+                except Exception:
+                    logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Teams callback)")
+
             if user:
                 logger.info(f"[TeamsOAuth] Processing user: id={user.id} email={user.email} login_provider={user.login_provider}")
 
@@ -1655,7 +1798,7 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
             if serializer.is_valid(raise_exception=True):
                 access_token = serializer.validated_data.get('access_token')
                 microsoft_user_data = serializer.get_microsoft_user_data(access_token)
-                user = serializer.create_or_get_user(microsoft_user_data)
+                user, is_new_user = serializer.create_or_get_user(microsoft_user_data)
 
                 ms_refresh_token = serializer.validated_data.get('refresh_token', '')
                 user.login_provider = 'microsoft_teams'
@@ -1677,6 +1820,14 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
 
                 logger.info(f"Microsoft Teams OAuth login successful: {user.email}")
 
+                # First-time signup, no password yet — send the set-password
+                # email (not forgot-password). Never blocks the response.
+                if is_new_user and not user.has_usable_password() and user.email:
+                    try:
+                        send_set_password_email(user, "Microsoft Teams")
+                    except Exception:
+                        logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Teams OAuth)")
+
                 return Response({
                     "message": "Microsoft Teams login successful",
                     "user": UserProfileSerializer(user).data,
@@ -1685,7 +1836,7 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                         "access": str(refresh.access_token),
                     },
                     "access_token": str(access_token),
-                    "is_new_user": False,
+                    "is_new_user": is_new_user,
                     "vaptfix_team": vaptfix_team
                 }, status=status.HTTP_200_OK)
                 
@@ -4322,6 +4473,14 @@ class SlackOAuthCallbackView(APIView):
                 except Exception as e:
                     logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
 
+            # First-time signup, no password yet — send the set-password
+            # email (not forgot-password). Never blocks the flow.
+            if newly_created and not user.has_usable_password() and user.email:
+                try:
+                    send_set_password_email(user, "Slack")
+                except Exception:
+                    logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Slack callback)")
+
             # Email-provider admins are allowed to also connect Slack (additive
             # login — they keep their password AND gain Slack login). Only the
             # Slack<->Teams mutual-exclusivity check below still blocks.
@@ -4504,7 +4663,7 @@ class SlackLoginView(APIView):
                     "is_active": True,
                     "is_staff": True,
                     "is_superuser": False,
-                    "password": "",
+                    "password": make_password(None),
                     "last_login": timezone.now(),
                     "login_provider": "slack",
                     "slack_user_id": slack_user_id,
@@ -4634,6 +4793,14 @@ class SlackLoginView(APIView):
                 )
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in login", exc_info=True)
+
+            # First-time signup, no password yet — send the set-password
+            # email (not forgot-password). Never blocks the response.
+            if created and not user.has_usable_password() and user.email:
+                try:
+                    send_set_password_email(user, "Slack")
+                except Exception:
+                    logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Slack login)")
 
             # 4. PERFECT RESPONSE FORMAT
             return Response({

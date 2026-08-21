@@ -96,6 +96,65 @@ class UploadReportAdmin(admin.ModelAdmin):
     list_filter = ('uploaded_at',)
     readonly_fields = ()
     exclude = ('file_hash', 'location', 'admin', 'uploaded_at', 'created_at', 'updated_at', 'parsed_count', 'member_type', 'status')
+    actions = ['generate_claim_link']
+
+    def generate_claim_link(self, request, queryset):
+        """
+        Select one or more reports you (Super Admin) own here and run this
+        action — produces a single 15-minute magic link that hands all of
+        them off to whoever completes VaptFix signup through it. Stopgap
+        until the website gets its own "Generate claim link" button —
+        see users/invite_utils.py for how the link itself works.
+        """
+        if not request.user.is_superuser:
+            self.message_user(request, "Only Super Admin can generate a claim invite.", level=messages.ERROR)
+            return
+
+        # Don't trust the `queryset` Django admin hands us here — it's built
+        # via `.filter(pk__in=<checkbox strings>)`, and djongo's
+        # ObjectIdField doesn't coerce plain strings in an __in lookup, so
+        # it silently comes back empty every time. Re-derive the selection
+        # straight from the raw checkbox POST values and look each one up
+        # explicitly instead.
+        from django.contrib.admin import helpers as _admin_helpers
+        from bson import ObjectId as _ObjectId
+        from bson.errors import InvalidId as _InvalidId
+        selected_ids = request.POST.getlist(_admin_helpers.ACTION_CHECKBOX_NAME)
+        selected = []
+        for sid in selected_ids:
+            try:
+                selected.append(UploadReport.objects.get(_id=_ObjectId(sid)))
+            except (UploadReport.DoesNotExist, _InvalidId):
+                pass
+
+        # Compare raw admin_id (not r.admin.id) — djongo doesn't reliably
+        # resolve the FK relation on these instances either.
+        owned = [r for r in selected if str(getattr(r, "admin_id", "")) == str(request.user.id)]
+        not_owned = len(selected) - len(owned)
+        if not owned:
+            self.message_user(
+                request,
+                "None of the selected report(s) are owned by your account — "
+                "a claim link can only hand off reports you uploaded yourself.",
+                level=messages.ERROR,
+            )
+            return
+
+        from users.invite_utils import create_invite, INVITE_TTL_SECONDS
+
+        report_ids = [str(r._id) for r in owned]
+        token = create_invite(report_ids, request.user.id)
+        frontend_base = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+        invite_url = f"{frontend_base}/signup?invite={token}"
+
+        msg = (
+            f"Claim link (expires in {INVITE_TTL_SECONDS // 60} minutes) for "
+            f"{len(owned)} report(s): {invite_url}"
+        )
+        if not_owned:
+            msg += f"  ({not_owned} selected report(s) skipped — not owned by you.)"
+        self.message_user(request, msg, level=messages.SUCCESS)
+    generate_claim_link.short_description = "Generate claim link (magic link) for selected report(s)"
 
     class Media:
         js = ("upload_report/admin_upload_timing.js",)
