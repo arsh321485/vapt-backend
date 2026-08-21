@@ -1,3 +1,50 @@
-add user krte hai to ye vali error aa rhi hai 
+Feature: "Generate claim link" button — SUPERADMIN side only
 
-or first name last name me number bhi add ho rhi hai firstname last name me string hi aana chahihe for example bharti 
+This is separate from the earlier magic-link signup-page note (still valid, still needed). This one is about where the link gets CREATED — right now there's no UI for it at all, so I had to generate it manually via a backend script. Needs a button.
+
+Scope: Super Admin dashboard/panel ONLY — NOT the regular admin dashboard. The
+backend endpoint is superuser-gated (checks request.user.is_superuser); a
+regular admin calling it gets a 403. Only show this button/flow where the
+logged-in user is a Super Admin.
+
+Where it fits: Super Admin already has a screen listing reports they've
+uploaded (for themselves, ahead of handing off to a client). Add a
+"Generate claim link" action there, per report (or per multi-select if
+several reports were uploaded together for the same client).
+
+Endpoint:
+  POST /api/admin/upload_report/claim-invite/generate/
+  Auth: Bearer token (Super Admin's own)
+  Body: { "report_ids": ["<report_id>", "<report_id2>", ...] }
+        — must be report(s) currently owned by the calling Super Admin.
+
+Response (201):
+  {
+    "success": true,
+    "invite_url": "https://vaptfix.ai/signup?invite=<token>",
+    "token": "<token>",
+    "expires_in_seconds": 900,
+    "report_ids": [...],
+    "files": ["<original filenames, for display confirmation>"]
+  }
+
+UI needed:
+  1. Button/action: "Generate claim link" next to a report (or a
+     multi-select + bulk action if handing off several at once).
+  2. On click, call the endpoint above with the selected report_id(s).
+  3. Show the returned invite_url clearly with a copy-to-clipboard control —
+     it's only valid for 15 minutes (expires_in_seconds: 900), so make that
+     visible right next to it (e.g. "Expires in 15:00" countdown, or at
+     minimum a static "Expires 15 minutes after generating — share it
+     immediately").
+  4. No polling/status needed beyond that — the link is single-use; once
+     someone completes signup through it, the report(s) silently reassign
+     to the new account. There's currently no "was this claimed yet?" UI —
+     ask if that's wanted as a follow-up, not blocking for v1.
+
+Error cases to handle:
+  - 403 → user isn't a Super Admin (shouldn't be reachable if the button
+    itself is Super-Admin-gated, but handle gracefully anyway).
+  - 400 with "missing" list → tried to invite report_id(s) not owned by
+    this Super Admin — shouldn't happen if the button only ever appears
+    next to the Super Admin's own reports.
