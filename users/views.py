@@ -631,7 +631,7 @@ def send_set_password_email(user, provider_label):
     uid = urlsafe_base64_encode(force_bytes(user.pk))
     token = PasswordResetTokenGenerator().make_token(user)
     frontend_base = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
-    reset_link = f"{frontend_base}/reset-password/{uid}/{token}"
+    reset_link = f"{frontend_base}/set-password/{uid}/{token}"
 
     logo_b64 = None
     try:
@@ -642,8 +642,12 @@ def send_set_password_email(user, provider_label):
     except Exception:
         logger.warning("Suppressed error loading logo for set-password email", exc_info=True)
 
+    # cid: reference (not a data: URI) — matches how Util.send_mail actually
+    # attaches inline_logo_b64 (ContentId("vaptfix_logo")). A raw base64
+    # data: URI in <img src> is what the other password emails in this file
+    # used and Gmail silently strips it, showing a broken-image icon.
     logo_html = (
-        f'<img src="data:image/png;base64,{logo_b64}" alt="VAPTFIX" style="height:60px;" />'
+        '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
         if logo_b64 else '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
     )
 
@@ -784,7 +788,9 @@ class UserForgotPasswordView(generics.GenericAPIView):
                 logo_b64 = base64.b64encode(f.read()).decode("utf-8")
 
         if logo_b64:
-            logo_html = f'<img src="data:image/png;base64,{logo_b64}" alt="VAPTFIX" style="height:60px;" />'
+            # cid: reference, not a data: URI — Gmail silently strips inline
+            # base64 images in <img src>, showing a broken-image icon.
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
         else:
             logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
 
@@ -10522,6 +10528,42 @@ class SlackSlashCommandView(APIView):
         except ValueError:
             return {"detail": "invalid_response", "status_code": resp.status_code}
 
+    def _resolve_automation_match(self, v, team_id, user_id=None, os_param=None, admin_side=True):
+        """
+        Look up the automation-script match for a vulnerability finding —
+        tries plugin_id first (real Nessus findings), and falls back to
+        name-based matching when there's no plugin_id (AWS Inspector and
+        custom-report findings always have plugin_id=None). Mirrors the
+        website's /match/by-name/ fallback — Slack's automation views used
+        to give up entirely ("No plugin ID available") for exactly the
+        findings that DO have a script, just not a Nessus plugin_id to look
+        it up by.
+        """
+        plugin_id = v.get("plugin_id")
+        role = "admin" if admin_side else "user"
+
+        if plugin_id:
+            path = f"/api/{role}/automation-scripts/match/{plugin_id}/"
+            params = {"os": os_param} if os_param else None
+            if admin_side:
+                return self._call_api(path, team_id, params=params)
+            return self._call_user_api(path, team_id, user_id, params=params)
+
+        name = v.get("vul_name") or v.get("plugin_name") or v.get("vulnerability_name")
+        if not name:
+            return {"matched": False, "message": "No automated fix available for this vulnerability."}
+
+        path = f"/api/{role}/automation-scripts/match/by-name/"
+        body = {"vulnerability_names": [name]}
+        if os_param:
+            body["os"] = os_param
+        if admin_side:
+            resp = self._call_api(path, team_id, method="post", json_body=body)
+        else:
+            resp = self._call_user_api(path, team_id, user_id, method="post", json_body=body)
+        results = resp.get("results") or []
+        return results[0] if results else {"matched": False, "message": "No automated fix available for this vulnerability."}
+
     def _call_user_api_raw(self, path, team_id, user_id, params=None):
         """Like _call_user_api but returns the raw response (for binary file downloads)."""
         backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
@@ -11197,16 +11239,10 @@ class SlackSlashCommandView(APIView):
             ],
         }
         if sub == "automation":
-            plugin_id = v.get("plugin_id")
-            if not plugin_id:
-                content = self._text_block("_No plugin ID available for this vulnerability — automation lookup not possible._")
-            else:
-                os_param = v.get("host_os")
-                automation = self._call_user_api(
-                    f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
-                    params={"os": os_param} if os_param else None,
-                )
-                content = self._format_vulndata_automation_detail(v, automation, can_download=True)
+            automation = self._resolve_automation_match(
+                v, team_id, user_id, os_param=v.get("host_os"), admin_side=False,
+            )
+            content = self._format_vulndata_automation_detail(v, automation, can_download=True)
         else:
             steps_data = None
             if not report_id:
@@ -12366,16 +12402,10 @@ class SlackSlashCommandView(APIView):
             ],
         }
         if sub == "automation":
-            plugin_id = v.get("plugin_id")
-            if not plugin_id:
-                content = self._text_block("_No plugin ID available for this vulnerability — automation lookup not possible._")
-            else:
-                os_param = v.get("operating_system")
-                automation = self._call_api(
-                    f"/api/admin/automation-scripts/match/{plugin_id}/", team_id,
-                    params={"os": os_param} if os_param else None,
-                )
-                content = self._format_vulndata_automation_detail(v, automation)
+            automation = self._resolve_automation_match(
+                v, team_id, os_param=v.get("operating_system"), admin_side=True,
+            )
+            content = self._format_vulndata_automation_detail(v, automation)
         else:
             steps_data = None
             fix_vuln_id = v.get("fix_vulnerability_id")
@@ -15303,12 +15333,7 @@ class SlackSlashCommandView(APIView):
                     f"❌ Could not start fix workflow: {create_resp.get('detail') or create_resp.get('error') or 'unknown error'}\n"
                     "_Make sure your admin added you via `/adduser` with the correct team._"
                 )
-            automation = None
-            plugin_id = target.get("plugin_id")
-            if plugin_id:
-                automation = self._call_user_api(
-                    f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
-                )
+            automation = self._resolve_automation_match(target, team_id, user_id, admin_side=False)
             steps_data = self._call_user_api(
                 f"/api/user/register/fix-vulnerability/{fix_vuln_id}/step-complete/", team_id, user_id,
             )
@@ -15506,17 +15531,14 @@ class SlackSlashCommandView(APIView):
                 f"❌ Vulnerability `{vuln_id}` not found.\n"
                 "Use `/viewassigned vulns` to see IDs."
             )
-        plugin_id = target.get("plugin_id")
-        if not plugin_id:
-            return self._text_block(
-                f"❌ No Nessus plugin ID found for this vulnerability — cannot check for an automated fix.\n"
-                f"Use `/manualfix {vuln_id}` instead."
-            )
         host_os = target.get("host_os")  # "Windows" / "Linux" / "Cisco" / None
         os_params = {"os": host_os} if host_os else None
-        automation = self._call_user_api(
-            f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id, params=os_params,
-        )
+        automation = self._resolve_automation_match(target, team_id, user_id, os_param=host_os, admin_side=False)
+        # AWS/custom findings resolve via name — the real plugin_id comes
+        # back on the match itself (the library's own Nessus ID), not from
+        # the original finding, which never had one. Needed below for the
+        # download call and the fallback filename.
+        plugin_id = automation.get("plugin_id") or target.get("plugin_id")
         if automation.get("detail") and "matched" not in automation:
             return self._text_block(f"❌ `{automation.get('detail')}`")
         if not automation.get("matched"):
@@ -15585,7 +15607,13 @@ class SlackSlashCommandView(APIView):
             )
         plugin_id = target.get("plugin_id")
         if not plugin_id:
-            return self._text_block("❌ No plugin ID found for this vulnerability.")
+            # AWS/custom findings never carry a real plugin_id — resolve it
+            # by name (same fallback as /autofix) so feedback can still be
+            # recorded against the actual matched script.
+            automation = self._resolve_automation_match(target, team_id, user_id, admin_side=False)
+            plugin_id = automation.get("plugin_id")
+            if not plugin_id:
+                return self._text_block("❌ No automated fix found for this vulnerability — nothing to give feedback on.")
         resp = self._call_user_api(
             "/api/user/automation-scripts/feedback/", team_id, user_id,
             method="post", json_body={"plugin_id": plugin_id, "working": direction == "up"},
@@ -15799,26 +15827,50 @@ class SlackSlashCommandView(APIView):
                     f"❌ Vulnerability `{vuln_id}` not found.\n"
                     "Use `/viewassigned vulns` to see IDs."
                 )
-            plugin_id = target.get("plugin_id")
-            if not plugin_id:
-                return self._text_block(f"❌ No Nessus plugin ID found for `{vuln_id}`.")
-            host_os = target.get("host_os")
-            automation = self._call_user_api(
-                f"/api/user/automation-scripts/match/{plugin_id}/", team_id, user_id,
-                params={"os": host_os} if host_os else None,
+            automation = self._resolve_automation_match(
+                target, team_id, user_id, os_param=target.get("host_os"), admin_side=False,
             )
             return self._format_single_scriptstats(automation, target, vuln_id)
 
         plugin_ids = sorted({v.get("plugin_id") for v in vulns if v.get("plugin_id")})
-        if not plugin_ids:
-            return self._text_block("No Nessus plugin IDs found for your team's vulnerabilities.")
-        bulk = self._call_user_api(
-            "/api/user/automation-scripts/match/bulk/", team_id, user_id,
-            method="post", json_body={"plugin_ids": plugin_ids},
-        )
-        results = bulk.get("results") or []
-        matched_by_pid = {r.get("plugin_id"): r for r in results if r.get("matched")}
-        return self._format_scriptstats(vulns, matched_by_pid, team_name)
+        # AWS/custom findings never carry a real plugin_id — matched by name
+        # instead, same as everywhere else in this file. Keyed by
+        # "name:<normalized>" (see _vuln_stats_key) since there's no
+        # plugin_id to key on for these.
+        name_only_vulns = [v for v in vulns if not v.get("plugin_id") and v.get("plugin_name")]
+        if not plugin_ids and not name_only_vulns:
+            return self._text_block("No vulnerabilities found for your team.")
+
+        matched_by_key = {}
+        if plugin_ids:
+            bulk = self._call_user_api(
+                "/api/user/automation-scripts/match/bulk/", team_id, user_id,
+                method="post", json_body={"plugin_ids": plugin_ids},
+            )
+            for r in (bulk.get("results") or []):
+                if r.get("matched"):
+                    matched_by_key[r.get("plugin_id")] = r
+        if name_only_vulns:
+            by_name = self._call_user_api(
+                "/api/user/automation-scripts/match/by-name/", team_id, user_id,
+                method="post", json_body={"vulnerability_names": [v.get("plugin_name") for v in name_only_vulns]},
+            )
+            # Results come back in the same order as the names sent.
+            for v, r in zip(name_only_vulns, by_name.get("results") or []):
+                if r.get("matched"):
+                    matched_by_key[self._vuln_stats_key(v)] = r
+        return self._format_scriptstats(vulns, matched_by_key, team_name)
+
+    @staticmethod
+    def _vuln_stats_key(v):
+        """Lookup key for matched_by_key in _format_scriptstats/_cmd_scriptstats
+        list mode — plugin_id when there is one, else a normalized-name key
+        (AWS/custom findings never have a real plugin_id)."""
+        pid = v.get("plugin_id")
+        if pid:
+            return pid
+        name = (v.get("plugin_name") or "").strip().lower()
+        return f"name:{name}" if name else None
 
     def _cmd_deadlines(self, text, team_id, user_id, team_name):
         """
@@ -17762,7 +17814,11 @@ class SlackSlashCommandView(APIView):
         add_section("Before running", "considerations_before")
 
         if can_download:
-            plugin_id = v.get("plugin_id") or ""
+            # Use the MATCHED script's own plugin_id, not the original
+            # finding's — AWS/custom findings resolve by name and never had
+            # a real plugin_id to begin with, so the download button must
+            # carry the library's plugin_id (what /download/ actually needs).
+            plugin_id = automation.get("plugin_id") or v.get("plugin_id") or ""
             host_os = v.get("host_os") or ""
             blocks.append({
                 "type": "actions",
@@ -18427,13 +18483,15 @@ class SlackSlashCommandView(APIView):
                 "text": f"{icon} *{vuln}* [{sev}] — +{days} days\n_Status: {st}_ | Reason: {reason}"}})
         return blocks
 
-    def _format_scriptstats(self, vulns, matched_by_pid, team_name):
+    def _format_scriptstats(self, vulns, matched_by_key, team_name):
         """
         vulns: this team's vuln list (from _get_team_vulns, has plugin_id/short_id)
-        matched_by_pid: {plugin_id: automation_doc} for plugin_ids WITH a script
+        matched_by_key: {_vuln_stats_key(v): automation_doc} for vulns WITH a script —
+        keyed by plugin_id when there is one, else "name:<normalized>" for
+        AWS/custom findings (see _vuln_stats_key).
         """
         total      = len(vulns)
-        auto_count = sum(1 for v in vulns if v.get("plugin_id") in matched_by_pid)
+        auto_count = sum(1 for v in vulns if self._vuln_stats_key(v) in matched_by_key)
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"🤖 {team_name} — Script Stats", "emoji": True}},
             self._ctx("Script download stats — shows which vulnerabilities have automated fix scripts available for your team"),
@@ -18447,7 +18505,7 @@ class SlackSlashCommandView(APIView):
         for v in vulns[:10]:
             sid      = v.get("short_id", "?")
             name     = v.get("plugin_name") or "Unknown"
-            doc      = matched_by_pid.get(v.get("plugin_id"))
+            doc      = matched_by_key.get(self._vuln_stats_key(v))
             has_scr  = bool(doc)
             dl_count = doc.get("download_count", 0) if doc else 0
             icon     = "🤖" if has_scr else "📝"

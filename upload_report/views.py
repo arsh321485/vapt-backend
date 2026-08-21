@@ -591,6 +591,21 @@ class UploadReportView(APIView):
             upload_results = []
             errors = []
 
+            # Freemium is capped at 1 report upload total (the plan gate
+            # above only blocks a *second request* — a Freemium admin who
+            # picks 2+ files in this SAME request would otherwise slip
+            # through, since they had 0 uploads on record when the gate
+            # ran). Only the first file in the batch is processed; the rest
+            # are reported as errors, same shape as an unsupported file type.
+            from billing.enforcement import is_freemium
+            if is_freemium(target_admin) and len(uploaded_files) > 1:
+                for extra_file in uploaded_files[1:]:
+                    errors.append({
+                        "file": extra_file.name,
+                        "error": "Freemium plan allows only 1 report upload total. Upgrade to Premium to upload more.",
+                    })
+                uploaded_files = uploaded_files[:1]
+
             # Same-day merge target — if the admin already uploaded something
             # today (this request or an earlier one today), every file in
             # THIS request also merges into that same report_id instead of
