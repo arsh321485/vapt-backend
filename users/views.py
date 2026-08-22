@@ -1243,15 +1243,20 @@ def _rename_general_channel(team_id, headers):
         channels = _get_team_channels(team_id, headers)
         general_id = _pick_general_channel_id(channels)
         if not general_id:
-            return {"status": "not_found"}
+            return {"status": "not_found", "channelId": None}
         url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{general_id}"
         resp = _http_patch(url, headers=headers, json={
             "displayName": TEAMS_CHANNEL_DISPLAY_NAMES["General"],
         }, timeout=15)
-        return {"status": "renamed" if resp.status_code in (200, 204) else "failed", "http_status": resp.status_code}
+        return {
+            "status": "renamed" if resp.status_code in (200, 204) else "failed",
+            "http_status": resp.status_code,
+            "channelName": TEAMS_CHANNEL_DISPLAY_NAMES["General"],
+            "channelId": general_id,
+        }
     except Exception as e:
         logger.warning(f"[TeamsChannels] General channel rename failed: {e}")
-        return {"status": "failed", "error": str(e)}
+        return {"status": "failed", "error": str(e), "channelId": None}
 
 
 def _create_vaptfix_channels(team_id, headers):
@@ -1339,9 +1344,16 @@ def _get_team_channels(team_id, headers):
 
 
 def _pick_general_channel_id(channels):
+    # Matches both the raw Graph default name ("General" — e.g. right after
+    # creation, before the rename call has run yet) and the renamed display
+    # name ("vaptfix admin dashboard") — without this second check, every
+    # caller here silently stopped finding the admin channel the moment
+    # _rename_general_channel started actually renaming it, and fell back
+    # to a generic team URL instead of deep-linking into it.
+    target_names = {"general", TEAMS_CHANNEL_DISPLAY_NAMES["General"].strip().lower()}
     for ch in channels or []:
         nm = (ch.get("displayName") or ch.get("channelName") or "").strip().lower()
-        if nm == "general":
+        if nm in target_names:
             return ch.get("id") or ch.get("channelId")
     return None
 
