@@ -39,18 +39,28 @@ def _call_view_in_process(view_cls, admin, data=None, files=None, method="post")
     return response.status_code, response.data
 
 
-def _pending_upload_key(conversation_id):
-    return f"teams_bot_pending_upload:{conversation_id}"
+def _pending_upload_key(team_id):
+    return f"teams_bot_pending_upload:{team_id}"
 
 
-def set_pending_upload_intent(conversation_id, purpose):
+def set_pending_upload_intent(team_id, purpose):
     """purpose: "report" or "scope_csv" — read back by
-    TeamsBotMessagesView._handle_message when the next attachment arrives."""
-    cache.set(_pending_upload_key(conversation_id), purpose, timeout=900)
+    TeamsBotMessagesView._handle_message when the next attachment arrives.
+
+    Keyed by team_id, NOT conversation_id — confirmed via real Teams data
+    that a channel post and a reply inside its own thread get DIFFERENT
+    conversation ids (the reply's has a ";messageid=..." suffix). The
+    button click (a reply) and the file the admin attaches next (usually a
+    fresh top-level post, not a reply in that same thread) landed in two
+    different conversations, so a conversation_id-keyed flag was never
+    found when the file arrived — team_id is the one thing guaranteed
+    stable across both.
+    """
+    cache.set(_pending_upload_key(team_id), purpose, timeout=900)
 
 
-def pop_pending_upload_intent(conversation_id):
-    key = _pending_upload_key(conversation_id)
+def pop_pending_upload_intent(team_id):
+    key = _pending_upload_key(team_id)
     purpose = cache.get(key)
     if purpose:
         cache.delete(key)
@@ -128,11 +138,11 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
         return cards.provide_scope_card()
 
     if action_id == "open_upload_report":
-        set_pending_upload_intent(conversation_id, "report")
+        set_pending_upload_intent(team_id, "report")
         return cards.upload_via_attachment_card("report")
 
     if action_id == "open_scope_csv":
-        set_pending_upload_intent(conversation_id, "scope_csv")
+        set_pending_upload_intent(team_id, "scope_csv")
         return cards.upload_via_attachment_card("scope")
 
     if action_id == "open_scope_manual":
