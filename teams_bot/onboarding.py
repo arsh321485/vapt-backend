@@ -70,3 +70,60 @@ def post_onboarding_for_team_id(team_id, force_state=None):
         logger.info(f"[TeamsOnboarding] no admin found with ms_team_id={team_id}")
         return None
     return post_onboarding_step(admin, team_id=team_id, force_state=force_state)
+
+
+def watch_report_and_post_onboarding(admin, report_ids, max_wait_seconds=1800, poll_interval=6):
+    """
+    Teams counterpart of users/views.py's _watch_reports_and_post_onboarding
+    — an admin uploading via the website's /admin-upload-report page (which
+    is what Teams' "Upload Report"/"CSV File" buttons redirect to, since
+    Teams channel bots can't receive files directly) should still see the
+    risk-criteria prompt land automatically in their Teams admin-dashboard
+    channel once mitigation cards are ready, not just on the website.
+    Meant to run in a background thread (see the call in
+    upload_report/views.py's notify_admin_report_uploaded hook).
+    """
+    import time as _time
+    import requests
+    from django.conf import settings
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    if not getattr(admin, "ms_team_id", None):
+        return
+
+    report_ids = [str(r) for r in (report_ids or []) if r]
+    if not report_ids:
+        return
+
+    backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+    token = str(RefreshToken.for_user(admin).access_token)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def _all_complete():
+        for rid in report_ids:
+            try:
+                resp = requests.get(
+                    f"{backend}/api/admin/upload_report/upload/{rid}/status/",
+                    headers=headers, timeout=15,
+                )
+                data = resp.json()
+            except Exception:
+                logger.exception(f"[TeamsOnboarding] status check failed for report_id={rid}")
+                return False
+            if not data.get("cards_generation_complete"):
+                return False
+        return True
+
+    deadline = _time.time() + max_wait_seconds
+    try:
+        while _time.time() < deadline:
+            if _all_complete():
+                break
+            _time.sleep(poll_interval)
+    except Exception:
+        logger.exception(f"[TeamsOnboarding] polling failed for report_ids={report_ids}")
+
+    try:
+        post_onboarding_step(admin)
+    except Exception:
+        logger.exception("[TeamsOnboarding] failed to post onboarding after upload watch")
