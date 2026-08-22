@@ -11,10 +11,15 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-# Bot Framework's OWN token authority — fixed, NOT our Azure tenant. Every
-# bot (regardless of which tenant its app registration lives in) gets its
-# outbound Connector API token from this same endpoint.
-_TOKEN_URL = "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
+# Confirmed via a real failing call (Connector API returned 401
+# "Authorization has been denied for this request" with a token that
+# otherwise decoded fine — correct aud/appid): the Azure Bot resource here
+# ("Vaptfix-Bot") was created as Single Tenant, not the classic Multi
+# Tenant Bot Channels Registration. Multi-tenant bots get their Connector
+# API token from the generic https://login.microsoftonline.com/botframework.com/
+# authority; single-tenant bots must request it from their OWN Entra ID
+# tenant instead — same settings.MICROSOFT_TOKEN_URL already used for Graph
+# API calls elsewhere in this app.
 _TOKEN_SCOPE = "https://api.botframework.com/.default"
 
 _cached_token = None
@@ -29,7 +34,7 @@ def _get_bot_access_token() -> str:
         return _cached_token
 
     resp = requests.post(
-        _TOKEN_URL,
+        settings.MICROSOFT_TOKEN_URL,
         data={
             "grant_type": "client_credentials",
             "client_id": settings.MICROSOFT_CLIENT_ID,

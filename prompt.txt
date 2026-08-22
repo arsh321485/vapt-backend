@@ -1,3 +1,8 @@
-open hone ke bad mujhe o chat team pr le ja rha hai mujhe teams tab ke vaptfix team ke vaptfix admin dashboard pr le jana chahihe 
-
-code push kr diya hai abhi bhi nai aaya hai welcome message
+secureitlab@support:/var/www/backend/vapt-backend$ sudo journalctl -u vapt-backend --since "10 minutes ago" --no-pager | grep -i teamsbot
+Aug 22 15:31:30 support.secureitlabservices.com gunicorn[2655262]: [TeamsBot] Activity received: type=installationUpdate from=None
+Aug 22 15:31:30 support.secureitlabservices.com gunicorn[2655265]: [TeamsBot] Activity received: type=conversationUpdate from=None
+Aug 22 15:31:30 support.secureitlabservices.com gunicorn[2655265]: [TeamsBot] Bot was added to a conversation/team.
+Aug 22 15:31:30 support.secureitlabservices.com gunicorn[2655265]: [TeamsBot] bot added to team_id=19:Egrpe0jdQwT6MPbiFuf0TmFjXSPT6IGVwKkKTJ4FOzI1@thread.tacv2 but no admin has this ms_team_id yet
+Aug 22 15:37:03 support.secureitlabservices.com gunicorn[2655265]: [TeamsBot] Rejected unauthenticated request: Missing or malformed Authorization header
+Aug 22 15:37:04 support.secureitlabservices.com gunicorn[2655264]: [TeamsBot] Rejected unauthenticated request: Missing or malformed Authorization header
+secureitlab@support:/var/www/backend/vapt-backend$
