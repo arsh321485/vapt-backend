@@ -213,17 +213,50 @@ def risk_criteria_prompt_card():
 # Same tab set + order as SlackSlashCommandView._NAV_ITEMS, and the same
 # internal action_id spelling (nav_home, nav_fix, ...) so any shared
 # downstream data-formatting code keys off one consistent name across both
-# platforms.
+# platforms. Labels kept short on purpose (see _nav_button_columnset) —
+# Teams renders these host-side and will still wrap onto a second line on a
+# narrow pane no matter what the card says, but short labels in a ColumnSet
+# give it the best real chance of staying on one row.
 NAV_ITEMS = [
     ("nav_home", "🏠 Home"),
     ("nav_fix", "🔧 Fix"),
     ("nav_register", "📋 Register"),
-    ("nav_automation", "🤖 Automations"),
+    ("nav_automation", "🤖 Auto"),
     ("nav_team", "👥 Team"),
-    ("nav_request", "📨 Timeline Ext."),
-    ("nav_notification", "🔔 Reminder"),
-    ("nav_download", "📥 Download Report"),
+    ("nav_request", "📨 Ext."),
+    ("nav_notification", "🔔 Alerts"),
+    ("nav_download", "📥 Report"),
 ]
+
+
+def _nav_button_columnset(active_action_id):
+    """
+    A single-row button bar built from a ColumnSet with narrow auto-width
+    columns, each made clickable via selectAction — this packs noticeably
+    tighter than Adaptive Cards' own `actions` array (which is what kept
+    wrapping onto a second row before), though the final call on wrapping
+    is still Teams' own host rendering, not something the card format can
+    force absolutely.
+    """
+    columns = []
+    for action_id, label in NAV_ITEMS:
+        is_active = action_id == active_action_id
+        columns.append({
+            "type": "Column",
+            "width": "auto",
+            "verticalContentAlignment": "center",
+            "selectAction": {"type": "Action.Submit", "data": {"action_id": action_id}},
+            "items": [{
+                "type": "TextBlock",
+                "text": label,
+                "wrap": False,
+                "size": "Small",
+                "weight": "Bolder" if is_active else "Default",
+                "color": "accent" if is_active else "default",
+                "horizontalAlignment": "center",
+            }],
+        })
+    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
 
 
 def nav_buttons_card(active_action_id="nav_home", extra_body=None):
@@ -233,8 +266,135 @@ def nav_buttons_card(active_action_id="nav_home", extra_body=None):
     card reply containing the navbar again plus that tab's content
     (extra_body), rather than editing a pinned message.
     """
-    actions = [
-        _submit_action(label, action_id, style=("positive" if action_id == active_action_id else None))
-        for action_id, label in NAV_ITEMS
+    body = list(extra_body or [])
+    body.append(_nav_button_columnset(active_action_id))
+    return _card(body=body)
+
+
+# ─── Home dashboard card ────────────────────────────────────────────────
+# Approximates the reference design (Microsoft -Admin/home.html) as closely
+# as Adaptive Cards allow — Teams cards have no canvas/chart rendering, so
+# the bar/donut charts there become colored stat rows and chip rows here
+# instead; same information, same grouping, just no literal chart images.
+
+_SEV_ORDER = ("critical", "high", "medium", "low")
+_SEV_ICONS = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
+_SEV_COLORS = {"critical": "attention", "high": "warning", "medium": "warning", "low": "good"}
+
+
+def _section_title(text):
+    return {"type": "TextBlock", "text": text, "weight": "Bolder", "size": "Medium", "spacing": "Large", "wrap": True}
+
+
+def _stat_container(icon, label, value, desc=None):
+    items = [
+        {"type": "TextBlock", "text": f"{icon}  {label}", "size": "Small", "weight": "Bolder",
+         "color": "accent", "wrap": True, "spacing": "None"},
+        {"type": "TextBlock", "text": str(value), "size": "ExtraLarge", "weight": "Bolder", "spacing": "Small", "wrap": True},
     ]
-    return _card(body=extra_body or [], actions=actions)
+    if desc:
+        items.append({"type": "TextBlock", "text": desc, "size": "Small", "isSubtle": True, "spacing": "None", "wrap": True})
+    return {"type": "Container", "style": "emphasis", "items": items, "spacing": "Small"}
+
+
+def _stat_row(*stats):
+    """stats: list of (icon, label, value, desc) tuples, laid out as equal-width columns."""
+    return {
+        "type": "ColumnSet",
+        "spacing": "Medium",
+        "columns": [
+            {"type": "Column", "width": "stretch", "items": [_stat_container(*s)]}
+            for s in stats
+        ],
+    }
+
+
+def _severity_chip_row(counts: dict):
+    columns = []
+    for sev in _SEV_ORDER:
+        columns.append({
+            "type": "Column",
+            "width": "stretch",
+            "items": [
+                {"type": "TextBlock", "text": f"{_SEV_ICONS[sev]} {sev.title()}", "size": "Small", "weight": "Bolder", "wrap": True},
+                {"type": "TextBlock", "text": str(counts.get(sev, 0) or 0), "size": "Large", "weight": "Bolder", "color": _SEV_COLORS[sev]},
+            ],
+        })
+    return {"type": "ColumnSet", "columns": columns, "spacing": "Small"}
+
+
+def _mitigation_timeline_row(timeline: dict):
+    columns = []
+    for sev in _SEV_ORDER:
+        info = timeline.get(sev) or {}
+        label = info.get("remaining_label") or "—"
+        is_overdue = info.get("status") == "overdue"
+        color = "attention" if is_overdue else _SEV_COLORS[sev]
+        columns.append({
+            "type": "Column",
+            "width": "stretch",
+            "items": [{
+                "type": "TextBlock",
+                "text": f"{sev.title()} — {label}",
+                "size": "Small", "weight": "Bolder", "color": color, "wrap": True,
+            }],
+        })
+    return {"type": "ColumnSet", "columns": columns, "spacing": "Small"}
+
+
+def _support_requests_row(support: dict):
+    items = [
+        ("📥", "Total Requests", support.get("total", 0)),
+        ("⏳", "Pending", support.get("pending", 0)),
+        ("✅", "Closed", support.get("closed", 0)),
+    ]
+    columns = []
+    for icon, label, val in items:
+        columns.append({
+            "type": "Column",
+            "width": "stretch",
+            "items": [
+                {"type": "TextBlock", "text": f"{icon} {label}", "size": "Small", "isSubtle": True, "wrap": True},
+                {"type": "TextBlock", "text": str(val or 0), "size": "Large", "weight": "Bolder", "spacing": "None"},
+            ],
+        })
+    return {"type": "ColumnSet", "columns": columns, "spacing": "Small"}
+
+
+def home_dashboard_card_body(data: dict):
+    """
+    `data` is the same shape AdminDashboardSummaryAPIView returns (one key
+    per metric, each holding that sub-view's own payload) — build the
+    full Home tab body from it. Returns a list of Adaptive Card body
+    elements (not a full card), same convention as the other *_body
+    helpers — callers pass this as nav_buttons_card's extra_body.
+    """
+    total_assets = (data.get("total_assets") or {}).get("total_assets")
+    avg_score = (data.get("avg_score") or {}).get("avg_score")
+    mttr_label = ((data.get("mean_time_remediate") or {}).get("mean_time_to_remediate") or {}).get("label")
+    vulns = data.get("vulnerabilities") or {}
+    fixed = data.get("vulnerabilities_fixed") or {}
+    fixed_counts = {sev: fixed.get(f"{sev}_fixed", 0) for sev in _SEV_ORDER}
+    timeline = data.get("mitigation_timeline") or {}
+    support = data.get("support_requests") or {}
+
+    body = [
+        _header("🏠 VaptFix Admin Dashboard"),
+        _body_text("Overall summary — assets, vulnerabilities, mitigation timeline, mean fix time and support tickets."),
+        _stat_row(
+            ("💻", "TOTAL ASSETS", total_assets if total_assets is not None else "—", "Monitored endpoints"),
+            ("⚠️", "AVG RISK SCORE", f"{avg_score} / 10" if avg_score is not None else "—", "Higher = more urgent"),
+            ("⏱️", "MEAN TIME TO REMEDIATE", mttr_label or "—", "Average resolution time"),
+        ),
+        _section_title("📊 Vulnerabilities by Severity"),
+        _severity_chip_row(vulns),
+        _section_title(f"✅ Vulnerabilities Fixed: {fixed.get('total_fixed', 0)}"),
+        _severity_chip_row(fixed_counts),
+    ]
+    if timeline:
+        body.append(_section_title("🕐 Mitigation Timeline"))
+        body.append(_mitigation_timeline_row(timeline))
+    if support:
+        body.append(_section_title("🎫 Support Requests"))
+        body.append(_support_requests_row(support))
+    return body

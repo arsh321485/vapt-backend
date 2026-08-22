@@ -1,3 +1,6 @@
-Sirf itna hai ki agar koi naya admin pehli baar Teams connect karta hai (jinke paas pehle se koi "Vaptfix" team nahi), system unke liye naya team bana dega — us naye team me bot ko manually add karna hoga (jaisa humne abhi kiya) taaki Teams messages aayein. Ye ek baar ka setup step hai, per-team.
+ese aa rha hai mene aapko microsoft-Admin me ui diya hai mujhe vese chahihe 
 
-o manually q krega client ko dena hai ye project backend se fix krvao esko
+Home tab ke liye home.html
+ye vala ui chahihe mujhe 
+
+jo bhi tab aa rhe hai na o ek hi row me aaye 
