@@ -142,10 +142,21 @@ def _normalize_vuln_name(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "")).strip().lower()
 
 
-def _load_latest_report_plugin_ids(db, admin_id, admin_email):
+def _load_all_reports_plugin_ids(db, admin_id, admin_email):
     """
-    Finds the admin's most recently uploaded nessus report and returns
-    (report_id, uploaded_at, set_of_plugin_ids_present_in_it, set_of_normalized_vuln_names_present_in_it).
+    Finds EVERY nessus_reports document belonging to this admin (not just
+    the single most recent one — see upload_report/merge_service.py: only
+    uploads on the SAME day merge into one doc via "today's report_id", so
+    an admin who has uploaded on more than one day genuinely has multiple
+    separate report_id rows) and returns the union of plugin_ids/vuln_names
+    across all of them, plus every report_id.
+
+    Previously this only looked at the single latest report, which meant
+    any vulnerability belonging to an OLDER report (Nessus, AWS, or custom
+    — doesn't matter which) silently lost automation-script visibility the
+    moment a newer report was uploaded, even though its script was still
+    perfectly available. Confirmed as the exact reported symptom: "SMB
+    Signing Not Required" script disappearing after a second file upload.
 
     plugin_ids alone only ever works for native Nessus uploads — AWS
     Inspector and custom/CSV reports store a different ID scheme (or none
@@ -153,27 +164,35 @@ def _load_latest_report_plugin_ids(db, admin_id, admin_email):
     vulnerabilities can never match automation_scripts (which is indexed
     by real Nessus plugin IDs) through plugin_id. The name set lets callers
     fall back to matching by vulnerability name for those report types.
+
+    Returns (latest_report_id, latest_uploaded_at, all_report_ids,
+    union_of_plugin_ids, union_of_normalized_vuln_names).
     """
     coll = db[NESSUS_COLLECTION]
-    doc = coll.find_one({"admin_id": str(admin_id)}, sort=[("uploaded_at", -1)])
-    if not doc and admin_email:
-        doc = coll.find_one({"admin_email": admin_email}, sort=[("uploaded_at", -1)])
-    if not doc:
-        return None, None, set(), set()
+    query = {"$or": [{"admin_id": str(admin_id)}, {"admin_email": admin_email}]} if admin_email else {"admin_id": str(admin_id)}
+    docs = list(coll.find(query, sort=[("uploaded_at", -1)]))
+    if not docs:
+        return None, None, [], set(), set()
 
     plugin_ids = set()
     vuln_names = set()
-    for host in doc.get("vulnerabilities_by_host", []):
-        for v in host.get("vulnerabilities", []):
-            try:
-                plugin_ids.add(int(v.get("plugin_id")))
-            except (TypeError, ValueError):
-                pass
-            name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
-            for key in _vuln_name_lookup_keys(name):
-                vuln_names.add(_normalize_vuln_name(key))
+    report_ids = []
+    for doc in docs:
+        rid = doc.get("report_id")
+        if rid:
+            report_ids.append(str(rid))
+        for host in doc.get("vulnerabilities_by_host", []):
+            for v in host.get("vulnerabilities", []):
+                try:
+                    plugin_ids.add(int(v.get("plugin_id")))
+                except (TypeError, ValueError):
+                    pass
+                name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                for key in _vuln_name_lookup_keys(name):
+                    vuln_names.add(_normalize_vuln_name(key))
 
-    return doc.get("report_id"), doc.get("uploaded_at"), plugin_ids, vuln_names
+    latest = docs[0]
+    return latest.get("report_id"), latest.get("uploaded_at"), report_ids, plugin_ids, vuln_names
 
 
 def _fetch_scripts_by_name(name_keys, os=None):
@@ -297,12 +316,17 @@ def _build_stats(docs, report_id=None):
     Build download-stats rows with team resolved for every script:
       1) vulnerability_cards by exact / stripped vulnerability name
          (scoped to `report_id` when given, so team assignment can't leak
-         in from an unrelated admin's report sharing the same vuln name)
+         in from an unrelated admin's report sharing the same vuln name —
+         `report_id` may be a single id or a list of ids, since an admin
+         can have more than one report; either way this never reaches
+         beyond that admin's own reports)
       2) same plugin_id sibling that already resolved a team
       3) keyword inference (never leave team blank)
     """
     if not docs:
         return []
+
+    report_id_filter = {"$in": report_id} if isinstance(report_id, list) else report_id
 
     lookup_names = []
     seen_names = set()
@@ -319,7 +343,7 @@ def _build_stats(docs, report_id=None):
         if lookup_names:
             card_query = {"vulnerability_name": {"$in": lookup_names}}
             if report_id:
-                card_query["report_id"] = str(report_id)
+                card_query["report_id"] = report_id_filter
             cards = db["vulnerability_cards"].find(
                 card_query,
                 {"vulnerability_name": 1, "assigned_team": 1, "plugin_id": 1, "_id": 0},
@@ -352,7 +376,7 @@ def _build_stats(docs, report_id=None):
             for coll_name in ("fix_vulnerabilities", "fix_vulnerabilities_closed"):
                 fix_query = {"plugin_id": {"$in": pid_query}}
                 if report_id:
-                    fix_query["report_id"] = str(report_id)
+                    fix_query["report_id"] = report_id_filter
                 for row in db[coll_name].find(
                     fix_query,
                     {"plugin_id": 1, "assigned_team": 1, "_id": 0},
@@ -555,10 +579,11 @@ def admin_list_scripts(request):
 def admin_download_stats(request):
     """
     Columns: Vulnerability Name | Severity | No. of Times Downloaded | Team
-    Scoped to the plugin_ids present in the admin's LATEST uploaded report —
+    Scoped to the plugin_ids present across ALL of the admin's uploaded
+    reports (not just the latest — see _load_all_reports_plugin_ids) —
     `automation_scripts` itself is a global collection shared across every
     admin/report, so without this filter every admin sees every script ever
-    loaded, not just the ones relevant to their current data.
+    loaded, not just the ones relevant to their own data.
 
     "No. of Times Downloaded" is this admin's OWN team's total (summed
     across every UserDetail under this admin from script_user_downloads),
@@ -575,7 +600,7 @@ def admin_download_stats(request):
         )
 
     with MongoContext() as db:
-        report_id, uploaded_at, plugin_ids, vuln_names = _load_latest_report_plugin_ids(db, admin_id, admin_email)
+        report_id, uploaded_at, report_ids, plugin_ids, vuln_names = _load_all_reports_plugin_ids(db, admin_id, admin_email)
 
         if not report_id:
             return Response(
@@ -616,7 +641,7 @@ def admin_download_stats(request):
         key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
         d["download_count"] = team_count_by_key.get(key, 0)
 
-    stats = _build_stats(docs, report_id=report_id)
+    stats = _build_stats(docs, report_id=report_ids)
     stats.sort(key=lambda s: s["download_count"], reverse=True)
     return Response({"report_id": str(report_id), "count": len(stats), "stats": stats})
 
@@ -803,8 +828,8 @@ def user_download_script(request, plugin_id):
 def user_download_stats(request):
     """
     Columns: Vulnerability Name | Severity | No. of Times Downloaded | Team
-    Scoped to the plugin_ids present in the member's admin's LATEST uploaded
-    report, then further filtered to the member's own assigned team(s).
+    Scoped to the plugin_ids present across ALL of the member's admin's
+    uploaded reports, then further filtered to the member's own assigned team(s).
     ?team=Patch+Management — narrow to one specific team when the member
     belongs to more than one (same convention as register/latest/vulns/).
 
@@ -833,7 +858,7 @@ def user_download_stats(request):
         )
 
     with MongoContext() as db:
-        report_id, uploaded_at, plugin_ids, vuln_names = _load_latest_report_plugin_ids(db, admin_id, admin_email)
+        report_id, uploaded_at, report_ids, plugin_ids, vuln_names = _load_all_reports_plugin_ids(db, admin_id, admin_email)
 
         if not report_id:
             return Response(
@@ -873,7 +898,7 @@ def user_download_stats(request):
         key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
         d["download_count"] = team_count_by_key.get(key, 0)
 
-    stats = [s for s in _build_stats(docs, report_id=report_id) if s["team"].lower() in teams_lower]
+    stats = [s for s in _build_stats(docs, report_id=report_ids) if s["team"].lower() in teams_lower]
     stats.sort(key=lambda s: s["download_count"], reverse=True)
     return Response({
         "report_id": str(report_id),
