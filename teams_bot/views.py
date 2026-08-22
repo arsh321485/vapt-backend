@@ -174,14 +174,28 @@ class TeamsBotMessagesView(APIView):
             )
             return
 
-        att = next((a for a in attachments if a.get("contentType") != "text/html"), attachments[0])
-        file_name = att.get("name") or "upload"
-        download_url = (att.get("content") or {}).get("downloadUrl") or att.get("contentUrl")
-        logger.info(f"[TeamsBot] attachment: file_name={file_name!r} contentType={att.get('contentType')!r} download_url_set={bool(download_url)}")
+        # The "text/html" attachment Teams adds for an @mention has `content`
+        # as a plain HTML string, not a dict — .get("downloadUrl") on that
+        # crashed (confirmed in prod: "Error handling activity type=message"
+        # right after this line). Only look for a real download URL on
+        # attachments that actually carry one; @mention-only attachments
+        # never do, so a mention with no real file correctly falls through
+        # to "no file found" below instead of crashing.
+        att, download_url, file_name = None, None, None
+        for a in attachments:
+            if (a.get("contentType") or "") == "text/html":
+                continue
+            content = a.get("content")
+            url = content.get("downloadUrl") if isinstance(content, dict) else None
+            url = url or a.get("contentUrl")
+            if url:
+                att, download_url, file_name = a, url, (a.get("name") or "upload")
+                break
+        logger.info(f"[TeamsBot] attachment: file_name={file_name!r} contentType={(att or {}).get('contentType')!r} download_url_set={bool(download_url)}")
         if not download_url:
             bot_api.reply_to_activity(
                 service_url, conversation_id, activity_id,
-                bot_api.text_message(f"❌ Could not read the attached file \"{file_name}\" — please try attaching it again."),
+                bot_api.text_message("❌ I didn't see a file attached to that message — please attach the file (paperclip icon) and send again."),
             )
             return
 
