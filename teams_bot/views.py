@@ -113,6 +113,11 @@ class TeamsBotMessagesView(APIView):
         # only relevant if we set a pending-upload intent for this
         # conversation via the Upload Report / CSV File buttons.
         attachments = activity.get("attachments") or []
+        logger.info(
+            f"[TeamsBot] message activity: attachments_count={len(attachments)} "
+            f"content_types={[a.get('contentType') for a in attachments]} "
+            f"has_text={bool((activity.get('text') or '').strip())}"
+        )
         if attachments:
             self._handle_attachment(activity, service_url, conversation_id, activity_id, attachments)
             return
@@ -139,6 +144,7 @@ class TeamsBotMessagesView(APIView):
         # conversation_id, since a channel post and a reply inside its own
         # thread get different conversation ids in Teams.
         admin, team_id = self._resolve_admin(activity)
+        logger.info(f"[TeamsBot] attachment: resolved admin={getattr(admin, 'email', None)} team_id={team_id}")
         if not admin:
             bot_api.reply_to_activity(
                 service_url, conversation_id, activity_id,
@@ -147,6 +153,7 @@ class TeamsBotMessagesView(APIView):
             return
 
         purpose = actions.pop_pending_upload_intent(team_id)
+        logger.info(f"[TeamsBot] attachment: pending_upload_intent={purpose!r}")
         if not purpose:
             bot_api.reply_to_activity(
                 service_url, conversation_id, activity_id,
@@ -157,6 +164,7 @@ class TeamsBotMessagesView(APIView):
         att = next((a for a in attachments if a.get("contentType") != "text/html"), attachments[0])
         file_name = att.get("name") or "upload"
         download_url = (att.get("content") or {}).get("downloadUrl") or att.get("contentUrl")
+        logger.info(f"[TeamsBot] attachment: file_name={file_name!r} contentType={att.get('contentType')!r} download_url_set={bool(download_url)}")
         if not download_url:
             bot_api.reply_to_activity(
                 service_url, conversation_id, activity_id,
@@ -168,6 +176,7 @@ class TeamsBotMessagesView(APIView):
             file_resp = requests.get(download_url, timeout=30)
             file_resp.raise_for_status()
             file_bytes = file_resp.content
+            logger.info(f"[TeamsBot] attachment: downloaded {len(file_bytes)} bytes")
         except Exception:
             logger.exception("[TeamsBot] attachment download failed")
             bot_api.reply_to_activity(
@@ -189,6 +198,7 @@ class TeamsBotMessagesView(APIView):
             )
             return
 
+        logger.info(f"[TeamsBot] attachment: submit_{purpose} status={status_code} data={data}")
         if status_code >= 300:
             reason = (data or {}).get("message") or (data or {}).get("detail") or "Could not process that file."
             bot_api.reply_to_activity(
