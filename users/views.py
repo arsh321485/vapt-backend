@@ -1232,6 +1232,150 @@ TEAMS_CHANNEL_DISPLAY_NAMES = {
 }
 
 
+_graph_app_token_cache = {"token": None, "expires_at": 0}
+
+
+def _get_graph_app_token():
+    """
+    App-only (client_credentials) Graph API token — used only for auto-
+    publishing/installing the Teams bot app, so this never depends on any
+    individual admin's own delegated token/session. Needs the Application
+    permissions AppCatalog.ReadWrite.All and TeamworkAppInstallation.
+    ReadWriteForTeam.All granted (with admin consent) on this app
+    registration — a one-time tenant setup step, same category as the
+    Bot Framework/Azure Bot setup already done.
+    """
+    if _graph_app_token_cache["token"] and time.time() < _graph_app_token_cache["expires_at"] - 60:
+        return _graph_app_token_cache["token"]
+    try:
+        resp = _http_post(
+            settings.MICROSOFT_TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": settings.MICROSOFT_CLIENT_ID,
+                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                "scope": "https://graph.microsoft.com/.default",
+            },
+            timeout=15,
+        )
+        data = resp.json()
+    except Exception:
+        logger.exception("[TeamsAppInstall] Failed to acquire app-only Graph token")
+        return None
+    token = data.get("access_token")
+    if not token:
+        logger.warning(f"[TeamsAppInstall] App-only Graph token request failed: {data}")
+        return None
+    _graph_app_token_cache["token"] = token
+    _graph_app_token_cache["expires_at"] = time.time() + int(data.get("expires_in", 3600))
+    return token
+
+
+_teams_catalog_app_id_cache = {"id": None}
+
+
+def _get_or_publish_teams_catalog_app():
+    """
+    Returns this bot's id in the tenant's Teams app catalog, publishing it
+    there (once, ever) via app-only Graph credentials if it isn't already —
+    this is the automated equivalent of the manual "Upload a custom app"
+    step, so no admin/client ever has to do that by hand. Cached across
+    calls for the life of the process once found, since it never changes.
+    """
+    global _teams_catalog_app_id_cache
+    if _teams_catalog_app_id_cache.get("id"):
+        return _teams_catalog_app_id_cache["id"]
+
+    token = _get_graph_app_token()
+    if not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        resp = _http_get(
+            f"https://graph.microsoft.com/v1.0/appCatalogs/teamsApps?$filter=externalId eq '{settings.MICROSOFT_CLIENT_ID}'",
+            headers=headers, timeout=15,
+        )
+        if resp.status_code == 200:
+            apps = resp.json().get("value") or []
+            if apps:
+                _teams_catalog_app_id_cache["id"] = apps[0]["id"]
+                return apps[0]["id"]
+    except Exception:
+        logger.exception("[TeamsAppInstall] Catalog lookup failed")
+
+    zip_path = os.path.join(str(settings.BASE_DIR), "vaptfix-teams-app.zip")
+    if not os.path.exists(zip_path):
+        logger.warning(f"[TeamsAppInstall] Teams app package not found at {zip_path} — cannot auto-publish")
+        return None
+
+    try:
+        with open(zip_path, "rb") as f:
+            publish_resp = _http_post(
+                "https://graph.microsoft.com/v1.0/appCatalogs/teamsApps",
+                headers={**headers, "Content-Type": "application/zip"},
+                data=f.read(),
+                timeout=30,
+            )
+        if publish_resp.status_code in (200, 201):
+            body = publish_resp.json()
+            catalog_id = body.get("id") or (body.get("teamsApp") or {}).get("id")
+            if catalog_id:
+                _teams_catalog_app_id_cache["id"] = catalog_id
+                logger.info(f"[TeamsAppInstall] Published bot to org app catalog, id={catalog_id}")
+                return catalog_id
+        elif publish_resp.status_code == 409:
+            # Published by a concurrent request in the meantime — re-fetch.
+            resp2 = _http_get(
+                f"https://graph.microsoft.com/v1.0/appCatalogs/teamsApps?$filter=externalId eq '{settings.MICROSOFT_CLIENT_ID}'",
+                headers=headers, timeout=15,
+            )
+            apps2 = (resp2.json().get("value") or []) if resp2.status_code == 200 else []
+            if apps2:
+                _teams_catalog_app_id_cache["id"] = apps2[0]["id"]
+                return apps2[0]["id"]
+        logger.warning(f"[TeamsAppInstall] Catalog publish failed: {publish_resp.status_code} {publish_resp.text[:300]}")
+    except Exception:
+        logger.exception("[TeamsAppInstall] Catalog publish request failed")
+    return None
+
+
+def _install_teams_bot(team_id):
+    """
+    Best-effort auto-install of the VaptFix bot into a newly created (or
+    existing) team, using app-only Graph credentials — call this right
+    after a team's channels are created so every admin, on every team,
+    gets a working bot with zero manual steps. Safe to call even if
+    already installed (Graph just returns a 409, handled as a no-op).
+    """
+    if not team_id:
+        return False
+    catalog_id = _get_or_publish_teams_catalog_app()
+    if not catalog_id:
+        return False
+    token = _get_graph_app_token()
+    if not token:
+        return False
+    try:
+        resp = _http_post(
+            f"https://graph.microsoft.com/v1.0/teams/{team_id}/installedApps",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"teamsApp@odata.bind": f"https://graph.microsoft.com/v1.0/appCatalogs/teamsApps/{catalog_id}"},
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            logger.info(f"[TeamsAppInstall] Bot installed for team_id={team_id}")
+            return True
+        if resp.status_code == 409:
+            logger.info(f"[TeamsAppInstall] Bot already installed for team_id={team_id}")
+            return True
+        logger.warning(f"[TeamsAppInstall] Install failed for team_id={team_id}: {resp.status_code} {resp.text[:300]}")
+        return False
+    except Exception:
+        logger.exception(f"[TeamsAppInstall] Unexpected error installing bot for team_id={team_id}")
+        return False
+
+
 def _rename_general_channel(team_id, headers):
     """
     Every new Team comes with a built-in 'General' channel that can't be
@@ -1283,6 +1427,7 @@ def _create_vaptfix_channels(team_id, headers):
             })
         except Exception as e:
             results.append({"channelName": channel_name, "status": "failed", "error": str(e)})
+    _install_teams_bot(team_id)
     return results
 
 
@@ -2454,6 +2599,7 @@ class CreateTeamView(generics.GenericAPIView):
                     "status": "failed",
                     "error": str(e)
                 })
+        _install_teams_bot(team_id)
         return results
 
     def wait_for_team_and_create_channels(self, access_token, team_id, max_retries=5, delay=10):
