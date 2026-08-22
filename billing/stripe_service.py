@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from .models import BillingCustomer, Subscription, Invoice, StripeWebhookEvent
 from .plans import (
+    PLAN_PREMIUM,
     MODE_MANAGEMENT, MODE_MANAGEMENT_TESTING,
     MANAGEMENT_BILLING_CYCLES, MANAGEMENT_TESTING_RATE_PER_IP_YEAR,
     calculate_management_amount, calculate_management_testing_amount,
@@ -260,6 +261,12 @@ def _on_invoice_failed(invoice: dict):
     if sub:
         sub.status = "past_due"
         sub.save(update_fields=["status", "updated_at"])
+        if sub.plan == PLAN_PREMIUM:
+            try:
+                from .account_lifecycle import send_payment_failed_warning_email
+                send_payment_failed_warning_email(sub.admin, sub)
+            except Exception:
+                logger.exception(f"[Billing] payment-failed warning email failed for {sub.admin.email}")
 
 
 def _upsert_invoice(invoice: dict, status: str):
@@ -292,6 +299,12 @@ def _on_subscription_updated(stripe_sub: dict, deleted: bool):
     if deleted:
         sub.status = "canceled"
         sub.canceled_at = timezone.now()
+        if sub.plan == PLAN_PREMIUM:
+            try:
+                from .account_lifecycle import purge_premium_admin_data
+                purge_premium_admin_data(sub.admin)
+            except Exception:
+                logger.exception(f"[Billing] account purge failed for {sub.admin.email}")
     else:
         status_map = {
             "active": "active",

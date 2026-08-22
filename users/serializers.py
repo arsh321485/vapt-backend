@@ -473,6 +473,14 @@ class UserPasswordResetSerializer(serializers.Serializer):
         if not PasswordResetTokenGenerator().check_token(user, token):
             raise serializers.ValidationError("Token expired or invalid")
 
+        # Closed accounts (Premium subscription ended -> full data purge,
+        # see billing/account_lifecycle.py) can't log in either way
+        # (authenticate() already blocks is_active=False), but without this
+        # check they could still successfully "set" a password here and get
+        # a confusing silent-failure on login instead of a clear reason.
+        if not user.is_active:
+            raise serializers.ValidationError("This account has been closed and can no longer be accessed.")
+
         try:
             validate_password(password, user)
         except ValidationError as e:

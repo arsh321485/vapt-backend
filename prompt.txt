@@ -1,4 +1,1 @@
-ms team se file upload nai hogi kya qki file upload hone ke bad mujhe uske agent bhi create krne hai fir risk risk criteia 
-
-mujhe mere senior ko btana ki ms team se file upload hogi ki nai 
-ya use website se hi upload krvaye 
+esa bhi hona chahihe ki jo bhi file upload kre to uski automation script avaliable ho to o show hona chahihe 
