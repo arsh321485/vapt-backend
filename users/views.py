@@ -2548,6 +2548,12 @@ class CreateTeamView(generics.GenericAPIView):
                     # Auto-create default channels
                     channels_result = []
                     if team_id:
+                        # Persist here (not left to a separate frontend call) so
+                        # this admin's ms_team_id can never drift out of sync
+                        # with the team actually just created — a stale/wrong
+                        # id here silently breaks channel renaming, onboarding,
+                        # and the Teams webhook for this admin.
+                        User.objects.filter(pk=request.user.pk).update(ms_team_id=team_id)
                         channels_result = self.create_default_channels(access_token, team_id)
 
                     return Response({
@@ -2581,6 +2587,7 @@ class CreateTeamView(generics.GenericAPIView):
                     # Wait for team provisioning, then create default channels
                     channels_result = []
                     if team_id:
+                        User.objects.filter(pk=request.user.pk).update(ms_team_id=team_id)
                         channels_result = self.wait_for_team_and_create_channels(access_token, team_id)
 
                     return Response({
@@ -2604,6 +2611,7 @@ class CreateTeamView(generics.GenericAPIView):
                         # Auto-create default channels
                         channels_result = []
                         if team_id:
+                            User.objects.filter(pk=request.user.pk).update(ms_team_id=team_id)
                             channels_result = self.create_default_channels(access_token, team_id)
 
                         return Response({
