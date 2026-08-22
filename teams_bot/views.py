@@ -134,19 +134,23 @@ class TeamsBotMessagesView(APIView):
         )
 
     def _handle_attachment(self, activity, service_url, conversation_id, activity_id, attachments):
-        purpose = actions.pop_pending_upload_intent(conversation_id)
-        if not purpose:
-            bot_api.reply_to_activity(
-                service_url, conversation_id, activity_id,
-                bot_api.text_message("Got your file, but I wasn't expecting one right now — click \"Upload Report\" or \"CSV File\" first, then attach it."),
-            )
-            return
-
+        # Resolve admin/team FIRST — the pending-upload flag is keyed by
+        # team_id (see actions.set_pending_upload_intent), not
+        # conversation_id, since a channel post and a reply inside its own
+        # thread get different conversation ids in Teams.
         admin, team_id = self._resolve_admin(activity)
         if not admin:
             bot_api.reply_to_activity(
                 service_url, conversation_id, activity_id,
                 bot_api.text_message("This Teams workspace isn't linked to a VaptFix admin account yet."),
+            )
+            return
+
+        purpose = actions.pop_pending_upload_intent(team_id)
+        if not purpose:
+            bot_api.reply_to_activity(
+                service_url, conversation_id, activity_id,
+                bot_api.text_message("Got your file, but I wasn't expecting one right now — click \"Upload Report\" or \"CSV File\" first, then attach it."),
             )
             return
 

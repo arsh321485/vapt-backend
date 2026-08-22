@@ -1,10 +1,7 @@
 secureitlab@support:/var/www/backend/vapt-backend$ sudo journalctl -u vapt-backend --since "15 minutes ago" --no-pager | grep -i teamsbot
-Aug 22 15:48:28 support.secureitlabservices.com gunicorn[2656958]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
-Aug 22 15:48:41 support.secureitlabservices.com gunicorn[2656954]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
-Aug 22 15:48:56 support.secureitlabservices.com gunicorn[2656956]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
-Aug 22 16:01:53 support.secureitlabservices.com gunicorn[2657191]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
+Aug 22 16:12:34 support.secureitlabservices.com gunicorn[2659944]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
+Aug 22 16:12:40 support.secureitlabservices.com gunicorn[2659944]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
+Aug 22 16:16:16 support.secureitlabservices.com gunicorn[2659944]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
 secureitlab@support:/var/www/backend/vapt-backend$
 
-
-
-abhi bhi nai ho rha hai ocheck kro 
+check this one 
