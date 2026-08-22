@@ -126,6 +126,25 @@ def get_team_channel_reference(team_id: str):
         return db[TEAM_CHANNEL_COLLECTION].find_one({"team_id": team_id})
 
 
+def resolve_team_id_from_thread_id(thread_id: str):
+    """
+    Confirmed via real production data: Bot Framework only includes
+    channelData.team.aadGroupId (the Graph/AAD Group id — the one that
+    matches User.ms_team_id) on some activity types (conversationUpdate,
+    seen when the bot is first added). On plain "message" activities (a
+    typed message, an Action.Submit card click) team.aadGroupId comes back
+    None — only team.id (the "19:...@thread.tacv2" conversation-thread
+    form) is present. This maps that thread id back to the real GUID,
+    using whatever the last conversationUpdate for that team recorded —
+    so admin resolution still works on every message, not just the first.
+    """
+    if not thread_id:
+        return None
+    with MongoContext() as db:
+        doc = db[TEAM_CHANNEL_COLLECTION].find_one({"team_thread_id": thread_id})
+        return doc.get("team_id") if doc else None
+
+
 def get_conversation_reference_by_email(email: str, conversation_type: str = None):
     """
     Look up via the admin/UserDetail's stored aad object id (see
