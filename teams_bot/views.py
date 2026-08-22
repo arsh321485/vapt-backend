@@ -57,7 +57,17 @@ class TeamsBotMessagesView(APIView):
         return Response(status=status.HTTP_200_OK)
 
     def _resolve_admin(self, activity: dict):
-        team_id = ((activity.get("channelData") or {}).get("team") or {}).get("id")
+        # Bot Framework's channelData.team.id is a CONVERSATION/thread id
+        # (format "19:...@thread.tacv2" — same shape as a channel id), NOT
+        # the AAD Group id Microsoft Graph uses for /teams/{id} — the two
+        # are entirely different values for the same team. Our DB's
+        # ms_team_id is set from the Graph-side id (see auto_create_vaptfix_team
+        # / CreateTeamView), so aadGroupId is the one that actually matches
+        # it. Using team.id here silently never found the admin (confirmed
+        # in prod logs: "bot added to team_id=19:Egr...@thread.tacv2 but no
+        # admin has this ms_team_id yet").
+        team = (activity.get("channelData") or {}).get("team") or {}
+        team_id = team.get("aadGroupId") or team.get("id")
         if not team_id:
             return None, None
         from django.contrib.auth import get_user_model

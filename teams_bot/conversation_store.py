@@ -87,14 +87,18 @@ def save_team_channel_reference(activity: dict):
     channel_data = activity.get("channelData") or {}
     team = channel_data.get("team") or {}
     conversation = activity.get("conversation") or {}
-    team_id = team.get("id")
+    # team.id is a conversation/thread id ("19:...@thread.tacv2"), NOT the
+    # Graph/AAD Group id our User.ms_team_id stores — aadGroupId is the one
+    # that actually matches it, so it's what this collection is keyed by.
+    # team.id is kept too (as thread_id) purely for debugging.
+    team_id = team.get("aadGroupId") or team.get("id")
     conversation_id = conversation.get("id")
     if not team_id or not conversation_id:
         return
 
     doc = {
         "team_id": team_id,
-        "team_aad_group_id": team.get("aadGroupId"),
+        "team_thread_id": team.get("id"),
         "conversation_id": conversation_id,
         "channel_id": (channel_data.get("channel") or {}).get("id") or conversation_id,
         "service_url": activity.get("serviceUrl"),
