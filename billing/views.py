@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from users.utils import Util
-from .asset_service import get_admin_asset_count, get_admin_scope_asset_count
+from .asset_service import get_admin_asset_count, get_admin_scope_asset_count, resolve_management_testing_asset_count
 from .models import Subscription, SalesLead
 from .plans import (
     PLAN_FREEMIUM, PLAN_PREMIUM, PLAN_CUSTOM,
@@ -60,12 +60,17 @@ class PlanEstimateView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Mode A bills on uploaded-report assets; Mode B never uploads a
-            # report — it bills on the scope submitted via /api/admin/scope/create/.
+            # Mode A bills on uploaded-report assets. Mode B prefers that
+            # SAME report's asset count when one already exists (an admin
+            # who already uploaded a report just wants testing added on
+            # top, not a separate target list) — falls back to the scope
+            # submitted via /api/admin/scope/create/ only when there's no
+            # report at all.
+            asset_source = "report"
             if mode == MODE_MANAGEMENT:
                 asset_count = get_admin_asset_count(str(request.user.id))
             else:
-                asset_count = get_admin_scope_asset_count(str(request.user.id))
+                asset_count, asset_source = resolve_management_testing_asset_count(str(request.user.id))
 
             if asset_count > PREMIUM_ASSET_CEILING:
                 return Response({
@@ -98,18 +103,20 @@ class PlanEstimateView(APIView):
                 "amount_due": str(amount),
                 "currency": "usd",
             }
+            if mode == MODE_MANAGEMENT_TESTING:
+                # Lets the frontend show "priced from your uploaded report"
+                # vs "priced from your submitted scope".
+                response_data["asset_source"] = asset_source
 
-            # Management+Testing never uploads a report — its asset_count
-            # comes entirely from scope/create/. A brand-new admin hasn't
-            # submitted one yet, so asset_count=0 here isn't a calculation
-            # error, it's "nothing to price yet" — $0.00 alone reads as a
-            # real (wrong) total, so flag it explicitly and point the
-            # frontend at the endpoint that actually unblocks it.
+            # Only genuinely nothing to price on — no uploaded report AND
+            # no submitted scope. $0.00 alone would read as a real (wrong)
+            # total, so flag it explicitly and point the frontend at the
+            # endpoint that actually unblocks it.
             if mode == MODE_MANAGEMENT_TESTING and asset_count == 0:
                 response_data["needs_scope"] = True
                 response_data["message"] = (
-                    "No scope submitted yet — pricing can't be calculated until you "
-                    "provide your target IPs/URLs."
+                    "No report or scope found yet — pricing can't be calculated until "
+                    "you upload a report or provide your target IPs/URLs."
                 )
                 response_data["scope_submit_endpoint"] = "/api/admin/scope/create/"
 
@@ -177,14 +184,16 @@ class PremiumCheckoutView(APIView):
         billing_cycle = serializer.validated_data.get("billing_cycle") or "annual"
 
         admin = request.user
-        # Mode A bills on uploaded-report assets; Mode B never uploads a
-        # report — it bills on the scope submitted via /api/admin/scope/create/.
+        # Mode A bills on uploaded-report assets. Mode B prefers that SAME
+        # report's asset count when one exists, falling back to the
+        # submitted scope only when there's no report at all — see
+        # resolve_management_testing_asset_count().
         if mode == MODE_MANAGEMENT:
             asset_count = get_admin_asset_count(str(admin.id))
             no_assets_detail = "Upload a report first — no assets found to bill for."
         else:
-            asset_count = get_admin_scope_asset_count(str(admin.id))
-            no_assets_detail = "Provide your scope first — no targets found to bill for."
+            asset_count, _asset_source = resolve_management_testing_asset_count(str(admin.id))
+            no_assets_detail = "Upload a report or provide your scope first — no targets found to bill for."
 
         if asset_count > PREMIUM_ASSET_CEILING:
             return Response(

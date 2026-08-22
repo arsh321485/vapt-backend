@@ -109,6 +109,7 @@ INSTALLED_APPS = [
     "partners",
     "webinar",
     "billing",
+    "teams_bot",
 ]
 
 MIDDLEWARE = [

@@ -52,6 +52,25 @@ def get_admin_scope_asset_count(admin_id: str) -> int:
         return 0
 
 
+def resolve_management_testing_asset_count(admin_id: str):
+    """
+    Management+Testing asset count — prefers an already-uploaded report's
+    asset count (same source Mode A/get_admin_asset_count uses) when the
+    admin has one, since an admin who already uploaded a report just wants
+    VaptFix to also run testing/retesting on it, not a separate target
+    list. Falls back to the submitted scope (scope/create/) only when no
+    report exists at all — the original "no report yet, here's what to
+    test" path this mode was built for.
+
+    Returns (asset_count, source) — source is "report" or "scope", so
+    callers can label where the number came from.
+    """
+    report_count = get_admin_asset_count(admin_id)
+    if report_count > 0:
+        return report_count, "report"
+    return get_admin_scope_asset_count(admin_id), "scope"
+
+
 def get_admin_asset_breakdown(admin_id: str):
     """Debug/detail helper — list of {host_name, report_count} for an admin's assets."""
     try:
