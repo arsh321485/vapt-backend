@@ -209,30 +209,18 @@ def _handle_nav(admin, team_id, action_id):
 
 
 def _home_summary_body(admin):
+    """
+    Full Home-tab body — mirrors the layout of the reference design
+    (Microsoft -Admin/home.html): header, 3 stat cards, severity breakdown,
+    vulnerabilities fixed, mitigation timeline, support requests. See
+    cards.home_dashboard_card_body for how each section is actually built.
+    """
     try:
         from admindashboard.views import AdminDashboardSummaryAPIView
         status_code, data = _call_view_in_process(AdminDashboardSummaryAPIView, admin, method="get")
         if status_code >= 300 or not isinstance(data, dict):
             raise ValueError(f"summary call failed: {status_code}")
-
-        assets = (data.get("total_assets") or {}).get("total_assets")
-        vulns = data.get("vulnerabilities") or {}
-        fixed = (data.get("vulnerabilities_fixed") or {}).get("total_fixed")
-        support = (data.get("support_requests") or {}).get("total") or (data.get("support_requests") or {}).get("open")
-
-        lines = []
-        if assets is not None:
-            lines.append(f"**Total Assets:** {assets}")
-        for sev in ("critical", "high", "medium", "low"):
-            if sev in vulns:
-                lines.append(f"**{sev.title()} Vulnerabilities:** {vulns[sev]}")
-        if fixed is not None:
-            lines.append(f"**Vulnerabilities Fixed:** {fixed}")
-        if support is not None:
-            lines.append(f"**Support Requests:** {support}")
-        if not lines:
-            lines = ["Dashboard summary loaded — open the website for full detail."]
-        return [cards._header("🏠 Home"), *[cards._body_text(l) for l in lines]]
+        return cards.home_dashboard_card_body(data)
     except Exception:
         logger.exception("[TeamsBot] home summary fetch failed")
         return [cards._header("🏠 Home"), cards._body_text("Could not load your dashboard summary right now.")]
