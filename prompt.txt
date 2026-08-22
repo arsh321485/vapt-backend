@@ -1,1 +1,10 @@
-esa bhi hona chahihe ki jo bhi file upload kre to uski automation script avaliable ho to o show hona chahihe 
+mujhe esa chahihe ki jo admin ne user ko add kiya hai to uska hi count show kre 
+
+all ka nai 
+
+for ex: 
+malibharti888@gmail.com admin ki id hai 
+
+usne 2 user ko add kiya hai team me 
+
+to admin ko sare user ka download ka show hoga or particular user ko uska particular count show hoga 

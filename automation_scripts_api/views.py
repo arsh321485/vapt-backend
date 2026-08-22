@@ -833,11 +833,10 @@ def user_download_stats(request):
     ?team=Patch+Management — narrow to one specific team when the member
     belongs to more than one (same convention as register/latest/vulns/).
 
-    "No. of Times Downloaded" is this admin's WHOLE team's total (summed
-    across every UserDetail under this member's admin, same as
-    admin_download_stats) — not just this one member's own downloads —
-    so a member's Scripts tab shows the same per-script count their admin
-    sees, not a smaller "just me" number.
+    "No. of Times Downloaded" here is THIS member's own downloads only —
+    admin_download_stats (the admin's own view) is the one that shows the
+    whole team's combined total; a member's Scripts tab shows just what
+    they personally downloaded, not everyone's combined count.
     """
     admin_id, admin_email, teams = _resolve_admin_and_teams(request)
     if not admin_id or not teams:
@@ -851,11 +850,7 @@ def user_download_stats(request):
     active_teams = [selected_team] if selected_team and selected_team in teams else teams
     teams_lower = {t.lower() for t in active_teams}
 
-    member_emails = []
-    if UserDetail:
-        member_emails = list(
-            UserDetail.objects.filter(admin_id=admin_id).values_list("email", flat=True)
-        )
+    member_emails = [request.user.email] if getattr(request.user, "email", None) else []
 
     with MongoContext() as db:
         report_id, uploaded_at, report_ids, plugin_ids, vuln_names = _load_all_reports_plugin_ids(db, admin_id, admin_email)
@@ -882,21 +877,21 @@ def user_download_stats(request):
 
         all_plugin_ids = list({d.get("plugin_id") for d in docs if d.get("plugin_id") is not None})
 
-        team_count_by_key = {}
+        own_count_by_key = {}
         if member_emails and all_plugin_ids:
             for row in db["script_user_downloads"].find(
                 {"plugin_id": {"$in": all_plugin_ids}, "user_email": {"$in": member_emails}},
                 {"_id": 0, "plugin_id": 1, "os": 1, "download_count": 1},
             ):
                 key = (row["plugin_id"], (row.get("os") or "").strip().lower())
-                team_count_by_key[key] = team_count_by_key.get(key, 0) + row.get("download_count", 0)
+                own_count_by_key[key] = own_count_by_key.get(key, 0) + row.get("download_count", 0)
 
-    # Replace the global counter with this admin's whole team's total before
+    # Replace the global counter with just THIS member's own count before
     # formatting, matched by (plugin_id, os) since a plugin_id can have
     # multiple OS variants.
     for d in docs:
         key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
-        d["download_count"] = team_count_by_key.get(key, 0)
+        d["download_count"] = own_count_by_key.get(key, 0)
 
     stats = [s for s in _build_stats(docs, report_id=report_ids) if s["team"].lower() in teams_lower]
     stats.sort(key=lambda s: s["download_count"], reverse=True)
