@@ -138,12 +138,10 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
         return cards.provide_scope_card()
 
     if action_id == "open_upload_report":
-        set_pending_upload_intent(team_id, "report")
-        return cards.upload_via_attachment_card("report")
+        return cards.open_website_upload_card("report")
 
     if action_id == "open_scope_csv":
-        set_pending_upload_intent(team_id, "scope_csv")
-        return cards.upload_via_attachment_card("scope")
+        return cards.open_website_upload_card("scope")
 
     if action_id == "open_scope_manual":
         return cards.manual_scope_form_card()

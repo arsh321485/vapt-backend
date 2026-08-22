@@ -52,6 +52,13 @@ def _body_text(text):
     return {"type": "TextBlock", "text": text, "wrap": True, "spacing": "Medium"}
 
 
+def _open_url_action(title, url, style=None):
+    action = {"type": "Action.OpenUrl", "title": title, "url": url}
+    if style:
+        action["style"] = style
+    return action
+
+
 def _submit_action(title, action_id, extra_data=None, style=None):
     action = {
         "type": "Action.Submit",
@@ -143,19 +150,33 @@ def risk_criteria_form_card(existing=None):
     )
 
 
-def upload_via_attachment_card(purpose="report"):
+def open_website_upload_card(purpose="report"):
     """
-    Adaptive Cards have no native file-picker input — Teams' own pattern for
-    getting a file from a user is to have them attach it directly to a chat
-    message. Shown after "Upload Report" / "CSV File" is clicked; the next
-    message from this admin carrying an attachment is picked up by
-    TeamsBotMessagesView._handle_message.
+    Confirmed via real production activity dumps: a file attached to a
+    Teams CHANNEL message never reaches the bot's messaging endpoint at all
+    — only the message text/mention comes through, the file itself stays
+    on SharePoint with no reference in the payload. This is a hard Teams
+    platform limitation for channel-scope bots (personal 1:1 chat bots
+    behave differently, but that's not this surface), not something fixable
+    from here — so instead of asking for an in-chat attachment, this opens
+    the same "Provide Your Scope" flow the website already has, in a
+    browser tab, exactly the way several official Teams bots hand off to a
+    full web form for anything more complex than a card can do.
     """
+    from django.conf import settings
+    frontend = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+    url = f"{frontend}/admin-upload-report"
     noun = "VA report" if purpose == "report" else "scope CSV"
-    return _card(body=[
-        _header("📎 Attach your file"),
-        _body_text(f"Drag and drop your {noun} into this chat (paperclip icon), then send it."),
-    ])
+    return _card(
+        body=[
+            _header("🌐 Continue on the VaptFix website"),
+            _body_text(
+                f"Teams doesn't let bots receive files posted in a channel, so upload your {noun} "
+                "on the website instead — same account, opens in your browser."
+            ),
+        ],
+        actions=[_open_url_action("📤 Open Upload Page", url, style="positive")],
+    )
 
 
 def manual_scope_form_card():
