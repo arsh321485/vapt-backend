@@ -1,3 +1,6 @@
 secureitlab@support:/var/www/backend/vapt-backend$ sudo journalctl -u vapt-backend --since "5 minutes ago" --no-pager | grep -i teamsbot
-Aug 22 16:35:55 support.secureitlabservices.com gunicorn[2662639]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
+Aug 22 16:44:41 support.secureitlabservices.com gunicorn[2663572]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
+Aug 22 16:44:56 support.secureitlabservices.com gunicorn[2663573]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
 secureitlab@support:/var/www/backend/vapt-backend$
+
+
