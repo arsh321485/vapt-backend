@@ -14,7 +14,7 @@ from rest_framework import status
 
 from .auth import verify_bot_framework_request, BotAuthError
 from . import bot_api, cards, actions
-from .conversation_store import save_conversation_reference, save_team_channel_reference
+from .conversation_store import save_conversation_reference, save_team_channel_reference, resolve_team_id_from_thread_id
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,16 @@ class TeamsBotMessagesView(APIView):
         # in prod logs: "bot added to team_id=19:Egr...@thread.tacv2 but no
         # admin has this ms_team_id yet").
         team = (activity.get("channelData") or {}).get("team") or {}
-        team_id = team.get("aadGroupId") or team.get("id")
+        thread_id = team.get("id")
+        team_id = team.get("aadGroupId")
+        if not team_id and thread_id:
+            # Confirmed via real prod data: plain "message" activities
+            # (typed text, Action.Submit clicks) never carry aadGroupId,
+            # only the thread-id form — resolve it via whatever
+            # conversationUpdate already recorded for this thread.
+            team_id = resolve_team_id_from_thread_id(thread_id)
+        if not team_id:
+            team_id = thread_id
         if not team_id:
             return None, None
         from django.contrib.auth import get_user_model
