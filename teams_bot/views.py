@@ -36,6 +36,12 @@ class TeamsBotMessagesView(APIView):
         activity = request.data
         activity_type = activity.get("type")
         logger.info(f"[TeamsBot] Activity received: type={activity_type} from={((activity.get('from') or {}).get('name'))}")
+        if activity_type == "message":
+            try:
+                import json as _json
+                logger.info(f"[TeamsBot] RAW activity dump: {_json.dumps(activity)[:4000]}")
+            except Exception:
+                logger.exception("[TeamsBot] raw dump failed")
 
         try:
             save_conversation_reference(activity)
@@ -87,6 +93,13 @@ class TeamsBotMessagesView(APIView):
         service_url = activity.get("serviceUrl")
         conversation_id = (activity.get("conversation") or {}).get("id")
         activity_id = activity.get("id")
+
+        logger.info(
+            f"[TeamsBot] _handle_message: has_value={bool(activity.get('value'))} "
+            f"has_attachments={bool(activity.get('attachments'))} "
+            f"attachment_layout={activity.get('attachmentLayout')} "
+            f"keys={sorted(activity.keys())}"
+        )
 
         # Adaptive Card Action.Submit lands here with `value` populated and
         # `text` usually empty.
