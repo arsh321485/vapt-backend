@@ -4147,28 +4147,42 @@ def notify_admin_report_uploaded(admin, report_ids=None):
     """
     Called from upload_report/views.py right after an admin's upload
     succeeds, with the report_id(s) that were just created. If they have a
-    linked Slack admin channel, waits in the background for the
-    mitigation-card agent to finish for those reports, then proactively
-    pushes them to the risk-criteria prompt (or straight to the dashboard
-    if risk criteria is already set) — they shouldn't have to do anything
-    to discover their report is ready. A no-op (and never raises) for
-    admins without a linked Slack workspace or with nothing to watch.
+    linked Slack admin channel and/or a linked Teams team, waits in the
+    background (independently per platform) for the mitigation-card agent
+    to finish for those reports, then proactively pushes them to the
+    risk-criteria prompt (or straight to the dashboard if risk criteria is
+    already set) — they shouldn't have to do anything to discover their
+    report is ready, on either platform, regardless of which one (or the
+    website) they actually uploaded from. A no-op (and never raises) for
+    admins without a linked Slack workspace or Teams team, or with nothing
+    to watch.
     """
+    if not report_ids:
+        return
     try:
         bot_token = getattr(admin, "slack_bot_token", None)
         team_id = getattr(admin, "slack_team_id", None)
-        if not bot_token or not team_id or not report_ids:
-            return
-        channel_id = SlackSlashCommandView()._get_channel_id_by_name(bot_token, ADMIN_DASHBOARD_CHANNEL)
-        if not channel_id:
-            return
-        threading.Thread(
-            target=_watch_reports_and_post_onboarding,
-            args=(report_ids, admin),
-            daemon=True,
-        ).start()
+        if bot_token and team_id:
+            channel_id = SlackSlashCommandView()._get_channel_id_by_name(bot_token, ADMIN_DASHBOARD_CHANNEL)
+            if channel_id:
+                threading.Thread(
+                    target=_watch_reports_and_post_onboarding,
+                    args=(report_ids, admin),
+                    daemon=True,
+                ).start()
     except Exception:
         logger.exception("[SlackEvent] notify_admin_report_uploaded failed")
+
+    try:
+        if getattr(admin, "ms_team_id", None):
+            from teams_bot.onboarding import watch_report_and_post_onboarding
+            threading.Thread(
+                target=watch_report_and_post_onboarding,
+                args=(admin, report_ids),
+                daemon=True,
+            ).start()
+    except Exception:
+        logger.exception("[TeamsOnboarding] notify_admin_report_uploaded (Teams) failed")
 
 
 def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_id=None):
