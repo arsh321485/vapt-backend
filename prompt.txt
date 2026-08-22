@@ -1,6 +1,24 @@
-secureitlab@support:/var/www/backend/vapt-backend$ sudo journalctl -u vapt-backend --since "5 minutes ago" --no-pager | grep -i teamsbot
-Aug 22 16:44:41 support.secureitlabservices.com gunicorn[2663572]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
-Aug 22 16:44:56 support.secureitlabservices.com gunicorn[2663573]: [TeamsBot] Activity received: type=message from=Yash Rohatgi
+secureitlab@support:/var/www/backend/vapt-backend$ grep -n "attachments_count" /var/www/backend/vapt-backend/teams_bot/views.py
+117:            f"[TeamsBot] message activity: attachments_count={len(attachments)} "
+secureitlab@support:/var/www/backend/vapt-backend$ cd /var/www/backend/vapt-backend && git log --oneline -1
+ec646a3 (HEAD -> main, origin/main, origin/HEAD) add debug logging
+secureitlab@support:/var/www/backend/vapt-backend$ sudo systemctl status vapt-backend --no-pager | head -15
+● vapt-backend.service - VAPT Backend Service
+     Loaded: loaded (/etc/systemd/system/vapt-backend.service; enabled; vendor preset: enabled)
+     Active: active (running) since Sat 2026-08-22 16:48:45 CEST; 9min ago
+   Main PID: 2664183 (gunicorn)
+      Tasks: 32 (limit: 28734)
+     Memory: 453.8M
+     CGroup: /system.slice/vapt-backend.service
+             ├─2664183 /home/secureitlab/venv311/bin/python3.11 /home/secureitlab/venv311/bin/gunicorn vaptfix.wsgi:application --workers 6 --threads 2 --worker-class gthread --bind 127.0.0.1:9001 --timeout 120 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile /var/log/gunicorn-access.log --error-logfile /var/log/gunicorn-error.log
+             ├─2664198 /home/secureitlab/venv311/bin/python3.11 /home/secureitlab/venv311/bin/gunicorn vaptfix.wsgi:application --workers 6 --threads 2 --worker-class gthread --bind 127.0.0.1:9001 --timeout 120 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile /var/log/gunicorn-access.log --error-logfile /var/log/gunicorn-error.log
+             ├─2664199 /home/secureitlab/venv311/bin/python3.11 /home/secureitlab/venv311/bin/gunicorn vaptfix.wsgi:application --workers 6 --threads 2 --worker-class gthread --bind 127.0.0.1:9001 --timeout 120 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile /var/log/gunicorn-access.log --error-logfile /var/log/gunicorn-error.log
+             ├─2664200 /home/secureitlab/venv311/bin/python3.11 /home/secureitlab/venv311/bin/gunicorn vaptfix.wsgi:application --workers 6 --threads 2 --worker-class gthread --bind 127.0.0.1:9001 --timeout 120 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile /var/log/gunicorn-access.log --error-logfile /var/log/gunicorn-error.log
+             ├─2664201 /home/secureitlab/venv311/bin/python3.11 /home/secureitlab/venv311/bin/gunicorn vaptfix.wsgi:application --workers 6 --threads 2 --worker-class gthread --bind 127.0.0.1:9001 --timeout 120 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile /var/log/gunicorn-access.log --error-logfile /var/log/gunicorn-error.log
+             ├─2664202 /home/secureitlab/venv311/bin/python3.11 /home/secureitlab/venv311/bin/gunicorn vaptfix.wsgi:application --workers 6 --threads 2 --worker-class gthread --bind 127.0.0.1:9001 --timeout 120 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile /var/log/gunicorn-access.log --error-logfile /var/log/gunicorn-error.log
+             └─2664203 /home/secureitlab/venv311/bin/python3.11 /home/secureitlab/venv311/bin/gunicorn vaptfix.wsgi:application --workers 6 --threads 2 --worker-class gthread --bind 127.0.0.1:9001 --timeout 120 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile /var/log/gunicorn-access.log --error-logfile /var/log/gunicorn-error.log
+
 secureitlab@support:/var/www/backend/vapt-backend$
 
 
+ye check kro ek bar 
