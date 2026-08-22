@@ -42,8 +42,19 @@ def _is_unlimited_admin(admin) -> bool:
     limit still applies to them like any other Freemium admin. Intended for
     internal/demo accounts that need to exercise the product without an
     actual paid plan, while still exercising the same-day-upload flow.
+
+    `admin` is a User instance at some call sites (upload_report/views.py)
+    but a plain admin_id string at others (automation_scripts_api/views.py's
+    _resolve_admin_and_teams, userregister/views.py's closed-doc admin_id) —
+    getattr(admin, "email", "") silently returns "" for a bare string, which
+    made this always False (and every download blocked for an otherwise-
+    exempt admin) at those call sites. Resolve a string to the real User
+    first so the exemption actually applies everywhere it's checked.
     """
     from django.conf import settings
+    if isinstance(admin, str):
+        from users.models import User
+        admin = User.objects.filter(id=admin).first()
     email = (getattr(admin, "email", "") or "").strip().lower()
     return bool(email) and email in getattr(settings, "BILLING_UNLIMITED_ADMIN_EMAILS", [])
 

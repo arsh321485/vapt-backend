@@ -1217,15 +1217,52 @@ class MicrosoftTeamsOAuthUrlView(APIView):
             return JsonResponse({"error": str(e)}, status=500)
 
 
+# Internal identifier (used everywhere in DB/logic: Member_role, assigned_team,
+# TEAM_NAMES, Slack channel mapping, etc.) -> the display name actually shown
+# on the Teams channel. Only this display-facing side changes for the MS
+# Teams rollout — every internal identifier stays exactly as it was, per
+# explicit instruction: "database jo tha wahi rahega, jo change karna hai wo
+# MS Team par karna hai".
+TEAMS_CHANNEL_DISPLAY_NAMES = {
+    "General": "vaptfix admin dashboard",
+    "Patch Management": "vaptfix patch management team",
+    "Configuration Management": "vaptfix Configuration Management team",
+    "Network Security": "vaptfix Network Security team",
+    "Architectural Flaws": "vaptfix Architectural Flaws team",
+}
+
+
+def _rename_general_channel(team_id, headers):
+    """
+    Every new Team comes with a built-in 'General' channel that can't be
+    created/deleted, only renamed. Point it at the admin-dashboard display
+    name so it matches the other 4 renamed channels. Safe no-op on failure
+    (some tenants lock General renaming) — channel creation still proceeds.
+    """
+    try:
+        channels = _get_team_channels(team_id, headers)
+        general_id = _pick_general_channel_id(channels)
+        if not general_id:
+            return {"status": "not_found"}
+        url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{general_id}"
+        resp = _http_patch(url, headers=headers, json={
+            "displayName": TEAMS_CHANNEL_DISPLAY_NAMES["General"],
+        }, timeout=15)
+        return {"status": "renamed" if resp.status_code in (200, 204) else "failed", "http_status": resp.status_code}
+    except Exception as e:
+        logger.warning(f"[TeamsChannels] General channel rename failed: {e}")
+        return {"status": "failed", "error": str(e)}
+
+
 def _create_vaptfix_channels(team_id, headers):
     """Create 4 default channels on a provisioned team (safe to call from background thread)."""
     default_channels = ["Patch Management", "Configuration Management", "Network Security", "Architectural Flaws"]
     channels_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels"
-    results = []
+    results = [_rename_general_channel(team_id, headers)]
     for channel_name in default_channels:
         try:
             ch_resp = _http_post(channels_url, headers=headers, json={
-                "displayName": channel_name,
+                "displayName": TEAMS_CHANNEL_DISPLAY_NAMES.get(channel_name, channel_name),
                 "description": f"{channel_name} channel",
                 "membershipType": "standard"
             }, timeout=15)
@@ -2377,10 +2414,10 @@ class CreateTeamView(generics.GenericAPIView):
             'Content-Type': 'application/json'
         }
         url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels"
-        results = []
+        results = [_rename_general_channel(team_id, headers)]
         for channel_name in self.DEFAULT_CHANNELS:
             payload = {
-                "displayName": channel_name,
+                "displayName": TEAMS_CHANNEL_DISPLAY_NAMES.get(channel_name, channel_name),
                 "description": f"{channel_name} channel",
                 "membershipType": "standard"
             }

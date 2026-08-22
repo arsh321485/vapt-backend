@@ -67,6 +67,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     ms_access_token = models.TextField(blank=True, null=True)
     ms_refresh_token = models.TextField(blank=True, null=True)
     ms_team_id = models.CharField(max_length=255, blank=True, null=True)
+    # The admin's own Azure AD object id — distinct from ms_team_id (the
+    # TEAM's id). Needed to look up their bot conversation reference for
+    # proactive messages (onboarding, notifications), same role slack_user_id
+    # plays for Slack.
+    ms_teams_object_id = models.CharField(max_length=255, blank=True, null=True)
 
     jira_access_token = models.TextField(blank=True, null=True)
     jira_refresh_token = models.TextField(blank=True, null=True)
