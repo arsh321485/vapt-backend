@@ -95,7 +95,19 @@ def post_onboarding_step(admin, team_id=None, force_state=None):
     elif state == "needs_risk_criteria":
         card = cards.risk_criteria_prompt_card()
     else:
-        card = cards.nav_buttons_card(active_action_id="nav_home")
+        # Home tab's real content, not just the bare nav bar — confirmed
+        # via real feedback that posting just the nav row (needing an
+        # extra click on "Home" to see anything) looked broken/empty.
+        # Same image-rendering call actions._handle_nav's nav_home branch
+        # uses; imported lazily to avoid a circular import (actions.py
+        # imports post_onboarding_step from this module).
+        try:
+            home_body = cards.dashboard_image_card_body(team_id, kind="dashboard", title="VaptFix Admin Dashboard")
+        except Exception:
+            logger.exception("[TeamsOnboarding] dashboard image body failed, falling back to text summary")
+            from . import actions as _actions
+            home_body = _actions._home_summary_body(admin)
+        card = cards.nav_buttons_card(active_action_id="nav_home", extra_body=home_body)
 
     new_message_id = replace_active_card(team_id, card)
     logger.info(f"[TeamsOnboarding] Posted state={state} card into team_id={team_id} (new_message_id={new_message_id})")
