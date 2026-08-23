@@ -1,6 +1,8 @@
 """
-Posts the right onboarding step into a team's admin-dashboard channel
-("vaptfix admin dashboard" display name / the renamed General channel) —
+Posts the right onboarding step into a team's admin-dashboard channel —
+a genuinely PRIVATE channel named "vaptfix admin dashboard" (see
+users.views.ADMIN_DASHBOARD_CHANNEL_NAME / _ensure_admin_private_channel;
+General is left as "General" now, since it can never be made private) —
 the Teams counterpart of users/views.py's _post_admin_onboarding_message.
 Reuses the SAME state function Slack and the website already use, so all
 three surfaces can never drift out of sync on what "ready" means.

@@ -179,7 +179,14 @@ class TeamsBotMessagesView(APIView):
         try:
             if activity_type == "message":
                 self._handle_message(activity)
-            elif activity_type == "conversationUpdate":
+            elif activity_type in ("conversationUpdate", "installationUpdate"):
+                # installationUpdate is handled the same way — some Teams
+                # app-install flows (notably channel-scoped installs, e.g.
+                # into the private admin-dashboard channel — see
+                # users.views._install_teams_bot_on_channel) fire this
+                # instead of/alongside conversationUpdate. Treating both
+                # identically just means save_team_channel_reference picks
+                # up whichever one actually arrives.
                 self._handle_conversation_update(activity)
             # Other activity types (typing, unrecognized invokes, etc.) —
             # nothing to do.
@@ -492,21 +499,31 @@ class TeamsBotMessagesView(APIView):
     def _handle_conversation_update(self, activity: dict):
         """
         Fires when the bot is added to a team/channel, or a member
-        joins/leaves. A team-scope add (bot installed on the whole team) is
-        what puts the bot into the renamed 'General' channel — i.e. the
-        'vaptfix admin dashboard' channel — so that's the trigger for the
-        very first welcome/onboarding card.
+        joins/leaves — also called for `installationUpdate` (see the
+        dispatch above), which some Teams app-install flows send instead,
+        notably the channel-scoped install into the private admin-dashboard
+        channel (users.views._install_teams_bot_on_channel). That event
+        shape has no `membersAdded` at all (it's `action: "add"`, not a
+        member list), so both shapes are checked here. Whichever channel
+        the bot was most recently added to becomes "the" admin channel —
+        save_team_channel_reference always overwrites the single row kept
+        per team_id — so once the bot lands in the new private channel,
+        every proactive/onboarding post automatically starts going there
+        instead of General, with no extra routing logic needed.
         """
         members_added = activity.get("membersAdded") or []
         bot_id = (activity.get("recipient") or {}).get("id")
-        bot_was_added = any(m.get("id") == bot_id for m in members_added)
+        bot_was_added = (
+            any(m.get("id") == bot_id for m in members_added)
+            or (activity.get("type") == "installationUpdate" and activity.get("action") == "add")
+        )
         if not bot_was_added:
             return
 
-        logger.info("[TeamsBot] Bot was added to a conversation/team.")
+        logger.info(f"[TeamsBot] Bot was added to a conversation/team (activity_type={activity.get('type')}).")
         team = (activity.get("channelData") or {}).get("team") or {}
-        team_id = team.get("id")
-        if not team_id:
+        thread_id = team.get("id")
+        if not thread_id:
             return
 
         try:
@@ -514,12 +531,20 @@ class TeamsBotMessagesView(APIView):
         except Exception:
             logger.exception("[TeamsBot] save_team_channel_reference failed")
 
-        admin, _ = self._resolve_admin(activity)
+        # _resolve_admin's second return value is the CORRECT (aadGroupId)
+        # team_id — the one save_team_channel_reference/get_team_channel_reference
+        # actually key on. Using the raw thread_id here instead (as an
+        # earlier version of this method did) meant post_onboarding_step's
+        # very first proactive post silently no-op'd ("bot not added yet")
+        # on every fresh team/channel add, since get_team_channel_reference
+        # would look up the wrong key — confirmed by reading through this
+        # exact path while wiring up the new private admin-dashboard channel.
+        admin, resolved_team_id = self._resolve_admin(activity)
         if not admin:
-            logger.info(f"[TeamsBot] bot added to team_id={team_id} but no admin has this ms_team_id yet")
+            logger.info(f"[TeamsBot] bot added to team_id={thread_id} but no admin has this ms_team_id yet")
             return
 
         try:
-            post_onboarding_step(admin, team_id=team_id)
+            post_onboarding_step(admin, team_id=resolved_team_id or thread_id)
         except Exception:
             logger.exception("[TeamsBot] post_onboarding_step on team add failed")
