@@ -37,7 +37,10 @@ _SUPPORT_TEAM_MATCH = {
 
 
 def reminder_subnav_columnset(active_sub):
-    return cards.pill_columnset(REMINDER_SUBTABS, active_sub, lambda k: {"action_id": k})
+    # 5 items with full-length labels — two_row_pill_columnset (3+2)
+    # instead of one row, same reasoning as the top nav bar (real Teams
+    # buttons truncate long labels crammed into one row).
+    return cards.two_row_pill_columnset(REMINDER_SUBTABS, active_sub, lambda k: {"action_id": k})
 
 
 # ── Deadline buckets (Overdue / Due Today / This Week / Next Week) ──────
@@ -223,7 +226,7 @@ def support_list_body(admin, st="all", team="all", offset=0):
             [(k, f"{label} {st_counts.get(k, 0)}") for k, label in SUPPORT_STATUS_FILTERS], st,
             lambda k: {"action_id": "remind_sup_filter", "st": k, "team": team, "offset": 0},
         ),
-        cards.pill_columnset(
+        cards.two_row_pill_columnset(
             SUPPORT_TEAM_FILTERS, team,
             lambda k: {"action_id": "remind_sup_filter", "st": st, "team": k, "offset": 0},
         ),

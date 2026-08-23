@@ -1,12 +1,17 @@
 """
 Download Report tab — real report summary stats (same consolidated data
 the website's own report page and Slack's /downloadreport show), plus a
-link to open/download the full report on the website. Mirrors
-users.views.SlackSlashCommandView._cmd_downloadreport's summary card,
-minus the file upload — Teams channel bots can't post files into a
-channel any more reliably than they can receive them (see
-cards.open_website_upload_card for the same platform-limitation reasoning
-on the upload side), so this links out instead of attempting one.
+real, direct download of the report file itself. Mirrors
+users.views.SlackSlashCommandView._cmd_downloadreport's summary card.
+
+The actual file comes from the SAME AdminReportDownloadAPIView Slack's
+/downloadreport already uses (HTML or PDF, WeasyPrint-rendered) — served
+through a signed-token URL (teams_bot.views.TeamsReportDownloadView,
+same pattern as the dashboard PNG images) so an Action.OpenUrl click
+downloads it straight from the clicker's own browser, no website login
+needed (Action.OpenUrl opens in the clicker's own browser, which has no
+way to carry the admin's website session — that's why this can't just
+link to the login-gated /reports page and expect a direct download).
 """
 import logging
 
@@ -22,13 +27,21 @@ def _fetch_report_summary(admin):
     return data
 
 
-def download_report_body(admin):
+def _download_url(team_id, fmt):
+    import time
+    from urllib.parse import quote
     from django.conf import settings
+    from users.views import _dashboard_image_signer
 
+    token = _dashboard_image_signer().sign(team_id)
+    backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+    return f"{backend}/api/admin/users/teams/report-download/?token={quote(token)}&type={fmt}&t={int(time.time())}"
+
+
+def download_report_body(admin, team_id):
     data = _fetch_report_summary(admin)
     vulns = data.get("vulnerabilities") or {}
     total = sum(v for v in vulns.values() if isinstance(v, (int, float)))
-    frontend = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
 
     body = [
         {"type": "TextBlock", "text": "📄 Download Report", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
@@ -52,7 +65,10 @@ def download_report_body(admin):
         },
         {
             "type": "ActionSet", "spacing": "Medium",
-            "actions": [{"type": "Action.OpenUrl", "title": "📥 Open Full Report", "url": f"{frontend}/reports", "style": "positive"}],
+            "actions": [
+                {"type": "Action.OpenUrl", "title": "📥 Download HTML Report", "url": _download_url(team_id, "html"), "style": "positive"},
+                {"type": "Action.OpenUrl", "title": "📥 Download PDF Report", "url": _download_url(team_id, "pdf")},
+            ],
         },
     ]
     return body

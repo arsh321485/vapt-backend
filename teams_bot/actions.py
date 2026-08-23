@@ -790,7 +790,7 @@ def _handle_nav(admin, team_id, action_id):
 
     if action_id == "nav_download":
         try:
-            body = download_tab.download_report_body(admin)
+            body = download_tab.download_report_body(admin, team_id)
         except Exception:
             logger.exception("[TeamsBot] download_report_body failed")
             body = [cards._header("📥 Download Report"), cards._body_text("Could not load this right now.")]

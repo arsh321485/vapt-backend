@@ -39,7 +39,9 @@ TEAM_CODE_TO_NAME = dict(TEAM_ROLE_OPTIONS)
 
 
 def team_subnav_columnset(active_sub):
-    return cards.pill_columnset(TEAM_SUBTABS, active_sub, lambda k: {"action_id": k})
+    # 5 items, one of them ("Update User Role") long enough to truncate
+    # in a single row — same two-row fix as the top nav bar and Reminder.
+    return cards.two_row_pill_columnset(TEAM_SUBTABS, active_sub, lambda k: {"action_id": k})
 
 
 # ── shared data fetch ─────────────────────────────────────────────────

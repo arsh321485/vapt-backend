@@ -310,31 +310,40 @@ def pill_columnset(options, active_key, build_data, stretch=True, separator=True
     return row
 
 
-def _nav_button_columnset(active_action_id):
+def two_row_pill_columnset(options, active_key, build_data, split=None):
     """
-    The persistent top tab bar, as TWO rows of 4 buttons instead of one
-    row of 8. Real Action.Execute buttons in Teams get a narrow, roughly-
-    uniform rendered width regardless of label length — confirmed via
-    real testing that all 8 full names ("Automations", "Timeline Ext.",
-    "Reminder", "Download Report" included) truncated badly crammed into
-    one row. Splitting into two rows gives every button real room for its
-    full label instead of shortening any of them.
+    Same real-button tab bar as pill_columnset, but split across TWO rows
+    instead of cramming everything into one. Real Action.Execute buttons
+    in Teams get a narrow, roughly-uniform rendered width regardless of
+    label length — confirmed via real testing that longer full labels
+    (the top nav's "Automations"/"Timeline Ext."/"Reminder"/"Download
+    Report", Reminder's own 5 bucket names) truncated badly in a single
+    row. Splitting into two rows gives every button real room for its
+    full label instead of shortening any of them. `split` defaults to
+    half the options (rounded up).
     """
-    build_data = lambda action_id: {"action_id": action_id}
+    if split is None:
+        split = (len(options) + 1) // 2
     return {
         "type": "Container",
         "spacing": "Medium",
         "separator": True,
         "items": [
-            # stretch=True on both (not just the first) — this is the
-            # first body element on every card, so whichever row ends up
+            # stretch=True on both (not just the first) — this is often
+            # the first body element on a card, so whichever row ends up
             # deciding the card's overall claimed width needs the trailing
             # stretch column, and keeping it on both is simpler than
             # reasoning about which one that'll be in a given renderer.
-            pill_columnset(NAV_ITEMS[:4], active_action_id, build_data, stretch=True),
-            pill_columnset(NAV_ITEMS[4:], active_action_id, build_data, stretch=True, separator=False),
+            pill_columnset(options[:split], active_key, build_data, stretch=True),
+            pill_columnset(options[split:], active_key, build_data, stretch=True, separator=False),
         ],
     }
+
+
+def _nav_button_columnset(active_action_id):
+    """The persistent top tab bar — see two_row_pill_columnset for why
+    this is two rows of 4 instead of one row of 8."""
+    return two_row_pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}, split=4)
 
 
 def nav_buttons_card(active_action_id="nav_home", extra_body=None):

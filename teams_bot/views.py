@@ -89,6 +89,57 @@ class TeamsDashboardImageView(APIView):
         return HttpResponse(png_bytes, content_type="image/png")
 
 
+class TeamsReportDownloadView(APIView):
+    """
+    GET /api/admin/users/teams/report-download/?token=...&type=html|pdf
+
+    Public (token-gated, not login-gated) — same reasoning as
+    TeamsDashboardImageView: an Action.OpenUrl button opens this in the
+    clicker's own default browser, which has no way to carry the admin's
+    website login session, so this can't just link to the website's
+    /reports page and rely on Content-Disposition there. Calls the SAME
+    AdminReportDownloadAPIView Slack's own /downloadreport already uses,
+    in-process, and passes its response straight through — the browser
+    downloads the file directly off the response's Content-Disposition
+    header, no extra page needed.
+    """
+    permission_classes = []
+    authentication_classes = []
+
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from users.views import _dashboard_image_signer
+        from adminregister.views import AdminReportDownloadAPIView
+
+        token = request.query_params.get("token", "")
+        try:
+            team_id = _dashboard_image_signer().unsign(token, max_age=600)
+        except Exception:
+            return HttpResponse(status=403)
+
+        User = get_user_model()
+        admin = User.objects.filter(ms_team_id=team_id).first()
+        if not admin:
+            return HttpResponse(status=404)
+
+        fmt = request.query_params.get("type") or "html"
+        try:
+            factory = APIRequestFactory()
+            inner_request = factory.get("/internal/", {"type": fmt})
+            force_authenticate(inner_request, user=admin)
+            response = AdminReportDownloadAPIView.as_view()(inner_request)
+            if hasattr(response, "render"):
+                response.render()
+        except Exception:
+            logger.exception(f"[TeamsReportDownload] failed for team_id={team_id} type={fmt}")
+            return HttpResponse(status=500)
+        # Success returns a plain HttpResponse with Content-Disposition
+        # already set (see AdminReportDownloadAPIView.get) — pass it
+        # straight through so the browser downloads it as-is.
+        return response
+
+
 class TeamsBotMessagesView(APIView):
     """POST /api/admin/users/teams/bot/messages/ — set as the Messaging
     endpoint on the Azure Bot resource."""
