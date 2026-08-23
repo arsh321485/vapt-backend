@@ -209,15 +209,22 @@ def add_user_form_body(admin):
     # Real people already on this Teams team (confirmed via real testing
     # this was expected — Slack's own Add User picks from a workspace
     # member directory the same way, instead of retyping a name/email
-    # that's already known) — picking one here skips the manual fields
-    # below entirely.
+    # that's already known). Adaptive Cards has no live onChange between
+    # inputs — picking someone here can't auto-fill the Name/Email fields
+    # below in the same render, so "Fetch Details" does one round-trip to
+    # picked_member_preview_body(), which shows their REAL name/email
+    # pulled from Teams before asking for a team and submitting.
     teams_members = _fetch_teams_members_from_graph(admin)
     if teams_members:
         body.append({"type": "TextBlock", "text": "Pick someone already in this Teams team:", "size": "Small", "weight": "Bolder", "spacing": "Medium"})
         body.append({
             "type": "Input.ChoiceSet", "id": "au_pick_member", "style": "compact",
-            "placeholder": "Select a Teams member (optional)",
+            "placeholder": "Select a Teams member",
             "choices": [{"title": f"{m['displayName']} ({m['email']})", "value": m["email"]} for m in teams_members],
+        })
+        body.append({
+            "type": "ActionSet", "spacing": "Small",
+            "actions": [cards._execute_action("🔎 Fetch Details", {"action_id": "team_adduser_show_picked"}, style="positive")],
         })
         body.append({"type": "TextBlock", "text": "— or fill in manually for someone not yet in this Teams team —", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
 
@@ -235,6 +242,46 @@ def add_user_form_body(admin):
             "actions": [cards._execute_action("✅ Add User", {"action_id": "team_adduser_submit"}, style="positive")],
         },
     ])
+    return body
+
+
+def picked_member_preview_body(admin, picked_email):
+    """Round-trip target for the "🔎 Fetch Details" button — shows the REAL
+    Name/Email pulled from the live Teams roster for whoever was picked in
+    add_user_form_body's au_pick_member dropdown, since Adaptive Cards has
+    no live onChange to auto-fill those fields in the same render. The
+    Team choice + final submit both happen here; submitting bakes
+    au_pick_member/au_type back into the Action.Execute data so
+    submit_add_user() resolves the name/email from the Graph roster again
+    (matching how the manual-entry path already works)."""
+    picked = next((m for m in _fetch_teams_members_from_graph(admin) if m["email"] == picked_email), None)
+    display_name = (picked or {}).get("displayName") or picked_email
+
+    body = [
+        {"type": "TextBlock", "text": "➕ Add User", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
+        {"type": "TextBlock", "text": "Fetched from this Teams team — confirm the team to grant access to:", "size": "Small", "isSubtle": True, "wrap": True},
+        {
+            "type": "FactSet",
+            "facts": [
+                {"title": "Name", "value": display_name},
+                {"title": "Email", "value": picked_email},
+            ],
+        },
+        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team", "style": "compact",
+         "placeholder": "Select a team",
+         "choices": [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]},
+        {
+            "type": "ActionSet", "spacing": "Medium",
+            "actions": [
+                cards._execute_action("✅ Add User", {
+                    "action_id": "team_adduser_submit",
+                    "au_pick_member": picked_email,
+                    "au_type": "internal",
+                }, style="positive"),
+                cards._execute_action("← Choose someone else", {"action_id": "team_sub_adduser"}),
+            ],
+        },
+    ]
     return body
 
 
@@ -281,10 +328,39 @@ def submit_add_user(admin, form_data):
             "Member_role": [team_name],
         },
     )
-    if status_code >= 300:
-        err = (data or {}).get("error") or (data or {}).get("detail") or (data or {}).get("email")
+    if status_code < 300:
+        return True, f"{first} ({email}) added to {team_name}. A welcome email has been sent."
+
+    err = (data or {}).get("error") or (data or {}).get("detail") or (data or {}).get("email")
+    already_exists = "already exists" in str(err or "")
+    if not already_exists:
         return False, str(err) if err else f"Could not add user (status {status_code})."
-    return True, f"{first} ({email}) added to {team_name}. A welcome email has been sent."
+
+    # A UserDetail already exists for this email — most commonly because
+    # the live Teams-membership sync (see _live_sync_members_from_teams)
+    # already created a Viewer-only stub for them just from being a Teams
+    # team member, before anyone explicitly granted them a real role.
+    # Mirrors users.views.SlackSlashCommandView._cmd_adduser's own
+    # already-exists handling: merge the requested team into their
+    # existing Member_role instead of treating "already has a stub
+    # record with no real access yet" as a hard failure.
+    try:
+        from users_details.models import UserDetail
+        from users_details.views import _ud_set
+        existing = UserDetail.objects.filter(admin=admin, email=email).first()
+        if not existing:
+            return False, str(err)
+        current_roles = [r for r in (existing.Member_role or []) if r != "Viewer"]
+        if team_name not in current_roles:
+            current_roles.append(team_name)
+        upd = {"Member_role": current_roles, "user_type": user_type}
+        if not existing.team_name:
+            upd["team_name"] = team_name
+        _ud_set(existing, **upd)
+        return True, f"{first} ({email})'s access now includes: {', '.join(current_roles)}."
+    except Exception:
+        logger.exception("[TeamsBot] failed to merge roles for existing user %s", email)
+        return False, str(err)
 
 
 # ── Delete User (deactivate / permanently delete) ───────────────────────

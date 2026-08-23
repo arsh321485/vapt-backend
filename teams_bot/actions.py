@@ -472,6 +472,19 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._header("👥 Team"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
+    if action_id == "team_adduser_show_picked":
+        picked_email = (value.get("au_pick_member") or "").strip()
+        try:
+            if picked_email:
+                body = [team_tab.team_subnav_columnset("team_sub_adduser")] + team_tab.picked_member_preview_body(admin, picked_email)
+            else:
+                body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("Pick someone first"), cards._body_text("Select a Teams member from the dropdown, then tap Fetch Details.")]
+                body.extend(team_tab.add_user_form_body(admin))
+        except Exception:
+            logger.exception("[TeamsBot] team_adduser_show_picked failed")
+            body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
     if action_id == "team_adduser_submit":
         try:
             ok, message = team_tab.submit_add_user(admin, value)
