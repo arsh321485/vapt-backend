@@ -46,13 +46,16 @@ def replace_active_card(team_id, card):
         return None
 
     old_message_id = ref.get("active_message_id")
+    logger.info(f"[TeamsOnboarding] replace_active_card: old_message_id={old_message_id}")
     if old_message_id:
-        bot_api.delete_activity(ref["service_url"], ref["conversation_id"], old_message_id)
+        del_resp = bot_api.delete_activity(ref["service_url"], ref["conversation_id"], old_message_id)
+        logger.info(f"[TeamsOnboarding] delete_activity({old_message_id}) -> {getattr(del_resp, 'status_code', None)}")
 
     resp = bot_api.send_activity(
         ref["service_url"], ref["conversation_id"],
         bot_api.card_message(card),
     )
+    logger.info(f"[TeamsOnboarding] send_activity -> status={getattr(resp, 'status_code', None)} body={getattr(resp, 'text', '')[:300]}")
     try:
         new_message_id = resp.json().get("id") if resp is not None else None
     except Exception:

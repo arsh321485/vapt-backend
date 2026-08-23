@@ -255,12 +255,20 @@ class TeamsBotMessagesView(APIView):
             if target_id:
                 resp = bot_api.update_activity(service_url, conversation_id, target_id, bot_api.card_message(card))
                 updated_ok = resp is not None and resp.status_code < 300
+                logger.info(
+                    f"[TeamsBot] update_activity target_id={target_id} "
+                    f"status={getattr(resp, 'status_code', None)} updated_ok={updated_ok}"
+                )
+            else:
+                logger.info("[TeamsBot] no replyToId on this activity — skipping update_activity, going straight to replace_active_card")
             if updated_ok:
                 from .conversation_store import set_active_message_id
                 set_active_message_id(team_id, target_id)
             else:
+                logger.info(f"[TeamsBot] falling back to replace_active_card (delete+resend) for team_id={team_id}")
                 from .onboarding import replace_active_card
                 new_message_id = replace_active_card(team_id, card)
+                logger.info(f"[TeamsBot] replace_active_card returned new_message_id={new_message_id}")
                 if new_message_id is None:
                     # No tracked channel reference yet (shouldn't normally
                     # happen once the bot's been added) — fall back to a
