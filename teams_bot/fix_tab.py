@@ -139,7 +139,11 @@ def assets_list_body(admin, offset=0):
 
 def asset_detail_body(admin, host, back_offset=0):
     rows = _fetch_register_rows(admin)
-    host_rows = [r for r in rows if (r.get("asset") or "Unknown").strip() == host]
+    # Keep each row's index in the FULL (unfiltered) list, not its position
+    # within this host's own subset — "View" on a row needs to hand back an
+    # idx that vuln_facts / asset_vuln_detail_body can look up again from
+    # that same full list on the next click.
+    host_rows = [(i, r) for i, r in enumerate(rows) if (r.get("asset") or "Unknown").strip() == host]
 
     body = [_back_action("← Back to All Assets", "fix_asset_back", {"offset": back_offset})]
     body.append({"type": "TextBlock", "text": f"🖥 {host}", "weight": "Bolder", "size": "Medium", "spacing": "Medium", "wrap": True})
@@ -147,20 +151,14 @@ def asset_detail_body(admin, host, back_offset=0):
     if not host_rows:
         body.append({"type": "TextBlock", "text": "No vulnerabilities found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
-    for r in host_rows[:20]:
+    for idx, r in host_rows[:20]:
         name = r.get("vul_name") or "Unnamed vulnerability"
         sev = (r.get("severity") or "medium").strip().lower()
         if sev not in _SEV_ICON:
             sev = "medium"
         status = r.get("status") or "open"
         subtitle = f"{_SEV_ICON[sev]} {sev.title()}   ·   {_status_label(status)}"
-        body.append({
-            "type": "Container", "spacing": "Medium", "separator": True,
-            "items": [
-                {"type": "TextBlock", "text": name, "weight": "Bolder", "size": "Small", "wrap": True},
-                {"type": "TextBlock", "text": subtitle, "size": "Small", "isSubtle": True, "spacing": "None"},
-            ],
-        })
+        body.append(_row(name, subtitle, "fix_asset_vuln_view", {"idx": idx, "host": host, "offset": back_offset}))
     if len(host_rows) > 20:
         body.append({"type": "TextBlock", "text": f"+ {len(host_rows) - 20} more not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
     return body
@@ -193,29 +191,47 @@ def vulns_list_body(admin, offset=0):
     return body
 
 
+def _vuln_facts_body(r):
+    sev = (r.get("severity") or "medium").strip().lower()
+    if sev not in _SEV_ICON:
+        sev = "medium"
+    status = r.get("status") or "open"
+    return [
+        {"type": "TextBlock", "text": r.get("vul_name") or "Unnamed vulnerability", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"},
+        {
+            "type": "FactSet",
+            "facts": [
+                {"title": "Asset", "value": str(r.get("asset") or "—")},
+                {"title": "Severity", "value": f"{_SEV_ICON[sev]} {sev.title()}"},
+                {"title": "Status", "value": _status_label(status)},
+                {"title": "Port", "value": str(r.get("port") or "—")},
+                {"title": "Protocol", "value": str(r.get("protocol") or "—")},
+                {"title": "OS", "value": str(r.get("operating_system") or "—")},
+            ],
+        },
+    ]
+
+
 def vuln_detail_body(admin, idx, back_offset=0):
+    """Reached from the flat All Vulns list — Back returns there."""
     rows = _fetch_register_rows(admin)
     body = [_back_action("← Back to All Vulns", "fix_vuln_back", {"offset": back_offset})]
     if idx is None or idx < 0 or idx >= len(rows):
         body.append({"type": "TextBlock", "text": "This vulnerability could not be found — the report may have changed. Go back and try again.", "wrap": True, "spacing": "Medium"})
         return body
-    r = rows[idx]
-    sev = (r.get("severity") or "medium").strip().lower()
-    if sev not in _SEV_ICON:
-        sev = "medium"
-    status = r.get("status") or "open"
-    body.append({"type": "TextBlock", "text": r.get("vul_name") or "Unnamed vulnerability", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
-    body.append({
-        "type": "FactSet",
-        "facts": [
-            {"title": "Asset", "value": str(r.get("asset") or "—")},
-            {"title": "Severity", "value": f"{_SEV_ICON[sev]} {sev.title()}"},
-            {"title": "Status", "value": _status_label(status)},
-            {"title": "Port", "value": str(r.get("port") or "—")},
-            {"title": "Protocol", "value": str(r.get("protocol") or "—")},
-            {"title": "OS", "value": str(r.get("operating_system") or "—")},
-        ],
-    })
+    body.extend(_vuln_facts_body(rows[idx]))
+    return body
+
+
+def asset_vuln_detail_body(admin, idx, host, back_offset=0):
+    """Reached from an asset's own vulnerability list — Back returns to
+    that asset's detail page, not the flat All Vulns list."""
+    rows = _fetch_register_rows(admin)
+    body = [_back_action(f"← Back to {host}", "fix_asset_vuln_back", {"host": host, "offset": back_offset})]
+    if idx is None or idx < 0 or idx >= len(rows):
+        body.append({"type": "TextBlock", "text": "This vulnerability could not be found — the report may have changed. Go back and try again.", "wrap": True, "spacing": "Medium"})
+        return body
+    body.extend(_vuln_facts_body(rows[idx]))
     return body
 
 

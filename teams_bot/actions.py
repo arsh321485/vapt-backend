@@ -222,6 +222,28 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._header("🖥 Asset"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
+    if action_id == "fix_asset_vuln_view":
+        host = value.get("host") or ""
+        idx = value.get("idx")
+        idx = int(idx) if idx is not None else None
+        list_offset = int(value.get("offset") or 0)
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_assets")] + fix_tab.asset_vuln_detail_body(admin, idx, host, back_offset=list_offset)
+        except Exception:
+            logger.exception("[TeamsBot] fix_asset_vuln_view failed")
+            body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_asset_vuln_back":
+        host = value.get("host") or ""
+        offset = int(value.get("offset") or 0)
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_assets")] + fix_tab.asset_detail_body(admin, host, back_offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] fix_asset_vuln_back failed")
+            body = [cards._header("🖥 Asset"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
     if action_id == "fix_asset_back":
         offset = int(value.get("offset") or 0)
         try:

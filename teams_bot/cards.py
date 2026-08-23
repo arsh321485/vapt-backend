@@ -262,6 +262,14 @@ def _nav_button_columnset(active_action_id):
                 "horizontalAlignment": "center",
             }],
         })
+    # Trailing empty "stretch" column — with every real column set to
+    # "auto" width, the ColumnSet (and every renderer's own width
+    # calculation for the card frame around it) otherwise only claims as
+    # much horizontal space as the labels need, leaving msteams.width:Full
+    # with nothing to actually stretch — this is the first body element on
+    # every card, so it alone decides whether the whole card looks full-
+    # width or leaves a blank gap on the right.
+    columns.append({"type": "Column", "width": "stretch", "items": []})
     return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
 
 
@@ -457,6 +465,7 @@ def _fix_subnav_columnset(active_sub):
                 "horizontalAlignment": "center",
             }],
         })
+    columns.append({"type": "Column", "width": "stretch", "items": []})  # see _nav_button_columnset
     return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
 
 
@@ -485,6 +494,7 @@ def _common_vulns_team_columnset(active_team):
                 "horizontalAlignment": "center",
             }],
         })
+    columns.append({"type": "Column", "width": "stretch", "items": []})  # see _nav_button_columnset
     return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
 
 
