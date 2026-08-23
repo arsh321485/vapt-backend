@@ -361,11 +361,36 @@ class TeamsBotMessagesView(APIView):
 
         logger.info(f"[TeamsBot] Message text: {text!r}")
 
-        reply_text = f"👋 VaptFix bot is alive. You said: \"{text}\"" if text else "👋 VaptFix bot is alive."
-        bot_api.reply_to_activity(
-            service_url, conversation_id, activity_id,
-            bot_api.text_message(reply_text),
-        )
+        # A plain message/@mention with no admin linked yet — nothing to
+        # post a real card for, same "not linked" reply every other branch
+        # gives.
+        admin, team_id = self._resolve_admin(activity)
+        if not admin:
+            bot_api.reply_to_activity(
+                service_url, conversation_id, activity_id,
+                bot_api.text_message("This Teams workspace isn't linked to a VaptFix admin account yet — please log in from the website first."),
+            )
+            return
+
+        # Posts a genuinely fresh onboarding/navbar card (replacing
+        # whatever's currently live) instead of a plain acknowledgement —
+        # confirmed via real feedback that a bare "bot is alive" text
+        # reply left no way to reliably get a brand-new, guaranteed-current
+        # card without clicking through an old (possibly stale, pre-fix)
+        # one. Any @mention or DM to the bot now doubles as a manual
+        # "refresh my dashboard" action.
+        try:
+            from .onboarding import post_onboarding_step
+            posted = post_onboarding_step(admin, team_id=team_id)
+        except Exception:
+            logger.exception("[TeamsBot] post_onboarding_step from plain message failed")
+            posted = None
+        if not posted:
+            reply_text = f"👋 VaptFix bot is alive. You said: \"{text}\"" if text else "👋 VaptFix bot is alive."
+            bot_api.reply_to_activity(
+                service_url, conversation_id, activity_id,
+                bot_api.text_message(reply_text),
+            )
 
     def _handle_attachment(self, activity, service_url, conversation_id, activity_id, attachments):
         # Resolve admin/team FIRST — the pending-upload flag is keyed by
