@@ -21,6 +21,7 @@ from . import fix_tab
 from . import register_tab
 from . import automations_tab
 from . import team_tab
+from . import timeline_tab
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -598,6 +599,80 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._header("🌐 External User"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
+    # ── Timeline Ext. tab ──────────────────────────────────────────────
+    if action_id in dict(timeline_tab.REQUEST_SUBTABS):
+        try:
+            body = timeline_tab.timeline_tab_body(admin, active_sub=action_id)
+        except Exception:
+            logger.exception(f"[TeamsBot] timeline_tab_body failed for {action_id}")
+            body = [cards._header("📨 Timeline Ext."), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
+
+    if action_id == "ext_list_pg":
+        offset = int(value.get("offset") or 0)
+        try:
+            body = timeline_tab.timeline_tab_body(admin, active_sub="req_sub_extensions", offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] ext_list_pg failed")
+            body = [cards._header("📨 Timeline Ext."), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
+
+    if action_id == "hist_toggle":
+        view = value.get("view") or "approve"
+        try:
+            body = timeline_tab.timeline_tab_body(admin, active_sub="req_sub_history", view=view, offset=0)
+        except Exception:
+            logger.exception("[TeamsBot] hist_toggle failed")
+            body = [cards._header("🕘 History"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
+
+    if action_id == "hist_list_pg":
+        view = value.get("view") or "approve"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = timeline_tab.timeline_tab_body(admin, active_sub="req_sub_history", view=view, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] hist_list_pg failed")
+            body = [cards._header("🕘 History"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
+
+    if action_id in ("ext_approve_do", "ext_reject_start", "ext_reject_cancel", "ext_reject_do"):
+        request_id = value.get("request_id") or ""
+        offset = int(value.get("offset") or 0)
+        src = value.get("src") or "ext"
+        view = value.get("view") or "approve"
+        active_sub = "req_sub_history" if src == "hist" else "req_sub_extensions"
+
+        def _back_to_list():
+            if src == "hist":
+                return timeline_tab.timeline_tab_body(admin, active_sub="req_sub_history", view=view, offset=offset)
+            return timeline_tab.timeline_tab_body(admin, active_sub="req_sub_extensions", offset=offset)
+
+        try:
+            if action_id == "ext_approve_do":
+                ok, message = timeline_tab.do_approve(admin, request_id)
+                body = [timeline_tab.request_subnav_columnset(active_sub)]
+                if not ok:
+                    body += [cards._header("❌ Failed"), cards._body_text(message)]
+                else:
+                    body += _back_to_list()
+            elif action_id == "ext_reject_start":
+                body = [timeline_tab.request_subnav_columnset(active_sub)] + timeline_tab.reject_reason_body(request_id, offset, src, view=view)
+            elif action_id == "ext_reject_cancel":
+                body = [timeline_tab.request_subnav_columnset(active_sub)] + _back_to_list()
+            else:  # ext_reject_do
+                reason = (value.get("reject_reason") or "").strip()
+                ok, message = timeline_tab.do_reject(admin, request_id, reason=reason)
+                body = [timeline_tab.request_subnav_columnset(active_sub)]
+                if not ok:
+                    body += [cards._header("❌ Failed"), cards._body_text(message)]
+                else:
+                    body += _back_to_list()
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [timeline_tab.request_subnav_columnset(active_sub), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
+
     if action_id and action_id.startswith("nav_"):
         return _handle_nav(admin, team_id, action_id)
 
@@ -653,6 +728,14 @@ def _handle_nav(admin, team_id, action_id):
             logger.exception("[TeamsBot] automations_tab_body (default) failed")
             body = [cards._header("🤖 Automations"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_automation", extra_body=body)
+
+    if action_id == "nav_request":
+        try:
+            body = timeline_tab.timeline_tab_body(admin, active_sub="req_sub_extensions")
+        except Exception:
+            logger.exception("[TeamsBot] timeline_tab_body (default) failed")
+            body = [cards._header("📨 Timeline Ext."), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
 
     label = dict(cards.NAV_ITEMS).get(action_id, action_id)
     return cards.nav_buttons_card(
