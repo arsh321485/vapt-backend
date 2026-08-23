@@ -398,3 +398,25 @@ def home_dashboard_card_body(data: dict):
         body.append(_section_title("🎫 Support Requests"))
         body.append(_support_requests_row(support))
     return body
+
+
+def dashboard_image_card_body(team_id, kind="dashboard", title=None):
+    """
+    Real bento-grid dashboard, rendered server-side to a PNG and shown as
+    an Adaptive Card Image — reuses the exact same rendering pipeline
+    already built for Slack (see teams_bot.views.TeamsDashboardImageView),
+    so this looks exactly like the reference design, not a hand-built
+    approximation. `t=` cache-busts so re-posting always shows fresh data;
+    the signed token is short-lived (10 min, minted fresh every call).
+    """
+    import time
+    from urllib.parse import quote
+    from django.conf import settings
+    from users.views import _dashboard_image_signer
+
+    token = _dashboard_image_signer().sign(team_id)
+    backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+    url = f"{backend}/api/admin/users/teams/dashboard-image/?token={quote(token)}&kind={kind}&t={int(time.time())}"
+    return [
+        {"type": "Image", "url": url, "size": "Stretch", "altText": title or "VaptFix Dashboard"},
+    ]

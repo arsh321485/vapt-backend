@@ -190,14 +190,29 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
 
 def _handle_nav(admin, team_id, action_id):
     """
-    nav_home renders a real summary pulled from the same dashboard-summary
-    endpoint the website/Slack use. Deeper tabs (Fix/Register/Automations/
-    Team/...) are acknowledged for now rather than left as dead clicks —
-    full per-tab content is the next phase of this port.
+    nav_home and nav_team render the real bento-grid dashboard as a PNG
+    image — the exact same rendering pipeline already built for Slack
+    (see teams_bot.views.TeamsDashboardImageView), so these match the
+    reference design pixel-for-pixel instead of a hand-built approximation.
+    Other tabs (Fix/Register/Automations/Timeline Ext.) are acknowledged
+    for now rather than left as dead clicks — full per-tab content is the
+    next phase of this port.
     """
     if action_id == "nav_home":
-        body = _home_summary_body(admin)
+        try:
+            body = cards.dashboard_image_card_body(team_id, kind="dashboard", title="VaptFix Admin Dashboard")
+        except Exception:
+            logger.exception("[TeamsBot] dashboard image body failed, falling back to text summary")
+            body = _home_summary_body(admin)
         return cards.nav_buttons_card(active_action_id="nav_home", extra_body=body)
+
+    if action_id == "nav_team":
+        try:
+            body = cards.dashboard_image_card_body(team_id, kind="teamperf", title="Team Performance")
+        except Exception:
+            logger.exception("[TeamsBot] team performance image body failed")
+            body = [cards._header("👥 Team"), cards._body_text("Could not load team performance right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
     label = dict(cards.NAV_ITEMS).get(action_id, action_id)
     return cards.nav_buttons_card(

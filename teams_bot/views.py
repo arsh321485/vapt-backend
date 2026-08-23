@@ -8,6 +8,7 @@ interactivity URLs.
 import logging
 
 import requests
+from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -18,6 +19,55 @@ from .conversation_store import save_conversation_reference, save_team_channel_r
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
+
+
+class TeamsDashboardImageView(APIView):
+    """
+    GET /api/admin/users/teams/dashboard-image/?token=...&kind=...
+
+    Public (token-gated, not login-gated) — Bot Framework fetches this URL
+    directly when rendering an Adaptive Card Image element, with no auth
+    headers of ours. Reuses the EXACT same HTML-building + PNG-rendering
+    pipeline already built for Slack (users.views._build_dashboard_html /
+    _build_team_performance_html / _dashboard_png_bytes / the shared
+    signer) — same real bento-grid design (matches Microsoft
+    -Admin/home.html), just resolved via ms_team_id instead of
+    slack_team_id, and fetched in-process instead of over HTTP.
+    """
+    permission_classes = []
+    authentication_classes = []
+
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+        from users.views import _dashboard_image_signer, _dashboard_png_bytes, _build_dashboard_html, _build_team_performance_html
+
+        token = request.query_params.get("token", "")
+        try:
+            team_id = _dashboard_image_signer().unsign(token, max_age=600)
+        except Exception:
+            return HttpResponse(status=403)
+
+        User = get_user_model()
+        admin = User.objects.filter(ms_team_id=team_id).first()
+        if not admin:
+            return HttpResponse(status=404)
+
+        kind = request.query_params.get("kind", "dashboard")
+        try:
+            if kind == "teamperf":
+                from admindashboard.views import AdminDistributionByTeamDetailAPIView
+                _status, data = actions._call_view_in_process(AdminDistributionByTeamDetailAPIView, admin, method="get")
+                html = _build_team_performance_html(data if isinstance(data, dict) else {})
+            else:
+                from admindashboard.views import AdminDashboardSummaryAPIView
+                _status, data = actions._call_view_in_process(AdminDashboardSummaryAPIView, admin, method="get")
+                html = _build_dashboard_html(data if isinstance(data, dict) else {})
+            png_bytes = _dashboard_png_bytes(html, selector=".dash")
+        except Exception:
+            logger.exception(f"[TeamsDashboardImage] render failed for team_id={team_id} kind={kind}")
+            return HttpResponse(status=500)
+
+        return HttpResponse(png_bytes, content_type="image/png")
 
 
 class TeamsBotMessagesView(APIView):
