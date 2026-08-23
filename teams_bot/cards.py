@@ -259,11 +259,18 @@ NAV_ITEMS = [
     ("nav_home", "🏠 Home"),
     ("nav_fix", "🔧 Fix"),
     ("nav_register", "📋 Register"),
-    ("nav_automation", "🤖 Automations"),
+    # Real Action.Execute buttons (see pill_columnset) get a narrow,
+    # roughly-uniform rendered width in Teams regardless of label length —
+    # confirmed via real testing that the longer names ("Automations",
+    # "Timeline Ext.", "Reminder", "Download Report") were truncated to a
+    # few letters each. Back to short labels so the text is actually
+    # readable; a tab's own header still spells out the full name once
+    # you're on it.
+    ("nav_automation", "🤖 Auto"),
     ("nav_team", "👥 Team"),
-    ("nav_request", "📨 Timeline Ext."),
-    ("nav_notification", "🔔 Reminder"),
-    ("nav_download", "📥 Download Report"),
+    ("nav_request", "📨 Ext."),
+    ("nav_notification", "🔔 Alerts"),
+    ("nav_download", "📥 Report"),
 ]
 
 
