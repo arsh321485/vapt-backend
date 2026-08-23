@@ -19,10 +19,15 @@ Action.Execute + a synchronous invoke response as the only way around it.
 """
 
 _SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
-# 1.5 — needed for ActionSet's "orientation" property (see pill_columnset),
-# which is what keeps a row of real tab buttons on one horizontal line
-# instead of ActionSet's 1.4-and-earlier default of stacking vertically.
-_VERSION = "1.5"
+# Stayed on 1.4 deliberately — a 1.5-only ActionSet "orientation" property
+# was tried for the tab bars and, along with the (already-reverted)
+# `requires` field, the whole nav row stopped rendering in real Teams
+# testing. Not confirmed which of the two actually caused it, so both are
+# gone now rather than guessing further without being able to see the
+# live client. pill_columnset uses a ColumnSet of Action.Execute buttons
+# instead (see there) — proven to render (that was the working layout
+# this whole epic has been tested against) while still using real buttons.
+_VERSION = "1.4"
 
 # Same option list + defaults as users/views.py's _RISK_LEVEL_OPTIONS /
 # _RISK_CRITERIA_DEFAULTS — kept as a separate copy (not imported) so
@@ -264,31 +269,38 @@ NAV_ITEMS = [
 
 def pill_columnset(options, active_key, build_data, stretch=True):
     """
-    Generic single-row tab bar — a real ActionSet of Action.Execute
-    buttons laid out horizontally (orientation="Horizontal", Adaptive
-    Cards 1.5+), the active one styled "positive" (filled/highlighted).
+    Generic single-row tab bar — a ColumnSet of narrow auto-width columns,
+    each holding one real Action.Execute button (an ActionSet with a
+    single action inside), the active one styled "positive" (filled).
 
-    Earlier this built a ColumnSet of plain TextBlocks made clickable via
-    selectAction — confirmed via real feedback that those don't render
-    with any button chrome at all (just look like plain text/links, not
-    something tappable) and, worse, that selectAction-driven clicks left
-    every OTHER action on the card visually greyed out afterward. Real
-    Action.Execute buttons fix both: visible button borders/fill, and no
-    grey-out (see _execute_action's `requires` field for why that part
-    happened).
+    This is the proven-working layout (ColumnSet + msteams.width:Full's
+    trailing stretch column) this whole epic has actually been tested
+    against, just with each column's content upgraded from a plain
+    clickable TextBlock to a real button — a straight ActionSet with
+    orientation="Horizontal" was tried first and made the entire row stop
+    rendering in real Teams testing, so this sticks to the combination
+    that's confirmed to work rather than the untested one.
 
     `options`: [(key, label), ...]. `build_data(key)` returns the click
     payload dict for that button (whatever teams_bot.actions.handle_card_action
     needs to route it) — kept as a callback rather than a fixed shape since
     every caller's payload fields differ (action_id, offset, filters, ...).
-    `stretch` is accepted for backward compatibility with existing callers
-    but has no effect — ActionSet fills the row on its own.
     """
-    actions = [
-        _execute_action(label, build_data(key), style="positive" if key == active_key else None)
-        for key, label in options
-    ]
-    return {"type": "ActionSet", "orientation": "Horizontal", "actions": actions, "spacing": "Medium", "separator": True}
+    columns = []
+    for key, label in options:
+        is_active = key == active_key
+        columns.append({
+            "type": "Column",
+            "width": "auto",
+            "verticalContentAlignment": "center",
+            "items": [{
+                "type": "ActionSet",
+                "actions": [_execute_action(label, build_data(key), style="positive" if is_active else None)],
+            }],
+        })
+    if stretch:
+        columns.append({"type": "Column", "width": "stretch", "items": []})
+    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
 
 
 def _nav_button_columnset(active_action_id):
