@@ -46,7 +46,82 @@ def team_subnav_columnset(active_sub):
 
 # ── shared data fetch ─────────────────────────────────────────────────
 
+def _live_sync_members_from_teams(admin):
+    """
+    Best-effort live pull of the Team's real Microsoft Teams membership
+    into UserDetail. Replaces reliance on the Graph change-notification
+    subscription set up once in CreateTeamsSubscriptionView — confirmed
+    via a real Graph API check that subscription had silently expired
+    (it caps at ~3 days and nothing renews it), so a member added
+    directly in Teams (native "Add member") never showed up here until
+    manually re-synced. This runs the same sync logic that view already
+    has on every Team-tab open instead, no subscription needed at all.
+
+    Throttled via cached_fetch (~45s) so switching between Delete User /
+    Update User Role / External User in a row doesn't hit Graph on every
+    single click. Never raises — a failed sync just means this click
+    sees whatever was already in the DB, same as before this existed.
+    """
+    def _do_sync():
+        team_id = getattr(admin, "ms_team_id", None)
+        access_token = getattr(admin, "ms_access_token", None)
+        if not team_id or not access_token:
+            return False
+        try:
+            from users.views import CreateTeamsSubscriptionView
+            view = CreateTeamsSubscriptionView()
+            result = view._sync_existing_members(admin, team_id, access_token)
+            if isinstance(result, dict) and result.get("error"):
+                # Most likely an expired access token — refresh once and retry.
+                new_token = _refresh_ms_access_token(admin)
+                if new_token:
+                    view._sync_existing_members(admin, team_id, new_token)
+            return True
+        except Exception:
+            logger.exception("[TeamsBot] live Teams member sync failed")
+            return False
+    return fix_tab.cached_fetch(f"team_member_sync:{admin.id}", 45, _do_sync)
+
+
+def _refresh_ms_access_token(admin):
+    """Same refresh_token grant MicrosoftTeamsTokenRefreshView uses —
+    returns the new access token (and persists it) or None on failure."""
+    refresh_token = getattr(admin, "ms_refresh_token", None)
+    if not refresh_token:
+        return None
+    try:
+        from django.conf import settings
+        from users.views import _http_post
+        resp = _http_post(
+            settings.MICROSOFT_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": settings.MICROSOFT_CLIENT_ID,
+                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+                "scope": "https://graph.microsoft.com/.default offline_access",
+            },
+            timeout=15,
+        )
+        data = resp.json()
+        new_token = data.get("access_token")
+        if not new_token:
+            return None
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        User.objects.filter(pk=admin.pk).update(
+            ms_access_token=new_token,
+            ms_refresh_token=data.get("refresh_token") or refresh_token,
+        )
+        admin.ms_access_token = new_token
+        return new_token
+    except Exception:
+        logger.exception("[TeamsBot] MS Teams access token refresh failed")
+        return None
+
+
 def _fetch_members(admin, user_type=None):
+    _live_sync_members_from_teams(admin)
     from users_details.views import UserDetailListView
     from .actions import _call_view_in_process
     status_code, data = _call_view_in_process(
