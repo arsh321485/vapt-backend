@@ -19,7 +19,10 @@ Action.Execute + a synchronous invoke response as the only way around it.
 """
 
 _SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
-_VERSION = "1.4"
+# 1.5 — needed for ActionSet's "orientation" property (see pill_columnset),
+# which is what keeps a row of real tab buttons on one horizontal line
+# instead of ActionSet's 1.4-and-earlier default of stacking vertically.
+_VERSION = "1.5"
 
 # Same option list + defaults as users/views.py's _RISK_LEVEL_OPTIONS /
 # _RISK_CRITERIA_DEFAULTS — kept as a separate copy (not imported) so
@@ -76,12 +79,17 @@ def _execute_action(title, data, style=None):
     Action.Submit everywhere. `verb` is set to the action_id mainly for
     parity with Microsoft's own samples; nothing here actually branches on
     it — the dispatch in teams_bot.actions reads action_id out of `data`,
-    same as it always has."""
+    same as it always has. `requires` declares Universal Actions support
+    explicitly — confirmed via real testing that omitting it is what made
+    every button on a freshly-opened tab render greyed-out/disabled in
+    Teams (the host couldn't confirm support for the action without it, so
+    it fell back to a disabled-looking state instead of a live one)."""
     action = {
         "type": "Action.Execute",
         "title": title,
         "verb": data.get("action_id", "action"),
         "data": data,
+        "requires": {"adaptiveCards": "1.3"},
     }
     if style:
         action["style"] = style  # "positive" is Adaptive Card's primary-button equivalent
@@ -253,77 +261,37 @@ NAV_ITEMS = [
 
 def pill_columnset(options, active_key, build_data, stretch=True):
     """
-    Generic single-row pill/tab bar — a ColumnSet of narrow auto-width,
-    click-anywhere columns, one marked active. This is the same shape
-    _nav_button_columnset/_fix_subnav_columnset/_common_vulns_team_columnset
-    hand-build individually; new tabs (Register's severity/status filters,
-    and whatever Team/Reminder/Timeline Ext. need next) should call this
-    instead of writing another copy.
+    Generic single-row tab bar — a real ActionSet of Action.Execute
+    buttons laid out horizontally (orientation="Horizontal", Adaptive
+    Cards 1.5+), the active one styled "positive" (filled/highlighted).
+
+    Earlier this built a ColumnSet of plain TextBlocks made clickable via
+    selectAction — confirmed via real feedback that those don't render
+    with any button chrome at all (just look like plain text/links, not
+    something tappable) and, worse, that selectAction-driven clicks left
+    every OTHER action on the card visually greyed out afterward. Real
+    Action.Execute buttons fix both: visible button borders/fill, and no
+    grey-out (see _execute_action's `requires` field for why that part
+    happened).
 
     `options`: [(key, label), ...]. `build_data(key)` returns the click
-    payload dict for that pill (whatever teams_bot.actions.handle_card_action
+    payload dict for that button (whatever teams_bot.actions.handle_card_action
     needs to route it) — kept as a callback rather than a fixed shape since
     every caller's payload fields differ (action_id, offset, filters, ...).
+    `stretch` is accepted for backward compatibility with existing callers
+    but has no effect — ActionSet fills the row on its own.
     """
-    columns = []
-    for key, label in options:
-        is_active = key == active_key
-        columns.append({
-            "type": "Column",
-            "width": "auto",
-            "verticalContentAlignment": "center",
-            "selectAction": {"type": "Action.Execute", "verb": str(key), "data": build_data(key)},
-            "items": [{
-                "type": "TextBlock",
-                "text": label,
-                "wrap": False,
-                "size": "Small",
-                "weight": "Bolder" if is_active else "Default",
-                "color": "accent" if is_active else "default",
-                "horizontalAlignment": "center",
-            }],
-        })
-    if stretch:
-        columns.append({"type": "Column", "width": "stretch", "items": []})
-    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
+    actions = [
+        _execute_action(label, build_data(key), style="positive" if key == active_key else None)
+        for key, label in options
+    ]
+    return {"type": "ActionSet", "orientation": "Horizontal", "actions": actions, "spacing": "Medium", "separator": True}
 
 
 def _nav_button_columnset(active_action_id):
-    """
-    A single-row button bar built from a ColumnSet with narrow auto-width
-    columns, each made clickable via selectAction — this packs noticeably
-    tighter than Adaptive Cards' own `actions` array (which is what kept
-    wrapping onto a second row before), though the final call on wrapping
-    is still Teams' own host rendering, not something the card format can
-    force absolutely.
-    """
-    columns = []
-    for action_id, label in NAV_ITEMS:
-        is_active = action_id == active_action_id
-        columns.append({
-            "type": "Column",
-            "width": "auto",
-            "verticalContentAlignment": "center",
-            "selectAction": {"type": "Action.Execute", "verb": action_id, "data": {"action_id": action_id}},
-            "items": [{
-                "type": "TextBlock",
-                "text": label,
-                "wrap": False,
-                "size": "Small",
-                "weight": "Bolder" if is_active else "Default",
-                "color": "accent" if is_active else "default",
-                "horizontalAlignment": "center",
-            }],
-        })
-    # Trailing empty "stretch" column — with every real column set to
-    # "auto" width, the ColumnSet (and every renderer's own width
-    # calculation for the card frame around it) otherwise only claims as
-    # much horizontal space as the labels need, leaving msteams.width:Full
-    # with nothing to actually stretch — this is the first body element on
-    # every card, so it alone decides whether the whole card looks full-
-    # width or leaves a blank gap on the right.
-    columns.append({"type": "Column", "width": "stretch", "items": []})
-    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
+    """The persistent top tab bar — see pill_columnset for why this is a
+    real horizontal ActionSet of buttons, not clickable plain text."""
+    return pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id})
 
 
 def nav_buttons_card(active_action_id="nav_home", extra_body=None):
@@ -503,23 +471,7 @@ FIX_SUBTABS = [
 
 
 def _fix_subnav_columnset(active_sub):
-    columns = []
-    for action_id, label in FIX_SUBTABS:
-        is_active = action_id == active_sub
-        columns.append({
-            "type": "Column",
-            "width": "auto",
-            "verticalContentAlignment": "center",
-            "selectAction": {"type": "Action.Execute", "verb": action_id, "data": {"action_id": action_id}},
-            "items": [{
-                "type": "TextBlock", "text": label, "wrap": False, "size": "Small",
-                "weight": "Bolder" if is_active else "Default",
-                "color": "accent" if is_active else "default",
-                "horizontalAlignment": "center",
-            }],
-        })
-    columns.append({"type": "Column", "width": "stretch", "items": []})  # see _nav_button_columnset
-    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
+    return pill_columnset(FIX_SUBTABS, active_sub, lambda action_id: {"action_id": action_id})
 
 
 # Common Vulns' own team-filter row — matches Microsoft -Admin/commonvuln.html's tabs.
@@ -532,23 +484,7 @@ COMMON_VULNS_TEAMS = [
 
 
 def _common_vulns_team_columnset(active_team):
-    columns = []
-    for key, label in COMMON_VULNS_TEAMS:
-        is_active = key == active_team
-        columns.append({
-            "type": "Column",
-            "width": "auto",
-            "verticalContentAlignment": "center",
-            "selectAction": {"type": "Action.Execute", "verb": "fix_common_team", "data": {"action_id": "fix_common_team", "team": key}},
-            "items": [{
-                "type": "TextBlock", "text": label, "wrap": False, "size": "Small",
-                "weight": "Bolder" if is_active else "Default",
-                "color": "accent" if is_active else "default",
-                "horizontalAlignment": "center",
-            }],
-        })
-    columns.append({"type": "Column", "width": "stretch", "items": []})  # see _nav_button_columnset
-    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
+    return pill_columnset(COMMON_VULNS_TEAMS, active_team, lambda key: {"action_id": "fix_common_team", "team": key})
 
 
 # Full Fix-tab body building (sub-nav + real, clickable content) now lives
