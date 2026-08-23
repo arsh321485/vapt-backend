@@ -101,6 +101,27 @@ def send_activity(service_url: str, conversation_id: str, activity: dict):
     return resp
 
 
+def delete_activity(service_url: str, conversation_id: str, activity_id: str):
+    """
+    Deletes a previously-sent bot message — used to remove the old
+    onboarding/dashboard card right before posting a new one, so a channel
+    never accumulates multiple stale root cards side by side (each with its
+    own independent edit-in-place chain, which is what made old clicks look
+    like they were "going to the wrong place").
+    """
+    if not activity_id:
+        return None
+    url = f"{service_url.rstrip('/')}/v3/conversations/{conversation_id}/activities/{activity_id}"
+    try:
+        resp = requests.delete(url, headers=_connector_headers(), timeout=15)
+        if resp.status_code >= 300:
+            logger.info(f"[TeamsBot] delete_activity ({activity_id}) -> {resp.status_code} (likely already gone/too old, harmless)")
+        return resp
+    except Exception:
+        logger.exception(f"[TeamsBot] delete_activity request failed for {activity_id}")
+        return None
+
+
 def adaptive_card_attachment(card: dict) -> dict:
     """Wraps a raw Adaptive Card JSON body as a Bot Framework attachment."""
     return {

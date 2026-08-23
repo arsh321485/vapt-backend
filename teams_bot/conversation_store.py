@@ -126,6 +126,22 @@ def get_team_channel_reference(team_id: str):
         return db[TEAM_CHANNEL_COLLECTION].find_one({"team_id": team_id})
 
 
+def set_active_message_id(team_id: str, message_id):
+    """
+    Tracks the id of the single "live" onboarding/dashboard card currently
+    posted in this team's admin-dashboard channel — so the next proactive
+    post (welcome -> risk-criteria -> navbar transitions) can delete this
+    one first instead of leaving it behind as an orphaned extra card.
+    """
+    if not team_id:
+        return
+    with MongoContext() as db:
+        db[TEAM_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id},
+            {"$set": {"active_message_id": message_id}},
+        )
+
+
 def resolve_team_id_from_thread_id(thread_id: str):
     """
     Confirmed via real production data: Bot Framework only includes

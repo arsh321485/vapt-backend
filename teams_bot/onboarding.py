@@ -8,7 +8,7 @@ three surfaces can never drift out of sync on what "ready" means.
 import logging
 
 from . import bot_api, cards
-from .conversation_store import get_team_channel_reference
+from .conversation_store import get_team_channel_reference, set_active_message_id
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +19,57 @@ def _resolve_admin_by_team_id(team_id):
     return User.objects.filter(ms_team_id=team_id).first()
 
 
+def replace_active_card(team_id, card):
+    """
+    Deletes the previously-tracked "live" card for this team's
+    admin-dashboard channel (if any) and posts `card` as a fresh message in
+    its place, tracking the new message id for next time. This is the
+    single source of truth for "only one card lives in the channel at a
+    time" — used for onboarding state transitions AND for every nav/action
+    card click (see TeamsBotMessagesView._handle_message).
+
+    Confirmed via real production activity dumps that Bot Framework's
+    update-activity PUT (editing a message "in place") does NOT reliably
+    preserve a stable clickable identity in Teams — consecutive clicks on
+    what looked like the same card kept arriving with different
+    `replyToId` values, meaning every "edit" was effectively spawning a new
+    independently-clickable message anyway. Delete-then-send is what
+    actually keeps the channel down to one live card, since it doesn't
+    depend on Teams preserving that identity across edits at all.
+
+    Returns the new message id (or None if the channel reference isn't
+    known yet / the send failed).
+    """
+    ref = get_team_channel_reference(team_id)
+    if not ref:
+        logger.info(f"[TeamsOnboarding] no stored admin-dashboard channel reference for team_id={team_id} — bot not added yet")
+        return None
+
+    old_message_id = ref.get("active_message_id")
+    if old_message_id:
+        bot_api.delete_activity(ref["service_url"], ref["conversation_id"], old_message_id)
+
+    resp = bot_api.send_activity(
+        ref["service_url"], ref["conversation_id"],
+        bot_api.card_message(card),
+    )
+    try:
+        new_message_id = resp.json().get("id") if resp is not None else None
+    except Exception:
+        new_message_id = None
+    if new_message_id:
+        set_active_message_id(team_id, new_message_id)
+    return new_message_id
+
+
 def post_onboarding_step(admin, team_id=None, force_state=None):
     """
     Posts whichever onboarding card matches the admin's current state
     ("no_report" -> welcome card, "needs_risk_criteria" -> risk-criteria
     prompt, "ready" -> the completed navbar) into the stored admin-dashboard
-    channel conversation for this admin's team. No-op (logged, not raised)
-    if the bot hasn't been added to that team yet — nothing has been saved
-    to proactively message into.
+    channel conversation for this admin's team, replacing whatever card is
+    currently live there (see replace_active_card). No-op (logged, not
+    raised) if the bot hasn't been added to that team yet.
 
     `force_state` lets callers that already know the transition (e.g.
     "risk criteria was just submitted, so definitely show the navbar now")
@@ -36,11 +79,6 @@ def post_onboarding_step(admin, team_id=None, force_state=None):
     team_id = team_id or getattr(admin, "ms_team_id", None)
     if not team_id:
         logger.info(f"[TeamsOnboarding] admin={getattr(admin, 'email', None)} has no ms_team_id — skipping")
-        return None
-
-    ref = get_team_channel_reference(team_id)
-    if not ref:
-        logger.info(f"[TeamsOnboarding] no stored admin-dashboard channel reference for team_id={team_id} — bot not added yet")
         return None
 
     if force_state:
@@ -56,11 +94,8 @@ def post_onboarding_step(admin, team_id=None, force_state=None):
     else:
         card = cards.nav_buttons_card(active_action_id="nav_home")
 
-    bot_api.send_activity(
-        ref["service_url"], ref["conversation_id"],
-        bot_api.card_message(card),
-    )
-    logger.info(f"[TeamsOnboarding] Posted state={state} card into team_id={team_id}")
+    new_message_id = replace_active_card(team_id, card)
+    logger.info(f"[TeamsOnboarding] Posted state={state} card into team_id={team_id} (new_message_id={new_message_id})")
     return state
 
 
