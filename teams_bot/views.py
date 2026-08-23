@@ -337,7 +337,17 @@ class TeamsBotMessagesView(APIView):
             f"content_types={[a.get('contentType') for a in attachments]} "
             f"has_text={bool((activity.get('text') or '').strip())}"
         )
-        if attachments:
+        # Teams tacks on a "text/html" attachment for the @mention span
+        # itself even on a PLAIN TEXT message with no real file (confirmed
+        # via real testing: @-mentioning the bot with just "hi" landed
+        # here with attachments_count=1, content_types=["text/html"]) —
+        # counting that as "the admin attached a file" made a normal
+        # @mention wrongly trigger the "wasn't expecting a file right now"
+        # reply instead of the plain-text greeting. Only route into
+        # _handle_attachment for attachments that could actually be a
+        # real file.
+        real_attachments = [a for a in attachments if (a.get("contentType") or "") != "text/html"]
+        if real_attachments:
             self._handle_attachment(activity, service_url, conversation_id, activity_id, attachments)
             return
 
