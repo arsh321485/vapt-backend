@@ -251,30 +251,24 @@ def risk_criteria_prompt_card():
 # Same tab set + order as SlackSlashCommandView._NAV_ITEMS, and the same
 # internal action_id spelling (nav_home, nav_fix, ...) so any shared
 # downstream data-formatting code keys off one consistent name across both
-# platforms. Labels kept short on purpose (see _nav_button_columnset) —
-# Teams renders these host-side and will still wrap onto a second line on a
-# narrow pane no matter what the card says, but short labels in a ColumnSet
-# give it the best real chance of staying on one row.
+# platforms. Full names kept (not shortened) per explicit request — real
+# Action.Execute buttons get a narrow, roughly-uniform rendered width in
+# Teams regardless of label length, so all 8 in one row truncated these;
+# see _nav_button_columnset for how that's solved (two rows) instead of
+# shortening the text.
 NAV_ITEMS = [
     ("nav_home", "🏠 Home"),
     ("nav_fix", "🔧 Fix"),
     ("nav_register", "📋 Register"),
-    # Real Action.Execute buttons (see pill_columnset) get a narrow,
-    # roughly-uniform rendered width in Teams regardless of label length —
-    # confirmed via real testing that the longer names ("Automations",
-    # "Timeline Ext.", "Reminder", "Download Report") were truncated to a
-    # few letters each. Back to short labels so the text is actually
-    # readable; a tab's own header still spells out the full name once
-    # you're on it.
-    ("nav_automation", "🤖 Auto"),
+    ("nav_automation", "🤖 Automations"),
     ("nav_team", "👥 Team"),
-    ("nav_request", "📨 Ext."),
-    ("nav_notification", "🔔 Alerts"),
-    ("nav_download", "📥 Report"),
+    ("nav_request", "📨 Timeline Ext."),
+    ("nav_notification", "🔔 Reminder"),
+    ("nav_download", "📥 Download Report"),
 ]
 
 
-def pill_columnset(options, active_key, build_data, stretch=True):
+def pill_columnset(options, active_key, build_data, stretch=True, separator=True):
     """
     Generic single-row tab bar — a ColumnSet of narrow auto-width columns,
     each holding one real Action.Execute button (an ActionSet with a
@@ -292,6 +286,9 @@ def pill_columnset(options, active_key, build_data, stretch=True):
     payload dict for that button (whatever teams_bot.actions.handle_card_action
     needs to route it) — kept as a callback rather than a fixed shape since
     every caller's payload fields differ (action_id, offset, filters, ...).
+    `separator`: pass False for a row stacked directly under another pill
+    row (see _nav_button_columnset) so there isn't a divider line between
+    them.
     """
     columns = []
     for key, label in options:
@@ -307,13 +304,37 @@ def pill_columnset(options, active_key, build_data, stretch=True):
         })
     if stretch:
         columns.append({"type": "Column", "width": "stretch", "items": []})
-    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
+    row = {"type": "ColumnSet", "columns": columns, "spacing": "Medium"}
+    if separator:
+        row["separator"] = True
+    return row
 
 
 def _nav_button_columnset(active_action_id):
-    """The persistent top tab bar — see pill_columnset for why this is a
-    real horizontal ActionSet of buttons, not clickable plain text."""
-    return pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id})
+    """
+    The persistent top tab bar, as TWO rows of 4 buttons instead of one
+    row of 8. Real Action.Execute buttons in Teams get a narrow, roughly-
+    uniform rendered width regardless of label length — confirmed via
+    real testing that all 8 full names ("Automations", "Timeline Ext.",
+    "Reminder", "Download Report" included) truncated badly crammed into
+    one row. Splitting into two rows gives every button real room for its
+    full label instead of shortening any of them.
+    """
+    build_data = lambda action_id: {"action_id": action_id}
+    return {
+        "type": "Container",
+        "spacing": "Medium",
+        "separator": True,
+        "items": [
+            # stretch=True on both (not just the first) — this is the
+            # first body element on every card, so whichever row ends up
+            # deciding the card's overall claimed width needs the trailing
+            # stretch column, and keeping it on both is simpler than
+            # reasoning about which one that'll be in a given renderer.
+            pill_columnset(NAV_ITEMS[:4], active_action_id, build_data, stretch=True),
+            pill_columnset(NAV_ITEMS[4:], active_action_id, build_data, stretch=True, separator=False),
+        ],
+    }
 
 
 def nav_buttons_card(active_action_id="nav_home", extra_body=None):
