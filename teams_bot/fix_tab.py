@@ -412,14 +412,24 @@ def _fix_toggle_actionset(sub, value_base):
     return {"type": "ActionSet", "spacing": "Medium", "actions": [action("🛠 Manual", "manual"), action("🤖 Automation Fix", "automation")]}
 
 
-def _vuln_detail_full_body(admin, idx, sub="manual", ctx="vulns", host=None, offset=0):
-    """Shared by both entry points (flat All Vulns list, and an asset's own
-    vulnerability list) — `ctx`/`host` only decide where the Back button
-    returns to. Read-only for admins, same as the website/Slack."""
+def _vuln_detail_full_body(admin, idx, sub="manual", ctx="vulns", host=None, offset=0,
+                            back_action_id=None, back_title=None, extra_value=None):
+    """Shared by every entry point that drills into one vulnerability's own
+    Manual/Automation Fix detail (flat All Vulns list, an asset's own vuln
+    list, and Register's filtered list) — `ctx`/`host` decide where the
+    Back button returns to for the two built-in cases; `back_action_id`/
+    `back_title`/`extra_value` let a THIRD caller (Register — see
+    teams_bot.register_tab) plug in its own Back target and extra state
+    (its severity/status filters) without this module needing to know
+    anything about Register's filter concept. Read-only for admins, same
+    as the website/Slack."""
     data = _fetch_register_data(admin)
     rows = data.get("rows") or []
+    extra_value = extra_value or {}
 
-    if ctx == "asset":
+    if back_action_id:
+        body = [_back_action(back_title or "← Back", back_action_id, {"offset": offset, **extra_value})]
+    elif ctx == "asset":
         body = [_back_action(f"← Back to {host}", "fix_asset_vuln_back", {"host": host, "offset": offset})]
     else:
         body = [_back_action("← Back to All Vulns", "fix_vuln_back", {"offset": offset})]
@@ -431,7 +441,7 @@ def _vuln_detail_full_body(admin, idx, sub="manual", ctx="vulns", host=None, off
     r = rows[idx]
     body.extend(_vuln_facts_body(r))
 
-    value_base = {"idx": idx, "ctx": ctx, "offset": offset}
+    value_base = {"idx": idx, "ctx": ctx, "offset": offset, **extra_value}
     if ctx == "asset":
         value_base["host"] = host
     body.append(_fix_toggle_actionset(sub, value_base))

@@ -18,6 +18,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from . import cards
 from . import fix_tab
+from . import register_tab
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -286,14 +287,28 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
 
     if action_id == "fix_vuln_toggle":
         # Manual/Automation Fix toggle inside a vuln's own detail page —
-        # works from either entry point (flat All Vulns list or an asset's
-        # vuln list), see fix_tab._vuln_detail_full_body's ctx handling.
+        # works from any entry point (flat All Vulns list, an asset's own
+        # vuln list, or Register's filtered list — ctx says which), see
+        # fix_tab._vuln_detail_full_body's ctx/back_action_id/extra_value
+        # handling.
         sub = value.get("sub") or "manual"
         ctx = value.get("ctx") or "vulns"
         idx = value.get("idx")
         idx = int(idx) if idx is not None else None
         offset = int(value.get("offset") or 0)
         host = value.get("host") or ""
+
+        if ctx == "register":
+            sev = value.get("sev") or "all"
+            st = value.get("st") or "all"
+            try:
+                content = register_tab.register_vuln_detail_body(admin, idx, sub=sub, sev=sev, st=st, offset=offset)
+                body = [register_tab.register_subnav_columnset("reg_sub_register")] + content
+            except Exception:
+                logger.exception("[TeamsBot] fix_vuln_toggle (register) failed")
+                body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+            return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
         active_sub = "fix_sub_assets" if ctx == "asset" else "fix_sub_vulns"
         try:
             if ctx == "asset":
@@ -305,6 +320,70 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             logger.exception("[TeamsBot] fix_vuln_toggle failed")
             body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    # ── Register tab ──────────────────────────────────────────────────
+    if action_id in ("reg_sub_register", "reg_sub_script"):
+        try:
+            body = register_tab.register_tab_body(admin, active_sub=action_id)
+        except Exception:
+            logger.exception(f"[TeamsBot] register_tab_body failed for {action_id}")
+            body = [cards._header("📋 Register"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
+    if action_id in ("reg_sev", "reg_st"):
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        try:
+            body = register_tab.register_tab_body(admin, active_sub="reg_sub_register", sev=sev, st=st, offset=0)
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [cards._header("📋 Register"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
+    if action_id == "reg_view_pg":
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = register_tab.register_tab_body(admin, active_sub="reg_sub_register", sev=sev, st=st, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] reg_view_pg failed")
+            body = [cards._header("📋 Register"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
+    if action_id == "script_pg":
+        offset = int(value.get("offset") or 0)
+        try:
+            body = register_tab.register_tab_body(admin, active_sub="reg_sub_script", offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] script_pg failed")
+            body = [cards._header("📜 Script"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
+    if action_id == "reg_view":
+        idx = value.get("idx")
+        idx = int(idx) if idx is not None else None
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        offset = int(value.get("offset") or 0)
+        try:
+            content = register_tab.register_vuln_detail_body(admin, idx, sub="manual", sev=sev, st=st, offset=offset)
+            body = [register_tab.register_subnav_columnset("reg_sub_register")] + content
+        except Exception:
+            logger.exception("[TeamsBot] reg_view failed")
+            body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
+    if action_id == "reg_view_back":
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = register_tab.register_tab_body(admin, active_sub="reg_sub_register", sev=sev, st=st, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] reg_view_back failed")
+            body = [cards._header("📋 Register"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
 
     if action_id == "fix_vuln_back":
         offset = int(value.get("offset") or 0)
@@ -386,6 +465,14 @@ def _handle_nav(admin, team_id, action_id):
             logger.exception("[TeamsBot] fix_tab_body (default) failed")
             body = [cards._header("🔧 Fix"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "nav_register":
+        try:
+            body = register_tab.register_tab_body(admin, active_sub="reg_sub_register")
+        except Exception:
+            logger.exception("[TeamsBot] register_tab_body (default) failed")
+            body = [cards._header("📋 Register"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
 
     label = dict(cards.NAV_ITEMS).get(action_id, action_id)
     return cards.nav_buttons_card(

@@ -251,6 +251,43 @@ NAV_ITEMS = [
 ]
 
 
+def pill_columnset(options, active_key, build_data, stretch=True):
+    """
+    Generic single-row pill/tab bar — a ColumnSet of narrow auto-width,
+    click-anywhere columns, one marked active. This is the same shape
+    _nav_button_columnset/_fix_subnav_columnset/_common_vulns_team_columnset
+    hand-build individually; new tabs (Register's severity/status filters,
+    and whatever Team/Reminder/Timeline Ext. need next) should call this
+    instead of writing another copy.
+
+    `options`: [(key, label), ...]. `build_data(key)` returns the click
+    payload dict for that pill (whatever teams_bot.actions.handle_card_action
+    needs to route it) — kept as a callback rather than a fixed shape since
+    every caller's payload fields differ (action_id, offset, filters, ...).
+    """
+    columns = []
+    for key, label in options:
+        is_active = key == active_key
+        columns.append({
+            "type": "Column",
+            "width": "auto",
+            "verticalContentAlignment": "center",
+            "selectAction": {"type": "Action.Execute", "verb": str(key), "data": build_data(key)},
+            "items": [{
+                "type": "TextBlock",
+                "text": label,
+                "wrap": False,
+                "size": "Small",
+                "weight": "Bolder" if is_active else "Default",
+                "color": "accent" if is_active else "default",
+                "horizontalAlignment": "center",
+            }],
+        })
+    if stretch:
+        columns.append({"type": "Column", "width": "stretch", "items": []})
+    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
+
+
 def _nav_button_columnset(active_action_id):
     """
     A single-row button bar built from a ColumnSet with narrow auto-width
