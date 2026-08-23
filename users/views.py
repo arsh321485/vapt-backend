@@ -1240,7 +1240,7 @@ def _get_graph_app_token():
     App-only (client_credentials) Graph API token — used only for auto-
     publishing/installing the Teams bot app, so this never depends on any
     individual admin's own delegated token/session. Needs the Application
-    permissions AppCatalog.ReadWrite.All and TeamworkAppInstallation.
+    permissions AppCatalog.ReadWrite.All and TeamsAppInstallation.
     ReadWriteForTeam.All granted (with admin consent) on this app
     registration — a one-time tenant setup step, same category as the
     Bot Framework/Azure Bot setup already done.
