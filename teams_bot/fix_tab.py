@@ -58,7 +58,7 @@ def _row(title_text, subtitle_text, action_id, value):
                 "type": "Column", "width": "auto", "verticalContentAlignment": "Center",
                 "items": [{
                     "type": "ActionSet",
-                    "actions": [{"type": "Action.Submit", "title": "View ›", "data": {"action_id": action_id, **value}}],
+                    "actions": [cards._execute_action("View ›", {"action_id": action_id, **value})],
                 }],
             },
         ],
@@ -72,16 +72,16 @@ def _pagination_body(offset, total, action_id, extra_value=None):
     body = [{"type": "TextBlock", "text": f"Showing {start}-{end} of {total}", "size": "Small", "isSubtle": True, "spacing": "Medium"}]
     actions = []
     if offset > 0:
-        actions.append({"type": "Action.Submit", "title": "‹ Prev", "data": {"action_id": action_id, "offset": max(0, offset - PAGE_SIZE), **extra_value}})
+        actions.append(cards._execute_action("‹ Prev", {"action_id": action_id, "offset": max(0, offset - PAGE_SIZE), **extra_value}))
     if offset + PAGE_SIZE < total:
-        actions.append({"type": "Action.Submit", "title": "Next ›", "data": {"action_id": action_id, "offset": offset + PAGE_SIZE, **extra_value}})
+        actions.append(cards._execute_action("Next ›", {"action_id": action_id, "offset": offset + PAGE_SIZE, **extra_value}))
     if actions:
         body.append({"type": "ActionSet", "actions": actions})
     return body
 
 
 def _back_action(title, action_id, value):
-    return {"type": "ActionSet", "actions": [{"type": "Action.Submit", "title": title, "data": {"action_id": action_id, **value}}]}
+    return {"type": "ActionSet", "actions": [cards._execute_action(title, {"action_id": action_id, **value})]}
 
 
 def _fetch_register_data(admin):
@@ -400,10 +400,10 @@ def _manual_fix_body(steps_data, host_os_hint=None):
 
 def _fix_toggle_actionset(sub, value_base):
     def action(title, sub_val):
-        a = {"type": "Action.Submit", "title": title, "data": {"action_id": "fix_vuln_toggle", "sub": sub_val, **value_base}}
-        if sub == sub_val:
-            a["style"] = "positive"
-        return a
+        return cards._execute_action(
+            title, {"action_id": "fix_vuln_toggle", "sub": sub_val, **value_base},
+            style="positive" if sub == sub_val else None,
+        )
     return {"type": "ActionSet", "spacing": "Medium", "actions": [action("🛠 Manual", "manual"), action("🤖 Automation Fix", "automation")]}
 
 

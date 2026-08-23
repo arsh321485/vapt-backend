@@ -117,12 +117,21 @@ class TeamsBotMessagesView(APIView):
         except Exception:
             logger.exception("[TeamsBot] save_conversation_reference failed")
 
+        # Adaptive Card Action.Execute clicks arrive as a synchronous
+        # "invoke" activity, not a fire-and-forget "message" — Bot
+        # Framework expects the new card back in THIS HTTP response body,
+        # not as a separate Connector API call, so this branches BEFORE
+        # the generic 200 below (see _handle_adaptive_card_invoke).
+        if activity_type == "invoke" and activity.get("name") == "adaptiveCard/action":
+            return self._handle_adaptive_card_invoke(activity)
+
         try:
             if activity_type == "message":
                 self._handle_message(activity)
             elif activity_type == "conversationUpdate":
                 self._handle_conversation_update(activity)
-            # Other activity types (typing, invoke, etc.) — Phase 2+.
+            # Other activity types (typing, unrecognized invokes, etc.) —
+            # nothing to do.
         except Exception:
             logger.exception(f"[TeamsBot] Error handling activity type={activity_type}")
 
@@ -130,6 +139,52 @@ class TeamsBotMessagesView(APIView):
         # replies go out as separate REST calls (reply_to_activity/send_activity),
         # not in this response body.
         return Response(status=status.HTTP_200_OK)
+
+    def _handle_adaptive_card_invoke(self, activity: dict):
+        """
+        Handles Action.Execute clicks. The client is BLOCKED waiting on
+        this response — returning the new card here (instead of firing a
+        separate reply/update REST call, like the old Action.Submit path
+        did) is what makes the swap instant with no visible flicker and,
+        critically, none of the "Your response was sent to the app" toast
+        Action.Submit always shows (that toast is inherent to its fire-
+        and-forget flow; there's no card-JSON setting that suppresses it
+        while staying on Action.Submit — this invoke-response pattern is
+        Teams' own documented fix).
+        """
+        value = activity.get("value") or {}
+        action = value.get("action") or {}
+        data = action.get("data") or {}
+
+        admin, team_id = self._resolve_admin(activity)
+        if not admin:
+            card = cards.text_result_card(
+                "🔒 Not linked",
+                "This Teams workspace isn't linked to a VaptFix admin account yet — please log in from the website first.",
+            )
+        else:
+            conversation_id = (activity.get("conversation") or {}).get("id")
+            try:
+                card = actions.handle_card_action(admin, team_id, conversation_id, data)
+            except Exception:
+                logger.exception("[TeamsBot] handle_card_action failed (invoke)")
+                card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
+
+            # Keep the tracked "active" message id in sync too — other,
+            # unrelated proactive pushes (post_onboarding_step after a
+            # report upload, etc.) still edit/replace via that id.
+            try:
+                target_id = activity.get("replyToId") or activity.get("id")
+                if team_id and target_id:
+                    from .conversation_store import set_active_message_id
+                    set_active_message_id(team_id, target_id)
+            except Exception:
+                logger.exception("[TeamsBot] set_active_message_id (invoke) failed")
+
+        return Response(
+            {"statusCode": 200, "type": "application/vnd.microsoft.card.adaptive", "value": card},
+            status=status.HTTP_200_OK,
+        )
 
     def _resolve_admin(self, activity: dict):
         # Bot Framework's channelData.team.id is a CONVERSATION/thread id

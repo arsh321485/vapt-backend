@@ -7,9 +7,15 @@ _nav_buttons_block). Same copy, same step order, same action names where a
 direct equivalent exists — only the card format changes (Adaptive Card JSON
 instead of Block Kit blocks), per "same as a Slack me kiya hai vese hi".
 
-Every button is an Action.Submit whose `data` is echoed back verbatim as the
-`value` field of the resulting Teams "message" activity — that's the field
-TeamsBotMessagesView._handle_message already branches on.
+Every button is an Action.Execute (Adaptive Card Universal Actions) whose
+`data` is echoed back verbatim in the resulting `invoke` activity
+(name="adaptiveCard/action") — TeamsBotMessagesView._handle_adaptive_card_invoke
+reads it from `value.action.data`. Action.Execute (not the older
+Action.Submit) is what lets a click swap the card in place with zero
+flicker and, critically, without Teams showing its "Your response was
+sent to the app" toast on every click — that toast is baked into
+Action.Submit's fire-and-forget flow and Teams' own docs name
+Action.Execute + a synchronous invoke response as the only way around it.
 """
 
 _SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
@@ -65,15 +71,25 @@ def _open_url_action(title, url, style=None):
     return action
 
 
-def _submit_action(title, action_id, extra_data=None, style=None):
+def _execute_action(title, data, style=None):
+    """Action.Execute — see the module docstring for why this replaced
+    Action.Submit everywhere. `verb` is set to the action_id mainly for
+    parity with Microsoft's own samples; nothing here actually branches on
+    it — the dispatch in teams_bot.actions reads action_id out of `data`,
+    same as it always has."""
     action = {
-        "type": "Action.Submit",
+        "type": "Action.Execute",
         "title": title,
-        "data": {"action_id": action_id, **(extra_data or {})},
+        "verb": data.get("action_id", "action"),
+        "data": data,
     }
     if style:
         action["style"] = style  # "positive" is Adaptive Card's primary-button equivalent
     return action
+
+
+def _submit_action(title, action_id, extra_data=None, style=None):
+    return _execute_action(title, {"action_id": action_id, **(extra_data or {})}, style=style)
 
 
 def welcome_card():
@@ -251,7 +267,7 @@ def _nav_button_columnset(active_action_id):
             "type": "Column",
             "width": "auto",
             "verticalContentAlignment": "center",
-            "selectAction": {"type": "Action.Submit", "data": {"action_id": action_id}},
+            "selectAction": {"type": "Action.Execute", "verb": action_id, "data": {"action_id": action_id}},
             "items": [{
                 "type": "TextBlock",
                 "text": label,
@@ -457,7 +473,7 @@ def _fix_subnav_columnset(active_sub):
             "type": "Column",
             "width": "auto",
             "verticalContentAlignment": "center",
-            "selectAction": {"type": "Action.Submit", "data": {"action_id": action_id}},
+            "selectAction": {"type": "Action.Execute", "verb": action_id, "data": {"action_id": action_id}},
             "items": [{
                 "type": "TextBlock", "text": label, "wrap": False, "size": "Small",
                 "weight": "Bolder" if is_active else "Default",
@@ -486,7 +502,7 @@ def _common_vulns_team_columnset(active_team):
             "type": "Column",
             "width": "auto",
             "verticalContentAlignment": "center",
-            "selectAction": {"type": "Action.Submit", "data": {"action_id": "fix_common_team", "team": key}},
+            "selectAction": {"type": "Action.Execute", "verb": "fix_common_team", "data": {"action_id": "fix_common_team", "team": key}},
             "items": [{
                 "type": "TextBlock", "text": label, "wrap": False, "size": "Small",
                 "weight": "Bolder" if is_active else "Default",
