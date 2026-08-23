@@ -38,6 +38,12 @@ def _card(body, actions=None):
         "type": "AdaptiveCard",
         "version": _VERSION,
         "body": body,
+        # Teams caps card width to a narrow default (~330px, leaving most of
+        # the message pane empty) unless told otherwise — this is the
+        # documented Teams-specific escape hatch to use the full available
+        # width instead, which is what actually made the empty space on the
+        # right go away and gave the nav row more room to fit on one line.
+        "msteams": {"width": "Full"},
     }
     if actions:
         card["actions"] = actions
