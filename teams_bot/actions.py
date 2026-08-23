@@ -25,16 +25,27 @@ logger = logging.getLogger(__name__)
 _factory = APIRequestFactory()
 
 
-def _call_view_in_process(view_cls, admin, data=None, files=None, method="post"):
-    """Invokes a DRF APIView's endpoint in-process as `admin`, multipart so
-    both plain fields and file uploads work through the same call."""
+def _call_view_in_process(view_cls, admin, data=None, files=None, method="post", url_kwargs=None, request_format="multipart"):
+    """Invokes a DRF endpoint in-process as `admin` — multipart by default so
+    both plain fields and file uploads work through the same call.
+
+    `url_kwargs`: for endpoints whose path carries arguments (report_id,
+    fix_vuln_id, plugin_id, ...) — DRF hands these to the view as normal
+    view kwargs, same as the URLconf would, so pass them here instead of
+    trying to bake them into the (never-actually-routed) "/internal/" path.
+    `view_cls` also accepts a plain @api_view-decorated function (has no
+    .as_view()) — those are called directly, same call shape either way.
+    `request_format`: "json" for bodies with nested lists/dicts (multipart
+    can't encode those) — e.g. {"vulnerability_names": [...]}.
+    """
     payload = dict(data or {})
     if files:
         payload.update(files)
     factory_method = getattr(_factory, method)
-    request = factory_method("/internal/", payload, format="multipart")
+    request = factory_method("/internal/", payload, format=request_format)
     force_authenticate(request, user=admin)
-    response = view_cls.as_view()(request)
+    view = view_cls.as_view() if hasattr(view_cls, "as_view") else view_cls
+    response = view(request, **(url_kwargs or {}))
     if hasattr(response, "render"):
         response.render()
     return response.status_code, response.data
@@ -270,6 +281,28 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.vuln_detail_body(admin, idx, back_offset=back_offset)
         except Exception:
             logger.exception("[TeamsBot] fix_vuln_view failed")
+            body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_vuln_toggle":
+        # Manual/Automation Fix toggle inside a vuln's own detail page —
+        # works from either entry point (flat All Vulns list or an asset's
+        # vuln list), see fix_tab._vuln_detail_full_body's ctx handling.
+        sub = value.get("sub") or "manual"
+        ctx = value.get("ctx") or "vulns"
+        idx = value.get("idx")
+        idx = int(idx) if idx is not None else None
+        offset = int(value.get("offset") or 0)
+        host = value.get("host") or ""
+        active_sub = "fix_sub_assets" if ctx == "asset" else "fix_sub_vulns"
+        try:
+            if ctx == "asset":
+                content = fix_tab.asset_vuln_detail_body(admin, idx, host, back_offset=offset, sub=sub)
+            else:
+                content = fix_tab.vuln_detail_body(admin, idx, back_offset=offset, sub=sub)
+            body = [cards._fix_subnav_columnset(active_sub)] + content
+        except Exception:
+            logger.exception("[TeamsBot] fix_vuln_toggle failed")
             body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
