@@ -70,15 +70,24 @@ def _member_detail_id(m):
 # ── Add User ───────────────────────────────────────────────────────────
 
 def add_user_form_body():
+    # NOTE: deliberately NOT using isRequired/errorMessage on these inputs —
+    # confirmed via real testing that Adaptive Cards validates every
+    # isRequired input on the CARD as a whole before letting ANY
+    # Action.Execute fire, including the top nav bar's own selectAction
+    # clicks living in the same card body. With isRequired set here, an
+    # admin who opened Add User couldn't click any other tab until they'd
+    # filled this form in — required-field checking is done server-side
+    # in submit_add_user() instead, which already returns a clear error
+    # message without blocking navigation.
     return [
         {"type": "TextBlock", "text": "➕ Add User", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": "Add a new team member and grant them access to one team. A welcome email with login instructions is sent automatically.", "size": "Small", "isSubtle": True, "wrap": True},
         {"type": "Input.ChoiceSet", "id": "au_type", "label": "User Type", "style": "compact", "value": "external",
          "choices": [{"title": "External", "value": "external"}, {"title": "Internal", "value": "internal"}]},
-        {"type": "Input.Text", "id": "au_first", "label": "First Name", "isRequired": True, "errorMessage": "First name is required", "placeholder": "e.g. Ritu"},
+        {"type": "Input.Text", "id": "au_first", "label": "First Name", "placeholder": "e.g. Ritu"},
         {"type": "Input.Text", "id": "au_last", "label": "Last Name", "placeholder": "optional"},
-        {"type": "Input.Text", "id": "au_email", "label": "Email", "style": "Email", "isRequired": True, "errorMessage": "Email is required", "placeholder": "name@example.com"},
-        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team", "style": "compact", "isRequired": True, "errorMessage": "Select a team",
+        {"type": "Input.Text", "id": "au_email", "label": "Email", "style": "Email", "placeholder": "name@example.com"},
+        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team", "style": "compact",
          "placeholder": "Select a team",
          "choices": [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]},
         {
