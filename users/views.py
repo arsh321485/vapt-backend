@@ -1244,6 +1244,22 @@ TEAMS_CHANNEL_DISPLAY_NAMES = {
 # content — see _ensure_admin_private_channel.
 ADMIN_DASHBOARD_CHANNEL_NAME = "vaptfix admin dashboard"
 
+# Disabled for now (2026-08-23): confirmed via real production logs that
+# the bot never actually gets installed into the new private channel —
+# _get_or_publish_teams_catalog_app's publish call 403s ("User not
+# authorized"), and even after AppCatalog.ReadWrite.All +
+# TeamsAppInstallation.ReadWriteForTeam.All were granted with admin
+# consent in Azure, the private channel still didn't get a welcome card
+# (Teams apps-in-private-channels support is a very recent, still-rolling-
+# out capability — the channel-scoped installedApps call this relies on
+# may need a permission/tenant-rollout state that isn't confirmed yet).
+# Flip back to True once that's diagnosed with fresh logs — everything
+# else (channel creation, General revert, owner assignment) still runs;
+# this only skips the part that was actually broken (bot install + the
+# routing that depends on it), so dashboard content keeps posting into
+# General in the meantime instead of silently going nowhere.
+ADMIN_PRIVATE_CHANNEL_ENABLED = False
+
 
 _graph_app_token_cache = {"token": None, "expires_at": 0}
 
@@ -1459,6 +1475,8 @@ def _ensure_admin_private_channel(team_id, access_token, headers=None, admin=Non
     messaging lookups) already expecting it. Safe no-op on any failure —
     the 4 real team channels still get created either way.
     """
+    if not ADMIN_PRIVATE_CHANNEL_ENABLED:
+        return {"status": "disabled", "channelId": None}
     headers = headers or ({"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"} if access_token else None)
     if not team_id or not headers:
         return {"status": "skipped", "channelId": None}
