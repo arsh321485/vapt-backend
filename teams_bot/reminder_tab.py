@@ -69,21 +69,27 @@ def _parse_rc_days(raw_value):
 
 
 def _fetch_risk_criteria_days(admin):
-    from risk_criteria.views import RiskCriteriaListView
-    from .actions import _call_view_in_process
-    status_code, data = _call_view_in_process(RiskCriteriaListView, admin, method="get")
-    if status_code >= 300 or not isinstance(data, dict):
-        return None
-    rc_list = data.get("risk_criteria") or []
-    if not rc_list:
-        return None
-    rc = rc_list[0]
-    return {
-        "critical": _parse_rc_days(rc.get("critical")),
-        "high": _parse_rc_days(rc.get("high")),
-        "medium": _parse_rc_days(rc.get("medium")),
-        "low": _parse_rc_days(rc.get("low")),
-    }
+    def _fetch():
+        from risk_criteria.views import RiskCriteriaListView
+        from .actions import _call_view_in_process
+        status_code, data = _call_view_in_process(RiskCriteriaListView, admin, method="get")
+        if status_code >= 300 or not isinstance(data, dict):
+            return None
+        rc_list = data.get("risk_criteria") or []
+        if not rc_list:
+            return None
+        rc = rc_list[0]
+        return {
+            "critical": _parse_rc_days(rc.get("critical")),
+            "high": _parse_rc_days(rc.get("high")),
+            "medium": _parse_rc_days(rc.get("medium")),
+            "low": _parse_rc_days(rc.get("low")),
+        }
+    # A None result (not configured yet) is never cached by cached_fetch
+    # (it treats a cached None the same as a miss) -- harmless here, that
+    # state resolves the moment the admin finishes the risk-criteria
+    # onboarding step, not from anything on this tab.
+    return fix_tab.cached_fetch(f"risk_criteria_days:{admin.id}", 20, _fetch)
 
 
 def _bucket_deadline_rows(rows, rc_days):

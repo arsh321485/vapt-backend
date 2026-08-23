@@ -45,26 +45,30 @@ def _classify(raw_value):
 
 
 def _fetch_category_by_plugin(admin):
-    from automation_scripts_api import views as auto_views
-    from .actions import _call_view_in_process
-    status_code, data = _call_view_in_process(auto_views.admin_list_scripts, admin, method="get")
-    if status_code >= 300 or not isinstance(data, dict):
-        return {}
-    category_by_plugin = {}
-    for s in data.get("scripts") or []:
-        pid = s.get("plugin_id")
-        if pid is None:
-            continue
-        try:
-            pid = int(pid)
-        except (TypeError, ValueError):
-            continue
-        if pid in category_by_plugin:
-            continue
-        cat = _classify(s.get("automation_possible"))
-        if cat:
-            category_by_plugin[pid] = cat
-    return category_by_plugin
+    def _fetch():
+        from automation_scripts_api import views as auto_views
+        from .actions import _call_view_in_process
+        status_code, data = _call_view_in_process(auto_views.admin_list_scripts, admin, method="get")
+        if status_code >= 300 or not isinstance(data, dict):
+            return {}
+        category_by_plugin = {}
+        for s in data.get("scripts") or []:
+            pid = s.get("plugin_id")
+            if pid is None:
+                continue
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                continue
+            if pid in category_by_plugin:
+                continue
+            cat = _classify(s.get("automation_possible"))
+            if cat:
+                category_by_plugin[pid] = cat
+        return category_by_plugin
+    # Library-wide, not admin/report scoped — but keyed by admin id anyway
+    # for a simple, consistent cache-key shape with everything else here.
+    return fix_tab.cached_fetch(f"category_by_plugin:{admin.id}", 30, _fetch)
 
 
 def _sev_filter_columnset(category, active_sev, counts):

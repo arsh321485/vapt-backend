@@ -84,15 +84,41 @@ def _back_action(title, action_id, value):
     return {"type": "ActionSet", "actions": [cards._execute_action(title, {"action_id": action_id, **value})]}
 
 
+def cached_fetch(cache_key, ttl, fetch_fn):
+    """
+    Small shared helper (used by fix_tab/register_tab/automations_tab/
+    reminder_tab) — every Action.Execute click BLOCKS the Teams client
+    (buttons show disabled) until our invoke response comes back, so a
+    user clicking through several tabs/pages/filters in quick succession
+    keeps re-running the same in-process DRF calls (Mongo round trips)
+    over and over within a few seconds of each other. This data only
+    actually changes on distinct events well outside that window (a new
+    report upload, a risk-criteria save, an automation script being
+    added) — not from anything these read-only tab clicks themselves do —
+    so a short cache is safe and directly shortens that visible "greyed
+    out while waiting" window on every click after the first.
+    """
+    from django.core.cache import cache
+    key = f"teamsbot_cache:{cache_key}"
+    val = cache.get(key)
+    if val is not None:
+        return val
+    val = fetch_fn()
+    cache.set(key, val, timeout=ttl)
+    return val
+
+
 def _fetch_register_data(admin):
     """Full response (rows + report_id) — the Fix/Manual toggle needs
     report_id too (to get-or-create a fix record), not just the rows."""
-    from adminregister.views import LatestSuperAdminVulnerabilityRegisterAPIView
-    from .actions import _call_view_in_process
-    status_code, data = _call_view_in_process(LatestSuperAdminVulnerabilityRegisterAPIView, admin, method="get")
-    if status_code >= 300 or not isinstance(data, dict):
-        raise ValueError(f"register fetch failed: {status_code}")
-    return data
+    def _fetch():
+        from adminregister.views import LatestSuperAdminVulnerabilityRegisterAPIView
+        from .actions import _call_view_in_process
+        status_code, data = _call_view_in_process(LatestSuperAdminVulnerabilityRegisterAPIView, admin, method="get")
+        if status_code >= 300 or not isinstance(data, dict):
+            raise ValueError(f"register fetch failed: {status_code}")
+        return data
+    return cached_fetch(f"register_data:{admin.id}", 20, _fetch)
 
 
 def _fetch_register_rows(admin):

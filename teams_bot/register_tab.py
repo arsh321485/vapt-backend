@@ -122,12 +122,14 @@ def register_vuln_detail_body(admin, idx, sub="manual", sev="all", st="all", off
 # ─── Script sub-tab ──────────────────────────────────────────────────────
 
 def _fetch_script_stats(admin):
-    from automation_scripts_api import views as auto_views
-    from .actions import _call_view_in_process
-    status_code, data = _call_view_in_process(auto_views.admin_download_stats, admin, method="get")
-    if status_code >= 300 or not isinstance(data, dict):
-        raise ValueError(f"script stats fetch failed: {status_code}")
-    return data.get("stats") or []
+    def _fetch():
+        from automation_scripts_api import views as auto_views
+        from .actions import _call_view_in_process
+        status_code, data = _call_view_in_process(auto_views.admin_download_stats, admin, method="get")
+        if status_code >= 300 or not isinstance(data, dict):
+            raise ValueError(f"script stats fetch failed: {status_code}")
+        return data.get("stats") or []
+    return fix_tab.cached_fetch(f"script_stats:{admin.id}", 20, _fetch)
 
 
 def script_list_body(admin, offset=0):
