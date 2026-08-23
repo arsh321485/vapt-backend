@@ -593,6 +593,15 @@ def admin_download_stats(request):
     admin_id = str(request.user.id)
     admin_email = getattr(request.user, "email", None)
 
+    # Freemium admins can never actually download a script (see
+    # assert_can_use_automation_scripts, enforced in user_download_script),
+    # so script_user_downloads stays permanently empty for them and every
+    # count below would show a plain "0" — indistinguishable from "nobody's
+    # gotten around to it yet" on a Premium account. Surface WHY instead,
+    # so the frontend can show an upgrade prompt rather than a misleading 0.
+    from billing.enforcement import is_freemium, _is_unlimited_admin
+    premium_required = is_freemium(request.user) and not _is_unlimited_admin(request.user)
+
     member_emails = []
     if UserDetail:
         member_emails = list(
@@ -643,7 +652,16 @@ def admin_download_stats(request):
 
     stats = _build_stats(docs, report_id=report_ids)
     stats.sort(key=lambda s: s["download_count"], reverse=True)
-    return Response({"report_id": str(report_id), "count": len(stats), "stats": stats})
+    return Response({
+        "report_id": str(report_id),
+        "count": len(stats),
+        "stats": stats,
+        "premium_required": premium_required,
+        "message": (
+            "Automation scripts are not available on the Freemium plan — download counts will stay "
+            "at 0 until you upgrade to Premium." if premium_required else None
+        ),
+    })
 
 
 @api_view(["GET"])
@@ -846,6 +864,13 @@ def user_download_stats(request):
             status=403,
         )
 
+    # See the matching comment in admin_download_stats — a Freemium admin's
+    # members can never actually download a script, so this member's own
+    # count will always show 0 too; surface why instead of leaving it
+    # looking like a plain "haven't downloaded yet" count.
+    from billing.enforcement import is_freemium, _is_unlimited_admin
+    premium_required = is_freemium(admin_id) and not _is_unlimited_admin(admin_id)
+
     selected_team = request.query_params.get("team", "").strip()
     active_teams = [selected_team] if selected_team and selected_team in teams else teams
     teams_lower = {t.lower() for t in active_teams}
@@ -900,6 +925,11 @@ def user_download_stats(request):
         "teams": active_teams,
         "count": len(stats),
         "stats": stats,
+        "premium_required": premium_required,
+        "message": (
+            "Automation scripts are not available on your admin's Freemium plan — download counts "
+            "will stay at 0 until they upgrade to Premium." if premium_required else None
+        ),
     })
 
 
