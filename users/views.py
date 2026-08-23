@@ -1465,10 +1465,36 @@ def _ensure_admin_private_channel(team_id, access_token, headers=None, admin=Non
     try:
         existing = _get_team_channels(team_id, headers)
         for ch in existing or []:
-            if (ch.get("displayName") or "").strip().lower() == ADMIN_DASHBOARD_CHANNEL_NAME.lower():
-                channel_id = ch.get("id")
+            name_matches = (ch.get("displayName") or "").strip().lower() == ADMIN_DASHBOARD_CHANNEL_NAME.lower()
+            if not name_matches:
+                continue
+
+            channel_id = ch.get("id")
+            # The General channel's id is always identical to the team id —
+            # this is the reliable way to detect it regardless of its
+            # current display name (Graph guarantees this 1:1 mapping).
+            is_general = channel_id == team_id
+            if ch.get("membershipType") == "private" and not is_general:
+                # A genuine already-created private admin channel.
                 _install_teams_bot_on_channel(team_id, channel_id)
                 return {"status": "already_exists", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id}
+
+            # Otherwise this is the OLD renamed-General channel left over
+            # from an earlier deploy of this feature (confirmed via real
+            # testing: it silently satisfied this name check and blocked
+            # a real private channel from ever being created) — rename it
+            # back to "General" and fall through to actually create the
+            # private channel below.
+            if is_general:
+                try:
+                    rename_resp = _http_patch(
+                        f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}",
+                        headers=headers, json={"displayName": "General"}, timeout=15,
+                    )
+                    logger.info(f"[TeamsChannels] Reverted General channel display name back to 'General': {rename_resp.status_code}")
+                except Exception:
+                    logger.warning("[TeamsChannels] Failed to revert General channel display name", exc_info=True)
+            break
 
         aad_object_id = _get_admin_aad_object_id(access_token)
         if admin is not None and aad_object_id and not getattr(admin, "ms_teams_object_id", None):
