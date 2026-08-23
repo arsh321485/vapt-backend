@@ -152,14 +152,16 @@ class TeamsBotMessagesView(APIView):
         )
 
         # Adaptive Card Action.Submit lands here with `value` populated and
-        # `text` usually empty. Confirmed via real production activity dumps
-        # that Bot Framework's update-activity PUT does NOT reliably keep a
-        # stable clickable identity in Teams (consecutive clicks on what
-        # looked like the same card kept arriving with different
-        # `replyToId` values) — so instead of editing in place, every click
-        # deletes the channel's current live card and posts the new one
-        # fresh (see onboarding.replace_active_card), which is what
-        # actually keeps the channel down to a single card.
+        # `text` usually empty. `replyToId` is the id of the message that
+        # CONTAINED the card that was clicked — editing THAT message in
+        # place (PUT) is the clean, Slack-like behavior (zero visible
+        # trace, no "message deleted" tombstone) and is tried first. It
+        # only falls back to delete-old+send-new (onboarding.
+        # replace_active_card) when the edit itself fails — e.g. a click
+        # landing on a genuinely stale/orphaned card left over from before
+        # this tracking existed — so a bad click still self-heals instead
+        # of leaving two live cards, without paying the tombstone cost on
+        # every normal click.
         if activity.get("value"):
             admin, team_id = self._resolve_admin(activity)
             if not admin:
@@ -173,13 +175,24 @@ class TeamsBotMessagesView(APIView):
             except Exception:
                 logger.exception("[TeamsBot] handle_card_action failed")
                 card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
-            from .onboarding import replace_active_card
-            new_message_id = replace_active_card(team_id, card)
-            if new_message_id is None:
-                # No tracked channel reference yet (shouldn't normally
-                # happen once the bot's been added) — fall back to a plain
-                # reply so the click never just silently does nothing.
-                bot_api.reply_to_activity(service_url, conversation_id, activity_id, bot_api.card_message(card))
+
+            target_id = activity.get("replyToId")
+            updated_ok = False
+            if target_id:
+                resp = bot_api.update_activity(service_url, conversation_id, target_id, bot_api.card_message(card))
+                updated_ok = resp is not None and resp.status_code < 300
+            if updated_ok:
+                from .conversation_store import set_active_message_id
+                set_active_message_id(team_id, target_id)
+            else:
+                from .onboarding import replace_active_card
+                new_message_id = replace_active_card(team_id, card)
+                if new_message_id is None:
+                    # No tracked channel reference yet (shouldn't normally
+                    # happen once the bot's been added) — fall back to a
+                    # plain reply so the click never just silently does
+                    # nothing.
+                    bot_api.reply_to_activity(service_url, conversation_id, activity_id, bot_api.card_message(card))
             return
 
         # A file the admin attached in response to "Attach your file" —
