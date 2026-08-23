@@ -79,17 +79,20 @@ def _execute_action(title, data, style=None):
     Action.Submit everywhere. `verb` is set to the action_id mainly for
     parity with Microsoft's own samples; nothing here actually branches on
     it — the dispatch in teams_bot.actions reads action_id out of `data`,
-    same as it always has. `requires` declares Universal Actions support
-    explicitly — confirmed via real testing that omitting it is what made
-    every button on a freshly-opened tab render greyed-out/disabled in
-    Teams (the host couldn't confirm support for the action without it, so
-    it fell back to a disabled-looking state instead of a live one)."""
+    same as it always has.
+
+    Deliberately NOT setting "requires": {"adaptiveCards": "1.3"} here —
+    tried that as a fix for buttons rendering greyed-out, but real testing
+    showed it made the WHOLE nav row disappear instead (Teams apparently
+    treats an unmet/unconfirmed `requires` capability as "hide this
+    action", not "show it disabled") — a worse regression than the grey
+    state it was meant to fix. Reverted; the grey-out issue needs a
+    different real fix, not this."""
     action = {
         "type": "Action.Execute",
         "title": title,
         "verb": data.get("action_id", "action"),
         "data": data,
-        "requires": {"adaptiveCards": "1.3"},
     }
     if style:
         action["style"] = style  # "positive" is Adaptive Card's primary-button equivalent
