@@ -326,6 +326,11 @@ def two_row_pill_columnset(options, active_key, build_data, split=None):
         split = (len(options) + 1) // 2
     return {
         "type": "Container",
+        # Shaded background + inset padding so the two stacked rows read
+        # as one cohesive toolbar block, not two loose rows of buttons —
+        # requested after the nav bar became two rows instead of one.
+        "style": "emphasis",
+        "bleed": True,
         "spacing": "Medium",
         "separator": True,
         "items": [
