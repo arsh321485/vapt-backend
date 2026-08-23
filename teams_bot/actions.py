@@ -19,6 +19,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from . import cards
 from . import fix_tab
 from . import register_tab
+from . import automations_tab
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -385,6 +386,38 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._header("📋 Register"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
 
+    # ── Automations tab ───────────────────────────────────────────────
+    if action_id in ("auto_sub_full", "auto_sub_partial"):
+        try:
+            body = automations_tab.automations_tab_body(admin, active_sub=action_id)
+        except Exception:
+            logger.exception(f"[TeamsBot] automations_tab_body failed for {action_id}")
+            body = [cards._header("🤖 Automations"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_automation", extra_body=body)
+
+    if action_id == "auto_sev":
+        category = value.get("category") or "full"
+        sev = value.get("sev") or "all"
+        active_sub = "auto_sub_partial" if category == "partial" else "auto_sub_full"
+        try:
+            body = automations_tab.automations_tab_body(admin, active_sub=active_sub, sev=sev, offset=0)
+        except Exception:
+            logger.exception("[TeamsBot] auto_sev failed")
+            body = [cards._header("🤖 Automations"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_automation", extra_body=body)
+
+    if action_id == "auto_list_pg":
+        category = value.get("category") or "full"
+        sev = value.get("sev") or "all"
+        offset = int(value.get("offset") or 0)
+        active_sub = "auto_sub_partial" if category == "partial" else "auto_sub_full"
+        try:
+            body = automations_tab.automations_tab_body(admin, active_sub=active_sub, sev=sev, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] auto_list_pg failed")
+            body = [cards._header("🤖 Automations"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_automation", extra_body=body)
+
     if action_id == "fix_vuln_back":
         offset = int(value.get("offset") or 0)
         try:
@@ -473,6 +506,14 @@ def _handle_nav(admin, team_id, action_id):
             logger.exception("[TeamsBot] register_tab_body (default) failed")
             body = [cards._header("📋 Register"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
+    if action_id == "nav_automation":
+        try:
+            body = automations_tab.automations_tab_body(admin, active_sub="auto_sub_full")
+        except Exception:
+            logger.exception("[TeamsBot] automations_tab_body (default) failed")
+            body = [cards._header("🤖 Automations"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_automation", extra_body=body)
 
     label = dict(cards.NAV_ITEMS).get(action_id, action_id)
     return cards.nav_buttons_card(

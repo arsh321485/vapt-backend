@@ -243,7 +243,7 @@ NAV_ITEMS = [
     ("nav_home", "🏠 Home"),
     ("nav_fix", "🔧 Fix"),
     ("nav_register", "📋 Register"),
-    ("nav_automation", "🤖 Auto"),
+    ("nav_automation", "🤖 Automations"),
     ("nav_team", "👥 Team"),
     ("nav_request", "📨 Ext."),
     ("nav_notification", "🔔 Alerts"),
