@@ -20,6 +20,7 @@ from . import cards
 from . import fix_tab
 from . import register_tab
 from . import automations_tab
+from . import team_tab
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -459,6 +460,144 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._header("🧩 Common Vulns"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
+    # ── Team tab ───────────────────────────────────────────────────────
+    if action_id in dict(team_tab.TEAM_SUBTABS):
+        try:
+            body = team_tab.team_tab_body(admin, team_id, active_sub=action_id)
+        except Exception:
+            logger.exception(f"[TeamsBot] team_tab_body failed for {action_id}")
+            body = [cards._header("👥 Team"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_adduser_submit":
+        try:
+            ok, message = team_tab.submit_add_user(admin, value)
+            body = [team_tab.team_subnav_columnset("team_sub_adduser")]
+            body.append(cards._header("✅ User Added" if ok else "❌ Could not add user"))
+            body.append(cards._body_text(message))
+            if not ok:
+                body.extend(team_tab.add_user_form_body())
+        except Exception:
+            logger.exception("[TeamsBot] team_adduser_submit failed")
+            body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_deleteuser_pg":
+        offset = int(value.get("offset") or 0)
+        try:
+            body = team_tab.team_tab_body(admin, team_id, active_sub="team_sub_deleteuser", offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] team_deleteuser_pg failed")
+            body = [cards._header("🗑️ Delete User"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_deleteuser_view":
+        detail_id = value.get("detail_id") or ""
+        offset = int(value.get("offset") or 0)
+        try:
+            body = [team_tab.team_subnav_columnset("team_sub_deleteuser")] + team_tab.delete_user_confirm_body(admin, detail_id, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] team_deleteuser_view failed")
+            body = [cards._header("🗑️ Delete User"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_deleteuser_back":
+        offset = int(value.get("offset") or 0)
+        try:
+            body = team_tab.team_tab_body(admin, team_id, active_sub="team_sub_deleteuser", offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] team_deleteuser_back failed")
+            body = [cards._header("🗑️ Delete User"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id in ("team_deleteuser_deactivate_confirm", "team_deleteuser_delete_confirm"):
+        detail_id = value.get("detail_id") or ""
+        offset = int(value.get("offset") or 0)
+        try:
+            content = (
+                team_tab.deactivate_confirm_body(detail_id, offset) if action_id == "team_deleteuser_deactivate_confirm"
+                else team_tab.delete_confirm_body(detail_id, offset)
+            )
+            body = [team_tab.team_subnav_columnset("team_sub_deleteuser")] + content
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [cards._header("🗑️ Delete User"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id in ("team_deleteuser_deactivate_do", "team_deleteuser_delete_do"):
+        detail_id = value.get("detail_id") or ""
+        offset = int(value.get("offset") or 0)
+        try:
+            ok, message = (
+                team_tab.do_deactivate_user(admin, detail_id) if action_id == "team_deleteuser_deactivate_do"
+                else team_tab.do_delete_user(admin, detail_id)
+            )
+            body = [team_tab.team_subnav_columnset("team_sub_deleteuser"), cards._header("✅ Done" if ok else "❌ Failed"), cards._body_text(message)]
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [team_tab.team_subnav_columnset("team_sub_deleteuser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_role_pg":
+        offset = int(value.get("offset") or 0)
+        try:
+            body = team_tab.team_tab_body(admin, team_id, active_sub="team_sub_deleteteamuser", offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] team_role_pg failed")
+            body = [cards._header("🔄 Update User Role"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_role_view":
+        detail_id = value.get("detail_id") or ""
+        offset = int(value.get("offset") or 0)
+        try:
+            body = [team_tab.team_subnav_columnset("team_sub_deleteteamuser")] + team_tab.update_role_detail_body(admin, detail_id, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] team_role_view failed")
+            body = [cards._header("🔄 Update User Role"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_role_back":
+        offset = int(value.get("offset") or 0)
+        try:
+            body = team_tab.team_tab_body(admin, team_id, active_sub="team_sub_deleteteamuser", offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] team_role_back failed")
+            body = [cards._header("🔄 Update User Role"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_role_remove_confirm":
+        detail_id = value.get("detail_id") or ""
+        role = value.get("role") or ""
+        offset = int(value.get("offset") or 0)
+        try:
+            body = [team_tab.team_subnav_columnset("team_sub_deleteteamuser")] + team_tab.role_remove_confirm_body(detail_id, role, offset)
+        except Exception:
+            logger.exception("[TeamsBot] team_role_remove_confirm failed")
+            body = [cards._header("🔄 Update User Role"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_role_remove_do":
+        detail_id = value.get("detail_id") or ""
+        role = value.get("role") or ""
+        offset = int(value.get("offset") or 0)
+        try:
+            ok, message = team_tab.do_remove_role(admin, detail_id, role)
+            body = [team_tab.team_subnav_columnset("team_sub_deleteteamuser"), cards._header("✅ Done" if ok else "❌ Failed"), cards._body_text(message)]
+        except Exception:
+            logger.exception("[TeamsBot] team_role_remove_do failed")
+            body = [team_tab.team_subnav_columnset("team_sub_deleteteamuser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_ext_pg":
+        offset = int(value.get("offset") or 0)
+        try:
+            body = team_tab.team_tab_body(admin, team_id, active_sub="team_sub_externaluser", offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] team_ext_pg failed")
+            body = [cards._header("🌐 External User"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
     if action_id and action_id.startswith("nav_"):
         return _handle_nav(admin, team_id, action_id)
 
@@ -485,9 +624,9 @@ def _handle_nav(admin, team_id, action_id):
 
     if action_id == "nav_team":
         try:
-            body = cards.dashboard_image_card_body(team_id, kind="teamperf", title="Team Performance")
+            body = team_tab.team_tab_body(admin, team_id, active_sub="team_sub_team")
         except Exception:
-            logger.exception("[TeamsBot] team performance image body failed")
+            logger.exception("[TeamsBot] team_tab_body (default) failed")
             body = [cards._header("👥 Team"), cards._body_text("Could not load team performance right now.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
