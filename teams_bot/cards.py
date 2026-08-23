@@ -267,13 +267,13 @@ def _nav_button_columnset(active_action_id):
 
 def nav_buttons_card(active_action_id="nav_home", extra_body=None):
     """
-    The persistent navbar row — Teams doesn't support Slack's "replace
-    message in place" pattern the same way, so each nav click sends a NEW
-    card reply containing the navbar again plus that tab's content
-    (extra_body), rather than editing a pinned message.
+    The persistent navbar row — placed at the TOP of the card (matching the
+    reference design's own header-tabs layout), with that tab's content
+    below it. Each nav click replaces the whole card in place (see
+    onboarding.replace_active_card) rather than appending a new one.
     """
-    body = list(extra_body or [])
-    body.append(_nav_button_columnset(active_action_id))
+    body = [_nav_button_columnset(active_action_id)]
+    body.extend(extra_body or [])
     return _card(body=body)
 
 
