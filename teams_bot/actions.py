@@ -182,6 +182,23 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             logger.exception("[TeamsBot] failed to post navbar after risk criteria save")
         return cards.text_result_card("✅ Risk criteria saved", "Loading your dashboard…")
 
+    if action_id in ("fix_sub_assets", "fix_sub_vulns", "fix_sub_common"):
+        try:
+            body = cards.fix_tab_body(team_id, active_sub=action_id)
+        except Exception:
+            logger.exception(f"[TeamsBot] fix_tab_body failed for {action_id}")
+            body = [cards._header("🔧 Fix"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_common_team":
+        team_key = value.get("team") or "config"
+        try:
+            body = cards.fix_tab_body(team_id, active_sub="fix_sub_common", common_team=team_key)
+        except Exception:
+            logger.exception("[TeamsBot] fix_tab_body (common vulns team switch) failed")
+            body = [cards._header("🧩 Common Vulns"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
     if action_id and action_id.startswith("nav_"):
         return _handle_nav(admin, team_id, action_id)
 
@@ -213,6 +230,14 @@ def _handle_nav(admin, team_id, action_id):
             logger.exception("[TeamsBot] team performance image body failed")
             body = [cards._header("👥 Team"), cards._body_text("Could not load team performance right now.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "nav_fix":
+        try:
+            body = cards.fix_tab_body(team_id, active_sub="fix_sub_assets")
+        except Exception:
+            logger.exception("[TeamsBot] fix_tab_body (default) failed")
+            body = [cards._header("🔧 Fix"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     label = dict(cards.NAV_ITEMS).get(action_id, action_id)
     return cards.nav_buttons_card(

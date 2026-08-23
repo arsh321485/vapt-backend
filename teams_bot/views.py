@@ -39,7 +39,11 @@ class TeamsDashboardImageView(APIView):
 
     def get(self, request):
         from django.contrib.auth import get_user_model
-        from users.views import _dashboard_image_signer, _dashboard_png_bytes, _build_dashboard_html, _build_team_performance_html
+        from users.views import (
+            _dashboard_image_signer, _dashboard_png_bytes, _build_dashboard_html,
+            _build_team_performance_html, _build_all_assets_html, _build_all_vulns_html,
+            _build_common_vulns_html,
+        )
 
         token = request.query_params.get("token", "")
         try:
@@ -53,16 +57,31 @@ class TeamsDashboardImageView(APIView):
             return HttpResponse(status=404)
 
         kind = request.query_params.get("kind", "dashboard")
+        selector = ".dash"
         try:
             if kind == "teamperf":
                 from admindashboard.views import AdminDistributionByTeamDetailAPIView
                 _status, data = actions._call_view_in_process(AdminDistributionByTeamDetailAPIView, admin, method="get")
                 html = _build_team_performance_html(data if isinstance(data, dict) else {})
+            elif kind in ("assets", "allvulns"):
+                from adminregister.views import LatestSuperAdminVulnerabilityRegisterAPIView
+                _status, data = actions._call_view_in_process(LatestSuperAdminVulnerabilityRegisterAPIView, admin, method="get")
+                rows = (data.get("rows") or []) if isinstance(data, dict) else []
+                html = _build_all_assets_html(rows) if kind == "assets" else _build_all_vulns_html(rows)
+                selector = ".page-card"
+            elif kind == "commonvulns":
+                from adminmitigationstrategy.views import MitigationStrategyByTeamAPIView
+                from users.views import SlackSlashCommandView
+                _status, data = actions._call_view_in_process(MitigationStrategyByTeamAPIView, admin, method="get")
+                grouped = SlackSlashCommandView()._group_common_vulns_by_team(data if isinstance(data, dict) else {})
+                team_key = request.query_params.get("team") or "config"
+                html = _build_common_vulns_html(grouped, team_key=team_key)
+                selector = ".page-card"
             else:
                 from admindashboard.views import AdminDashboardSummaryAPIView
                 _status, data = actions._call_view_in_process(AdminDashboardSummaryAPIView, admin, method="get")
                 html = _build_dashboard_html(data if isinstance(data, dict) else {})
-            png_bytes = _dashboard_png_bytes(html, selector=".dash")
+            png_bytes = _dashboard_png_bytes(html, selector=selector)
         except Exception:
             logger.exception(f"[TeamsDashboardImage] render failed for team_id={team_id} kind={kind}")
             return HttpResponse(status=500)

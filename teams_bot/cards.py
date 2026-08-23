@@ -406,7 +406,7 @@ def home_dashboard_card_body(data: dict):
     return body
 
 
-def dashboard_image_card_body(team_id, kind="dashboard", title=None):
+def dashboard_image_card_body(team_id, kind="dashboard", title=None, extra_params=None):
     """
     Real bento-grid dashboard, rendered server-side to a PNG and shown as
     an Adaptive Card Image — reuses the exact same rendering pipeline
@@ -423,6 +423,84 @@ def dashboard_image_card_body(team_id, kind="dashboard", title=None):
     token = _dashboard_image_signer().sign(team_id)
     backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
     url = f"{backend}/api/admin/users/teams/dashboard-image/?token={quote(token)}&kind={kind}&t={int(time.time())}"
+    for k, v in (extra_params or {}).items():
+        if v is not None and str(v) != "":
+            url += f"&{quote(str(k))}={quote(str(v))}"
     return [
         {"type": "Image", "url": url, "size": "Stretch", "altText": title or "VaptFix Dashboard"},
     ]
+
+
+# Fix tab's own sub-nav — All Assets / All Vulns / Common Vulns (matches
+# Slack's _FIX_SUBTABS, same action_id spelling so nothing else has to
+# guess at the mapping).
+FIX_SUBTABS = [
+    ("fix_sub_assets", "🖥 All Assets"),
+    ("fix_sub_vulns", "📋 All Vulns"),
+    ("fix_sub_common", "🧩 Common Vulns"),
+]
+
+
+def _fix_subnav_columnset(active_sub):
+    columns = []
+    for action_id, label in FIX_SUBTABS:
+        is_active = action_id == active_sub
+        columns.append({
+            "type": "Column",
+            "width": "auto",
+            "verticalContentAlignment": "center",
+            "selectAction": {"type": "Action.Submit", "data": {"action_id": action_id}},
+            "items": [{
+                "type": "TextBlock", "text": label, "wrap": False, "size": "Small",
+                "weight": "Bolder" if is_active else "Default",
+                "color": "accent" if is_active else "default",
+                "horizontalAlignment": "center",
+            }],
+        })
+    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
+
+
+# Common Vulns' own team-filter row — matches Microsoft -Admin/commonvuln.html's tabs.
+COMMON_VULNS_TEAMS = [
+    ("patch", "Patch Management"),
+    ("config", "Configuration Management"),
+    ("network", "Network Security"),
+    ("arch", "Architectural Flaws"),
+]
+
+
+def _common_vulns_team_columnset(active_team):
+    columns = []
+    for key, label in COMMON_VULNS_TEAMS:
+        is_active = key == active_team
+        columns.append({
+            "type": "Column",
+            "width": "auto",
+            "verticalContentAlignment": "center",
+            "selectAction": {"type": "Action.Submit", "data": {"action_id": "fix_common_team", "team": key}},
+            "items": [{
+                "type": "TextBlock", "text": label, "wrap": False, "size": "Small",
+                "weight": "Bolder" if is_active else "Default",
+                "color": "accent" if is_active else "default",
+                "horizontalAlignment": "center",
+            }],
+        })
+    return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
+
+
+def fix_tab_body(team_id, active_sub="fix_sub_assets", common_team="config"):
+    """
+    Full Fix-tab body: its own sub-nav row (All Assets/All Vulns/Common
+    Vulns) followed by that sub-tab's real content, rendered the same
+    image-snapshot way as Home/Team (see dashboard_image_card_body) —
+    matches Microsoft -Admin/allassets.html, allvuln.html, commonvuln.html.
+    """
+    body = [_fix_subnav_columnset(active_sub)]
+    if active_sub == "fix_sub_vulns":
+        body.extend(dashboard_image_card_body(team_id, kind="allvulns", title="All Vulnerabilities"))
+    elif active_sub == "fix_sub_common":
+        body.append(_common_vulns_team_columnset(common_team))
+        body.extend(dashboard_image_card_body(team_id, kind="commonvulns", title="Common Vulnerabilities", extra_params={"team": common_team}))
+    else:
+        body.extend(dashboard_image_card_body(team_id, kind="assets", title="All Assets"))
+    return body

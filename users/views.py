@@ -9299,6 +9299,317 @@ _TEAM_PERF_META = [
 ]
 
 
+_ASSET_VULN_LIST_CSS = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f3f2f1; min-height: 100vh; padding: 28px 20px 48px; }
+    .page-card { max-width: 1000px; margin: 0 auto; background: #fff; border-radius: 12px; border: 1px solid #e5e5e5; box-shadow: 0 2px 14px rgba(0,0,0,0.07); overflow: hidden; }
+    .heading-wrap { padding: 16px 20px 12px; border-bottom: 1px solid #f0f0f0; }
+    .heading-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; color: #1a1a3e; margin-bottom: 5px; }
+    .heading-desc { font-size: 12px; color: #aaa; }
+    .total-row { padding: 8px 20px 10px; font-size: 12.5px; color: #888; border-bottom: 1.5px solid #f0f0f0; }
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { background: #f8f8fb; border-bottom: 1.5px solid #eee; }
+    thead th { padding: 10px 20px; font-size: 10px; font-weight: 700; color: #aaa; letter-spacing: 0.8px; text-transform: uppercase; text-align: left; }
+    tbody tr { border-bottom: 1px solid #f5f5f5; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody td { padding: 13px 20px; vertical-align: middle; }
+    .asset-ip, .vuln-name { font-size: 13.5px; font-weight: 700; color: #1a1a3e; }
+    .asset-team, .vuln-ip { font-size: 11.5px; color: #aaa; margin-bottom: 5px; }
+    .dot-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .dot-item { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; }
+    .dot-c { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
+    .d-critical { background: #991b1b; } .d-high { background: #dc2626; } .d-medium { background: #d97706; } .d-low { background: #16a34a; }
+    .vuln-count { font-size: 15px; font-weight: 700; color: #1a1a3e; }
+    .vuln-code { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; font-family: monospace; }
+    .vc-high { background: #fee2e2; color: #dc2626; } .vc-medium { background: #fff7ed; color: #d97706; } .vc-low { background: #f0fdf4; color: #16a34a; } .vc-critical { background: #fde8e8; color: #991b1b; }
+    .status-pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 5px; border: 1.5px solid; }
+    .st-open { background: #fff5f5; color: #dc2626; border-color: #fca5a5; }
+    .st-closed { background: #f0fdf4; color: #16a34a; border-color: #86efac; }
+    .st-progress { background: #fff8f0; color: #c0651a; border-color: #fdba74; }
+    .st-review { background: #f5f3ff; color: #6d28d9; border-color: #c4b5fd; }
+    .empty-state { text-align: center; padding: 40px; color: #bbb; font-size: 13px; }
+  </style>
+</head>
+<body>
+<div class="page-card">
+"""
+
+
+def _status_pill_html(status):
+    st = (status or "open").strip().lower()
+    if st == "closed":
+        return f'<span class="status-pill st-closed">Closed</span>'
+    if "progress" in st:
+        return f'<span class="status-pill st-progress">In Progress</span>'
+    if "review" in st:
+        return f'<span class="status-pill st-review">Open/Review</span>'
+    return f'<span class="status-pill st-open">Open</span>'
+
+
+def _severity_dots_html(counts):
+    labels = [("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")]
+    parts = []
+    for key, label in labels:
+        n = counts.get(key, 0)
+        if n:
+            parts.append(
+                f'<div class="dot-item"><div class="dot-c d-{key}"></div>'
+                f'<span style="color:{_SEV_DOT_COLOR[key]}">{label}: {n}</span></div>'
+            )
+    return "".join(parts)
+
+
+_SEV_DOT_COLOR = {"critical": "#991b1b", "high": "#dc2626", "medium": "#d97706", "low": "#16a34a"}
+_SEV_CODE_CLASS = {"critical": "vc-critical", "high": "vc-high", "medium": "vc-medium", "low": "vc-low"}
+
+
+def _build_all_assets_html(rows, max_rows=20):
+    """
+    Matches Microsoft -Admin/allassets.html — one row per asset (host),
+    grouped from the same real vuln rows LatestSuperAdminVulnerabilityRegisterAPIView
+    returns, with a severity-count breakdown and a representative status.
+    """
+    assets = {}
+    order = []
+    for r in rows or []:
+        host = (r.get("asset") or "Unknown").strip() or "Unknown"
+        if host not in assets:
+            assets[host] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "statuses": set()}
+            order.append(host)
+        sev = (r.get("severity") or "").strip().lower()
+        if sev in assets[host]:
+            assets[host][sev] += 1
+        assets[host]["statuses"].add((r.get("status") or "open").strip().lower())
+
+    total = len(order)
+    shown = order[:max_rows]
+
+    if not shown:
+        body_rows = '<tr><td colspan="2"><div class="empty-state">No assets found.</div></td></tr>'
+    else:
+        trs = []
+        for host in shown:
+            info = assets[host]
+            vuln_total = info["critical"] + info["high"] + info["medium"] + info["low"]
+            statuses = info["statuses"]
+            status = "closed" if statuses == {"closed"} else ("progress" if "in_progress" in statuses or "in progress" in statuses else "open")
+            trs.append(f"""<tr>
+              <td>
+                <div class="asset-ip">{host}</div>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+                  <span class="vuln-count">{vuln_total} Vulns</span>
+                  {_status_pill_html(status)}
+                </div>
+                <div class="dot-row">{_severity_dots_html(info)}</div>
+              </td>
+            </tr>""")
+        body_rows = "".join(trs)
+
+    note = f'<div class="total-row">Total: <strong>{total}</strong> assets{" — showing first " + str(max_rows) if total > max_rows else ""}</div>' if total else ""
+
+    body = f"""
+  <div class="heading-wrap">
+    <div class="heading-title">💻 All Assets</div>
+    <div class="heading-desc">Every asset in your latest report.</div>
+  </div>
+  {note}
+  <table>
+    <thead><tr><th>Asset</th></tr></thead>
+    <tbody>{body_rows}</tbody>
+  </table>
+</div>
+</body>
+</html>
+"""
+    return _ASSET_VULN_LIST_CSS + body
+
+
+def _build_all_vulns_html(rows, max_rows=20):
+    """Matches Microsoft -Admin/allvuln.html — one row per vulnerability finding."""
+    total = len(rows or [])
+    shown = (rows or [])[:max_rows]
+
+    if not shown:
+        body_rows = '<tr><td><div class="empty-state">No vulnerabilities found.</div></td></tr>'
+    else:
+        trs = []
+        for r in shown:
+            name = r.get("vul_name") or "Unnamed vulnerability"
+            host = r.get("asset") or "—"
+            sev = (r.get("severity") or "medium").strip().lower()
+            if sev not in _SEV_CODE_CLASS:
+                sev = "medium"
+            code_cls = _SEV_CODE_CLASS[sev]
+            status = r.get("status") or "open"
+            trs.append(f"""<tr>
+              <td>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+                  <span class="vuln-code {code_cls}">{sev.upper()[:4]}</span>
+                  <span class="vuln-name">{name}</span>
+                </div>
+                <div class="dot-row">
+                  <span class="vuln-ip">{host}</span>
+                  <span style="color:#ccc;">|</span>
+                  {_status_pill_html(status)}
+                </div>
+              </td>
+            </tr>""")
+        body_rows = "".join(trs)
+
+    note = f'<div class="total-row">Total: <strong>{total}</strong> vulnerabilities{" — showing first " + str(max_rows) if total > max_rows else ""}</div>' if total else ""
+
+    body = f"""
+  <div class="heading-wrap">
+    <div class="heading-title">⚠️ All Vulnerabilities</div>
+    <div class="heading-desc">Every vulnerability in your latest report.</div>
+  </div>
+  {note}
+  <table>
+    <thead><tr><th>Vulnerability</th></tr></thead>
+    <tbody>{body_rows}</tbody>
+  </table>
+</div>
+</body>
+</html>
+"""
+    return _ASSET_VULN_LIST_CSS + body
+
+
+_COMMON_VULNS_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f3f2f1; min-height: 100vh; padding: 28px 20px 48px; }
+    .page-card { max-width: 900px; margin: 0 auto; background: #fff; border-radius: 14px; border: 1px solid #e5e5e5; box-shadow: 0 2px 16px rgba(0,0,0,0.08); overflow: hidden; }
+    .heading-wrap { padding: 20px 24px 14px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: flex-start; gap: 14px; }
+    .heading-icon { width: 48px; height: 48px; background: #ededf8; border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 22px; }
+    .heading-title { font-size: 17px; font-weight: 800; color: #1a1a3e; margin-bottom: 4px; }
+    .heading-desc { font-size: 12.5px; color: #888; line-height: 1.5; }
+    .team-tabs { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 24px 0; }
+    .team-tab { font-size: 12.5px; font-weight: 600; padding: 8px 16px; border-radius: 7px; border: 1.5px solid #e0e0e0; background: #fff; color: #666; }
+    .team-tab.active { background: #1a1a6e; border-color: #1a1a6e; color: #fff; }
+    .selected-label { padding: 10px 24px 0; font-size: 12.5px; font-weight: 600; color: #5b5ea6; }
+    .tab-divider { border: none; border-top: 1px solid #f0f0f0; margin: 14px 0 0; }
+    .vsec-header { padding: 12px 24px 10px; border-bottom: 1px solid #f0f0f0; }
+    .vsec-meta { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #555; font-weight: 600; }
+    .vsec-team-name { color: #1a1a3e; font-weight: 700; }
+    .vsec-dot { color: #ccc; } .vsec-total { color: #5b5ea6; }
+    .vsec-sev-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 7px; }
+    .summary-dot { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #666; }
+    .sd { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .sd-c { background: #991b1b; } .sd-h { background: #dc2626; } .sd-m { background: #d97706; } .sd-l { background: #16a34a; }
+    .vuln-item { padding: 14px 24px; border-bottom: 1px solid #f5f5f5; }
+    .vuln-item:last-child { border-bottom: none; }
+    .vuln-top-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .vi-num { font-size: 10.5px; font-weight: 700; font-family: monospace; background: #f0f0f0; color: #888; padding: 2px 8px; border-radius: 5px; flex-shrink: 0; }
+    .vi-assets { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #888; flex-shrink: 0; }
+    .vi-sep { color: #ddd; font-size: 14px; }
+    .vi-sev { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 5px; border: 1.5px solid; white-space: nowrap; flex-shrink: 0; }
+    .vis-critical { background: #fde8e8; color: #991b1b; border-color: #f87171; }
+    .vis-high { background: #fee2e2; color: #dc2626; border-color: #fca5a5; }
+    .vis-medium { background: #fff7ed; color: #d97706; border-color: #fcd34d; }
+    .vis-low { background: #f0fdf4; color: #16a34a; border-color: #86efac; }
+    .vuln-name-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .vuln-name { font-size: 14px; font-weight: 700; color: #1a1a3e; flex: 1; }
+    .empty-state { padding: 32px 24px; text-align: center; }
+    .empty-state p { font-size: 13.5px; font-weight: 700; color: #1a1a3e; margin-bottom: 3px; }
+    .empty-state span { font-size: 12.5px; color: #aaa; }
+    .vsec-footer { padding: 10px 24px 14px; font-size: 12px; color: #aaa; border-top: 1px solid #f0f0f0; }
+  </style>
+</head>
+<body>
+<div class="page-card">
+"""
+
+_COMMON_VULNS_TEAM_KEYS = [
+    ("patch", "Patch Management"),
+    ("config", "Configuration Management"),
+    ("network", "Network Security"),
+    ("arch", "Architectural Flaws"),
+]
+
+
+def _build_common_vulns_html(grouped, team_key="config", max_rows=15):
+    """
+    Matches Microsoft -Admin/commonvuln.html — grouped is the same shape
+    _group_common_vulns_by_team already produces from
+    /api/admin/adminmitigationstrategy/by-team/ (real data, same source
+    Slack's own Common Vulns tab uses).
+    """
+    tabs_html = "".join(
+        f'<button class="team-tab{" active" if k == team_key else ""}">{label}</button>'
+        for k, label in _COMMON_VULNS_TEAM_KEYS
+    )
+
+    team = grouped.get(team_key) or {"display_name": dict(_COMMON_VULNS_TEAM_KEYS).get(team_key, team_key), "severity": {}, "vulns": []}
+    vulns = team.get("vulns") or []
+    sev = team.get("severity") or {}
+    total = len(vulns)
+    shown = vulns[:max_rows]
+
+    if not shown:
+        items_html = '<div class="empty-state"><p>No common vulnerabilities for this team.</p><span>Nothing appears on 4+ assets yet.</span></div>'
+    else:
+        rows = []
+        for i, v in enumerate(shown):
+            v_sev = (v.get("severity") or "medium").strip().lower()
+            if v_sev not in _SEV_CODE_CLASS:
+                v_sev = "medium"
+            asset_count = len(v.get("assets") or []) or v.get("asset_count") or 0
+            rows.append(f"""<div class="vuln-item">
+              <div class="vuln-top-bar">
+                <span class="vi-num">{i + 1:02d}</span>
+                <div class="vi-assets">💻 {asset_count} assets</div>
+                <span class="vi-sep">|</span>
+                <span class="vi-sev vis-{v_sev}">{v_sev.upper()}</span>
+              </div>
+              <div class="vuln-name-row"><div class="vuln-name">{v.get('name') or 'Unnamed vulnerability'}</div></div>
+            </div>""")
+        items_html = "".join(rows)
+
+    footer = f'<div class="vsec-footer">Showing {len(shown)} of {total} common vulns{" (4+ assets)" if total else ""}</div>' if total else ""
+
+    body = f"""
+  <div class="heading-wrap">
+    <div class="heading-icon">🧩</div>
+    <div>
+      <div class="heading-title">Common Vulnerabilities</div>
+      <div class="heading-desc">Vulnerabilities appearing on 4+ assets, by team.</div>
+    </div>
+  </div>
+  <div class="team-tabs">{tabs_html}</div>
+  <div class="selected-label">Selected: {team.get('display_name', team_key)}</div>
+  <hr class="tab-divider"/>
+  <div class="vsec-header">
+    <div class="vsec-meta">
+      <span class="vsec-team-name">{team.get('display_name', team_key)}</span>
+      <span class="vsec-dot">·</span>
+      <span class="vsec-total">Total Vulns: {total}</span>
+    </div>
+    <div class="vsec-sev-row">
+      <div class="summary-dot"><div class="sd sd-c"></div>Critical: <strong>{sev.get('critical', 0)}</strong></div>
+      <div class="summary-dot"><div class="sd sd-h"></div>High: <strong>{sev.get('high', 0)}</strong></div>
+      <div class="summary-dot"><div class="sd sd-m"></div>Medium: <strong>{sev.get('medium', 0)}</strong></div>
+      <div class="summary-dot"><div class="sd sd-l"></div>Low: <strong>{sev.get('low', 0)}</strong></div>
+    </div>
+  </div>
+  <div>{items_html}</div>
+  {footer}
+</div>
+</body>
+</html>
+"""
+    return _COMMON_VULNS_HTML_HEAD + body
+
+
 def _build_team_performance_html(data):
     """
     Render team-performance.html design with live distribution-by-team/detail data.
