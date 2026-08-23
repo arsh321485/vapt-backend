@@ -1491,6 +1491,24 @@ def _ensure_admin_dashboard_channel(team_id, access_token, headers=None, admin=N
     if not team_id or not headers:
         return {"status": "skipped", "channelId": None}
     from teams_bot.conversation_store import save_admin_dashboard_channel_reference
+
+    def _repoint_and_post(cid):
+        # Repointing the stored reference alone doesn't put anything IN the
+        # new channel — nothing else proactively triggers a post until the
+        # admin happens to message/click the bot somewhere. Confirmed via
+        # real testing this left the new channel showing Teams' own generic
+        # "Welcome to the ... channel" placeholder with no bot card at all.
+        # So: if a reference already existed to repoint (i.e. the bot really
+        # is already active on this team), immediately post the current
+        # onboarding/dashboard card into it too.
+        pointed = save_admin_dashboard_channel_reference(team_id, cid)
+        if pointed and admin is not None:
+            try:
+                from teams_bot.onboarding import post_onboarding_step
+                post_onboarding_step(admin, team_id=team_id)
+            except Exception:
+                logger.warning("[TeamsChannels] post_onboarding_step after channel repoint failed", exc_info=True)
+
     try:
         existing = _get_team_channels(team_id, headers)
         for ch in existing or []:
@@ -1507,7 +1525,7 @@ def _ensure_admin_dashboard_channel(team_id, access_token, headers=None, admin=N
                 # Already exists as its own channel (private, from an
                 # earlier deploy, or standard from a previous run of this
                 # same code) — just make sure proactive posts point at it.
-                save_admin_dashboard_channel_reference(team_id, channel_id)
+                _repoint_and_post(channel_id)
                 return {"status": "already_exists", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id}
 
             # Otherwise this is the OLD renamed-General channel left over
@@ -1548,7 +1566,7 @@ def _ensure_admin_dashboard_channel(team_id, access_token, headers=None, admin=N
             return {"status": "failed", "http_status": resp.status_code, "channelId": None}
 
         channel_id = resp.json().get("id")
-        save_admin_dashboard_channel_reference(team_id, channel_id)
+        _repoint_and_post(channel_id)
         return {"status": "created", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id}
     except Exception as e:
         logger.warning(f"[TeamsChannels] _ensure_admin_dashboard_channel failed: {e}")
