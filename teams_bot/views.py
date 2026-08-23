@@ -152,12 +152,19 @@ class TeamsBotMessagesView(APIView):
         )
 
         # Adaptive Card Action.Submit lands here with `value` populated and
-        # `text` usually empty.
+        # `text` usually empty. `replyToId` is the id of the message that
+        # CONTAINED the card that got clicked — editing that message in
+        # place (Bot Framework's update-activity PUT) instead of posting a
+        # fresh reply is what makes clicking Fix/Register/... replace the
+        # previous tab's content instead of stacking a new card under it
+        # every time (confirmed live: without this every nav click left the
+        # old tab's card sitting in the channel).
         if activity.get("value"):
+            target_id = activity.get("replyToId") or activity_id
             admin, team_id = self._resolve_admin(activity)
             if not admin:
-                bot_api.reply_to_activity(
-                    service_url, conversation_id, activity_id,
+                bot_api.update_activity(
+                    service_url, conversation_id, target_id,
                     bot_api.text_message("This Teams workspace isn't linked to a VaptFix admin account yet — please log in from the website first."),
                 )
                 return
@@ -166,8 +173,8 @@ class TeamsBotMessagesView(APIView):
             except Exception:
                 logger.exception("[TeamsBot] handle_card_action failed")
                 card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
-            bot_api.reply_to_activity(
-                service_url, conversation_id, activity_id,
+            bot_api.update_activity(
+                service_url, conversation_id, target_id,
                 bot_api.card_message(card),
             )
             return

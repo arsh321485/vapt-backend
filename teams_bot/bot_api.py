@@ -71,6 +71,23 @@ def reply_to_activity(service_url: str, conversation_id: str, activity_id: str, 
     return resp
 
 
+def update_activity(service_url: str, conversation_id: str, activity_id: str, activity: dict):
+    """
+    Edits an EXISTING message in place (Bot Framework's PUT — the direct
+    equivalent of Slack's chat.update/replace_original) instead of posting
+    a new one. Used for nav-tab clicks so clicking Fix/Register/... replaces
+    the previous tab's card instead of stacking a new message under it
+    every time — without this, every click left the old tab's content
+    sitting in the channel, which is exactly what looked like "old data
+    still showing" / "history" piling up.
+    """
+    url = f"{service_url.rstrip('/')}/v3/conversations/{conversation_id}/activities/{activity_id}"
+    resp = requests.put(url, json=activity, headers=_connector_headers(), timeout=15)
+    if resp.status_code >= 300:
+        logger.warning(f"[TeamsBot] update_activity failed ({resp.status_code}): {resp.text[:500]}")
+    return resp
+
+
 def send_activity(service_url: str, conversation_id: str, activity: dict):
     """
     Send a NEW message into an existing conversation (not a reply to a
