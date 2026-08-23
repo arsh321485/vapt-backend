@@ -2066,33 +2066,66 @@ class MicrosoftTeamsCallbackView(APIView):
                 logger.info(f"[TeamsOAuth] Lookup by admin_id_from_state={admin_id_from_state}: found={bool(user)}")
 
             if not user and email:
-                # TEMP DIAGNOSTIC (2026-08-23): real production logs show a
-                # fresh User + fresh 'Vaptfix' team getting created on EVERY
-                # Teams login for the SAME email, yet only one row for that
-                # email ever exists afterward — i.e. get_or_create's lookup
-                # isn't finding the row a previous login already created.
-                # Logging the raw query result right before the actual call
-                # to see exactly what this specific request's DB connection
-                # sees, since this couldn't be reproduced in an isolated
-                # local script. Remove once root-caused.
+                # DEFENSIVE RETRY + DIAGNOSTIC (2026-08-23): real production
+                # logs repeatedly show a fresh User + fresh 'Vaptfix' team
+                # getting created on EVERY Teams login for the same email,
+                # yet only one row for that email ever exists afterward —
+                # i.e. the lookup right before get_or_create isn't finding a
+                # row a previous login already created seconds/minutes
+                # earlier. Could NOT reproduce this in an isolated local
+                # script or a controlled cross-process test against the
+                # same production Atlas cluster — every infra-level cause
+                # checked so far (gunicorn --preload, stale worker
+                # processes, replica read preference, explicit deletes,
+                # signals, extra deploy steps) has been ruled out. Whatever
+                # it is, retrying the lookup briefly is a cheap, safe hedge,
+                # and cross-checking raw pymongo against the ORM (bypassing
+                # djongo's query translation entirely) plus logging every
+                # attempt gives a definitive answer next time this happens:
+                # if a later attempt finds the row, it's transient; if
+                # NONE of them do, the row is genuinely gone by then.
+                found_user = None
                 try:
-                    pre_check = list(User.objects.filter(email=email).values_list("id", flat=True))
-                    pre_check_iexact = list(User.objects.filter(email__iexact=email).values_list("id", "email"))
-                    logger.info(f"[TeamsOAuth][DIAG] repr(email)={email!r} filter(email=)->{pre_check} filter(email__iexact=)->{pre_check_iexact}")
+                    from vaptfix.mongo_client import get_shared_db
+                    for attempt in range(4):
+                        try:
+                            orm_matches = list(User.objects.filter(email=email))
+                        except Exception:
+                            logger.exception("[TeamsOAuth][DIAG] ORM pre-check failed")
+                            orm_matches = []
+                        try:
+                            raw_matches = list(get_shared_db()["users_user"].find({"email": email}, {"id": 1}))
+                        except Exception:
+                            logger.exception("[TeamsOAuth][DIAG] raw pymongo pre-check failed")
+                            raw_matches = []
+                        logger.info(
+                            f"[TeamsOAuth][DIAG] attempt={attempt} repr(email)={email!r} "
+                            f"orm_count={len(orm_matches)} raw_count={len(raw_matches)} "
+                            f"raw_ids={[m.get('id') for m in raw_matches]}"
+                        )
+                        if orm_matches:
+                            found_user = orm_matches[0]
+                            break
+                        if attempt < 3:
+                            time.sleep(0.5)
                 except Exception:
-                    logger.exception("[TeamsOAuth][DIAG] pre-check query failed")
+                    logger.exception("[TeamsOAuth][DIAG] retry loop failed")
 
-                user, created = User.objects.get_or_create(
-                    email=email,
-                    defaults={
-                        "password": make_password(None),
-                        "is_active": True,
-                        "is_staff": True,
-                        "is_superuser": False,
-                        "login_provider": "microsoft_teams",
-                    },
-                )
-                logger.info(f"[TeamsOAuth] get_or_create by email={email}: created={created} user_id={user.id if user else None}")
+                if found_user:
+                    user, created = found_user, False
+                    logger.info(f"[TeamsOAuth][DIAG] Found existing user on retry — avoided creating a duplicate: id={user.id}")
+                else:
+                    user, created = User.objects.get_or_create(
+                        email=email,
+                        defaults={
+                            "password": make_password(None),
+                            "is_active": True,
+                            "is_staff": True,
+                            "is_superuser": False,
+                            "login_provider": "microsoft_teams",
+                        },
+                    )
+                    logger.info(f"[TeamsOAuth] get_or_create by email={email}: created={created} user_id={user.id if user else None}")
             else:
                 created = False
 
