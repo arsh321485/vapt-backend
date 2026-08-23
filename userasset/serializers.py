@@ -14,6 +14,7 @@ class UserAssetSerializer(serializers.Serializer):
         allow_null=True
     )
     assigned_teams = serializers.ListField(child=serializers.CharField(), required=False)
+    asset_type = serializers.CharField(required=False, allow_null=True)
 
 
 class UserAssetVulnSerializer(serializers.Serializer):

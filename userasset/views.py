@@ -36,6 +36,7 @@ def _clear_user_dashboard_cache(user_id, teams):
 
 from .serializers import UserAssetSerializer, UserAssetVulnSerializer
 from vaptfix.mongo_client import MongoContext
+from upload_report.asset_classification import classify_asset_type
 
 NESSUS_COLLECTION          = "nessus_reports"
 VULN_CARD_COLLECTION       = "vulnerability_cards"
@@ -291,7 +292,15 @@ class UserAssetsAPIView(APIView):
                                 plugin_team_map[v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""]
                                 for v in team_vulns
                                 if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in plugin_team_map
-                            })
+                            }),
+                            # Classified from ALL of this host's vulnerabilities
+                            # (not just this team's), same as adminasset's
+                            # AdminAssetsAPIView — asset_type is a property of
+                            # the asset itself, so it must match admin exactly
+                            # regardless of which team is viewing it.
+                            "asset_type": classify_asset_type(
+                                host_name, host.get("host_information") or {}, host.get("vulnerabilities", [])
+                            ),
                         }
 
                     entry = assets[host_name]
@@ -317,6 +326,7 @@ class UserAssetsAPIView(APIView):
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
                         "assigned_teams": a.get("assigned_teams", []),
+                        "asset_type": a.get("asset_type"),
                     }
                     for a in assets.values()
                 ]
@@ -484,6 +494,12 @@ class UserReportAssetsAPIView(APIView):
                             "total_vulnerabilities": 0,
                             "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
                             "host_information": host.get("host_information") or {},
+                            # Classified from ALL of this host's vulnerabilities
+                            # (not just this team's) so it matches adminasset's
+                            # AdminAssetsAPIView exactly — see UserAssetsAPIView.
+                            "asset_type": classify_asset_type(
+                                host_name, host.get("host_information") or {}, host.get("vulnerabilities", [])
+                            ),
                         }
 
                     entry = assets[host_name]
@@ -508,6 +524,7 @@ class UserReportAssetsAPIView(APIView):
                         "total_vulnerabilities": a["total_vulnerabilities"],
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
+                        "asset_type": a.get("asset_type"),
                     }
                     for a in assets.values()
                 ]
