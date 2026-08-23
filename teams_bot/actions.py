@@ -22,6 +22,7 @@ from . import register_tab
 from . import automations_tab
 from . import team_tab
 from . import timeline_tab
+from . import reminder_tab
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -673,6 +674,47 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [timeline_tab.request_subnav_columnset(active_sub), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
         return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
 
+    # ── Reminder tab ───────────────────────────────────────────────────
+    if action_id in dict(reminder_tab.REMINDER_SUBTABS):
+        try:
+            body = reminder_tab.reminder_tab_body(admin, active_sub=action_id)
+        except Exception:
+            logger.exception(f"[TeamsBot] reminder_tab_body failed for {action_id}")
+            body = [cards._header("🔔 Reminder"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
+    if action_id == "remind_bucket_pg":
+        bucket = value.get("bucket") or "overdue"
+        active_sub = {v: k for k, v in reminder_tab._SUB_TO_BUCKET.items()}.get(bucket, "notif_sub_overdue")
+        offset = int(value.get("offset") or 0)
+        try:
+            body = reminder_tab.reminder_tab_body(admin, active_sub=active_sub, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] remind_bucket_pg failed")
+            body = [cards._header("🔔 Reminder"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
+    if action_id == "remind_sup_filter":
+        st = value.get("st") or "all"
+        team = value.get("team") or "all"
+        try:
+            body = reminder_tab.reminder_tab_body(admin, active_sub="notif_sub_support", st=st, team=team, offset=0)
+        except Exception:
+            logger.exception("[TeamsBot] remind_sup_filter failed")
+            body = [cards._header("🎫 Support"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
+    if action_id == "remind_sup_pg":
+        st = value.get("st") or "all"
+        team = value.get("team") or "all"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = reminder_tab.reminder_tab_body(admin, active_sub="notif_sub_support", st=st, team=team, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] remind_sup_pg failed")
+            body = [cards._header("🎫 Support"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
     if action_id and action_id.startswith("nav_"):
         return _handle_nav(admin, team_id, action_id)
 
@@ -736,6 +778,14 @@ def _handle_nav(admin, team_id, action_id):
             logger.exception("[TeamsBot] timeline_tab_body (default) failed")
             body = [cards._header("📨 Timeline Ext."), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
+
+    if action_id == "nav_notification":
+        try:
+            body = reminder_tab.reminder_tab_body(admin, active_sub="notif_sub_overdue")
+        except Exception:
+            logger.exception("[TeamsBot] reminder_tab_body (default) failed")
+            body = [cards._header("🔔 Reminder"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
 
     label = dict(cards.NAV_ITEMS).get(action_id, action_id)
     return cards.nav_buttons_card(
