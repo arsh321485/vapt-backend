@@ -1193,6 +1193,15 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 "https://graph.microsoft.com/ChannelMessage.Send",
                 "https://graph.microsoft.com/TeamMember.ReadWrite.All",
                 "https://graph.microsoft.com/ChannelMember.ReadWrite.All",
+                # POST /appCatalogs/teamsApps (publishing the bot to the org
+                # catalog — see _get_or_publish_teams_catalog_app) doesn't
+                # support application-only auth at all, no matter what's
+                # granted on the app registration — confirmed via Graph docs
+                # and real 403s in prod even with AppCatalog.ReadWrite.All
+                # present on the app-only token. It needs a DELEGATED
+                # AppCatalog.Submit-or-higher scope from the signed-in
+                # admin instead, which is why this is requested here.
+                "https://graph.microsoft.com/AppCatalog.Submit",
                 "offline_access",
                 "openid",
                 "email",
@@ -1299,27 +1308,43 @@ def _get_graph_app_token():
 _teams_catalog_app_id_cache = {"id": None}
 
 
-def _get_or_publish_teams_catalog_app():
+def _get_or_publish_teams_catalog_app(delegated_access_token=None):
     """
     Returns this bot's id in the tenant's Teams app catalog, publishing it
-    there (once, ever) via app-only Graph credentials if it isn't already —
-    this is the automated equivalent of the manual "Upload a custom app"
-    step, so no admin/client ever has to do that by hand. Cached across
-    calls for the life of the process once found, since it never changes.
+    there (once, ever) if it isn't already — the automated equivalent of
+    the manual "Upload a custom app" step, so no admin/client ever has to
+    do that by hand. Cached across calls for the life of the process once
+    found, since it never changes.
+
+    The LOOKUP (GET) works fine with the app-only token. The PUBLISH
+    (POST) does not: confirmed via Microsoft's own Graph docs and real
+    repeated 403s in production ("User not authorized") even with
+    AppCatalog.ReadWrite.All present on the app-only token's own granted
+    roles — POST /appCatalogs/teamsApps simply does not support
+    application-only auth at all; it needs a DELEGATED token with
+    AppCatalog.Submit (or higher) from a real signed-in user, which is why
+    the Teams OAuth login flow now requests that scope (see auth_url's
+    `scopes` list) and callers here pass it through as
+    `delegated_access_token` wherever a fresh one is available (i.e. right
+    after a login, when provisioning a new team). Falls back to the
+    app-only token for the publish step too if no delegated token is
+    available — will 403 exactly as before, but keeps this safe to call
+    from paths that never have a user's own token (e.g. background retry
+    threads), since a failed publish is a logged no-op, not a crash.
     """
     global _teams_catalog_app_id_cache
     if _teams_catalog_app_id_cache.get("id"):
         return _teams_catalog_app_id_cache["id"]
 
-    token = _get_graph_app_token()
-    if not token:
+    app_token = _get_graph_app_token()
+    if not app_token:
         return None
-    headers = {"Authorization": f"Bearer {token}"}
+    lookup_headers = {"Authorization": f"Bearer {app_token}"}
 
     try:
         resp = _http_get(
             f"https://graph.microsoft.com/v1.0/appCatalogs/teamsApps?$filter=externalId eq '{settings.MICROSOFT_CLIENT_ID}'",
-            headers=headers, timeout=15,
+            headers=lookup_headers, timeout=15,
         )
         if resp.status_code == 200:
             apps = resp.json().get("value") or []
@@ -1334,11 +1359,13 @@ def _get_or_publish_teams_catalog_app():
         logger.warning(f"[TeamsAppInstall] Teams app package not found at {zip_path} — cannot auto-publish")
         return None
 
+    publish_token = delegated_access_token or app_token
+    publish_headers = {"Authorization": f"Bearer {publish_token}"}
     try:
         with open(zip_path, "rb") as f:
             publish_resp = _http_post(
                 "https://graph.microsoft.com/v1.0/appCatalogs/teamsApps",
-                headers={**headers, "Content-Type": "application/zip"},
+                headers={**publish_headers, "Content-Type": "application/zip"},
                 data=f.read(),
                 timeout=30,
             )
@@ -1353,7 +1380,7 @@ def _get_or_publish_teams_catalog_app():
             # Published by a concurrent request in the meantime — re-fetch.
             resp2 = _http_get(
                 f"https://graph.microsoft.com/v1.0/appCatalogs/teamsApps?$filter=externalId eq '{settings.MICROSOFT_CLIENT_ID}'",
-                headers=headers, timeout=15,
+                headers=lookup_headers, timeout=15,
             )
             apps2 = (resp2.json().get("value") or []) if resp2.status_code == 200 else []
             if apps2:
@@ -1365,17 +1392,23 @@ def _get_or_publish_teams_catalog_app():
     return None
 
 
-def _install_teams_bot(team_id):
+def _install_teams_bot(team_id, delegated_access_token=None):
     """
     Best-effort auto-install of the VaptFix bot into a newly created (or
     existing) team, using app-only Graph credentials — call this right
     after a team's channels are created so every admin, on every team,
     gets a working bot with zero manual steps. Safe to call even if
     already installed (Graph just returns a 409, handled as a no-op).
+
+    `delegated_access_token` (the signed-in admin's own token, when
+    available) is passed through to _get_or_publish_teams_catalog_app —
+    only the one-time org-catalog PUBLISH step needs it (app-only auth
+    doesn't work for that specific Graph call at all); this function's
+    own team-install call still uses app-only credentials as before.
     """
     if not team_id:
         return False
-    catalog_id = _get_or_publish_teams_catalog_app()
+    catalog_id = _get_or_publish_teams_catalog_app(delegated_access_token=delegated_access_token)
     if not catalog_id:
         return False
     token = _get_graph_app_token()
@@ -1598,7 +1631,7 @@ def _create_vaptfix_channels(team_id, headers, access_token=None, admin=None):
             })
         except Exception as e:
             results.append({"channelName": channel_name, "status": "failed", "error": str(e)})
-    _install_teams_bot(team_id)
+    _install_teams_bot(team_id, delegated_access_token=token)
     return results
 
 
@@ -1814,6 +1847,17 @@ def auto_create_vaptfix_team(access_token, admin=None):
                         _ensure_admin_dashboard_channel(team_id, access_token, headers=headers, admin=admin)
                     except Exception:
                         logger.warning("[TeamsChannels] _ensure_admin_dashboard_channel (existing team) failed", exc_info=True)
+                    # Retry the bot install too — idempotent (409 = already
+                    # installed, treated as success), so this is what
+                    # actually retrofits a team whose bot install kept
+                    # failing on every earlier login (e.g. the catalog-
+                    # publish delegated-token fix — see _install_teams_bot)
+                    # the next time this admin logs in, with no separate
+                    # migration step needed.
+                    try:
+                        _install_teams_bot(team_id, delegated_access_token=access_token)
+                    except Exception:
+                        logger.warning("[TeamsAppInstall] retry on existing-team login failed", exc_info=True)
                     # Fetch existing channels
                     channels_result = []
                     try:
@@ -2810,7 +2854,7 @@ class CreateTeamView(generics.GenericAPIView):
                     "status": "failed",
                     "error": str(e)
                 })
-        _install_teams_bot(team_id)
+        _install_teams_bot(team_id, delegated_access_token=access_token)
         return results
 
     def wait_for_team_and_create_channels(self, access_token, team_id, max_retries=5, delay=10, admin=None):
