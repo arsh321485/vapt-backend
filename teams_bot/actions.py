@@ -23,6 +23,7 @@ from . import automations_tab
 from . import team_tab
 from . import timeline_tab
 from . import reminder_tab
+from . import download_tab
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -786,6 +787,14 @@ def _handle_nav(admin, team_id, action_id):
             logger.exception("[TeamsBot] reminder_tab_body (default) failed")
             body = [cards._header("🔔 Reminder"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
+    if action_id == "nav_download":
+        try:
+            body = download_tab.download_report_body(admin)
+        except Exception:
+            logger.exception("[TeamsBot] download_report_body failed")
+            body = [cards._header("📥 Download Report"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_download", extra_body=body)
 
     label = dict(cards.NAV_ITEMS).get(action_id, action_id)
     return cards.nav_buttons_card(

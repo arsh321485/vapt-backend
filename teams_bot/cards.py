@@ -245,9 +245,9 @@ NAV_ITEMS = [
     ("nav_register", "📋 Register"),
     ("nav_automation", "🤖 Automations"),
     ("nav_team", "👥 Team"),
-    ("nav_request", "📨 Ext."),
-    ("nav_notification", "🔔 Alerts"),
-    ("nav_download", "📥 Report"),
+    ("nav_request", "📨 Timeline Ext."),
+    ("nav_notification", "🔔 Reminder"),
+    ("nav_download", "📥 Download Report"),
 ]
 
 
