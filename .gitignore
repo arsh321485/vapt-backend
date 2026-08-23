@@ -27,3 +27,4 @@ staticfiles/
 cache/
 django_cache/
 *.djcache
+prompt.txt
