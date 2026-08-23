@@ -120,6 +120,51 @@ def _refresh_ms_access_token(admin):
         return None
 
 
+def _fetch_teams_members_from_graph(admin):
+    """
+    Real Microsoft Teams roster for this admin's team (email + display
+    name), straight from Graph — used to let Add User PICK someone who's
+    already a Teams member instead of retyping their name/email by hand
+    (Slack's own Add User modal does the same thing with a users_select
+    picker). Cached ~45s (fix_tab.cached_fetch), same throttling reasoning
+    as _live_sync_members_from_teams.
+    """
+    def _do_fetch():
+        team_id = getattr(admin, "ms_team_id", None)
+        access_token = getattr(admin, "ms_access_token", None)
+        if not team_id or not access_token:
+            return []
+        try:
+            import requests
+            resp = requests.get(
+                f"https://graph.microsoft.com/v1.0/teams/{team_id}/members",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=15,
+            )
+            if resp.status_code == 401:
+                new_token = _refresh_ms_access_token(admin)
+                if not new_token:
+                    return []
+                resp = requests.get(
+                    f"https://graph.microsoft.com/v1.0/teams/{team_id}/members",
+                    headers={"Authorization": f"Bearer {new_token}"},
+                    timeout=15,
+                )
+            if resp.status_code != 200:
+                return []
+            out = []
+            for m in resp.json().get("value") or []:
+                email = (m.get("email") or "").strip()
+                if not email or (email.lower() == (getattr(admin, "email", "") or "").strip().lower()):
+                    continue  # skip the admin themselves
+                out.append({"email": email, "displayName": m.get("displayName") or email})
+            return out
+        except Exception:
+            logger.exception("[TeamsBot] fetch Teams members from Graph failed")
+            return []
+    return fix_tab.cached_fetch(f"teams_graph_members:{admin.id}", 45, _do_fetch)
+
+
 def _fetch_members(admin, user_type=None):
     _live_sync_members_from_teams(admin)
     from users_details.views import UserDetailListView
@@ -146,7 +191,7 @@ def _member_detail_id(m):
 
 # ── Add User ───────────────────────────────────────────────────────────
 
-def add_user_form_body():
+def add_user_form_body(admin):
     # NOTE: deliberately NOT using isRequired/errorMessage on these inputs —
     # confirmed via real testing that Adaptive Cards validates every
     # isRequired input on the CARD as a whole before letting ANY
@@ -156,9 +201,27 @@ def add_user_form_body():
     # filled this form in — required-field checking is done server-side
     # in submit_add_user() instead, which already returns a clear error
     # message without blocking navigation.
-    return [
+    body = [
         {"type": "TextBlock", "text": "➕ Add User", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": "Add a new team member and grant them access to one team. A welcome email with login instructions is sent automatically.", "size": "Small", "isSubtle": True, "wrap": True},
+    ]
+
+    # Real people already on this Teams team (confirmed via real testing
+    # this was expected — Slack's own Add User picks from a workspace
+    # member directory the same way, instead of retyping a name/email
+    # that's already known) — picking one here skips the manual fields
+    # below entirely.
+    teams_members = _fetch_teams_members_from_graph(admin)
+    if teams_members:
+        body.append({"type": "TextBlock", "text": "Pick someone already in this Teams team:", "size": "Small", "weight": "Bolder", "spacing": "Medium"})
+        body.append({
+            "type": "Input.ChoiceSet", "id": "au_pick_member", "style": "compact",
+            "placeholder": "Select a Teams member (optional)",
+            "choices": [{"title": f"{m['displayName']} ({m['email']})", "value": m["email"]} for m in teams_members],
+        })
+        body.append({"type": "TextBlock", "text": "— or fill in manually for someone not yet in this Teams team —", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
+
+    body.extend([
         {"type": "Input.ChoiceSet", "id": "au_type", "label": "User Type", "style": "compact", "value": "external",
          "choices": [{"title": "External", "value": "external"}, {"title": "Internal", "value": "internal"}]},
         {"type": "Input.Text", "id": "au_first", "label": "First Name", "placeholder": "e.g. Ritu"},
@@ -171,27 +234,40 @@ def add_user_form_body():
             "type": "ActionSet", "spacing": "Medium",
             "actions": [cards._execute_action("✅ Add User", {"action_id": "team_adduser_submit"}, style="positive")],
         },
-    ]
+    ])
+    return body
 
 
 def submit_add_user(admin, form_data):
     """`form_data` is the Input.* values Teams echoes back alongside our own
     action_id — mirrors users.views.SlackSlashCommandView._cmd_adduser's
-    real API call (POST /api/admin/users_details/add-user-detail/), minus
-    Slack's own Slack-user-lookup step (this form collects email/name
-    directly, the same fields the website's own Add User form takes)."""
+    real API call (POST /api/admin/users_details/add-user-detail/). If a
+    real Teams member was picked from au_pick_member, their name/email
+    come from the live Graph roster (matching Slack's own users_select
+    picker behavior); otherwise falls back to the manual fields, the same
+    ones the website's own Add User form takes."""
     from users_details.views import UserDetailCreateView
     from .actions import _call_view_in_process
 
-    email = (form_data.get("au_email") or "").strip()
-    first = (form_data.get("au_first") or "").strip()
-    last = (form_data.get("au_last") or "").strip() or first
+    picked_email = (form_data.get("au_pick_member") or "").strip()
+    if picked_email:
+        picked = next((m for m in _fetch_teams_members_from_graph(admin) if m["email"] == picked_email), None)
+        email = picked_email
+        display_name = (picked or {}).get("displayName") or ""
+        name_parts = display_name.split()
+        first = name_parts[0] if name_parts else email
+        last = " ".join(name_parts[1:]) if len(name_parts) > 1 else first
+    else:
+        email = (form_data.get("au_email") or "").strip()
+        first = (form_data.get("au_first") or "").strip()
+        last = (form_data.get("au_last") or "").strip() or first
+
     user_type = form_data.get("au_type") or "external"
     code = form_data.get("au_team") or ""
     team_name = TEAM_CODE_TO_NAME.get(code)
 
     if not email or not first or not team_name:
-        return False, "Email, First Name and Team are all required."
+        return False, "Pick a Teams member (or fill in Email/First Name manually) and select a Team."
 
     status_code, data = _call_view_in_process(
         UserDetailCreateView, admin, method="post", request_format="json",
@@ -424,7 +500,7 @@ def team_tab_body(admin, team_id, active_sub="team_sub_team", offset=0):
     body = [team_subnav_columnset(active_sub)]
     try:
         if active_sub == "team_sub_adduser":
-            body.extend(add_user_form_body())
+            body.extend(add_user_form_body(admin))
         elif active_sub == "team_sub_deleteuser":
             body.extend(delete_user_list_body(admin, offset=offset))
         elif active_sub == "team_sub_deleteteamuser":

@@ -479,7 +479,7 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body.append(cards._header("✅ User Added" if ok else "❌ Could not add user"))
             body.append(cards._body_text(message))
             if not ok:
-                body.extend(team_tab.add_user_form_body())
+                body.extend(team_tab.add_user_form_body(admin))
         except Exception:
             logger.exception("[TeamsBot] team_adduser_submit failed")
             body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
