@@ -320,6 +320,11 @@ def _get_or_create_fix_vuln_id(admin, r, report_id):
             "risk_factor": r.get("severity") or "Medium",
             "port": r.get("port", ""),
         },
+        # This endpoint only has a JSON parser configured — the shared
+        # helper's multipart default got a hard 415 here (confirmed via a
+        # real call), which is why Manual Fix always fell through to "no
+        # steps to show" regardless of whether real steps existed.
+        request_format="json",
     )
     if status_code >= 300 or not isinstance(data, dict):
         return None
