@@ -2022,6 +2022,22 @@ class MicrosoftTeamsCallbackView(APIView):
                 logger.info(f"[TeamsOAuth] Lookup by admin_id_from_state={admin_id_from_state}: found={bool(user)}")
 
             if not user and email:
+                # TEMP DIAGNOSTIC (2026-08-23): real production logs show a
+                # fresh User + fresh 'Vaptfix' team getting created on EVERY
+                # Teams login for the SAME email, yet only one row for that
+                # email ever exists afterward — i.e. get_or_create's lookup
+                # isn't finding the row a previous login already created.
+                # Logging the raw query result right before the actual call
+                # to see exactly what this specific request's DB connection
+                # sees, since this couldn't be reproduced in an isolated
+                # local script. Remove once root-caused.
+                try:
+                    pre_check = list(User.objects.filter(email=email).values_list("id", flat=True))
+                    pre_check_iexact = list(User.objects.filter(email__iexact=email).values_list("id", "email"))
+                    logger.info(f"[TeamsOAuth][DIAG] repr(email)={email!r} filter(email=)->{pre_check} filter(email__iexact=)->{pre_check_iexact}")
+                except Exception:
+                    logger.exception("[TeamsOAuth][DIAG] pre-check query failed")
+
                 user, created = User.objects.get_or_create(
                     email=email,
                     defaults={
