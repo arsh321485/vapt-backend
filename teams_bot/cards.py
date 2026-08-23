@@ -488,19 +488,8 @@ def _common_vulns_team_columnset(active_team):
     return {"type": "ColumnSet", "columns": columns, "spacing": "Medium", "separator": True}
 
 
-def fix_tab_body(team_id, active_sub="fix_sub_assets", common_team="config"):
-    """
-    Full Fix-tab body: its own sub-nav row (All Assets/All Vulns/Common
-    Vulns) followed by that sub-tab's real content, rendered the same
-    image-snapshot way as Home/Team (see dashboard_image_card_body) —
-    matches Microsoft -Admin/allassets.html, allvuln.html, commonvuln.html.
-    """
-    body = [_fix_subnav_columnset(active_sub)]
-    if active_sub == "fix_sub_vulns":
-        body.extend(dashboard_image_card_body(team_id, kind="allvulns", title="All Vulnerabilities"))
-    elif active_sub == "fix_sub_common":
-        body.append(_common_vulns_team_columnset(common_team))
-        body.extend(dashboard_image_card_body(team_id, kind="commonvulns", title="Common Vulnerabilities", extra_params={"team": common_team}))
-    else:
-        body.extend(dashboard_image_card_body(team_id, kind="assets", title="All Assets"))
-    return body
+# Full Fix-tab body building (sub-nav + real, clickable content) now lives
+# in teams_bot.fix_tab.fix_tab_body — it needs `admin` (not just team_id) to
+# fetch rows in-process and build native drill-down rows, not just a PNG
+# image URL. This module still supplies the widgets fix_tab.py builds on:
+# _fix_subnav_columnset, _common_vulns_team_columnset, COMMON_VULNS_TEAMS.
