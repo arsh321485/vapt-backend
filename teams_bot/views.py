@@ -180,13 +180,13 @@ class TeamsBotMessagesView(APIView):
             if activity_type == "message":
                 self._handle_message(activity)
             elif activity_type in ("conversationUpdate", "installationUpdate"):
-                # installationUpdate is handled the same way — some Teams
-                # app-install flows (notably channel-scoped installs, e.g.
-                # into the private admin-dashboard channel — see
-                # users.views._install_teams_bot_on_channel) fire this
-                # instead of/alongside conversationUpdate. Treating both
-                # identically just means save_team_channel_reference picks
-                # up whichever one actually arrives.
+                # installationUpdate is handled the same way — kept
+                # defensive/no-cost even though the current admin-dashboard
+                # channel is a standard channel (covered by the existing
+                # team-scope install, see users.views._install_teams_bot)
+                # and doesn't need this path; some channel-scoped install
+                # flows fire installationUpdate instead of/alongside
+                # conversationUpdate, so both are treated identically here.
                 self._handle_conversation_update(activity)
             # Other activity types (typing, unrecognized invokes, etc.) —
             # nothing to do.
@@ -500,16 +500,16 @@ class TeamsBotMessagesView(APIView):
         """
         Fires when the bot is added to a team/channel, or a member
         joins/leaves — also called for `installationUpdate` (see the
-        dispatch above), which some Teams app-install flows send instead,
-        notably the channel-scoped install into the private admin-dashboard
-        channel (users.views._install_teams_bot_on_channel). That event
-        shape has no `membersAdded` at all (it's `action: "add"`, not a
-        member list), so both shapes are checked here. Whichever channel
-        the bot was most recently added to becomes "the" admin channel —
-        save_team_channel_reference always overwrites the single row kept
-        per team_id — so once the bot lands in the new private channel,
-        every proactive/onboarding post automatically starts going there
-        instead of General, with no extra routing logic needed.
+        dispatch above), which some Teams app-install flows send instead
+        of conversationUpdate. That event shape has no `membersAdded` at
+        all (it's `action: "add"`, not a member list), so both shapes are
+        checked here. This is what puts the bot's proactive-posting
+        reference onto General on first install (see save_team_channel_reference)
+        — the dedicated admin-dashboard channel (users.views.
+        ADMIN_DASHBOARD_CHANNEL_NAME) doesn't go through this path at all;
+        it's a standard channel already covered by the team-scope install,
+        so its reference is set directly and synchronously at channel-
+        creation time instead (conversation_store.save_admin_dashboard_channel_reference).
         """
         members_added = activity.get("membersAdded") or []
         bot_id = (activity.get("recipient") or {}).get("id")

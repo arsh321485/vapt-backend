@@ -1230,7 +1230,7 @@ class MicrosoftTeamsOAuthUrlView(APIView):
 # is immutable after creation, and General specifically is always
 # "standard" — a Microsoft product limitation, not something our code can
 # work around). The admin-only dashboard now lives in a genuinely PRIVATE
-# channel instead — see ADMIN_DASHBOARD_CHANNEL_NAME / _ensure_admin_private_channel.
+# channel instead — see ADMIN_DASHBOARD_CHANNEL_NAME / _ensure_admin_dashboard_channel.
 TEAMS_CHANNEL_DISPLAY_NAMES = {
     "General": "General",
     "Patch Management": "vaptfix patch management team",
@@ -1239,26 +1239,22 @@ TEAMS_CHANNEL_DISPLAY_NAMES = {
     "Architectural Flaws": "vaptfix Architectural Flaws team",
 }
 
-# Private channel (membershipType="private", only the admin as owner) that
-# replaces the old renamed-General approach for admin-only dashboard
-# content — see _ensure_admin_private_channel.
-ADMIN_DASHBOARD_CHANNEL_NAME = "vaptfix admin dashboard"
-
-# Disabled for now (2026-08-23): confirmed via real production logs that
-# the bot never actually gets installed into the new private channel —
-# _get_or_publish_teams_catalog_app's publish call 403s ("User not
+# Dedicated channel for admin-only dashboard content — separate from
+# General so General can stay untouched/unrenamed. Confirmed via real
+# production logs (2026-08-23) that a genuinely PRIVATE channel doesn't
+# work end-to-end yet: the bot never actually gets installed into it —
+# _get_or_publish_teams_catalog_app's publish call 403'd ("User not
 # authorized"), and even after AppCatalog.ReadWrite.All +
 # TeamsAppInstallation.ReadWriteForTeam.All were granted with admin
-# consent in Azure, the private channel still didn't get a welcome card
-# (Teams apps-in-private-channels support is a very recent, still-rolling-
-# out capability — the channel-scoped installedApps call this relies on
-# may need a permission/tenant-rollout state that isn't confirmed yet).
-# Flip back to True once that's diagnosed with fresh logs — everything
-# else (channel creation, General revert, owner assignment) still runs;
-# this only skips the part that was actually broken (bot install + the
-# routing that depends on it), so dashboard content keeps posting into
-# General in the meantime instead of silently going nowhere.
-ADMIN_PRIVATE_CHANNEL_ENABLED = False
+# consent in Azure, it still got no welcome card (Teams
+# apps-in-private-channels support is a very recent, still-rolling-out
+# capability). Per explicit instruction, this is now a plain STANDARD
+# channel instead — same visibility as the other 4 team channels, but the
+# bot can post into it via the team-scope install that already works
+# (no separate channel-scoped install/permission needed at all), which is
+# what actually made this reliable.
+ADMIN_DASHBOARD_CHANNEL_NAME = "vaptfix admin dashboard"
+ADMIN_DASHBOARD_CHANNEL_ENABLED = True
 
 
 _graph_app_token_cache = {"token": None, "expires_at": 0}
@@ -1434,6 +1430,14 @@ def _install_teams_bot_on_channel(team_id, channel_id):
     app support is a recent Teams platform capability — safe no-op on
     failure, e.g. if this tenant hasn't rolled it out yet or the app
     registration needs its manifest/permissions updated for it).
+
+    NOT currently called anywhere — the admin-dashboard channel is a
+    standard channel now (see ADMIN_DASHBOARD_CHANNEL_ENABLED), which the
+    team-scope install already covers. Kept for when a genuine private
+    channel is revisited; confirmed via real production logs that this
+    call alone wasn't enough to get a working welcome card even with the
+    right Graph permissions granted, so treat it as unverified/incomplete
+    if reused, not a drop-in fix.
     """
     if not team_id or not channel_id:
         return False
@@ -1463,23 +1467,30 @@ def _install_teams_bot_on_channel(team_id, channel_id):
         return False
 
 
-def _ensure_admin_private_channel(team_id, access_token, headers=None, admin=None):
+def _ensure_admin_dashboard_channel(team_id, access_token, headers=None, admin=None):
     """
-    Creates (if missing) a PRIVATE channel named ADMIN_DASHBOARD_CHANNEL_NAME
-    with only the signed-in admin as owner, and installs the VaptFix bot
-    into it — this is what the bot now posts admin-only dashboard content
-    into, replacing the earlier approach of renaming General itself
-    (General can never be private — see the note on TEAMS_CHANNEL_DISPLAY_NAMES).
-    Also opportunistically persists admin.ms_teams_object_id, which nothing
-    else in the codebase currently populates despite other code (proactive
-    messaging lookups) already expecting it. Safe no-op on any failure —
-    the 4 real team channels still get created either way.
+    Creates (if missing) a STANDARD channel named ADMIN_DASHBOARD_CHANNEL_NAME,
+    separate from General — this is what the bot posts admin dashboard
+    content into, replacing the earlier approach of renaming General
+    itself (General can never be private, and a genuine private channel
+    for this turned out not to work reliably yet — see the note on
+    ADMIN_DASHBOARD_CHANNEL_ENABLED). Since it's a standard channel, the
+    team-scope bot install (_install_teams_bot) already covers it — no
+    separate per-channel install needed. Points the stored proactive-
+    posting reference at it directly (conversation_store.
+    save_admin_dashboard_channel_reference) since a plain channel-create
+    call doesn't fire any "bot added" webhook to react to.
+    Also opportunistically persists admin.ms_teams_object_id, which
+    nothing else in the codebase currently populates despite other code
+    (proactive messaging lookups) already expecting it. Safe no-op on any
+    failure — the 4 real team channels still get created either way.
     """
-    if not ADMIN_PRIVATE_CHANNEL_ENABLED:
+    if not ADMIN_DASHBOARD_CHANNEL_ENABLED:
         return {"status": "disabled", "channelId": None}
     headers = headers or ({"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"} if access_token else None)
     if not team_id or not headers:
         return {"status": "skipped", "channelId": None}
+    from teams_bot.conversation_store import save_admin_dashboard_channel_reference
     try:
         existing = _get_team_channels(team_id, headers)
         for ch in existing or []:
@@ -1492,26 +1503,27 @@ def _ensure_admin_private_channel(team_id, access_token, headers=None, admin=Non
             # this is the reliable way to detect it regardless of its
             # current display name (Graph guarantees this 1:1 mapping).
             is_general = channel_id == team_id
-            if ch.get("membershipType") == "private" and not is_general:
-                # A genuine already-created private admin channel.
-                _install_teams_bot_on_channel(team_id, channel_id)
+            if not is_general:
+                # Already exists as its own channel (private, from an
+                # earlier deploy, or standard from a previous run of this
+                # same code) — just make sure proactive posts point at it.
+                save_admin_dashboard_channel_reference(team_id, channel_id)
                 return {"status": "already_exists", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id}
 
             # Otherwise this is the OLD renamed-General channel left over
             # from an earlier deploy of this feature (confirmed via real
             # testing: it silently satisfied this name check and blocked
-            # a real private channel from ever being created) — rename it
+            # a real separate channel from ever being created) — rename it
             # back to "General" and fall through to actually create the
-            # private channel below.
-            if is_general:
-                try:
-                    rename_resp = _http_patch(
-                        f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}",
-                        headers=headers, json={"displayName": "General"}, timeout=15,
-                    )
-                    logger.info(f"[TeamsChannels] Reverted General channel display name back to 'General': {rename_resp.status_code}")
-                except Exception:
-                    logger.warning("[TeamsChannels] Failed to revert General channel display name", exc_info=True)
+            # dedicated channel below.
+            try:
+                rename_resp = _http_patch(
+                    f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}",
+                    headers=headers, json={"displayName": "General"}, timeout=15,
+                )
+                logger.info(f"[TeamsChannels] Reverted General channel display name back to 'General': {rename_resp.status_code}")
+            except Exception:
+                logger.warning("[TeamsChannels] Failed to revert General channel display name", exc_info=True)
             break
 
         aad_object_id = _get_admin_aad_object_id(access_token)
@@ -1523,29 +1535,23 @@ def _ensure_admin_private_channel(team_id, access_token, headers=None, admin=Non
 
         payload = {
             "displayName": ADMIN_DASHBOARD_CHANNEL_NAME,
-            "description": "Admin-only dashboard — private, visible only to you.",
-            "membershipType": "private",
+            "description": "Admin dashboard — reports, fixes, and team updates.",
+            "membershipType": "standard",
         }
-        if aad_object_id:
-            payload["members"] = [{
-                "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                "roles": ["owner"],
-                "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{aad_object_id}')",
-            }]
 
         resp = _http_post(
             f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
             headers=headers, json=payload, timeout=15,
         )
         if resp.status_code not in (200, 201):
-            logger.warning(f"[TeamsChannels] Private admin channel creation failed: {resp.status_code} {resp.text[:300]}")
+            logger.warning(f"[TeamsChannels] Admin dashboard channel creation failed: {resp.status_code} {resp.text[:300]}")
             return {"status": "failed", "http_status": resp.status_code, "channelId": None}
 
         channel_id = resp.json().get("id")
-        _install_teams_bot_on_channel(team_id, channel_id)
+        save_admin_dashboard_channel_reference(team_id, channel_id)
         return {"status": "created", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id}
     except Exception as e:
-        logger.warning(f"[TeamsChannels] _ensure_admin_private_channel failed: {e}")
+        logger.warning(f"[TeamsChannels] _ensure_admin_dashboard_channel failed: {e}")
         return {"status": "failed", "error": str(e), "channelId": None}
 
 
@@ -1554,7 +1560,7 @@ def _create_vaptfix_channels(team_id, headers, access_token=None, admin=None):
     default_channels = ["Patch Management", "Configuration Management", "Network Security", "Architectural Flaws"]
     channels_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels"
     token = access_token or (headers.get("Authorization", "").replace("Bearer ", "") if headers else None)
-    results = [_ensure_admin_private_channel(team_id, token, headers=headers, admin=admin)]
+    results = [_ensure_admin_dashboard_channel(team_id, token, headers=headers, admin=admin)]
     for channel_name in default_channels:
         try:
             ch_resp = _http_post(channels_url, headers=headers, json={
@@ -1636,20 +1642,19 @@ def _get_team_channels(team_id, headers):
 
 
 def _pick_general_channel_id(channels):
-    # General is left as "General" now (see TEAMS_CHANNEL_DISPLAY_NAMES note)
-    # — this just matches the raw Graph default name, kept as a set/loop for
-    # backward compatibility with any already-provisioned team where an
-    # older deploy of this code had renamed it to "vaptfix admin dashboard".
-    target_names = {"general", "vaptfix admin dashboard"}
+    # General is left as "General" now (see TEAMS_CHANNEL_DISPLAY_NAMES
+    # note) — "vaptfix admin dashboard" is NOT an alias for it anymore
+    # (it's its own real channel now, see ADMIN_DASHBOARD_CHANNEL_NAME),
+    # so this only matches the raw Graph default name.
     for ch in channels or []:
         nm = (ch.get("displayName") or ch.get("channelName") or "").strip().lower()
-        if nm in target_names:
+        if nm == "general":
             return ch.get("id") or ch.get("channelId")
     return None
 
 
 def _pick_admin_dashboard_channel_id(channels):
-    """The genuinely private admin-dashboard channel — see ADMIN_DASHBOARD_CHANNEL_NAME."""
+    """The dedicated admin-dashboard channel — see ADMIN_DASHBOARD_CHANNEL_NAME."""
     target = ADMIN_DASHBOARD_CHANNEL_NAME.strip().lower()
     for ch in channels or []:
         nm = (ch.get("displayName") or ch.get("channelName") or "").strip().lower()
@@ -1762,8 +1767,8 @@ def auto_create_vaptfix_team(access_token, admin=None):
     """
     Auto-create a team named 'VAPTFIX' with 4 default channels if it doesn't already exist.
     Returns dict with team_id, team_name, and channels info. `admin` (the
-    signed-in User) is optional but needed to own the private admin-dashboard
-    channel — see _ensure_admin_private_channel.
+    signed-in User) is optional but used by _ensure_admin_dashboard_channel
+    to persist ms_teams_object_id.
     """
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -1781,16 +1786,16 @@ def auto_create_vaptfix_team(access_token, admin=None):
                     team_id = team.get('id')
                     logger.info(f"VAPTFIX team already exists: {team_id}")
                     _set_vaptfix_team_icon(team_id, access_token)
-                    # Ensure the private admin-dashboard channel exists even
+                    # Ensure the dedicated admin-dashboard channel exists even
                     # for a team that was provisioned before this feature —
                     # this is what actually retrofits an already-onboarded
                     # admin (e.g. one whose General channel was renamed by an
                     # older deploy) the next time they log in via Teams,
                     # without needing any one-off migration script.
                     try:
-                        _ensure_admin_private_channel(team_id, access_token, headers=headers, admin=admin)
+                        _ensure_admin_dashboard_channel(team_id, access_token, headers=headers, admin=admin)
                     except Exception:
-                        logger.warning("[TeamsChannels] _ensure_admin_private_channel (existing team) failed", exc_info=True)
+                        logger.warning("[TeamsChannels] _ensure_admin_dashboard_channel (existing team) failed", exc_info=True)
                     # Fetch existing channels
                     channels_result = []
                     try:
@@ -1807,7 +1812,7 @@ def auto_create_vaptfix_team(access_token, admin=None):
                                 })
                     except Exception as e:
                         logger.warning(f"Error fetching channels: {str(e)}")
-                    preferred_channel_id = _pick_general_channel_id(channels_result)
+                    preferred_channel_id = _pick_admin_dashboard_channel_id(channels_result) or _pick_general_channel_id(channels_result)
                     if not preferred_channel_id and channels_result:
                         preferred_channel_id = channels_result[0].get("channelId")
                     urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id)
@@ -1889,7 +1894,11 @@ def auto_create_vaptfix_team(access_token, admin=None):
         channels_result = _create_vaptfix_channels(team_id, headers, access_token=access_token, admin=admin)
         _set_vaptfix_team_icon(team_id, access_token)
         all_channels = _get_team_channels(team_id, headers)
-        preferred_channel_id = _pick_general_channel_id(all_channels) or _pick_general_channel_id(channels_result)
+        preferred_channel_id = (
+            _pick_admin_dashboard_channel_id(all_channels)
+            or _pick_general_channel_id(all_channels)
+            or _pick_general_channel_id(channels_result)
+        )
         if not preferred_channel_id and channels_result:
             preferred_channel_id = channels_result[0].get("channelId")
         urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id)
@@ -2739,7 +2748,7 @@ class CreateTeamView(generics.GenericAPIView):
         }
         admin = admin or getattr(getattr(self, "request", None), "user", None)
         url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels"
-        results = [_ensure_admin_private_channel(team_id, access_token, headers=headers, admin=admin)]
+        results = [_ensure_admin_dashboard_channel(team_id, access_token, headers=headers, admin=admin)]
         for channel_name in self.DEFAULT_CHANNELS:
             payload = {
                 "displayName": TEAMS_CHANNEL_DISPLAY_NAMES.get(channel_name, channel_name),

@@ -142,6 +142,49 @@ def set_active_message_id(team_id: str, message_id):
         )
 
 
+def save_admin_dashboard_channel_reference(team_id: str, channel_id: str):
+    """
+    Points the stored "admin dashboard channel" conversation reference at
+    a newly created STANDARD channel (see users.views.ADMIN_DASHBOARD_CHANNEL_NAME),
+    without waiting for any conversationUpdate webhook — a standard
+    channel is already covered by the team-scope bot install (only a
+    genuinely PRIVATE channel needs its own explicit per-channel install
+    event, which is why this whole approach exists: that path wasn't
+    reliable). A Teams channel's Bot Framework conversation id IS its
+    Graph channel id (both are the same "19:...@thread.tacv2" string), so
+    this just reuses whatever service_url/tenant_id this team already has
+    on file (from the original team-scope install/first conversationUpdate)
+    and repoints conversation_id + channel_id at the new channel.
+    Returns True if it could (i.e. a prior reference already existed to
+    borrow service_url from), False otherwise (safe no-op — proactive
+    posts just keep going wherever they were going before).
+    """
+    if not team_id or not channel_id:
+        return False
+    with MongoContext() as db:
+        existing = db[TEAM_CHANNEL_COLLECTION].find_one({"team_id": team_id})
+        if not existing or not existing.get("service_url"):
+            logger.warning(f"[TeamsBot] Cannot point admin-dashboard channel at {channel_id} — no existing team reference for team_id={team_id}")
+            return False
+        if existing.get("conversation_id") == channel_id:
+            return True  # already pointed here
+        db[TEAM_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id},
+            {"$set": {
+                "conversation_id": channel_id,
+                "channel_id": channel_id,
+                "updated_at": datetime.datetime.utcnow(),
+                # The previously tracked "live card" id belongs to whatever
+                # conversation we were posting into before (e.g. General) —
+                # clear it so the next post doesn't try to delete a message
+                # id that never existed in the new conversation.
+                "active_message_id": None,
+            }},
+        )
+        logger.info(f"[TeamsBot] Admin-dashboard channel reference for team_id={team_id} repointed to channel_id={channel_id}")
+        return True
+
+
 def resolve_team_id_from_thread_id(thread_id: str):
     """
     Confirmed via real production data: Bot Framework only includes
