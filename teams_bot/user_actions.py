@@ -40,7 +40,10 @@ _EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg"}
 # Reached from a vuln's own detail page regardless of whether it was
 # opened via Fix or Register — ctx (embedded in the click's own value)
 # says which, so the response re-highlights the right tab.
-_VULN_DETAIL_ACTION_IDS = {"ufix_vuln_toggle", "ufix_mark_mitigated", "uex_request_form", "uex_submit_request"}
+_VULN_DETAIL_ACTION_IDS = {
+    "ufix_vuln_toggle", "ufix_mark_mitigated", "uex_request_form", "uex_submit_request",
+    "ufix_step_nav", "ufix_step_complete",
+}
 
 
 def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
@@ -241,6 +244,20 @@ def _render_vuln_detail_action(member_user, team_name, action_id, value):
     if vctx == "register":
         value_base["sev"] = value.get("sev") or "all"
         value_base["st"] = value.get("st") or "all"
+
+    if action_id in ("ufix_step_nav", "ufix_step_complete"):
+        step = _as_int(value.get("step")) or 1
+        if action_id == "ufix_step_complete":
+            ok, error = fix.complete_step(member_user, r, data.get("report_id"), step)
+            if not ok:
+                return [cards._body_text(error or "Could not update this step.")]
+            step = step + 1  # auto-advance to the next step after completing this one
+        if vctx == "register":
+            return [register.register_subnav_columnset("ureg_sub_register")] + register.register_vuln_detail_body(
+                member_user, team_name, idx, sub="manual",
+                sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset, step_number=step,
+            )
+        return fix.vuln_detail_body(member_user, team_name, idx, ctx=vctx, host=host, offset=offset, sub="manual", step_number=step)
 
     if action_id == "uex_request_form":
         return fix.extension_form_body(r, value_base)

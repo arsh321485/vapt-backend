@@ -109,13 +109,13 @@ def register_list_body(member_user, team_name, sev="all", st="all", offset=0):
     return body
 
 
-def register_vuln_detail_body(member_user, team_name, idx, sub="manual", sev="all", st="all", offset=0):
+def register_vuln_detail_body(member_user, team_name, idx, sub="manual", sev="all", st="all", offset=0, step_number=None):
     """Same detail (facts + Manual/Auto toggle + Mark Mitigated + Request
     Extension) as the Fix tab's own vuln detail — Register is just a
     differently-filtered entry point into the identical rows."""
     return fix.vuln_detail_body(
         member_user, team_name, idx, ctx="register", offset=offset, sub=sub,
-        extra_value={"sev": sev, "st": st},
+        extra_value={"sev": sev, "st": st}, step_number=step_number,
         back_action_id="ureg_view_back", back_title="← Back to Register",
     )
 

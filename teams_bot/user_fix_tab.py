@@ -20,7 +20,7 @@ from . import cards
 from .fix_tab import (
     _row, _pagination_body, _back_action, _sev_dots_text, _status_label,
     _SEV_ICON, cached_fetch, _group_assets, PAGE_SIZE,
-    _vuln_facts_body, _manual_fix_body, _automation_fix_body,
+    _vuln_facts_body, _automation_fix_body,
     common_vulns_list_body, common_vuln_detail_body,
 )
 from . import cards as _cards_mod  # for COMMON_VULNS_TEAMS
@@ -221,6 +221,100 @@ def mark_mitigated(member_user, r, report_id):
     return True, None
 
 
+def complete_step(member_user, r, report_id, step_number):
+    """Marks ONE specific step done (not the whole vuln) — matches Slack's
+    /mitigated [vuln-id] [step-id]."""
+    fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
+    if not fix_vuln_id:
+        return False, "Could not start a fix record for this vulnerability."
+    from userregister.views import UserFixVulnerabilityStepsAPIView
+    from .actions import _call_view_in_process
+    status_code, data = _call_view_in_process(
+        UserFixVulnerabilityStepsAPIView, member_user, method="post", url_kwargs={"fix_vuln_id": fix_vuln_id},
+        data={"step_number": step_number}, request_format="json",
+    )
+    if status_code >= 300:
+        return False, (data or {}).get("detail") or "Could not update this step."
+    return True, None
+
+
+def _step_content_items(step, os_key):
+    step_num = step.get("step_number")
+    step_name = step.get("step_name") or f"Step {step_num}"
+    status_v = step.get("status", "pending")
+    done = status_v == "completed"
+    badge = "✅ Done" if done else ("🔒 Locked" if step.get("is_locked") else "▶️ Pending")
+    os_data = step.get(os_key) or {}
+    action = (os_data.get("action") or "").strip()
+
+    items = [{"type": "TextBlock", "text": f"{step_num}. {step_name} — {badge}", "weight": "Bolder", "size": "Medium", "wrap": True}]
+    if action:
+        items.append({"type": "TextBlock", "text": action, "wrap": True, "size": "Small"})
+    file_path = (os_data.get("system_file_path") or "").strip()
+    if file_path:
+        items.append({"type": "TextBlock", "text": f"File Path: {file_path}", "wrap": True, "size": "Small", "fontType": "Monospace"})
+    where_label = (os_data.get("where_to_run_label") or "").strip()
+    if where_label:
+        items.append({"type": "TextBlock", "text": f"Where To Run: {where_label}", "wrap": True, "size": "Small", "isSubtle": True})
+    cmd_groups = os_data.get("commands_for_action")
+    command_lines = []
+    if isinstance(cmd_groups, list):
+        for grp in cmd_groups:
+            if isinstance(grp, dict):
+                command_lines.extend(str(c) for c in (grp.get("commands") or []) if c)
+    command_text = "\n".join(command_lines).strip() or (
+        str(os_data.get("command_to_run") or "").strip()
+        if not isinstance(os_data.get("commands_for_action"), list) else ""
+    )
+    if command_text:
+        items.append({"type": "TextBlock", "text": command_text, "wrap": True, "size": "Small", "fontType": "Monospace"})
+    verification_check = (os_data.get("verification_check") or "").strip()
+    if verification_check:
+        items.append({"type": "TextBlock", "text": f"Verification: {verification_check}", "wrap": True, "size": "Small", "isSubtle": True})
+    important = (os_data.get("important_consideration") or "").strip()
+    if important:
+        items.append({"type": "TextBlock", "text": f"⚠️ Important: {important}", "wrap": True, "size": "Small", "color": "attention"})
+    return items, done
+
+
+def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_number=None):
+    """One step at a time (not the admin side's flat view-only list) — a
+    real 'Mark Step Complete' action per step, plus Previous/Next Step
+    navigation, matching Slack's /manualfix + /mitigated [id] [step]."""
+    if not steps_data or steps_data.get("detail"):
+        return [{"type": "TextBlock", "text": "No fix has been started for this vulnerability yet — no steps to show.", "wrap": True, "isSubtle": True, "spacing": "Medium"}]
+
+    steps = steps_data.get("steps") or []
+    completed = steps_data.get("completed_steps", 0)
+    total = steps_data.get("total_steps", 0)
+    os_v = steps_data.get("operating_system") or host_os_hint or "—"
+    os_key = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
+
+    if not steps:
+        return [{"type": "TextBlock", "text": "No steps found.", "isSubtle": True, "size": "Small", "spacing": "Medium"}]
+
+    by_number = {s.get("step_number"): s for s in steps}
+    if step_number is None or step_number not in by_number:
+        current = next((s for s in steps if s.get("status") != "completed"), steps[-1])
+        step_number = current.get("step_number")
+    step = by_number[step_number]
+
+    body = [{"type": "TextBlock", "text": f"📋 Step {step_number} of {total}  ·  {completed}/{total} done  ·  OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
+    items, done = _step_content_items(step, os_key)
+    body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
+
+    nav_actions = []
+    if step_number > 1:
+        nav_actions.append(cards._execute_action("◀ Previous Step", {"action_id": "ufix_step_nav", "step": step_number - 1, **value_base}))
+    if not done and not step.get("is_locked"):
+        nav_actions.append(cards._execute_action("✅ Mark Step Complete", {"action_id": "ufix_step_complete", "step": step_number, **value_base}, style="positive"))
+    if step_number < total:
+        nav_actions.append(cards._execute_action("Next Step ▶", {"action_id": "ufix_step_nav", "step": step_number + 1, **value_base}))
+    if nav_actions:
+        body.append({"type": "ActionSet", "spacing": "Medium", "actions": nav_actions})
+    return body
+
+
 def _fix_toggle_actionset(sub, value_base):
     def action(title, sub_val):
         return cards._execute_action(
@@ -245,7 +339,7 @@ def _request_extension_actionset(value_base):
 
 
 def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset=0, sub="manual",
-                      back_action_id=None, back_title=None, extra_value=None):
+                      back_action_id=None, back_title=None, extra_value=None, step_number=None):
     """Shared by every entry point that drills into one vulnerability's own
     detail (flat All Vulns list, an asset's own vuln list, Register's
     filtered list — ctx/host decide where Back goes for the two built-in
@@ -284,7 +378,7 @@ def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset
         else:
             fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
             steps_data = _fetch_fix_steps(member_user, fix_vuln_id) if fix_vuln_id else None
-            body.extend(_manual_fix_body(steps_data, host_os_hint=r.get("operating_system")))
+            body.extend(_manual_fix_body_interactive(steps_data, r.get("operating_system"), value_base, step_number=step_number))
     except Exception:
         logger.exception("[TeamsBot] user fix content fetch failed (sub=%s)", sub)
         body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "isSubtle": True, "spacing": "Medium"})
