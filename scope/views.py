@@ -199,19 +199,43 @@ class ScopeCreateAPIView(APIView):
                     "error": entry_data["error"]
                 })
 
-        # Freemium/Premium routing signal — Freemium allows up to
-        # FREEMIUM_LIMITS["max_internal_ips"] targets across ALL of this
-        # admin's scopes combined (same total billing.asset_service.
-        # get_admin_scope_asset_count already uses for Management+Testing
-        # pricing), so this counts the admin's whole scope history, not
-        # just what was just submitted — an admin who's already at the
-        # limit from an earlier scope should still be routed to Premium
-        # even if this particular submission alone is small.
-        from billing.asset_service import get_admin_scope_asset_count
+        # Freemium/Premium routing signal, across ALL of this admin's
+        # scopes combined (not just what was just submitted — an admin
+        # already over the line from an earlier scope stays routed to
+        # Premium even if this submission alone is small). Two separate
+        # Freemium restrictions, per explicit instruction:
+        #   1) Freemium is INTERNAL IPs ONLY — any external IP/subnet or
+        #      URL anywhere in the admin's scope requires Premium,
+        #      regardless of count.
+        #   2) Even all-internal, Freemium is capped at
+        #      FREEMIUM_LIMITS["max_internal_ips"] targets total.
+        # Premium has no such restriction — internal, external, and URLs
+        # are all valid there (still subject to the separate 250-asset
+        # Premium ceiling elsewhere).
+        from billing.asset_service import get_admin_scope_asset_breakdown
         from billing.plans import FREEMIUM_LIMITS
-        total_scope_assets = get_admin_scope_asset_count(str(request.user.id))
+        breakdown = get_admin_scope_asset_breakdown(str(request.user.id))
+        total_scope_assets = breakdown["total"]
         freemium_limit = FREEMIUM_LIMITS["max_internal_ips"]
-        recommended_plan = "premium" if total_scope_assets > freemium_limit else "freemium"
+
+        if breakdown["has_external"]:
+            recommended_plan = "premium"
+            recommendation_message = (
+                "Your scope includes external IPs/URLs — Freemium only covers internal IPs. "
+                "Please continue with the Premium plan."
+            )
+        elif total_scope_assets > freemium_limit:
+            recommended_plan = "premium"
+            recommendation_message = (
+                f"Your scope has {total_scope_assets} internal target(s), which is over the "
+                f"Freemium limit of {freemium_limit}. Please continue with the Premium plan."
+            )
+        else:
+            recommended_plan = "freemium"
+            recommendation_message = (
+                f"Your scope has {total_scope_assets} internal target(s), within the Freemium "
+                f"limit of {freemium_limit} — you can continue with Freemium."
+            )
 
         return Response({
             "message": "Scope created successfully",
@@ -227,14 +251,10 @@ class ScopeCreateAPIView(APIView):
             "plan_recommendation": {
                 "recommended_plan": recommended_plan,
                 "total_scope_assets": total_scope_assets,
+                "internal_count": breakdown["internal_count"],
+                "external_count": breakdown["external_count"],
                 "freemium_limit": freemium_limit,
-                "message": (
-                    f"Your scope has {total_scope_assets} target(s), which is over the "
-                    f"Freemium limit of {freemium_limit}. Please continue with the Premium plan."
-                    if recommended_plan == "premium" else
-                    f"Your scope has {total_scope_assets} target(s), within the Freemium "
-                    f"limit of {freemium_limit} — you can continue with Freemium."
-                ),
+                "message": recommendation_message,
             },
         }, status=status.HTTP_201_CREATED)
 

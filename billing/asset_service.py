@@ -52,6 +52,36 @@ def get_admin_scope_asset_count(admin_id: str) -> int:
         return 0
 
 
+def get_admin_scope_asset_breakdown(admin_id: str) -> dict:
+    """
+    Same dedupe as get_admin_scope_asset_count, but split by internal vs
+    everything else (external IPs, subnets, and URLs — anything
+    ScopeEntry.is_internal doesn't mark True) — Freemium is restricted to
+    internal IPs only ("premium plan ke liye sare ip valid rahenge, jo
+    freemium se jata hai usko sirf internal hi ip valid rahegi"), so
+    routing needs to know not just the total count but whether any
+    non-internal target is present at all.
+    """
+    try:
+        from scope.models import ScopeEntry
+        # dedupe in Python — see get_admin_scope_asset_count's note on why
+        # djongo can't do SELECT DISTINCT here.
+        seen_internal, seen_external = set(), set()
+        for value, is_internal in ScopeEntry.objects.filter(scope__admin_id=admin_id).values_list("value", "is_internal"):
+            if not value:
+                continue
+            (seen_internal if is_internal else seen_external).add(value.lower())
+        return {
+            "total": len(seen_internal | seen_external),
+            "internal_count": len(seen_internal),
+            "external_count": len(seen_external),
+            "has_external": bool(seen_external),
+        }
+    except Exception as e:
+        logger.error(f"[Billing] scope asset breakdown failed for admin_id={admin_id}: {e}")
+        return {"total": 0, "internal_count": 0, "external_count": 0, "has_external": False}
+
+
 def _latest_report_uploaded_at(admin_id: str):
     """Most recent uploaded_at across this admin's reports, or None."""
     try:
