@@ -18,6 +18,9 @@ Action.Submit's fire-and-forget flow and Teams' own docs name
 Action.Execute + a synchronous invoke response as the only way around it.
 """
 
+import logging
+logger = logging.getLogger(__name__)
+
 _SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
 # Stayed on 1.4 deliberately — a 1.5-only ActionSet "orientation" property
 # was tried for the tab bars and, along with the (already-reverted)
@@ -188,7 +191,7 @@ def risk_criteria_form_card(existing=None):
     )
 
 
-def open_website_upload_card(purpose="report"):
+def open_website_upload_card(purpose="report", admin=None):
     """
     Confirmed via real production activity dumps: a file attached to a
     Teams CHANNEL message never reaches the bot's messaging endpoint at all
@@ -200,10 +203,25 @@ def open_website_upload_card(purpose="report"):
     the same "Provide Your Scope" flow the website already has, in a
     browser tab, exactly the way several official Teams bots hand off to a
     full web form for anything more complex than a card can do.
+
+    Carries the same signed admin-handoff token the Slack "Upgrade plan"
+    link uses (see users.views._slack_pricing_handoff_signer /
+    SlackPricingHandoffView) — confirmed via real testing that this exact
+    class of bug (a bare link with no admin identity) made the website
+    side show $0.00/0 assets, since it had no way to know who was
+    visiting without an existing browser login session.
     """
     from django.conf import settings
     frontend = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
     url = f"{frontend}/admin-upload-report"
+    if admin is not None:
+        try:
+            from users.views import _slack_pricing_handoff_signer
+            from urllib.parse import quote
+            handoff_token = _slack_pricing_handoff_signer().sign(str(admin.id))
+            url = f"{url}?admin_token={quote(handoff_token)}"
+        except Exception:
+            logger.exception("[TeamsBot] failed to build signed handoff token for upload link")
     noun = "VA report" if purpose == "report" else "scope CSV"
     return _card(
         body=[

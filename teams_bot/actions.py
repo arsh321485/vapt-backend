@@ -188,10 +188,10 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
         return cards.provide_scope_card()
 
     if action_id == "open_upload_report":
-        return cards.open_website_upload_card("report")
+        return cards.open_website_upload_card("report", admin=admin)
 
     if action_id == "open_scope_csv":
-        return cards.open_website_upload_card("scope")
+        return cards.open_website_upload_card("scope", admin=admin)
 
     if action_id == "open_scope_manual":
         return cards.manual_scope_form_card()
