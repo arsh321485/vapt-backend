@@ -10565,6 +10565,11 @@ def _dashboard_image_signer():
     return TimestampSigner(salt="vaptfix-dashboard-image")
 
 
+def _slack_pricing_handoff_signer():
+    from django.core.signing import TimestampSigner
+    return TimestampSigner(salt="vaptfix-slack-pricing-handoff")
+
+
 class SlackStatusIconView(APIView):
     """
     GET /api/admin/users/slack/status-icon/<kind>/
@@ -10600,6 +10605,45 @@ class SlackStatusIconView(APIView):
             return HttpResponse(status=404)
         with open(path, "rb") as f:
             return HttpResponse(f.read(), content_type="image/png")
+
+
+class SlackPricingHandoffView(APIView):
+    """
+    POST /api/admin/users/slack/pricing-handoff/  {"admin_token": "..."}
+
+    Public (token-gated, not login-gated) — the website's pricing page
+    can't require an existing login session, since a Slack "Upgrade plan"
+    button opens a plain browser link with no session at all (confirmed
+    via real testing: without this, the page showed "$0.00 / 0 assets"
+    instead of the real report's count, because it had no way to know
+    which admin was visiting). admin_token is the short-lived signed
+    admin id minted in _post_over_limit_choice; exchanges it for a real
+    JWT pair so the frontend can silently log the admin in and the normal
+    plan-estimate flow resolves the correct asset count.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        admin_token = (request.data.get("admin_token") or "").strip()
+        if not admin_token:
+            return Response({"error": "admin_token is required"}, status=400)
+        try:
+            admin_id = _slack_pricing_handoff_signer().unsign(admin_token, max_age=600)
+        except Exception:
+            return Response({"error": "This link has expired. Please click 'Upgrade plan' in Slack again."}, status=400)
+
+        admin = User.objects.filter(id=admin_id).first()
+        if not admin:
+            return Response({"error": "Admin account not found"}, status=404)
+
+        from rest_framework_simplejwt.tokens import RefreshToken
+        refresh = RefreshToken.for_user(admin)
+        return Response({
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "email": admin.email,
+        })
 
 
 class SlackDashboardImageView(APIView):
@@ -10962,18 +11006,26 @@ class SlackSlashCommandView(APIView):
         # Temporarily bypassed for debugging — re-enable after confirming commands work
         return True
 
-    def _get_admin_token(self, team_id, slack_user_id=None):
-        from rest_framework_simplejwt.tokens import RefreshToken as _RT
+    def _get_admin_user(self, team_id, slack_user_id=None):
+        """Resolves the actual admin User for this Slack workspace — same
+        3-step fallback _get_admin_token used inline before this was
+        factored out, now shared so callers that need the User object
+        itself (not just a JWT) don't have to duplicate the resolution."""
         # 1. Exact match: user who ran the slash command
         if slack_user_id:
             user = next((u for u in User.objects.filter(slack_user_id=slack_user_id)), None)
             if user:
-                return str(_RT.for_user(user).access_token)
+                return user
         # 2. Any Slack-connected user in this workspace (they connected the bot → they're the admin)
         user = next((u for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token), None)
         if not user:
             # 3. Last resort: any Django staff user (djongo can't combine boolean+equality — filter in Python)
             user = next((u for u in User.objects.all() if u.is_staff), None)
+        return user
+
+    def _get_admin_token(self, team_id, slack_user_id=None):
+        from rest_framework_simplejwt.tokens import RefreshToken as _RT
+        user = self._get_admin_user(team_id, slack_user_id=slack_user_id)
         if user:
             return str(_RT.for_user(user).access_token)
         return None
@@ -11098,6 +11150,7 @@ class SlackSlashCommandView(APIView):
                 )
                 self._post_over_limit_choice(
                     bot_token, team_id, over_limit_err.get("asset_count"), over_limit_err.get("limit"), token,
+                    slack_user_id=slack_user_id,
                 )
                 return self._text_block(
                     "⚠️ This report goes over your plan's asset limit — check the channel to choose how to proceed."
@@ -11161,16 +11214,32 @@ class SlackSlashCommandView(APIView):
             daemon=True,
         ).start()
 
-    def _post_over_limit_choice(self, bot_token, team_id, asset_count, limit, token):
+    def _post_over_limit_choice(self, bot_token, team_id, asset_count, limit, token, slack_user_id=None):
         """
         Posts the "this report goes over your Freemium asset limit" message
         with the two options — Keep same plan (trims to the first `limit`
         hosts, see upload_keep_trim in _handle_action) or Upgrade (a plain
         link button, straight to the pricing page, no server round trip).
+
+        The Upgrade link carries a short-lived signed handoff token
+        identifying the admin — confirmed via real testing that a bare
+        https://vaptfix.ai/pricingplan link (no admin context at all) made
+        the pricing page show "$0.00 / 0 assets" instead of the real
+        report's asset count, since the website had no way to know who
+        was visiting (especially opening in a fresh/incognito browser with
+        no existing login session). See SlackPricingHandoffView for the
+        exchange endpoint the frontend calls with this token.
         """
         admin_channel_id = self._get_admin_channel_id(bot_token)
         if not admin_channel_id:
             return
+
+        upgrade_url = "https://vaptfix.ai/pricingplan"
+        admin = self._get_admin_user(team_id, slack_user_id=slack_user_id)
+        if admin:
+            handoff_token = _slack_pricing_handoff_signer().sign(str(admin.id))
+            upgrade_url = f"{upgrade_url}?admin_token={quote(handoff_token)}"
+
         blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": (
                 f"⚠️ This report has *{asset_count} assets* — your Freemium plan allows up to *{limit}*.\n"
@@ -11191,7 +11260,7 @@ class SlackSlashCommandView(APIView):
                         "action_id": "upload_upgrade_redirect",
                         "value": token,
                         "style": "primary",
-                        "url": "https://vaptfix.ai/pricingplan",
+                        "url": upgrade_url,
                     },
                 ],
             },
