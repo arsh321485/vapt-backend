@@ -234,8 +234,7 @@ def add_user_form_body(admin):
         {"type": "Input.Text", "id": "au_first", "label": "First Name", "placeholder": "e.g. Ritu"},
         {"type": "Input.Text", "id": "au_last", "label": "Last Name", "placeholder": "optional"},
         {"type": "Input.Text", "id": "au_email", "label": "Email", "style": "Email", "placeholder": "name@example.com"},
-        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team", "style": "compact",
-         "placeholder": "Select a team",
+        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team(s)", "style": "expanded", "isMultiSelect": True,
          "choices": [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]},
         {
             "type": "ActionSet", "spacing": "Medium",
@@ -267,8 +266,7 @@ def picked_member_preview_body(admin, picked_email):
                 {"title": "Email", "value": picked_email},
             ],
         },
-        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team", "style": "compact",
-         "placeholder": "Select a team",
+        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team(s)", "style": "expanded", "isMultiSelect": True,
          "choices": [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]},
         {
             "type": "ActionSet", "spacing": "Medium",
@@ -310,12 +308,16 @@ def submit_add_user(admin, form_data):
         last = (form_data.get("au_last") or "").strip() or first
 
     user_type = form_data.get("au_type") or "external"
-    code = form_data.get("au_team") or ""
-    team_name = TEAM_CODE_TO_NAME.get(code)
+    # au_team is Input.ChoiceSet with isMultiSelect: true (checkboxes) now
+    # — Adaptive Cards echoes multi-select values back as a single
+    # comma-separated string, not a list, so split it here.
+    codes = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
+    team_names = [TEAM_CODE_TO_NAME[c] for c in codes if c in TEAM_CODE_TO_NAME]
 
-    if not email or not first or not team_name:
-        return False, "Pick a Teams member (or fill in Email/First Name manually) and select a Team."
+    if not email or not first or not team_names:
+        return False, "Pick a Teams member (or fill in Email/First Name manually) and select at least one Team."
 
+    teams_label = ", ".join(team_names)
     status_code, data = _call_view_in_process(
         UserDetailCreateView, admin, method="post", request_format="json",
         data={
@@ -324,12 +326,12 @@ def submit_add_user(admin, form_data):
             "first_name": first,
             "last_name": last,
             "user_type": user_type,
-            "team_name": team_name,
-            "Member_role": [team_name],
+            "team_name": team_names[0],
+            "Member_role": team_names,
         },
     )
     if status_code < 300:
-        return True, f"{first} ({email}) added to {team_name}. A welcome email has been sent."
+        return True, f"{first} ({email}) added to {teams_label}. A welcome email has been sent."
 
     err = (data or {}).get("error") or (data or {}).get("detail") or (data or {}).get("email")
     already_exists = "already exists" in str(err or "")
@@ -341,7 +343,7 @@ def submit_add_user(admin, form_data):
     # already created a Viewer-only stub for them just from being a Teams
     # team member, before anyone explicitly granted them a real role.
     # Mirrors users.views.SlackSlashCommandView._cmd_adduser's own
-    # already-exists handling: merge the requested team into their
+    # already-exists handling: merge the requested team(s) into their
     # existing Member_role instead of treating "already has a stub
     # record with no real access yet" as a hard failure.
     try:
@@ -351,11 +353,12 @@ def submit_add_user(admin, form_data):
         if not existing:
             return False, str(err)
         current_roles = [r for r in (existing.Member_role or []) if r != "Viewer"]
-        if team_name not in current_roles:
-            current_roles.append(team_name)
+        for team_name in team_names:
+            if team_name not in current_roles:
+                current_roles.append(team_name)
         upd = {"Member_role": current_roles, "user_type": user_type}
         if not existing.team_name:
-            upd["team_name"] = team_name
+            upd["team_name"] = team_names[0]
         _ud_set(existing, **upd)
         return True, f"{first} ({email})'s access now includes: {', '.join(current_roles)}."
     except Exception:
