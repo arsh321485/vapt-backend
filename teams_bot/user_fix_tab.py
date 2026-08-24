@@ -1,11 +1,18 @@
 """
-User-side Fix tab — All Assets / All Vulns, team-scoped. Mirrors
-teams_bot.fix_tab (admin side) almost exactly — same row/pagination/detail
-layout, same field names (both admin's LatestSuperAdminVulnerabilityRegisterAPIView
-and this one's UserLatestVulnerabilityRegisterAPIView return the identical
-vul_name/asset/severity/port/protocol/status shape) — reuses fix_tab's
-generic row-building helpers directly rather than duplicating them.
-Common Vulns (the 3rd Slack sub-tab, tfix_sub_common) isn't wired yet.
+User-side Fix tab — All Assets / All Vulns / Common Vulns, team-scoped.
+Mirrors teams_bot.fix_tab (admin side) closely — same row/pagination/
+detail layout and the same field names (both admin's
+LatestSuperAdminVulnerabilityRegisterAPIView and this one's
+UserLatestVulnerabilityRegisterAPIView return the identical vul_name/
+asset/severity/port/protocol/status shape) — reuses fix_tab's generic
+rendering helpers directly (_row, _pagination_body, _manual_fix_body,
+_automation_fix_body, ... — none of those take `admin`, just data) rather
+than duplicating them.
+
+UNLIKE the admin side (explicitly read-only, matching the website), a
+member gets real actions here: Manual/Automation Fix toggle with actual
+steps, and a "Mark Mitigated" button — this is the member's own workflow,
+same as Slack's /startfix, /manualfix, /autofix, /mitigated.
 """
 import logging
 
@@ -13,21 +20,29 @@ from . import cards
 from .fix_tab import (
     _row, _pagination_body, _back_action, _sev_dots_text, _status_label,
     _SEV_ICON, cached_fetch, _group_assets, PAGE_SIZE,
+    _vuln_facts_body, _manual_fix_body, _automation_fix_body,
+    common_vulns_list_body, common_vuln_detail_body,
 )
+from . import cards as _cards_mod  # for COMMON_VULNS_TEAMS
 
 logger = logging.getLogger(__name__)
 
 UFIX_SUBTABS = [
     ("ufix_sub_assets", "🖥 All Assets"),
     ("ufix_sub_vulns",  "📋 All Vulns"),
+    ("ufix_sub_common", "🧩 Common Vulns"),
 ]
+
+# "Configuration Management" -> "config" (COMMON_VULNS_TEAMS is
+# [(key, display_name), ...] — see cards.py).
+_TEAM_NAME_TO_COMMON_KEY = {v: k for k, v in _cards_mod.COMMON_VULNS_TEAMS}
 
 
 def _fix_subnav_columnset(active_sub):
     return cards.pill_columnset(UFIX_SUBTABS, active_sub, lambda action_id: {"action_id": action_id})
 
 
-def _fetch_team_rows(member_user, team_name):
+def _fetch_team_data(member_user, team_name):
     def _fetch():
         from userregister.views import UserLatestVulnerabilityRegisterAPIView
         from .actions import _call_view_in_process
@@ -36,8 +51,12 @@ def _fetch_team_rows(member_user, team_name):
         )
         if status_code >= 300 or not isinstance(data, dict):
             raise ValueError(f"user register fetch failed: {status_code}")
-        return data.get("rows") or []
-    return cached_fetch(f"user_register_rows:{member_user.id}:{team_name}", 20, _fetch)
+        return data
+    return cached_fetch(f"user_register_data:{member_user.id}:{team_name}", 20, _fetch)
+
+
+def _fetch_team_rows(member_user, team_name):
+    return _fetch_team_data(member_user, team_name).get("rows") or []
 
 
 def assets_list_body(member_user, team_name, offset=0):
@@ -108,42 +127,184 @@ def vulns_list_body(member_user, team_name, offset=0):
     return body
 
 
-def _vuln_facts_body(r):
-    sev = (r.get("severity") or "medium").strip().lower()
-    if sev not in _SEV_ICON:
-        sev = "medium"
-    status = r.get("status") or "open"
-    return [
-        {"type": "TextBlock", "text": r.get("vul_name") or "Unnamed vulnerability", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"},
-        {
-            "type": "FactSet",
-            "facts": [
-                {"title": "Asset", "value": str(r.get("asset") or "—")},
-                {"title": "Severity", "value": f"{_SEV_ICON[sev]} {sev.title()}"},
-                {"title": "Status", "value": _status_label(status)},
-                {"title": "Port", "value": str(r.get("port") or "—")},
-                {"title": "Protocol", "value": str(r.get("protocol") or "—")},
-            ],
+# ─── Manual Fix / Automation Fix (real, actionable — member side) ───────
+
+def _get_or_create_fix_vuln_id(member_user, r, report_id):
+    fix_vuln_id = r.get("fix_vulnerability_id")
+    if fix_vuln_id:
+        return fix_vuln_id
+    host_name = r.get("asset") or ""
+    if not report_id or not host_name:
+        return None
+    from userregister.views import UserFixVulnerabilityCreateAPIView
+    from .actions import _call_view_in_process
+    status_code, data = _call_view_in_process(
+        UserFixVulnerabilityCreateAPIView, member_user, method="post",
+        url_kwargs={"report_id": report_id, "host_name": host_name},
+        data={
+            "id": r.get("id", ""),
+            "plugin_name": r.get("vul_name") or "",
+            "risk_factor": r.get("severity") or "Medium",
+            "port": r.get("port", ""),
         },
-    ]
+        request_format="json",
+    )
+    if status_code >= 300 or not isinstance(data, dict):
+        return None
+    result = data.get("data") or {}
+    return result.get("fix_vulnerability_id") or result.get("_id")
 
 
-def vuln_detail_body(member_user, team_name, idx, back_action_id, back_value):
-    rows = _fetch_team_rows(member_user, team_name)
+def _fetch_fix_steps(member_user, fix_vuln_id):
+    if not fix_vuln_id:
+        return None
+    from userregister.views import UserFixVulnerabilityStepsAPIView
+    from .actions import _call_view_in_process
+    status_code, data = _call_view_in_process(
+        UserFixVulnerabilityStepsAPIView, member_user, method="get", url_kwargs={"fix_vuln_id": fix_vuln_id},
+    )
+    if status_code >= 300 or not isinstance(data, dict):
+        return None
+    return data
+
+
+def _fetch_automation_match(member_user, r):
+    from automation_scripts_api import views as auto_views
+    from .actions import _call_view_in_process
+
+    os_param = r.get("operating_system")
+    plugin_id = r.get("plugin_id")
+    if plugin_id not in (None, ""):
+        try:
+            pid = int(plugin_id)
+        except (TypeError, ValueError):
+            pid = None
+        if pid is not None:
+            status_code, data = _call_view_in_process(
+                auto_views.user_match_script, member_user, method="get",
+                url_kwargs={"plugin_id": pid},
+                data={"os": os_param} if os_param else None,
+            )
+            if status_code < 300 and isinstance(data, dict):
+                return data
+
+    name = r.get("vul_name")
+    if not name:
+        return {"matched": False, "message": "No automated fix available for this vulnerability."}
+    body = {"vulnerability_names": [name]}
+    if os_param:
+        body["os"] = os_param
+    status_code, data = _call_view_in_process(
+        auto_views.user_match_scripts_by_name, member_user, method="post", data=body, request_format="json",
+    )
+    if status_code < 300 and isinstance(data, dict):
+        results = data.get("results") or []
+        return results[0] if results else {"matched": False, "message": "No automated fix available for this vulnerability."}
+    return {"matched": False, "message": "No automated fix available for this vulnerability."}
+
+
+def mark_mitigated(member_user, r, report_id):
+    """Marks every step complete for this vuln's fix record — creates the
+    record first if it doesn't exist yet (a member can mark something
+    mitigated without ever opening Manual Fix first)."""
+    fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
+    if not fix_vuln_id:
+        return False, "Could not start a fix record for this vulnerability."
+    from userregister.views import UserFixVulnerabilityStepsAPIView
+    from .actions import _call_view_in_process
+    status_code, data = _call_view_in_process(
+        UserFixVulnerabilityStepsAPIView, member_user, method="post", url_kwargs={"fix_vuln_id": fix_vuln_id},
+        data={"step_number": 1, "complete_all": True}, request_format="json",
+    )
+    if status_code >= 300:
+        return False, (data or {}).get("detail") or "Could not update fix status."
+    return True, None
+
+
+def _fix_toggle_actionset(sub, value_base):
+    def action(title, sub_val):
+        return cards._execute_action(
+            title, {"action_id": "ufix_vuln_toggle", "sub": sub_val, **value_base},
+            style="positive" if sub == sub_val else None,
+        )
+    return {"type": "ActionSet", "spacing": "Medium", "actions": [action("🛠 Manual Fix", "manual"), action("🤖 Auto Fix", "automation")]}
+
+
+def _mark_mitigated_actionset(value_base):
+    return {
+        "type": "ActionSet", "spacing": "Medium",
+        "actions": [cards._execute_action("✅ Mark Mitigated", {"action_id": "ufix_mark_mitigated", **value_base}, style="positive")],
+    }
+
+
+def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset=0, sub="manual"):
+    """Shared by the flat All Vulns list and an asset's own vuln list —
+    real Manual/Auto Fix toggle + steps + a Mark Mitigated action, unlike
+    admin's read-only equivalent."""
+    data = _fetch_team_data(member_user, team_name)
+    rows = data.get("rows") or []
+    report_id = data.get("report_id")
+
+    if ctx == "asset":
+        body = [_back_action(f"← Back to {host}", "ufix_asset_vuln_back", {"host": host, "offset": offset})]
+    else:
+        body = [_back_action("← Back to All Vulns", "ufix_vuln_back", {"offset": offset})]
+
     if idx is None or idx < 0 or idx >= len(rows):
-        return [
-            _back_action("← Back", back_action_id, back_value),
-            {"type": "TextBlock", "text": "This vulnerability is no longer available (the report may have refreshed).", "size": "Small", "isSubtle": True, "wrap": True, "spacing": "Medium"},
-        ]
-    body = [_back_action("← Back", back_action_id, back_value)]
-    body.extend(_vuln_facts_body(rows[idx]))
+        body.append({"type": "TextBlock", "text": "This vulnerability could not be found — the report may have refreshed. Go back and try again.", "wrap": True, "spacing": "Medium"})
+        return body
+
+    r = rows[idx]
+    body.extend(_vuln_facts_body(r))
+
+    value_base = {"idx": idx, "ctx": ctx, "offset": offset}
+    if ctx == "asset":
+        value_base["host"] = host
+    body.append(_fix_toggle_actionset(sub, value_base))
+
+    try:
+        if sub == "automation":
+            automation = _fetch_automation_match(member_user, r)
+            body.extend(_automation_fix_body(automation))
+        else:
+            fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
+            steps_data = _fetch_fix_steps(member_user, fix_vuln_id) if fix_vuln_id else None
+            body.extend(_manual_fix_body(steps_data, host_os_hint=r.get("operating_system")))
+    except Exception:
+        logger.exception("[TeamsBot] user fix content fetch failed (sub=%s)", sub)
+        body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "isSubtle": True, "spacing": "Medium"})
+
+    body.append(_mark_mitigated_actionset(value_base))
     return body
 
 
-def fix_tab_body(member_user, team_name, sub_action_id="ufix_sub_assets", offset=0):
+def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets", offset=0):
+    """`admin` is only used for the Common Vulns sub-tab (admin-scoped
+    data source, see _common_vulns_for_team) — every other sub-tab is
+    genuinely member-scoped and ignores it."""
     body = [_fix_subnav_columnset(sub_action_id)]
     if sub_action_id == "ufix_sub_vulns":
         body.extend(vulns_list_body(member_user, team_name, offset=offset))
+    elif sub_action_id == "ufix_sub_common":
+        body.extend(_common_vulns_for_team(admin, team_name, offset=offset))
     else:
         body.extend(assets_list_body(member_user, team_name, offset=offset))
     return body
+
+
+# ─── Common Vulns (locked to the member's own team, unlike admin's
+# switchable-team view — reuses fix_tab.py's admin-authenticated data
+# fetch verbatim: MitigationStrategyByTeamAPIView is admin-scoped data,
+# there's no per-member variant, and there doesn't need to be — every
+# member of a team sees the same "vulns on 4+ assets" data for that team.
+# `admin` is threaded in from teams_bot.actions.handle_card_action's own
+# already-resolved admin — see user_actions.py's call site).
+
+def _common_vulns_for_team(admin, team_name, offset=0):
+    team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
+    return common_vulns_list_body(admin, team_key=team_key, offset=offset)
+
+
+def common_vuln_detail_for_team(admin, team_name, idx, back_offset=0):
+    team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
+    return common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset)
