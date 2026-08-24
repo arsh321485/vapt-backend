@@ -54,7 +54,7 @@ def fixed_list_body(member_user, team_name, offset=0):
     return body
 
 
-def fixed_detail_body(member_user, team_name, idx, back_offset=0):
+def fixed_detail_body(member_user, team_name, idx, back_offset=0, step_number=None):
     rows = _fetch_closed(member_user, team_name)
     body = [fix_tab._back_action("← Back to Fixed", "ufixed_back", {"offset": back_offset})]
     if idx is None or idx < 0 or idx >= len(rows):
@@ -80,7 +80,10 @@ def fixed_detail_body(member_user, team_name, idx, back_offset=0):
     if fix_vuln_id:
         try:
             steps_data = fix_detail._fetch_fix_steps(member_user, fix_vuln_id)
-            body.extend(fix_detail._all_steps_readonly_body(steps_data, r.get("os")))
+            value_base = {"idx": idx, "offset": back_offset}
+            body.extend(fix_detail._all_steps_readonly_body(
+                steps_data, r.get("os"), value_base, nav_action_id="ufixed_step_nav", step_number=step_number,
+            ))
         except Exception:
             logger.exception("[TeamsBot] fixed_detail_body steps fetch failed")
     return body

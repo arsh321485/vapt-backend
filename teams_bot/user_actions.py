@@ -34,7 +34,7 @@ _REGISTER_ACTION_IDS = {
     "ureg_sev", "ureg_st", "ureg_view", "ureg_view_pg", "ureg_view_back", "ureg_script_pg",
 }
 _SUPPORT_ACTION_IDS = {"unav_support", "usup_pg", "usup_view", "usup_raise_form", "usup_submit", "usup_back"}
-_FIXED_ACTION_IDS = {"unav_fixed", "ufixed_pg", "ufixed_view", "ufixed_back"}
+_FIXED_ACTION_IDS = {"unav_fixed", "ufixed_pg", "ufixed_view", "ufixed_step_nav", "ufixed_back"}
 _REMINDER_ACTION_IDS = {"unav_reminder", "urem_sub_overdue", "urem_sub_today", "urem_sub_thisweek", "urem_sub_nextweek", "urem_pg"}
 _EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg", "uex_new_submit", "uex_view", "uex_view_back"}
 # Reached from a vuln's own detail page regardless of whether it was
@@ -222,6 +222,9 @@ def _render_fixed(member_user, team_name, action_id, value):
         return fixed.fixed_list_body(member_user, team_name, offset=offset)
     if action_id == "ufixed_view":
         return fixed.fixed_detail_body(member_user, team_name, _as_int(value.get("idx")), back_offset=offset)
+    if action_id == "ufixed_step_nav":
+        step = _as_int(value.get("step"))
+        return fixed.fixed_detail_body(member_user, team_name, _as_int(value.get("idx")), back_offset=offset, step_number=step)
     if action_id == "ufixed_back":
         return fixed.fixed_list_body(member_user, team_name, offset=offset)
 

@@ -260,11 +260,14 @@ def complete_step(member_user, r, report_id, step_number):
     return True, None
 
 
-def _all_steps_readonly_body(steps_data, host_os_hint):
-    """All steps, flat, view-only — for an already-CLOSED vuln, where
-    there's nothing left to complete, but the member should still be able
-    to see exactly what was done (unlike the interactive one-at-a-time
-    view, which only makes sense while there's still something to do)."""
+def _all_steps_readonly_body(steps_data, host_os_hint, value_base, nav_action_id="ufix_step_nav", step_number=None):
+    """One step at a time, view-only (no Mark Complete / Raise Support
+    Request — nothing left to act on, the vuln is already CLOSED), with
+    Previous/Next Step nav — same one-at-a-time UX as the still-open
+    interactive view, just without the action buttons. `nav_action_id`
+    lets different callers (a vuln opened from Fix/Register vs. the Fixed
+    tab's own detail, which indexes a completely different list) each
+    route Previous/Next through their own dispatch."""
     if not steps_data or steps_data.get("detail"):
         return [{"type": "TextBlock", "text": "No fix steps were recorded for this vulnerability.", "wrap": True, "isSubtle": True, "spacing": "Medium"}]
 
@@ -275,12 +278,22 @@ def _all_steps_readonly_body(steps_data, host_os_hint):
     if not steps:
         return [{"type": "TextBlock", "text": "No fix steps were recorded for this vulnerability.", "isSubtle": True, "size": "Small", "spacing": "Medium"}]
 
-    body = [{"type": "TextBlock", "text": f"📋 All Steps (completed) — {total} total · OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
-    for step in steps[:15]:
-        items, _done = fix_tab.step_content_items(step, os_key)
-        body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
-    if len(steps) > 15:
-        body.append({"type": "TextBlock", "text": f"+ {len(steps) - 15} more steps not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
+    by_number = {s.get("step_number"): s for s in steps}
+    if step_number is None or step_number not in by_number:
+        step_number = steps[0].get("step_number")
+    step = by_number[step_number]
+
+    body = [{"type": "TextBlock", "text": f"📋 Step {step_number} of {total} (completed) · OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
+    items, _done = fix_tab.step_content_items(step, os_key)
+    body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
+
+    nav_actions = []
+    if step_number > 1:
+        nav_actions.append(cards._execute_action("◀ Previous Step", {"action_id": nav_action_id, "step": step_number - 1, **value_base}))
+    if step_number < total:
+        nav_actions.append(cards._execute_action("Next Step ▶", {"action_id": nav_action_id, "step": step_number + 1, **value_base}))
+    if nav_actions:
+        body.append({"type": "ActionSet", "spacing": "Medium", "actions": nav_actions})
     return body
 
 
@@ -421,7 +434,7 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
         try:
             fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
             steps_data = _fetch_fix_steps(member_user, fix_vuln_id) if fix_vuln_id else None
-            body.extend(_all_steps_readonly_body(steps_data, r.get("operating_system")))
+            body.extend(_all_steps_readonly_body(steps_data, r.get("operating_system"), value_base, step_number=step_number))
         except Exception:
             logger.exception("[TeamsBot] user closed-vuln steps fetch failed")
         body.append(_retest_actionset(value_base))

@@ -419,13 +419,28 @@ def step_content_items(step, os_key, truncate=None):
         s = s[:truncate] if truncate else s
         # A plain r"...\\\2..." replacement string doesn't actually insert
         # a literal backslash here (confirmed — re.sub's own backslash
-        # handling doesn't parse the way it looks), so this uses a
-        # replacement FUNCTION instead, which unambiguously does.
-        return _re.sub(
-            r"^(\s*)([#>*+-]|\d+\.)(\s)",
+        # handling doesn't parse the way it looks), so every step below
+        # uses a replacement FUNCTION instead, which unambiguously does.
+        #
+        # 1) Escape emphasis/code markers ANYWHERE in the text, not just
+        # leading — confirmed the heading fix alone left some step text
+        # still rendering bold: a stray "*"/"_"/backtick pair mid-sentence
+        # reads as **bold**/`code` no matter where it sits. Doing this
+        # FIRST (before the leading-char check below) so a leading "*"
+        # isn't escaped twice by both passes.
+        s = _re.sub(r"[*_`]", lambda m: "\\" + m.group(0), s)
+        # 2) Escape a leading #, >, +, -, or digit+"." (heading /
+        # blockquote / list-bullet triggers pass 1 doesn't touch — "*" is
+        # excluded here since pass 1 already escaped every "*", leading or
+        # not). Confirmed via real testing this leading-# case is what
+        # turned "Run a security scan..." into a giant heading, overriding
+        # the declared "size": "Small" entirely.
+        s = _re.sub(
+            r"^(\s*)([#>+-]|\d+\.)(\s)",
             lambda m: m.group(1) + "\\" + m.group(2) + m.group(3),
             s,
         )
+        return s
 
     step_num = step.get("step_number")
     step_name = step.get("step_name") or f"Step {step_num}"
