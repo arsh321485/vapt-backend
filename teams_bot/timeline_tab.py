@@ -119,29 +119,60 @@ def history_list_body(admin, view="approve", offset=0):
             {"type": "TextBlock", "text": name, "weight": "Bolder", "size": "Small", "wrap": True},
             {"type": "TextBlock", "text": f"+{days} days", "size": "Small", "isSubtle": True, "spacing": "None"},
         ]
+        view_action = cards._execute_action("View", {"action_id": "hist_view", "request_id": rid, "offset": offset, "view": view})
         if view == "approve" and st == "approved":
             items.append({"type": "TextBlock", "text": "✅ Approved", "size": "Small", "color": "good", "weight": "Bolder"})
-            body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
+            row_actions = [view_action]
         elif view == "reject" and st == "rejected":
             items.append({"type": "TextBlock", "text": f"❌ Rejected — Reason: {r.get('reason') or '—'}", "size": "Small", "color": "attention", "weight": "Bolder", "wrap": True})
-            body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
+            row_actions = [view_action]
         else:
             btn_title = "✅ Approve Request" if view == "approve" else "❌ Reject Request"
             btn_action = "ext_approve_do" if view == "approve" else "ext_reject_start"
-            body.append({
-                "type": "ColumnSet", "spacing": "Medium", "separator": True,
-                "columns": [
-                    {"type": "Column", "width": "stretch", "items": items},
-                    {
-                        "type": "Column", "width": "auto", "verticalContentAlignment": "Center",
-                        "items": [{"type": "ActionSet", "actions": [
-                            cards._execute_action(btn_title, {"action_id": btn_action, "request_id": rid, "offset": offset, "src": "hist", "view": view},
-                                                   style="positive" if view == "approve" else "destructive"),
-                        ]}],
-                    },
-                ],
-            })
+            row_actions = [
+                view_action,
+                cards._execute_action(btn_title, {"action_id": btn_action, "request_id": rid, "offset": offset, "src": "hist", "view": view},
+                                       style="positive" if view == "approve" else "destructive"),
+            ]
+        body.append({
+            "type": "ColumnSet", "spacing": "Medium", "separator": True,
+            "columns": [
+                {"type": "Column", "width": "stretch", "items": items},
+                {
+                    "type": "Column", "width": "auto", "verticalContentAlignment": "Center",
+                    "items": [{"type": "ActionSet", "actions": row_actions}],
+                },
+            ],
+        })
     body.extend(fix_tab._pagination_body(offset, total, "hist_list_pg", {"view": view}))
+    return body
+
+
+def history_detail_body(admin, request_id, view="approve", back_offset=0):
+    all_requests = _fetch_requests(admin)
+    r = next((x for x in all_requests if (x.get("request_id") or "") == request_id), None)
+
+    body = [fix_tab._back_action("← Back to History", "hist_back", {"offset": back_offset, "view": view})]
+    if not r:
+        body.append({"type": "TextBlock", "text": "This request could not be found.", "wrap": True, "spacing": "Medium"})
+        return body
+
+    st = r.get("status", "review")
+    st_label = {"approved": "✅ Approved", "rejected": "❌ Rejected"}.get(st, "🟠 Pending")
+    body.append({"type": "TextBlock", "text": r.get("vul_name") or "Unnamed vulnerability", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
+    body.append({
+        "type": "FactSet",
+        "facts": [
+            {"title": "Status", "value": st_label},
+            {"title": "Team", "value": str(r.get("requested_by") or "—")},
+            {"title": "Asset", "value": str(r.get("asset") or "—")},
+            {"title": "Severity", "value": str(r.get("severity") or "—")},
+            {"title": "Extension", "value": f"+{r.get('extension_days', 0)} days"},
+            {"title": "Requested At", "value": str(r.get("request_date") or "—")[:10]},
+        ],
+    })
+    body.append({"type": "TextBlock", "text": "Reason", "weight": "Bolder", "size": "Small", "spacing": "Medium"})
+    body.append({"type": "TextBlock", "text": r.get("reason") or "—", "wrap": True, "size": "Small"})
     return body
 
 

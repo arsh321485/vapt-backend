@@ -58,7 +58,11 @@ def nav_buttons_card(team_name, active_action_id="unav_home", extra_body=None):
     """
     body = [
         {"type": "TextBlock", "text": f"👥 {team_name}", "weight": "Bolder", "size": "Small", "isSubtle": True, "spacing": "None", "wrap": True},
-        cards.two_row_pill_columnset(UNAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}, split=4),
+        # split=3 (not the even half) puts Support Status right after
+        # Timeline Ext. in the SAME row — real feedback that the previous
+        # split=4 wrapped Support Status to the start of row 2, reading as
+        # unrelated to Timeline Ext. instead of "the next tab over."
+        cards.two_row_pill_columnset(UNAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}, split=3),
     ]
     body.extend(extra_body or [])
     return cards._card(body=body)

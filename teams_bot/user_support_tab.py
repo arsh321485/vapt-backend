@@ -56,7 +56,7 @@ def list_support_requests(admin, member_user, team_name, offset=0):
     for i, t in enumerate(page):
         icon = _status_icon(t.get("status"))
         title = t.get("vul_name") or "General request"
-        when = str(t.get("requested_at") or "")[:16].replace("T", " ")
+        when = str(t.get("requested_at") or "")[:10]
         subtitle = f"{t.get('description') or ''}".strip()[:120]
         body.append(fix_tab._row(
             f"{icon} {title}",
@@ -83,7 +83,7 @@ def view_body(admin, member_user, team_name, idx, back_offset=0):
         return body
     t = tickets[idx]
     icon = _status_icon(t.get("status"))
-    when = str(t.get("requested_at") or "")[:16].replace("T", " ")
+    when = str(t.get("requested_at") or "")[:10]
     body.append({"type": "TextBlock", "text": t.get("vul_name") or "General request", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
     body.append({
         "type": "FactSet",

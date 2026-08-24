@@ -67,7 +67,6 @@ def download_report_body(admin, team_id):
             "type": "ActionSet", "spacing": "Medium",
             "actions": [
                 {"type": "Action.OpenUrl", "title": "📥 Download HTML Report", "url": _download_url(team_id, "html"), "style": "positive"},
-                {"type": "Action.OpenUrl", "title": "📥 Download PDF Report", "url": _download_url(team_id, "pdf")},
             ],
         },
     ]

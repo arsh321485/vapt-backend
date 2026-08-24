@@ -718,6 +718,27 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._header("🕘 History"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
 
+    if action_id == "hist_view":
+        request_id = value.get("request_id") or ""
+        view = value.get("view") or "approve"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = timeline_tab.history_detail_body(admin, request_id, view=view, back_offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] hist_view failed")
+            body = [cards._header("🕘 Request"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
+
+    if action_id == "hist_back":
+        view = value.get("view") or "approve"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = timeline_tab.timeline_tab_body(admin, active_sub="req_sub_history", view=view, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] hist_back failed")
+            body = [cards._header("🕘 History"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_request", extra_body=body)
+
     if action_id in ("ext_approve_do", "ext_reject_start", "ext_reject_cancel", "ext_reject_do"):
         request_id = value.get("request_id") or ""
         offset = int(value.get("offset") or 0)

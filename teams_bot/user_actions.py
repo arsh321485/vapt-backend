@@ -36,7 +36,7 @@ _REGISTER_ACTION_IDS = {
 _SUPPORT_ACTION_IDS = {"unav_support", "usup_pg", "usup_view", "usup_raise_form", "usup_submit", "usup_back"}
 _FIXED_ACTION_IDS = {"unav_fixed", "ufixed_pg", "ufixed_view", "ufixed_back"}
 _REMINDER_ACTION_IDS = {"unav_reminder", "urem_sub_overdue", "urem_sub_today", "urem_sub_thisweek", "urem_sub_nextweek", "urem_pg"}
-_EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg", "uex_new_submit"}
+_EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg", "uex_new_submit", "uex_view", "uex_view_back"}
 # Reached from a vuln's own detail page regardless of whether it was
 # opened via Fix or Register — ctx (embedded in the click's own value)
 # says which, so the response re-highlights the right tab.
@@ -93,6 +93,14 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
                 ok, error = extend.submit_new_request(member_user, team_name, idx, days, value.get("uex_new_reason"))
                 banner = _result_banner(ok, "Your admin has been notified and can review it." if ok else (error or "Could not submit extension request."))
                 body = [banner, extend.extend_subnav_columnset("uex_sub_list")] + extend.request_list_body(member_user, team_name)
+                return home.nav_buttons_card(team_name, active_action_id="unav_extend", extra_body=body)
+            if action_id == "uex_view":
+                offset = _as_int(value.get("offset")) or 0
+                body = extend.request_detail_body(member_user, team_name, _as_int(value.get("idx")), back_offset=offset)
+                return home.nav_buttons_card(team_name, active_action_id="unav_extend", extra_body=body)
+            if action_id == "uex_view_back":
+                offset = _as_int(value.get("offset")) or 0
+                body = [extend.extend_subnav_columnset("uex_sub_list")] + extend.request_list_body(member_user, team_name, offset=offset)
                 return home.nav_buttons_card(team_name, active_action_id="unav_extend", extra_body=body)
             active_sub = action_id if action_id in ("uex_sub_list", "uex_sub_new") else "uex_sub_list"
             offset = _as_int(value.get("offset")) or 0

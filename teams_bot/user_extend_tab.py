@@ -54,19 +54,38 @@ def request_list_body(member_user, team_name, offset=0):
     if not page:
         body.append({"type": "TextBlock", "text": "No extension requests yet — use the \"Request Extension\" tab above.", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
         return body
-    for r in page:
+    for i, r in enumerate(page):
         icon = fix_tab._SEV_ICON.get((r.get("severity") or "medium").lower(), "🟡")
         name = r.get("vul_name") or "Unnamed vulnerability"
         status_label = _STATUS_ICON.get(r.get("status"), r.get("status") or "review")
-        body.append({
-            "type": "Container", "spacing": "Medium", "separator": True,
-            "items": [
-                {"type": "TextBlock", "text": f"{icon} {name}", "weight": "Bolder", "size": "Small", "wrap": True},
-                {"type": "TextBlock", "text": f"{r.get('asset') or '—'}   ·   +{r.get('extension_days', 0)}d   ·   {status_label}", "size": "Small", "isSubtle": True, "spacing": "None"},
-                {"type": "TextBlock", "text": r.get("reason") or "", "size": "Small", "isSubtle": True, "wrap": True, "spacing": "None"},
-            ],
-        })
+        subtitle = f"{r.get('asset') or '—'}   ·   +{r.get('extension_days', 0)}d   ·   {status_label}\n{r.get('reason') or ''}"
+        body.append(fix_tab._row(f"{icon} {name}", subtitle, "uex_view", {"idx": offset + i, "offset": offset}))
     body.extend(fix_tab._pagination_body(offset, total, "uex_pg"))
+    return body
+
+
+def request_detail_body(member_user, team_name, idx, back_offset=0):
+    rows = _fetch_requests(member_user, team_name)
+    body = [fix_tab._back_action("← Back to Extension Requests", "uex_view_back", {"offset": back_offset})]
+    if idx is None or idx < 0 or idx >= len(rows):
+        body.append({"type": "TextBlock", "text": "This request could not be found.", "wrap": True, "spacing": "Medium"})
+        return body
+    r = rows[idx]
+    icon = fix_tab._SEV_ICON.get((r.get("severity") or "medium").lower(), "🟡")
+    status_label = _STATUS_ICON.get(r.get("status"), r.get("status") or "review")
+    body.append({"type": "TextBlock", "text": r.get("vul_name") or "Unnamed vulnerability", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
+    body.append({
+        "type": "FactSet",
+        "facts": [
+            {"title": "Status", "value": status_label},
+            {"title": "Asset", "value": str(r.get("asset") or "—")},
+            {"title": "Severity", "value": f"{icon} {(r.get('severity') or '—').title()}"},
+            {"title": "Extension", "value": f"+{r.get('extension_days', 0)} days"},
+            {"title": "Requested At", "value": str(r.get("request_date") or "—")[:10]},
+        ],
+    })
+    body.append({"type": "TextBlock", "text": "Reason", "weight": "Bolder", "size": "Small", "spacing": "Medium"})
+    body.append({"type": "TextBlock", "text": r.get("reason") or "—", "wrap": True, "size": "Small"})
     return body
 
 
