@@ -482,11 +482,25 @@ class TeamsBotMessagesView(APIView):
             )
             return
 
-        noun = "report" if purpose == "report" else "scope"
-        bot_api.reply_to_activity(
-            service_url, conversation_id, activity_id,
-            bot_api.text_message(f"✅ \"{file_name}\" received — your {noun} is being processed. I'll post here once it's ready."),
-        )
+        if purpose == "report":
+            # Reports process asynchronously (mitigation-card generation
+            # runs in the background) — nothing to show yet.
+            bot_api.reply_to_activity(
+                service_url, conversation_id, activity_id,
+                bot_api.text_message(f"✅ \"{file_name}\" received — your report is being processed. I'll post here once it's ready."),
+            )
+        else:
+            # Scope submission is synchronous — ScopeCreateAPIView's
+            # response already has the real created/error counts and the
+            # Freemium/Premium recommendation, so show it now instead of
+            # a generic "processing" message that silently dropped
+            # rejected entries and the plan recommendation (confirmed via
+            # real feedback this needed to match the website/Slack fix).
+            from . import actions
+            bot_api.reply_to_activity(
+                service_url, conversation_id, activity_id,
+                bot_api.text_message(f"✅ \"{file_name}\" received.\n\n{actions.format_scope_result_message(data)}"),
+            )
 
         # Same follow-up the website/Slack flow does after an upload: once
         # processing catches up, the next real state is either the

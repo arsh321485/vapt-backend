@@ -11365,11 +11365,23 @@ class SlackSlashCommandView(APIView):
 
         name = scope_data.get("name") or "your scope"
         error_count = processing.get("error_count", 0)
+        errors = processing.get("errors") or []
         logger.info(f"[SlackScopeSubmit] Scope created — name={name} created={created_count} errors={error_count}")
 
         summary = f"✅ Scope *{name}* submitted with {created_count} target(s)."
         if error_count:
-            summary += f" ({error_count} entries had issues and were skipped.)"
+            summary += f" ({error_count} entr{'y' if error_count == 1 else 'ies'} rejected.)"
+            for e in errors[:3]:
+                summary += f"\n  • `{e.get('value')}`: {e.get('error')}"
+            if len(errors) > 3:
+                summary += f"\n  …and {len(errors) - 3} more."
+        # Freemium/Premium routing — confirmed via real feedback the
+        # website/Slack/Teams should all surface this, not just silently
+        # let a Freemium admin continue with an out-of-limit or external
+        # scope (see scope.views.ScopeCreateAPIView's plan_recommendation).
+        rec = data.get("plan_recommendation") or {}
+        if rec.get("message"):
+            summary += f"\n\n{rec['message']}"
         summary += "\nOur team will review and begin testing — we'll notify you here once your first report is ready."
         return self._text_block(summary)
 

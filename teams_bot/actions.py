@@ -96,6 +96,38 @@ def submit_report_file(admin, file_name, file_bytes):
     return status_code, data
 
 
+def format_scope_result_message(data):
+    """
+    Builds a plain-text summary from ScopeCreateAPIView's response —
+    created/error counts, up to 3 per-line errors, and the Freemium/
+    Premium plan_recommendation message — used by both the manual-entry
+    and file-upload scope submission paths. Confirmed via real feedback
+    that Teams (and Slack) were showing a bare "Scope saved" success
+    message that silently dropped rejected entries and the plan
+    recommendation the website surfaces, even though the same
+    ScopeCreateAPIView response already carries all of it.
+    """
+    processing = (data or {}).get("processing") or {}
+    created_count = processing.get("created_count", 0)
+    error_count = processing.get("error_count", 0)
+    errors = processing.get("errors") or []
+
+    lines = [f"{created_count} target(s) saved."]
+    if error_count:
+        lines.append(f"{error_count} entr{'y' if error_count == 1 else 'ies'} were rejected:")
+        for e in errors[:3]:
+            lines.append(f"  • {e.get('value')}: {e.get('error')}")
+        if len(errors) > 3:
+            lines.append(f"  …and {len(errors) - 3} more.")
+
+    rec = (data or {}).get("plan_recommendation") or {}
+    if rec.get("message"):
+        lines.append("")
+        lines.append(rec["message"])
+
+    return "\n".join(lines)
+
+
 def submit_scope_csv(admin, file_name, file_bytes):
     from scope.views import ScopeCreateAPIView
     from django.core.files.uploadedfile import SimpleUploadedFile
@@ -176,7 +208,7 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
         if status_code >= 300:
             reason = (data or {}).get("message") or "Could not create scope."
             return cards.text_result_card("❌ Could not save scope", str(reason))
-        return cards.text_result_card("✅ Scope saved", "Your scope has been submitted. We'll take it from here.")
+        return cards.text_result_card("✅ Scope saved", format_scope_result_message(data))
 
     if action_id == "open_risk_criteria":
         existing = get_existing_risk_criteria(admin)
