@@ -168,6 +168,64 @@ class TeamsReportDownloadView(APIView):
         return response
 
 
+class TeamsScriptDownloadView(APIView):
+    """
+    GET /api/admin/users/teams/script-download/?token=...&team=...&plugin_id=...
+
+    Public (token-gated), same reasoning as TeamsReportDownloadView — a
+    member clicks "Download" on a script in the Register tab's Scripts
+    sub-tab (teams_bot.user_register_tab), which opens this in their own
+    browser. Resolves a representative member of `team` (same approach as
+    kind="userdash" in TeamsDashboardImageView) and calls the real
+    user_download_script view in-process, passing its file response
+    straight through.
+    """
+    permission_classes = []
+    authentication_classes = []
+
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from users.views import _dashboard_image_signer
+        from users_details.models import UserDetail
+        from automation_scripts_api import views as auto_views
+
+        token = request.query_params.get("token", "")
+        try:
+            team_id = _dashboard_image_signer().unsign(token, max_age=600)
+        except Exception:
+            return HttpResponse(status=403)
+
+        User = get_user_model()
+        admin = User.objects.filter(ms_team_id=team_id).first()
+        if not admin:
+            return HttpResponse(status=404)
+
+        vapt_team = (request.query_params.get("team") or "").strip()
+        plugin_id = request.query_params.get("plugin_id")
+        try:
+            plugin_id = int(plugin_id)
+        except (TypeError, ValueError):
+            return HttpResponse(status=400)
+
+        detail = UserDetail.objects.filter(admin=admin, Member_role__contains=vapt_team).first() if vapt_team else None
+        member_user = User.objects.filter(email=detail.email).first() if detail else None
+        if not member_user:
+            return HttpResponse(status=404)
+
+        try:
+            factory = APIRequestFactory()
+            inner_request = factory.get("/internal/")
+            force_authenticate(inner_request, user=member_user)
+            response = auto_views.user_download_script(inner_request, plugin_id)
+            if hasattr(response, "render"):
+                response.render()
+        except Exception:
+            logger.exception(f"[TeamsScriptDownload] failed for team_id={team_id} plugin_id={plugin_id}")
+            return HttpResponse(status=500)
+        return response
+
+
 class TeamsBotMessagesView(APIView):
     """POST /api/admin/users/teams/bot/messages/ — set as the Messaging
     endpoint on the Azure Bot resource."""

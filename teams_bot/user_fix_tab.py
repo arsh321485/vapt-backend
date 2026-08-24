@@ -237,15 +237,30 @@ def _mark_mitigated_actionset(value_base):
     }
 
 
-def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset=0, sub="manual"):
-    """Shared by the flat All Vulns list and an asset's own vuln list —
-    real Manual/Auto Fix toggle + steps + a Mark Mitigated action, unlike
-    admin's read-only equivalent."""
+def _request_extension_actionset(value_base):
+    return {
+        "type": "ActionSet", "spacing": "Small",
+        "actions": [cards._execute_action("⏳ Request Extension", {"action_id": "uex_request_form", **value_base})],
+    }
+
+
+def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset=0, sub="manual",
+                      back_action_id=None, back_title=None, extra_value=None):
+    """Shared by every entry point that drills into one vulnerability's own
+    detail (flat All Vulns list, an asset's own vuln list, Register's
+    filtered list — ctx/host decide where Back goes for the two built-in
+    cases; back_action_id/back_title/extra_value let a third caller plug
+    in its own, same shape as admin fix_tab.py's _vuln_detail_full_body).
+    Real Manual/Auto Fix toggle + steps + Mark Mitigated + Request
+    Extension actions, unlike admin's read-only equivalent."""
     data = _fetch_team_data(member_user, team_name)
     rows = data.get("rows") or []
     report_id = data.get("report_id")
+    extra_value = extra_value or {}
 
-    if ctx == "asset":
+    if back_action_id:
+        body = [_back_action(back_title or "← Back", back_action_id, {"offset": offset, **extra_value})]
+    elif ctx == "asset":
         body = [_back_action(f"← Back to {host}", "ufix_asset_vuln_back", {"host": host, "offset": offset})]
     else:
         body = [_back_action("← Back to All Vulns", "ufix_vuln_back", {"offset": offset})]
@@ -257,7 +272,7 @@ def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset
     r = rows[idx]
     body.extend(_vuln_facts_body(r))
 
-    value_base = {"idx": idx, "ctx": ctx, "offset": offset}
+    value_base = {"idx": idx, "ctx": ctx, "offset": offset, **extra_value}
     if ctx == "asset":
         value_base["host"] = host
     body.append(_fix_toggle_actionset(sub, value_base))
@@ -275,7 +290,47 @@ def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset
         body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "isSubtle": True, "spacing": "Medium"})
 
     body.append(_mark_mitigated_actionset(value_base))
+    if (r.get("status") or "open").strip().lower() != "closed":
+        body.append(_request_extension_actionset(value_base))
     return body
+
+
+def extension_form_body(r, value_base):
+    """Prompt for days + reason — pre-fills the vuln's own name/asset/
+    severity so the member doesn't retype anything already known.
+    Submitting merges these Input values into the button's own data (see
+    team_tab.py's add_user_form_body for the same Action.Execute +
+    Input.* merge pattern)."""
+    name = r.get("vul_name") or "Unnamed vulnerability"
+    return [
+        cards._section_title("⏳ Request Timeline Extension"),
+        {"type": "TextBlock", "text": f"{name} on {r.get('asset') or '—'}", "size": "Small", "isSubtle": True, "wrap": True, "spacing": "Small"},
+        {"type": "Input.Number", "id": "uex_days", "label": "Extra days needed", "min": 1, "max": 90, "value": 7},
+        {"type": "Input.Text", "id": "uex_reason", "label": "Reason", "isMultiline": True, "placeholder": "e.g. Need more time for patch testing"},
+        {
+            "type": "ActionSet", "spacing": "Medium",
+            "actions": [cards._execute_action("✅ Submit Request", {"action_id": "uex_submit_request", **value_base}, style="positive")],
+        },
+    ]
+
+
+def submit_extension_request(member_user, r):
+    from userdashboard.views import UserMitigationTimelineExtensionCreateAPIView
+    from .actions import _call_view_in_process
+    status_code, data = _call_view_in_process(
+        UserMitigationTimelineExtensionCreateAPIView, member_user, method="post",
+        data={
+            "severity": (r.get("severity") or "Medium").strip().title(),
+            "asset": r.get("asset") or "",
+            "vulnerability_name": r.get("vul_name") or "",
+            "requested_extension_days": r.get("_requested_days") or 7,
+            "reason": r.get("_reason") or "",
+        },
+        request_format="json",
+    )
+    if status_code >= 300 or not isinstance(data, dict) or not data.get("request_id"):
+        return False, (data or {}).get("detail") or "Could not submit extension request."
+    return True, None
 
 
 def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets", offset=0):
