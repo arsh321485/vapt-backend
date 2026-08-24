@@ -126,6 +126,51 @@ def get_team_channel_reference(team_id: str):
         return db[TEAM_CHANNEL_COLLECTION].find_one({"team_id": team_id})
 
 
+def claim_post_slot(team_id: str, stale_after_seconds: int = 15) -> bool:
+    """
+    Atomically claims the right to replace the active card for this team —
+    prevents two concurrent triggers for the same login (confirmed via
+    real testing: the synchronous login-time repoint-and-post in
+    users.views._ensure_admin_dashboard_channel and the async webhook-
+    driven one in teams_bot.views._handle_conversation_update can both
+    fire for the same fresh install) from each independently deleting/
+    posting and producing two duplicate welcome cards. Returns True if
+    this call won the claim (caller should proceed and eventually call
+    release_post_slot); False if someone else holds it right now (caller
+    should skip — a duplicate post, not a missed one, since the other
+    caller is already handling it). A claim older than
+    stale_after_seconds is treated as abandoned (e.g. a crashed process)
+    and can be re-claimed, so this can never permanently wedge posting.
+    """
+    if not team_id:
+        return True
+    now = datetime.datetime.utcnow()
+    stale_before = now - datetime.timedelta(seconds=stale_after_seconds)
+    with MongoContext() as db:
+        result = db[TEAM_CHANNEL_COLLECTION].update_one(
+            {
+                "team_id": team_id,
+                "$or": [
+                    {"posting_claimed_at": {"$exists": False}},
+                    {"posting_claimed_at": None},
+                    {"posting_claimed_at": {"$lt": stale_before}},
+                ],
+            },
+            {"$set": {"posting_claimed_at": now}},
+        )
+        return result.matched_count > 0
+
+
+def release_post_slot(team_id: str):
+    if not team_id:
+        return
+    with MongoContext() as db:
+        db[TEAM_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id},
+            {"$set": {"posting_claimed_at": None}},
+        )
+
+
 def set_active_message_id(team_id: str, message_id):
     """
     Tracks the id of the single "live" onboarding/dashboard card currently

@@ -11,7 +11,7 @@ three surfaces can never drift out of sync on what "ready" means.
 import logging
 
 from . import bot_api, cards
-from .conversation_store import get_team_channel_reference, set_active_message_id
+from .conversation_store import get_team_channel_reference, set_active_message_id, claim_post_slot, release_post_slot
 
 logger = logging.getLogger(__name__)
 
@@ -41,31 +41,44 @@ def replace_active_card(team_id, card):
     depend on Teams preserving that identity across edits at all.
 
     Returns the new message id (or None if the channel reference isn't
-    known yet / the send failed).
+    known yet / the send failed / a concurrent caller already claimed
+    this post — see claim_post_slot).
     """
     ref = get_team_channel_reference(team_id)
     if not ref:
         logger.info(f"[TeamsOnboarding] no stored admin-dashboard channel reference for team_id={team_id} — bot not added yet")
         return None
 
-    old_message_id = ref.get("active_message_id")
-    logger.info(f"[TeamsOnboarding] replace_active_card: old_message_id={old_message_id}")
-    if old_message_id:
-        del_resp = bot_api.delete_activity(ref["service_url"], ref["conversation_id"], old_message_id)
-        logger.info(f"[TeamsOnboarding] delete_activity({old_message_id}) -> {getattr(del_resp, 'status_code', None)}")
+    # Confirmed via real testing: on a fresh install, the synchronous
+    # login-time repoint-and-post and the async webhook-driven one both
+    # end up calling this for the same card, producing two identical
+    # posts. Claim exclusivity first; if someone else already holds it,
+    # skip rather than post a duplicate.
+    if not claim_post_slot(team_id):
+        logger.info(f"[TeamsOnboarding] replace_active_card: another post already in flight for team_id={team_id} — skipping duplicate")
+        return None
 
-    resp = bot_api.send_activity(
-        ref["service_url"], ref["conversation_id"],
-        bot_api.card_message(card),
-    )
-    logger.info(f"[TeamsOnboarding] send_activity -> status={getattr(resp, 'status_code', None)} body={getattr(resp, 'text', '')[:300]}")
     try:
-        new_message_id = resp.json().get("id") if resp is not None else None
-    except Exception:
-        new_message_id = None
-    if new_message_id:
-        set_active_message_id(team_id, new_message_id)
-    return new_message_id
+        old_message_id = ref.get("active_message_id")
+        logger.info(f"[TeamsOnboarding] replace_active_card: old_message_id={old_message_id}")
+        if old_message_id:
+            del_resp = bot_api.delete_activity(ref["service_url"], ref["conversation_id"], old_message_id)
+            logger.info(f"[TeamsOnboarding] delete_activity({old_message_id}) -> {getattr(del_resp, 'status_code', None)}")
+
+        resp = bot_api.send_activity(
+            ref["service_url"], ref["conversation_id"],
+            bot_api.card_message(card),
+        )
+        logger.info(f"[TeamsOnboarding] send_activity -> status={getattr(resp, 'status_code', None)} body={getattr(resp, 'text', '')[:300]}")
+        try:
+            new_message_id = resp.json().get("id") if resp is not None else None
+        except Exception:
+            new_message_id = None
+        if new_message_id:
+            set_active_message_id(team_id, new_message_id)
+        return new_message_id
+    finally:
+        release_post_slot(team_id)
 
 
 def post_onboarding_step(admin, team_id=None, force_state=None):
