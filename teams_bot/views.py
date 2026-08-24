@@ -505,11 +505,20 @@ class TeamsBotMessagesView(APIView):
         all (it's `action: "add"`, not a member list), so both shapes are
         checked here. This is what puts the bot's proactive-posting
         reference onto General on first install (see save_team_channel_reference)
-        — the dedicated admin-dashboard channel (users.views.
-        ADMIN_DASHBOARD_CHANNEL_NAME) doesn't go through this path at all;
-        it's a standard channel already covered by the team-scope install,
-        so its reference is set directly and synchronously at channel-
-        creation time instead (conversation_store.save_admin_dashboard_channel_reference).
+        — General is the ONLY place Teams itself will ever deliver this
+        event for, since team-scope install always lands there first.
+
+        Per explicit instruction ("welcome msg se lekar sab kuch vaptfix
+        admin dashboard mein hi jana chahiye, General mein nahi") the very
+        first login shouldn't show anything in General at all, not even
+        the first card, and needing a second login to move it there
+        wasn't good enough — so right after learning the service_url from
+        this event, _repoint_to_admin_dashboard_channel_if_exists checks
+        whether the dedicated channel (created synchronously during the
+        same login, in users.views._ensure_admin_dashboard_channel)
+        already exists and, if so, repoints straight to it BEFORE
+        post_onboarding_step runs — so the very first card goes directly
+        there instead of landing in General first.
         """
         members_added = activity.get("membersAdded") or []
         bot_id = (activity.get("recipient") or {}).get("id")
@@ -545,6 +554,39 @@ class TeamsBotMessagesView(APIView):
             return
 
         try:
+            self._repoint_to_admin_dashboard_channel_if_exists(admin, resolved_team_id)
+        except Exception:
+            logger.exception("[TeamsBot] admin-dashboard-channel repoint-on-install failed")
+
+        try:
             post_onboarding_step(admin, team_id=resolved_team_id or thread_id)
         except Exception:
             logger.exception("[TeamsBot] post_onboarding_step on team add failed")
+
+    def _repoint_to_admin_dashboard_channel_if_exists(self, admin, team_id):
+        """
+        Right after save_team_channel_reference just learned this team's
+        service_url (from the team-scope install landing in General),
+        check whether the dedicated admin-dashboard channel already
+        exists — it does whenever this fires as part of a normal login,
+        since users.views._ensure_admin_dashboard_channel creates it
+        synchronously earlier in that same request — and if so, repoint
+        the stored reference straight to it. Uses the app-only Graph
+        token (already confirmed to carry Channel.ReadBasic.All) rather
+        than the admin's own delegated token, so this doesn't depend on
+        exactly which scopes that login happened to request.
+        """
+        from users.views import _get_team_channels, _pick_admin_dashboard_channel_id, _get_graph_app_token
+        from .conversation_store import save_admin_dashboard_channel_reference
+
+        graph_team_id = getattr(admin, "ms_team_id", None) or team_id
+        if not graph_team_id:
+            return
+        app_token = _get_graph_app_token()
+        if not app_token:
+            return
+        headers = {"Authorization": f"Bearer {app_token}"}
+        channels = _get_team_channels(graph_team_id, headers)
+        channel_id = _pick_admin_dashboard_channel_id(channels)
+        if channel_id:
+            save_admin_dashboard_channel_reference(graph_team_id, channel_id)
