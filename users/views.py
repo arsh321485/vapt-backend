@@ -12266,7 +12266,17 @@ class SlackSlashCommandView(APIView):
             automation = self._resolve_automation_match(
                 v, team_id, user_id, os_param=v.get("host_os"), admin_side=False,
             )
-            content = self._format_vulndata_automation_detail(v, automation, can_download=True)
+            locked_reason = None
+            try:
+                from billing.enforcement import assert_can_use_automation_scripts, PlanLimitExceeded
+                admin = User.objects.filter(slack_team_id=team_id).first()
+                if admin:
+                    assert_can_use_automation_scripts(admin.id)
+            except PlanLimitExceeded as e:
+                locked_reason = str(e)
+            except Exception:
+                logger.exception("[SlackCmd] automation plan-gate check failed (non-fatal, showing button)")
+            content = self._format_vulndata_automation_detail(v, automation, can_download=True, locked_reason=locked_reason)
         else:
             steps_data = None
             if not report_id:
@@ -18782,7 +18792,7 @@ class SlackSlashCommandView(APIView):
 
         return blocks
 
-    def _format_vulndata_automation_detail(self, v, automation, can_download=False):
+    def _format_vulndata_automation_detail(self, v, automation, can_download=False, locked_reason=None):
         """
         Automation Fix side of the Vuln Details toggle — shared by both the
         admin view (/api/admin/automation-scripts/match/<plugin_id>/, truly
@@ -18791,7 +18801,13 @@ class SlackSlashCommandView(APIView):
         (/api/user/automation-scripts/match/<plugin_id>/). `can_download`
         distinguishes the two: only the team-member call site passes True,
         which adds a real "Download Script" button instead of just telling
-        them to separately type /autofix.
+        them to separately type /autofix. `locked_reason` (only meaningful
+        when can_download=True): the admin's plan doesn't allow automation
+        scripts — Slack buttons can't be visually "greyed out", so this
+        swaps the button for a plain locked message instead, matching what
+        clicking it would have failed with anyway (see vulndata_autofix_download's
+        own /download/ plan-gate) — no point showing an action that's
+        guaranteed to fail.
         """
         sid  = v.get("short_id", "?")
         name = v.get("vul_name") or v.get("plugin_name") or "Unknown"
@@ -18837,7 +18853,9 @@ class SlackSlashCommandView(APIView):
                 "text": f"*Install command*\n`{automation['command_download_libraries']}`"}})
         add_section("Before running", "considerations_before")
 
-        if can_download:
+        if can_download and locked_reason:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"🔒 *{locked_reason}*"}})
+        elif can_download:
             # Use the MATCHED script's own plugin_id, not the original
             # finding's — AWS/custom findings resolve by name and never had
             # a real plugin_id to begin with, so the download button must
@@ -21609,7 +21627,7 @@ class SlackInteractivityView(APIView):
                 dl_host_os   = dl_parts[2] if len(dl_parts) > 2 else ""
                 if not dl_plugin_id or not channel_id:
                     self._post_response_url(response_url, {
-                        "response_type": "ephemeral",
+                        "response_type": "ephemeral", "replace_original": False,
                         "text": "❌ Could not download script — missing plugin ID or channel.",
                     }, action_id)
                     return
@@ -21622,9 +21640,20 @@ class SlackInteractivityView(APIView):
                     f"/api/user/automation-scripts/download/{dl_plugin_id}/", team_id, slack_user_id, params=os_params,
                 )
                 if script_resp is None or script_resp.status_code != 200 or not script_resp.content:
+                    # Surface the REAL reason (e.g. the Freemium plan-gate's
+                    # own message) instead of a generic "try again" — the
+                    # response body is real JSON ({"error": "..."}) on every
+                    # failure path user_download_script has, not just the
+                    # plan gate, so this covers all of them the same way.
+                    err_text = "Could not download the script right now — please try again."
+                    if script_resp is not None:
+                        try:
+                            err_text = script_resp.json().get("error") or err_text
+                        except Exception:
+                            pass
                     self._post_response_url(response_url, {
-                        "response_type": "ephemeral",
-                        "text": "❌ Could not download the script right now — please try again.",
+                        "response_type": "ephemeral", "replace_original": False,
+                        "text": f"❌ {err_text}",
                     }, action_id)
                     return
                 bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
@@ -21641,7 +21670,7 @@ class SlackInteractivityView(APIView):
                 )
                 if not uploaded:
                     self._post_response_url(response_url, {
-                        "response_type": "ephemeral",
+                        "response_type": "ephemeral", "replace_original": False,
                         "text": "❌ Could not upload the script file — please try again.",
                     }, action_id)
                 return
