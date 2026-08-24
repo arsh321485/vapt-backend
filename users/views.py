@@ -1653,11 +1653,28 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
         web_url = f"{web_url}&tenantId={tenant_id}"
     web_url_alt = web_url.replace("https://teams.cloud.microsoft/l/team/", "https://teams.cloud.microsoft/_#/l/team/")
     channel_web_url = None
+    channel_web_url_alt = None
     if channel_id:
         safe_name = quote(channel_name or "General")
         channel_web_url = f"https://teams.cloud.microsoft/l/channel/{channel_id}/{safe_name}?groupId={team_id}"
         if tenant_id:
             channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
+        channel_web_url_alt = channel_web_url.replace("https://teams.cloud.microsoft/l/channel/", "https://teams.cloud.microsoft/_#/l/channel/")
+    # general_web_url/general_web_url_alt/general_desktop_url are what
+    # their name says — the General channel specifically, only equal to
+    # channel_web_url when channel_name really is "General" — NOT a
+    # generic "preferred URL" fallback. Callers that want "whichever
+    # channel we actually resolved, defaulting to the team view" should
+    # prefer channel_web_url over these, same as the "teams_url" field
+    # already does — confirmed via real testing this distinction matters:
+    # an earlier version of this function always left channel_name at its
+    # default "General" regardless of which channel channel_id actually
+    # pointed at, which made general_web_url silently equal channel_web_url
+    # every time — accidentally "working" for non-General channels, but
+    # for the wrong reason, and callers that didn't ALSO prefer
+    # channel_web_url (like teams_tab_url below) got a plain team link
+    # instead of the intended channel once that accidental case stopped
+    # applying.
     general_web_url = channel_web_url if ((channel_name or "").strip().lower() == "general" and channel_web_url) else web_url
     if "/l/channel/" in general_web_url:
         general_web_url_alt = general_web_url.replace("https://teams.cloud.microsoft/l/channel/", "https://teams.cloud.microsoft/_#/l/channel/")
@@ -1674,6 +1691,7 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
         "general_web_url_alt": general_web_url_alt,
         "general_desktop_url": general_desktop_url,
         "channel_web_url": channel_web_url,
+        "channel_web_url_alt": channel_web_url_alt,
         "channel_desktop_url": channel_desktop_url,
     }
 
@@ -1879,14 +1897,24 @@ def auto_create_vaptfix_team(access_token, admin=None):
                     preferred_channel_id = _pick_admin_dashboard_channel_id(channels_result) or _pick_general_channel_id(channels_result)
                     if not preferred_channel_id and channels_result:
                         preferred_channel_id = channels_result[0].get("channelId")
-                    urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id)
+                    # _build_teams_tab_urls needs the REAL matched channel's
+                    # name for the URL's display-name segment — passing
+                    # nothing here silently defaulted to "General" even when
+                    # preferred_channel_id actually pointed at the dashboard
+                    # channel, which is misleading (if functionally masked
+                    # by Teams honoring channel_id over the name in the URL).
+                    preferred_channel_name = next(
+                        (c.get("channelName") for c in channels_result if c.get("channelId") == preferred_channel_id),
+                        "General",
+                    )
+                    urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
                     return {
                         "team_id": team_id,
                         "team_name": "Vaptfix",
                         "status": "already_exists",
                         "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
-                        "teams_tab_url": urls.get("general_web_url") or urls.get("web_url"),
-                        "teams_tab_url_alt": urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+                        "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+                        "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
                         "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
                         "channels": channels_result
                     }
@@ -1965,7 +1993,11 @@ def auto_create_vaptfix_team(access_token, admin=None):
         )
         if not preferred_channel_id and channels_result:
             preferred_channel_id = channels_result[0].get("channelId")
-        urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id)
+        preferred_channel_name = next(
+            (c.get("displayName") for c in all_channels if c.get("id") == preferred_channel_id),
+            "General",
+        )
+        urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
 
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
         return {
@@ -1973,8 +2005,8 @@ def auto_create_vaptfix_team(access_token, admin=None):
             "team_name": "Vaptfix",
             "status": "created",
             "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
-            "teams_tab_url": urls.get("general_web_url") or urls.get("web_url"),
-            "teams_tab_url_alt": urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+            "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+            "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
             "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
             "channels": channels_result
         }
