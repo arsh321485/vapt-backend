@@ -153,6 +153,7 @@ def watch_report_and_post_onboarding(admin, report_ids, max_wait_seconds=1800, p
     import requests
     from django.conf import settings
     from rest_framework_simplejwt.tokens import RefreshToken
+    from .conversation_store import claim_report_watch, release_report_watch
 
     if not getattr(admin, "ms_team_id", None):
         return
@@ -161,35 +162,52 @@ def watch_report_and_post_onboarding(admin, report_ids, max_wait_seconds=1800, p
     if not report_ids:
         return
 
-    backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
-    token = str(RefreshToken.for_user(admin).access_token)
-    headers = {"Authorization": f"Bearer {token}"}
-
-    def _all_complete():
-        for rid in report_ids:
-            try:
-                resp = requests.get(
-                    f"{backend}/api/admin/upload_report/upload/{rid}/status/",
-                    headers=headers, timeout=15,
-                )
-                data = resp.json()
-            except Exception:
-                logger.exception(f"[TeamsOnboarding] status check failed for report_id={rid}")
-                return False
-            if not data.get("cards_generation_complete"):
-                return False
-        return True
-
-    deadline = _time.time() + max_wait_seconds
-    try:
-        while _time.time() < deadline:
-            if _all_complete():
-                break
-            _time.sleep(poll_interval)
-    except Exception:
-        logger.exception(f"[TeamsOnboarding] polling failed for report_ids={report_ids}")
+    team_id = admin.ms_team_id
+    # Confirmed via real testing: the risk-criteria prompt was appearing
+    # twice — a duplicated/retried upload request starts two of these
+    # background watchers for the same team, each polling independently
+    # and each eventually calling post_onboarding_step once cards are
+    # ready. claim_post_slot alone doesn't catch this since the two calls
+    # land seconds-to-minutes apart, not concurrently. Claim exclusivity
+    # for the whole watch up front; a second watcher for the same team
+    # sees one already in flight and returns immediately instead of
+    # polling and posting a duplicate.
+    if not claim_report_watch(team_id, stale_after_seconds=max_wait_seconds + 120):
+        logger.info(f"[TeamsOnboarding] a report-watch is already in flight for team_id={team_id} — skipping duplicate watcher")
+        return
 
     try:
-        post_onboarding_step(admin)
-    except Exception:
-        logger.exception("[TeamsOnboarding] failed to post onboarding after upload watch")
+        backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+        token = str(RefreshToken.for_user(admin).access_token)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        def _all_complete():
+            for rid in report_ids:
+                try:
+                    resp = requests.get(
+                        f"{backend}/api/admin/upload_report/upload/{rid}/status/",
+                        headers=headers, timeout=15,
+                    )
+                    data = resp.json()
+                except Exception:
+                    logger.exception(f"[TeamsOnboarding] status check failed for report_id={rid}")
+                    return False
+                if not data.get("cards_generation_complete"):
+                    return False
+            return True
+
+        deadline = _time.time() + max_wait_seconds
+        try:
+            while _time.time() < deadline:
+                if _all_complete():
+                    break
+                _time.sleep(poll_interval)
+        except Exception:
+            logger.exception(f"[TeamsOnboarding] polling failed for report_ids={report_ids}")
+
+        try:
+            post_onboarding_step(admin)
+        except Exception:
+            logger.exception("[TeamsOnboarding] failed to post onboarding after upload watch")
+    finally:
+        release_report_watch(team_id)

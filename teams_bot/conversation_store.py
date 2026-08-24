@@ -171,6 +171,64 @@ def release_post_slot(team_id: str):
         )
 
 
+def claim_report_watch(team_id: str, stale_after_seconds: int) -> bool:
+    """
+    Same idea as claim_post_slot, but held for the WHOLE duration of a
+    teams_bot.onboarding.watch_report_and_post_onboarding background
+    watcher (minutes, not seconds) — confirmed via real testing that the
+    "set risk criteria" prompt appeared twice even after claim_post_slot
+    was already in place: that lock only prevents two calls to
+    replace_active_card from racing within the same few seconds, but two
+    separate watcher threads for the same team (e.g. from a duplicated/
+    retried upload request) each poll independently and typically finish
+    — and call post_onboarding_step — at slightly different times, well
+    outside claim_post_slot's short window, so neither ever sees the
+    other's claim as active. This claims exclusivity for the entire watch
+    instead, so a second watcher for the same team_id sees one already in
+    flight and returns immediately rather than polling and posting again.
+
+    Unlike claim_post_slot, this must handle team_id having no row yet at
+    all (a watcher can start before any bot activity has ever been seen
+    for this team) — done as two separate operations rather than one
+    upsert with the staleness $or condition, since combining upsert with
+    that condition could otherwise insert a SECOND document sharing the
+    same team_id whenever a genuine claim is already held (the whole
+    filter, $or included, finding no match is also true in that case).
+    """
+    if not team_id:
+        return True
+    now = datetime.datetime.utcnow()
+    stale_before = now - datetime.timedelta(seconds=stale_after_seconds)
+    with MongoContext() as db:
+        db[TEAM_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id},
+            {"$setOnInsert": {"team_id": team_id, "created_at": now}},
+            upsert=True,
+        )
+        result = db[TEAM_CHANNEL_COLLECTION].update_one(
+            {
+                "team_id": team_id,
+                "$or": [
+                    {"report_watch_claimed_at": {"$exists": False}},
+                    {"report_watch_claimed_at": None},
+                    {"report_watch_claimed_at": {"$lt": stale_before}},
+                ],
+            },
+            {"$set": {"report_watch_claimed_at": now}},
+        )
+        return result.matched_count > 0
+
+
+def release_report_watch(team_id: str):
+    if not team_id:
+        return
+    with MongoContext() as db:
+        db[TEAM_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id},
+            {"$set": {"report_watch_claimed_at": None}},
+        )
+
+
 def set_active_message_id(team_id: str, message_id):
     """
     Tracks the id of the single "live" onboarding/dashboard card currently
