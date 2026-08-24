@@ -132,7 +132,7 @@ class Util:
                              style="background:#e5f8ff; border-radius:8px; margin:0 auto 12px auto;">
                         <tr>
                           <td style="padding:14px 14px; color:#2e3d4f; font-size:14px; line-height:1.6; text-align:left;">
-                            This OTP is valid for <strong>5 minutes</strong>.
+                            This OTP is valid for <strong>1 minute</strong>.
                         Please do not share this OTP with anyone for security reasons.
                           </td>
                         </tr>

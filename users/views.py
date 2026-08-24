@@ -351,10 +351,12 @@ class AdminSignupVerifyOTPView(APIView):
         except SignupOTPSession.DoesNotExist:
             return Response({"error": "No signup session found. Please start again."}, status=400)
 
-        # Check 5-minute expiry
+        # Check 1-minute expiry (shortened from 5 minutes per explicit request —
+        # frontend should grey out the OTP inputs and enable Resend at the
+        # same 60s mark, calling AdminSignupSendOTPView again to resend).
         from django.utils import timezone as tz
         age_seconds = (tz.now() - session.created_at).total_seconds()
-        if age_seconds > 300:
+        if age_seconds > 60:
             # Use queryset delete for Djongo compatibility (model instance pk can be None)
             SignupOTPSession.objects.filter(email=email).delete()
             return Response({"error": "OTP has expired. Please start again."}, status=400)

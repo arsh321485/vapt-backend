@@ -102,7 +102,7 @@ class SignupOTPSession(models.Model):
     """
     Temporary store for admin signup OTP + password.
     Replaces cache.set/get so it works across all Gunicorn workers.
-    Deleted immediately after OTP is verified or if expired (5 minutes).
+    Deleted immediately after OTP is verified or if expired (1 minute).
     """
     email = models.EmailField(unique=True)
     otp = models.CharField(max_length=6)

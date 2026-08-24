@@ -52,23 +52,69 @@ def get_admin_scope_asset_count(admin_id: str) -> int:
         return 0
 
 
+def _latest_report_uploaded_at(admin_id: str):
+    """Most recent uploaded_at across this admin's reports, or None."""
+    try:
+        with MongoContext() as db:
+            doc = db[NESSUS_COLLECTION].find_one(
+                {"admin_id": str(admin_id)},
+                {"uploaded_at": 1},
+                sort=[("uploaded_at", -1)],
+            )
+            return doc.get("uploaded_at") if doc else None
+    except Exception as e:
+        logger.error(f"[Billing] latest report timestamp lookup failed for admin_id={admin_id}: {e}")
+        return None
+
+
+def _latest_scope_created_at(admin_id: str):
+    """created_at of this admin's most recently submitted scope, or None."""
+    try:
+        from scope.models import Scope
+        scope = Scope.objects.filter(admin_id=admin_id).order_by("-created_at").first()
+        return scope.created_at if scope else None
+    except Exception as e:
+        logger.error(f"[Billing] latest scope timestamp lookup failed for admin_id={admin_id}: {e}")
+        return None
+
+
 def resolve_management_testing_asset_count(admin_id: str):
     """
-    Management+Testing asset count — prefers an already-uploaded report's
-    asset count (same source Mode A/get_admin_asset_count uses) when the
-    admin has one, since an admin who already uploaded a report just wants
-    VaptFix to also run testing/retesting on it, not a separate target
-    list. Falls back to the submitted scope (scope/create/) only when no
-    report exists at all — the original "no report yet, here's what to
-    test" path this mode was built for.
+    Management+Testing asset count — picks whichever of (uploaded report,
+    submitted scope) is MORE RECENT, so an admin who just gave a scope
+    manually gets priced off that scope, not a stale report from before
+    (confirmed via real complaint: submitting scope still silently priced
+    off an old report — "why is it asking like I already have a report").
+    An admin who already has a report and hasn't touched scope still gets
+    priced off that report, same as before. Only falls back to whichever
+    one exists when the other is completely absent.
 
     Returns (asset_count, source) — source is "report" or "scope", so
     callers can label where the number came from.
     """
     report_count = get_admin_asset_count(admin_id)
-    if report_count > 0:
+    scope_count = get_admin_scope_asset_count(admin_id)
+
+    if report_count and scope_count:
+        report_at = _latest_report_uploaded_at(admin_id)
+        scope_at = _latest_scope_created_at(admin_id)
+        try:
+            # nessus_reports.uploaded_at comes back from raw pymongo as a
+            # naive datetime; Scope.created_at is timezone-aware (USE_TZ).
+            # Strip tzinfo from both before comparing so this never raises
+            # instead of just falling back to the old report-wins default.
+            r = report_at.replace(tzinfo=None) if report_at else None
+            s = scope_at.replace(tzinfo=None) if scope_at else None
+            if s and r and s >= r:
+                return scope_count, "scope"
+        except Exception as e:
+            logger.warning(f"[Billing] report/scope timestamp comparison failed for admin_id={admin_id}: {e}")
         return report_count, "report"
-    return get_admin_scope_asset_count(admin_id), "scope"
+    if report_count:
+        return report_count, "report"
+    if scope_count:
+        return scope_count, "scope"
+    return 0, "scope"
 
 
 def get_admin_asset_breakdown(admin_id: str):
