@@ -78,6 +78,33 @@ class TeamsDashboardImageView(APIView):
                 team_key = request.query_params.get("team") or "config"
                 html = _build_common_vulns_html(grouped, team_key=team_key)
                 selector = ".page-card"
+            elif kind == "userdash":
+                # Team channel's own (regular member's) Home dashboard —
+                # same real bento-grid design as the admin's, via the SAME
+                # /api/user/dashboard/summary/ endpoint Slack's own
+                # kind="userdash" image already uses (see
+                # SlackSlashCommandView's dashboard-image view). Renders
+                # for "any member of this team" (a representative, not a
+                # SPECIFIC clicking member) since this URL is fetched by
+                # Teams' own servers with no per-user session — the data
+                # is identical either way (team-scoped, not member-
+                # specific), same reasoning as _get_team_representative_token.
+                from userdashboard.views import UserDashboardSummaryAPIView
+                from users_details.models import UserDetail
+                vapt_team = (request.query_params.get("team") or "").strip()
+                detail = UserDetail.objects.filter(admin=admin, Member_role__contains=vapt_team).first() if vapt_team else None
+                member_user = User.objects.filter(email=detail.email).first() if detail else None
+                if not member_user:
+                    return HttpResponse(status=404)
+                _status, data = actions._call_view_in_process(
+                    UserDashboardSummaryAPIView, member_user, method="get",
+                    data={"team": vapt_team} if vapt_team else None,
+                )
+                html = _build_dashboard_html(
+                    data if isinstance(data, dict) else {},
+                    title=f"📊 {vapt_team or 'Team'} Dashboard",
+                    subtitle="Your team's summary — assigned assets, vuln severity, mitigation timeline, mean fix time, and support tickets.",
+                )
             else:
                 from admindashboard.views import AdminDashboardSummaryAPIView
                 _status, data = actions._call_view_in_process(AdminDashboardSummaryAPIView, admin, method="get")

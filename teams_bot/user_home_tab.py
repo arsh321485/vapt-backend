@@ -64,37 +64,20 @@ def nav_buttons_card(team_name, active_action_id="unav_home", extra_body=None):
     return cards._card(body=body)
 
 
-def home_tab_body(member_user, team_name):
+def home_tab_body(team_id, team_name):
     """
-    Real Home content for `team_name`, scoped to `member_user`'s own
-    admin/report — calls the exact same summary endpoint the website's own
-    user dashboard uses (userdashboard.UserDashboardSummaryAPIView),
-    server-side-filtered to `team_name` (falls back to the member's full
-    team list if `team_name` somehow isn't one of theirs — see that view's
-    own `active_teams` guard — member_resolve already checked this too,
-    ahead of ever calling in here, so that fallback shouldn't trigger in
-    practice). Reuses cards.home_dashboard_card_body verbatim — it's
-    already generic over "whatever this summary dict says", admin-scoped
-    or team-scoped alike.
+    Real Home content for `team_name` — a rendered PNG (same real
+    bento-grid design as the reference userdashboard.html mockup, and the
+    same one the admin's own Home tab already uses), not a native-card
+    approximation. Reuses cards.dashboard_image_card_body with
+    kind="userdash", the exact mechanism Slack's own team Home tab already
+    uses (see users.views.SlackSlashCommandView's dashboard-image view,
+    kind == "userdash" branch) — teams_bot.views.TeamsDashboardImageView's
+    own "userdash" branch resolves a representative member of `team_name`
+    server-side and calls the same /api/user/dashboard/summary/ endpoint
+    the native-card version used, so the data is identical, only the
+    rendering differs.
     """
-    from userdashboard.views import UserDashboardSummaryAPIView
-    from .actions import _call_view_in_process
-
-    try:
-        status_code, data = _call_view_in_process(
-            UserDashboardSummaryAPIView, member_user, method="get", data={"team": team_name},
-        )
-    except Exception:
-        logger.exception("[TeamsBot] UserDashboardSummaryAPIView call failed")
-        return [{"type": "TextBlock", "text": "❌ Couldn't load your dashboard right now — please try again.", "wrap": True}]
-
-    if status_code >= 400:
-        return [{"type": "TextBlock", "text": "❌ Couldn't load your dashboard right now — please try again.", "wrap": True}]
-
-    body = cards.home_dashboard_card_body(data or {})
-    # Swap the generic admin-facing header/blurb for a team-scoped one —
-    # home_dashboard_card_body's first two elements are always _header +
-    # _body_text (see cards.py), safe to replace by position.
-    body[0] = cards._header(f"🏠 {team_name} Dashboard")
-    body[1] = cards._body_text(f"Your team's summary — assets, vulnerabilities, mitigation timeline and support tickets for {team_name}.")
-    return body
+    return cards.dashboard_image_card_body(
+        team_id, kind="userdash", title=f"{team_name} Dashboard", extra_params={"team": team_name},
+    )

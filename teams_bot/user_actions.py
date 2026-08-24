@@ -10,6 +10,7 @@ import logging
 from . import cards
 from . import member_resolve
 from . import user_home_tab as home
+from . import user_fix_tab as fix
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +18,19 @@ logger = logging.getLogger(__name__)
 # fully clickable from day one, same incremental approach the admin-side
 # build used (each tab wired up and verified one at a time).
 _COMING_SOON = {
-    "unav_fix":      "Fix",
     "unav_register": "Register",
     "unav_extend":   "Timeline Extension",
     "unav_support":  "Support Status",
     "unav_fixed":    "Fixed",
     "unav_reminder": "Reminder",
+}
+
+# action_id -> which top nav tab it belongs under, so a Fix sub-tab/
+# pagination/drill-down click still renders with "Fix" highlighted in the
+# persistent nav bar, not silently falling back to Home.
+_FIX_ACTION_IDS = {
+    "unav_fix", "ufix_sub_assets", "ufix_sub_vulns",
+    "ufix_asset_pg", "ufix_vuln_pg", "ufix_asset_view", "ufix_asset_back", "ufix_asset_vuln_view", "ufix_vuln_view",
 }
 
 
@@ -43,18 +51,56 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
 
     if action_id in _COMING_SOON:
         label = _COMING_SOON[action_id]
-        body = [
-            {"type": "TextBlock", "text": f"👥 {team_name}", "weight": "Bolder", "size": "Small", "isSubtle": True, "spacing": "None", "wrap": True},
-            cards.two_row_pill_columnset(home.UNAV_ITEMS, action_id, lambda a: {"action_id": a}, split=4),
+        extra_body = [
             cards._section_title(f"🚧 {label}"),
             cards._body_text(f"{label} is coming very soon here — for now it's available on Slack for your team."),
         ]
-        return cards._card(body=body)
+        return home.nav_buttons_card(team_name, active_action_id=action_id, extra_body=extra_body)
+
+    if action_id in _FIX_ACTION_IDS:
+        try:
+            fix_body = _render_fix(member_user, team_name, action_id, value or {})
+        except Exception:
+            logger.exception("[TeamsBot] user_fix_tab render failed for team=%s action_id=%s", team_name, action_id)
+            fix_body = [cards._body_text("❌ Couldn't load Fix right now — please try again.")]
+        return home.nav_buttons_card(team_name, active_action_id="unav_fix", extra_body=fix_body)
 
     # unav_home (default)
     try:
-        home_body = home.home_tab_body(member_user, team_name)
+        home_body = home.home_tab_body(team_id, team_name)
     except Exception:
         logger.exception("[TeamsBot] home.home_tab_body failed for team=%s", team_name)
         home_body = [cards._body_text("❌ Couldn't load your dashboard right now — please try again.")]
     return home.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
+
+
+def _render_fix(member_user, team_name, action_id, value):
+    """Routes every Fix-related action_id (top-level tab, sub-tab switch,
+    pagination, asset drill-down, vuln detail, back) to the right
+    user_fix_tab body — mirrors admin actions.py's own fix-tab dispatch
+    shape, just against the team-scoped data source."""
+    offset = int(value.get("offset") or 0)
+
+    if action_id == "ufix_sub_vulns":
+        return fix.fix_tab_body(member_user, team_name, sub_action_id="ufix_sub_vulns")
+    if action_id == "ufix_vuln_pg":
+        return fix.fix_tab_body(member_user, team_name, sub_action_id="ufix_sub_vulns", offset=offset)
+    if action_id == "ufix_asset_pg":
+        return fix.fix_tab_body(member_user, team_name, sub_action_id="ufix_sub_assets", offset=offset)
+    if action_id == "ufix_asset_view":
+        return fix.asset_detail_body(member_user, team_name, value.get("host"), back_offset=offset)
+    if action_id == "ufix_asset_back":
+        return fix.fix_tab_body(member_user, team_name, sub_action_id="ufix_sub_assets", offset=offset)
+    if action_id == "ufix_asset_vuln_view":
+        host = value.get("host")
+        return fix.vuln_detail_body(
+            member_user, team_name, value.get("idx"),
+            "ufix_asset_view", {"host": host, "offset": offset},
+        )
+    if action_id == "ufix_vuln_view":
+        return fix.vuln_detail_body(
+            member_user, team_name, value.get("idx"),
+            "ufix_vuln_pg", {"offset": offset},
+        )
+    # unav_fix (default) / ufix_sub_assets
+    return fix.fix_tab_body(member_user, team_name, sub_action_id="ufix_sub_assets")
