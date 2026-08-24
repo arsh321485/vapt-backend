@@ -89,7 +89,20 @@ def is_member_sender(activity: dict, admin) -> bool:
     if sender_aad_id == getattr(admin, "ms_teams_object_id", None):
         return False
     from users_details.models import UserDetail
-    return UserDetail.objects.filter(admin=admin, ms_teams_member_id=sender_aad_id).exists()
+    matched = UserDetail.objects.filter(admin=admin, ms_teams_member_id=sender_aad_id).exists()
+    if not matched:
+        # Diagnostic only — helps tell apart "this aad id isn't recorded
+        # anywhere yet" from "it's recorded, but under a different admin
+        # FK than the one _resolve_admin found" (e.g. the duplicate-admin-
+        # account issue investigated earlier this session), since those
+        # need very different fixes.
+        any_admin_match = UserDetail.objects.filter(ms_teams_member_id=sender_aad_id).first()
+        logger.info(
+            f"[TeamsBot] is_member_sender: no match for aad_id={sender_aad_id} under admin.id={getattr(admin, 'id', None)} "
+            f"(admin.email={getattr(admin, 'email', None)}) — "
+            f"any_admin_match={'admin_id=' + str(any_admin_match.admin_id) + ' email=' + str(any_admin_match.email) if any_admin_match else 'NONE'}"
+        )
+    return matched
 
 
 def resolve_member_context(activity: dict, admin, team_id: str):
