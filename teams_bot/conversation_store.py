@@ -368,3 +368,35 @@ def get_team_name_for_channel(team_id: str, channel_id: str):
     with MongoContext() as db:
         doc = db[SUB_CHANNEL_COLLECTION].find_one({"team_id": team_id, "channel_id": channel_id})
         return doc.get("team_name") if doc else None
+
+
+def is_sub_channel_welcomed(team_id: str, channel_id: str) -> bool:
+    """
+    Confirmed via real testing: Teams' own @mention picker in a channel's
+    compose box only lists the bot once it has actually sent/received SOME
+    activity in that specific channel — a team-scope app install alone
+    (even though it functionally covers every standard channel) doesn't
+    make the client show it as mentionable there until then. This tracks
+    whether the one-time welcome post (see users.views.
+    _backfill_sub_channel_bot_presence) has already been sent into a given
+    channel, kept SEPARATE from the plain team_name mapping above since
+    that gets populated by the cheap self-heal Graph lookup too (see
+    member_resolve._self_heal_team_name), which never actually sends
+    anything — conflating the two would make the backfill silently skip
+    every channel it hasn't actually welcomed yet.
+    """
+    if not team_id or not channel_id:
+        return False
+    with MongoContext() as db:
+        doc = db[SUB_CHANNEL_COLLECTION].find_one({"team_id": team_id, "channel_id": channel_id})
+        return bool(doc and doc.get("welcomed_at"))
+
+
+def mark_sub_channel_welcomed(team_id: str, channel_id: str):
+    if not team_id or not channel_id:
+        return
+    with MongoContext() as db:
+        db[SUB_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id, "channel_id": channel_id},
+            {"$set": {"welcomed_at": datetime.datetime.utcnow()}},
+        )

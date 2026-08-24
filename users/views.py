@@ -1436,6 +1436,66 @@ def _install_teams_bot(team_id, delegated_access_token=None):
         return False
 
 
+def _backfill_sub_channel_bot_presence(team_id, channels_result):
+    """
+    Retrofit for teams whose 4 team-sub-channels (Patch/Configuration/
+    Network Security/Architectural Flaws) were created before the bot
+    ever posted anything into them individually. Confirmed via real
+    testing: even though the bot is genuinely team-scope installed (shows
+    up under Team > Apps, and DOES already work in the admin-dashboard
+    channel — which gets a real proactive post on every login), Teams'
+    own @mention picker in a channel's compose box only lists the bot
+    once it has actually sent/received some activity in THAT specific
+    channel — General included. Sends one real welcome message into each
+    of the 4 channels (skipped per-channel once already sent, tracked via
+    teams_bot.conversation_store.is_sub_channel_welcomed/
+    mark_sub_channel_welcomed) — safe/cheap to call on every login.
+    `channels_result`: the [{"channelName": <displayName>, "channelId": ...}]
+    list the caller already fetched from Graph (avoids a second round-trip).
+    """
+    if not team_id or not channels_result:
+        return
+    from teams_bot.conversation_store import (
+        get_team_channel_reference, save_sub_channel_team,
+        is_sub_channel_welcomed, mark_sub_channel_welcomed,
+    )
+    from teams_bot import bot_api
+
+    ref = get_team_channel_reference(team_id)
+    service_url = ref.get("service_url") if ref else None
+    if not service_url:
+        logger.info(f"[TeamsChannels] sub-channel welcome backfill skipped for team_id={team_id} — no service_url on file yet")
+        return
+
+    display_to_team = {
+        v.strip().lower(): k for k, v in TEAMS_CHANNEL_DISPLAY_NAMES.items() if k != "General"
+    }
+    for ch in channels_result:
+        display_name = (ch.get("channelName") or "").strip().lower()
+        team_name = display_to_team.get(display_name)
+        channel_id = ch.get("channelId")
+        if not team_name or not channel_id:
+            continue
+        save_sub_channel_team(team_id, channel_id, team_name)
+        if is_sub_channel_welcomed(team_id, channel_id):
+            continue
+        try:
+            resp = bot_api.send_activity(
+                service_url, channel_id,
+                bot_api.text_message(
+                    f"👋 VaptFix bot is here for the **{team_name}** team! "
+                    f"Mention me (@VaptFix) anytime to see your team's dashboard, fix vulnerabilities and more."
+                ),
+            )
+            if resp is not None and resp.status_code < 300:
+                mark_sub_channel_welcomed(team_id, channel_id)
+                logger.info(f"[TeamsChannels] Sent sub-channel welcome for team_id={team_id} channel={team_name}")
+            else:
+                logger.warning(f"[TeamsChannels] sub-channel welcome send failed for {team_name}: {getattr(resp, 'status_code', None)}")
+        except Exception:
+            logger.exception(f"[TeamsChannels] sub-channel welcome send raised for {team_name}")
+
+
 def _get_admin_aad_object_id(access_token):
     """
     Resolve the signed-in admin's own AAD object id via /me — needed to add
@@ -1901,6 +1961,14 @@ def auto_create_vaptfix_team(access_token, admin=None):
                                 })
                     except Exception as e:
                         logger.warning(f"Error fetching channels: {str(e)}")
+                    # One-time-per-channel retrofit — see
+                    # _backfill_sub_channel_bot_presence's own docstring
+                    # for why a team-scope install alone isn't enough to
+                    # make the bot @mentionable inside the 4 team channels.
+                    try:
+                        _backfill_sub_channel_bot_presence(team_id, channels_result)
+                    except Exception:
+                        logger.warning("[TeamsChannels] sub-channel welcome backfill failed", exc_info=True)
                     preferred_channel_id = _pick_admin_dashboard_channel_id(channels_result) or _pick_general_channel_id(channels_result)
                     if not preferred_channel_id and channels_result:
                         preferred_channel_id = channels_result[0].get("channelId")
