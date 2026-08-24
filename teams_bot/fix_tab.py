@@ -254,9 +254,6 @@ def _vuln_facts_body(r):
                 {"title": "Asset", "value": str(r.get("asset") or "—")},
                 {"title": "Severity", "value": f"{_SEV_ICON[sev]} {sev.title()}"},
                 {"title": "Status", "value": _status_label(status)},
-                {"title": "Port", "value": str(r.get("port") or "—")},
-                {"title": "Protocol", "value": str(r.get("protocol") or "—")},
-                {"title": "OS", "value": str(r.get("operating_system") or "—")},
             ],
         },
     ]

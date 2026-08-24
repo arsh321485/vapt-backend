@@ -313,19 +313,16 @@ def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_numb
     nav_actions = []
     if step_number > 1:
         nav_actions.append(cards._execute_action("◀ Previous Step", {"action_id": "ufix_step_nav", "step": step_number - 1, **value_base}))
+    # Raise Support Request sits immediately to the LEFT of Mark Step
+    # Complete, same row — tied to this exact step (not just a generic one
+    # in the Support Status tab) so the admin sees precisely where the
+    # member is stuck (see usup_step_form/submit_step_support_request).
+    nav_actions.append(cards._execute_action("🎫 Raise Support Request", {"action_id": "usup_step_form", "step": step_number, **value_base}))
     if not done and not step.get("is_locked"):
         nav_actions.append(cards._execute_action("✅ Mark Step Complete", {"action_id": "ufix_step_complete", "step": step_number, **value_base}, style="positive"))
     if step_number < total:
         nav_actions.append(cards._execute_action("Next Step ▶", {"action_id": "ufix_step_nav", "step": step_number + 1, **value_base}))
-    if nav_actions:
-        body.append({"type": "ActionSet", "spacing": "Medium", "actions": nav_actions})
-    # Per-step, not just a generic one in the Support Status tab — tied to
-    # this exact step so the admin sees precisely where the member is
-    # stuck (see usup_step_form/submit_step_support_request).
-    body.append({
-        "type": "ActionSet", "spacing": "Small",
-        "actions": [cards._execute_action("🎫 Raise Support Request", {"action_id": "usup_step_form", "step": step_number, **value_base})],
-    })
+    body.append({"type": "ActionSet", "spacing": "Medium", "actions": nav_actions})
     return body
 
 
@@ -365,20 +362,13 @@ def _fix_toggle_actionset(sub, value_base):
             title, {"action_id": "ufix_vuln_toggle", "sub": sub_val, **value_base},
             style="positive" if sub == sub_val else None,
         )
-    return {"type": "ActionSet", "spacing": "Medium", "actions": [action("🛠 Manual Fix", "manual"), action("🤖 Auto Fix", "automation")]}
+    return {"type": "ActionSet", "spacing": "Medium", "actions": [action("🛠 Manual Fix", "manual"), action("🤖 Automation Fix", "automation")]}
 
 
 def _mark_mitigated_actionset(value_base):
     return {
         "type": "ActionSet", "spacing": "Medium",
         "actions": [cards._execute_action("✅ Mark Mitigated", {"action_id": "ufix_mark_mitigated", **value_base}, style="positive")],
-    }
-
-
-def _request_extension_actionset(value_base):
-    return {
-        "type": "ActionSet", "spacing": "Small",
-        "actions": [cards._execute_action("⏳ Request Extension", {"action_id": "uex_request_form", **value_base})],
     }
 
 
@@ -457,29 +447,14 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
         logger.exception("[TeamsBot] user fix content fetch failed (sub=%s)", sub)
         body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "isSubtle": True, "spacing": "Medium"})
 
-    body.append(_mark_mitigated_actionset(value_base))
-    body.append(_retest_actionset(value_base))
-    body.append(_request_extension_actionset(value_base))
+    # Mark Mitigated only makes sense while actually working the manual
+    # steps — Automation Fix is just a script preview/download, nothing to
+    # mark done there. Retest only makes sense on an already-CLOSED vuln
+    # (see submit_retest's docstring — it's literally what reopens one),
+    # which takes the early-return branch above; not shown here at all.
+    if sub != "automation":
+        body.append(_mark_mitigated_actionset(value_base))
     return body
-
-
-def extension_form_body(r, value_base):
-    """Prompt for days + reason — pre-fills the vuln's own name/asset/
-    severity so the member doesn't retype anything already known.
-    Submitting merges these Input values into the button's own data (see
-    team_tab.py's add_user_form_body for the same Action.Execute +
-    Input.* merge pattern)."""
-    name = r.get("vul_name") or "Unnamed vulnerability"
-    return [
-        cards._section_title("⏳ Request Timeline Extension"),
-        {"type": "TextBlock", "text": f"{name} on {r.get('asset') or '—'}", "size": "Small", "isSubtle": True, "wrap": True, "spacing": "Small"},
-        {"type": "Input.Number", "id": "uex_days", "label": "Extra days needed", "min": 1, "max": 90, "value": 7},
-        {"type": "Input.Text", "id": "uex_reason", "label": "Reason", "isMultiline": True, "placeholder": "e.g. Need more time for patch testing"},
-        {
-            "type": "ActionSet", "spacing": "Medium",
-            "actions": [cards._execute_action("✅ Submit Request", {"action_id": "uex_submit_request", **value_base}, style="positive")],
-        },
-    ]
 
 
 def submit_extension_request(member_user, r):

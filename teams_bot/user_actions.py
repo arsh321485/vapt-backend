@@ -33,15 +33,15 @@ _REGISTER_ACTION_IDS = {
     "unav_register", "ureg_sub_register", "ureg_sub_scripts",
     "ureg_sev", "ureg_st", "ureg_view", "ureg_view_pg", "ureg_view_back", "ureg_script_pg",
 }
-_SUPPORT_ACTION_IDS = {"unav_support", "usup_pg", "usup_raise_form", "usup_submit", "usup_back"}
+_SUPPORT_ACTION_IDS = {"unav_support", "usup_pg", "usup_view", "usup_raise_form", "usup_submit", "usup_back"}
 _FIXED_ACTION_IDS = {"unav_fixed", "ufixed_pg", "ufixed_view", "ufixed_back"}
 _REMINDER_ACTION_IDS = {"unav_reminder", "urem_sub_overdue", "urem_sub_today", "urem_sub_thisweek", "urem_sub_nextweek", "urem_pg"}
-_EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg"}
+_EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg", "uex_new_submit"}
 # Reached from a vuln's own detail page regardless of whether it was
 # opened via Fix or Register — ctx (embedded in the click's own value)
 # says which, so the response re-highlights the right tab.
 _VULN_DETAIL_ACTION_IDS = {
-    "ufix_vuln_toggle", "ufix_mark_mitigated", "ufix_retest", "uex_request_form", "uex_submit_request",
+    "ufix_vuln_toggle", "ufix_mark_mitigated", "ufix_retest",
     "ufix_step_nav", "ufix_step_complete", "usup_step_form", "usup_step_submit",
 }
 
@@ -87,6 +87,13 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
             return home.nav_buttons_card(team_name, active_action_id="unav_reminder", extra_body=body)
 
         if action_id in _EXTEND_ACTION_IDS:
+            if action_id == "uex_new_submit":
+                idx = _as_int(value.get("uex_new_idx"))
+                days = _as_int(value.get("uex_new_days"))
+                ok, error = extend.submit_new_request(member_user, team_name, idx, days, value.get("uex_new_reason"))
+                banner = _result_banner(ok, "Your admin has been notified and can review it." if ok else (error or "Could not submit extension request."))
+                body = [banner, extend.extend_subnav_columnset("uex_sub_list")] + extend.request_list_body(member_user, team_name)
+                return home.nav_buttons_card(team_name, active_action_id="unav_extend", extra_body=body)
             active_sub = action_id if action_id in ("uex_sub_list", "uex_sub_new") else "uex_sub_list"
             offset = _as_int(value.get("offset")) or 0
             body = extend.extend_tab_body(member_user, team_name, active_sub=active_sub, offset=offset)
@@ -181,6 +188,8 @@ def _render_support(admin, member_user, member_detail, team_name, action_id, val
 
     if action_id == "usup_pg":
         return support.list_support_requests(admin, member_user, team_name, offset=offset)
+    if action_id == "usup_view":
+        return support.view_body(admin, member_user, team_name, _as_int(value.get("idx")), back_offset=offset)
     if action_id == "usup_raise_form":
         return support.raise_form_body()
     if action_id == "usup_submit":
@@ -190,7 +199,7 @@ def _render_support(admin, member_user, member_detail, team_name, action_id, val
         body.append({"type": "ActionSet", "spacing": "Medium", "actions": [cards._execute_action("← Back to Support Status", {"action_id": "usup_back"})]})
         return body
     if action_id == "usup_back":
-        return support.list_support_requests(admin, member_user, team_name)
+        return support.list_support_requests(admin, member_user, team_name, offset=offset)
 
     # unav_support (default)
     return support.list_support_requests(admin, member_user, team_name)
@@ -269,17 +278,6 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
     if action_id == "ufix_retest":
         ok, error = fix.submit_retest(member_user, r, data.get("report_id"))
         banner = _result_banner(ok, f"{r.get('vul_name') or 'This vulnerability'} on {r.get('asset') or '—'} sent to your admin for verification." if ok else (error or "Could not submit for retest."))
-        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual")
-
-    if action_id == "uex_request_form":
-        return fix.extension_form_body(r, value_base)
-
-    if action_id == "uex_submit_request":
-        days = value.get("uex_days")
-        reason = value.get("uex_reason")
-        merged = dict(r, _requested_days=_as_int(days) or 7, _reason=reason)
-        ok, error = fix.submit_extension_request(member_user, merged)
-        banner = _result_banner(ok, "Your admin has been notified and can review it." if ok else (error or "Could not submit extension request."))
         return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual")
 
     return [cards._body_text("Nothing to show.")]

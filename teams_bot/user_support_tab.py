@@ -53,20 +53,50 @@ def list_support_requests(admin, member_user, team_name, offset=0):
         body.append({"type": "TextBlock", "text": "No support requests yet.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
 
-    for t in page:
+    for i, t in enumerate(page):
         icon = _status_icon(t.get("status"))
         title = t.get("vul_name") or "General request"
         when = str(t.get("requested_at") or "")[:16].replace("T", " ")
         subtitle = f"{t.get('description') or ''}".strip()[:120]
-        body.append({
-            "type": "Container", "spacing": "Medium", "separator": True,
-            "items": [
-                {"type": "TextBlock", "text": f"{icon} {title}", "weight": "Bolder", "size": "Small", "wrap": True},
-                {"type": "TextBlock", "text": subtitle or "—", "size": "Small", "isSubtle": True, "wrap": True, "spacing": "None"},
-                {"type": "TextBlock", "text": f"By {t.get('requested_by') or '—'}   ·   {when}", "size": "Small", "isSubtle": True, "spacing": "None"},
-            ],
-        })
+        body.append(fix_tab._row(
+            f"{icon} {title}",
+            f"{subtitle or '—'}\nBy {t.get('requested_by') or '—'}   ·   {when}",
+            "usup_view", {"idx": offset + i, "offset": offset},
+        ))
     body.extend(fix_tab._pagination_body(offset, total, "usup_pg"))
+    return body
+
+
+def view_body(admin, member_user, team_name, idx, back_offset=0):
+    from vaptfix.mongo_client import MongoContext
+
+    report_id = fix._fetch_team_data(member_user, team_name).get("report_id")
+    query = {"assigned_team": team_name}
+    if report_id:
+        query["report_id"] = str(report_id)
+    with MongoContext() as db:
+        tickets = list(db[COLLECTION].find(query, sort=[("requested_at", -1)]))
+
+    body = [fix_tab._back_action("← Back to Support Status", "usup_back", {"offset": back_offset})]
+    if idx is None or idx < 0 or idx >= len(tickets):
+        body.append({"type": "TextBlock", "text": "This request could not be found.", "wrap": True, "spacing": "Medium"})
+        return body
+    t = tickets[idx]
+    icon = _status_icon(t.get("status"))
+    when = str(t.get("requested_at") or "")[:16].replace("T", " ")
+    body.append({"type": "TextBlock", "text": t.get("vul_name") or "General request", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
+    body.append({
+        "type": "FactSet",
+        "facts": [
+            {"title": "Status", "value": f"{icon} {(t.get('status') or 'open').title()}"},
+            {"title": "Asset", "value": str(t.get("host_name") or "—")},
+            {"title": "Step", "value": str(t.get("step_number") or "—")},
+            {"title": "Requested By", "value": str(t.get("requested_by") or "—")},
+            {"title": "Requested At", "value": when},
+        ],
+    })
+    body.append({"type": "TextBlock", "text": "Message", "weight": "Bolder", "size": "Small", "spacing": "Medium"})
+    body.append({"type": "TextBlock", "text": t.get("description") or "—", "wrap": True, "size": "Small"})
     return body
 
 

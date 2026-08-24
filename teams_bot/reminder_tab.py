@@ -240,7 +240,7 @@ def support_list_body(admin, st="all", team="all", offset=0):
     if not page:
         body.append({"type": "TextBlock", "text": "No support requests found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
-    for r in page:
+    for i, r in enumerate(page):
         name = r.get("vul_name") or "General Request"
         host = r.get("host_name") or "—"
         team_name = r.get("assigned_team") or "—"
@@ -248,14 +248,38 @@ def support_list_body(admin, st="all", team="all", offset=0):
         st_val = (r.get("status") or "open").strip().lower()
         st_label = "🟢 Closed" if st_val == "closed" else "🔴 Open"
         subtitle = f"{host}   ·   Team: {team_name}   ·   By: {requester}   ·   {st_label}"
-        body.append({
-            "type": "Container", "spacing": "Medium", "separator": True,
-            "items": [
-                {"type": "TextBlock", "text": name, "weight": "Bolder", "size": "Small", "wrap": True},
-                {"type": "TextBlock", "text": subtitle, "size": "Small", "isSubtle": True, "spacing": "None", "wrap": True},
-            ],
-        })
+        body.append(fix_tab._row(
+            name, subtitle, "remind_sup_view",
+            {"idx": offset + i, "st": st, "team": team, "offset": offset},
+        ))
     body.extend(fix_tab._pagination_body(offset, total, "remind_sup_pg", {"st": st, "team": team}))
+    return body
+
+
+def support_detail_body(admin, idx, st="all", team="all", back_offset=0):
+    raw = _fetch_support_requests(admin)
+    filtered = [r for r in raw if _match_support_status(r, st) and _match_support_team(r, team)]
+
+    body = [fix_tab._back_action("← Back to Support Requests", "remind_sup_back", {"st": st, "team": team, "offset": back_offset})]
+    if idx is None or idx < 0 or idx >= len(filtered):
+        body.append({"type": "TextBlock", "text": "This request could not be found.", "wrap": True, "spacing": "Medium"})
+        return body
+    r = filtered[idx]
+    st_val = (r.get("status") or "open").strip().lower()
+    st_label = "🟢 Closed" if st_val == "closed" else "🔴 Open"
+    body.append({"type": "TextBlock", "text": r.get("vul_name") or "General Request", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
+    body.append({
+        "type": "FactSet",
+        "facts": [
+            {"title": "Status", "value": st_label},
+            {"title": "Asset", "value": str(r.get("host_name") or "—")},
+            {"title": "Team", "value": str(r.get("assigned_team") or "—")},
+            {"title": "Requested By", "value": str(r.get("requested_by") or "—")},
+            {"title": "Requested At", "value": str(r.get("requested_at") or "—")[:16].replace("T", " ")},
+        ],
+    })
+    body.append({"type": "TextBlock", "text": "Message", "weight": "Bolder", "size": "Small", "spacing": "Medium"})
+    body.append({"type": "TextBlock", "text": r.get("description") or "—", "wrap": True, "size": "Small"})
     return body
 
 

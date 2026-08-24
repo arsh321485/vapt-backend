@@ -796,6 +796,30 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._header("🎫 Support"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
 
+    if action_id == "remind_sup_view":
+        idx = value.get("idx")
+        idx = int(idx) if idx is not None else None
+        st = value.get("st") or "all"
+        team = value.get("team") or "all"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = reminder_tab.support_detail_body(admin, idx, st=st, team=team, back_offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] remind_sup_view failed")
+            body = [cards._header("🎫 Support Request"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
+    if action_id == "remind_sup_back":
+        st = value.get("st") or "all"
+        team = value.get("team") or "all"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = reminder_tab.reminder_tab_body(admin, active_sub="notif_sub_support", st=st, team=team, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] remind_sup_back failed")
+            body = [cards._header("🎫 Support"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
     if action_id and action_id.startswith("nav_"):
         return _handle_nav(admin, team_id, action_id)
 

@@ -1494,6 +1494,22 @@ def _backfill_sub_channel_bot_presence(team_id, channels_result):
                 logger.warning(f"[TeamsChannels] sub-channel welcome send failed for {team_name}: {getattr(resp, 'status_code', None)}")
         except Exception:
             logger.exception(f"[TeamsChannels] sub-channel welcome send raised for {team_name}")
+            continue
+
+        # Immediately follow the plain welcome text with the real Home nav
+        # card — no one specific member is known yet at backfill time, but
+        # Home is genuinely team-scoped (any member of this team sees the
+        # same data), so this doesn't need to wait for someone to actually
+        # @mention the bot first (confirmed real request: the welcome text
+        # alone left the channel with no visible way to open a card without
+        # already knowing to type something).
+        try:
+            from teams_bot import user_home_tab
+            home_body = user_home_tab.home_tab_body(team_id, team_name)
+            card = user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
+            bot_api.send_activity(service_url, channel_id, bot_api.card_message(card))
+        except Exception:
+            logger.exception(f"[TeamsChannels] initial Home card send failed for {team_name}")
 
 
 def _get_admin_aad_object_id(access_token):

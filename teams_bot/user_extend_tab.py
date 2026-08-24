@@ -1,15 +1,16 @@
 """
 User-side Timeline Extension tab — list of the team's own extension
-requests + status (review/approved/rejected). Raising a NEW request
-happens from a vuln's own detail page (see user_fix_tab.py's "⏳ Request
-Extension" button) rather than a separate picker here, since the request
-needs a specific vulnerability's severity/asset/name — this sub-tab is
-just a shortcut pointing there plus the status list.
+requests + status (review/approved/rejected), and a real "Request
+Extension" form (vuln picker + days + reason) — Adaptive Cards support
+inline Input elements directly (unlike Slack, which has to open a
+separate modal for the same form, see users.views.SlackSlashCommandView.
+_build_extend_request_modal), so this is the same flow, just inline.
 """
 import logging
 
 from . import cards
 from . import fix_tab
+from . import user_fix_tab as fix
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def request_list_body(member_user, team_name, offset=0):
         {"type": "TextBlock", "text": f"{team_name}'s timeline extension requests and their status.", "size": "Small", "isSubtle": True, "wrap": True},
     ]
     if not page:
-        body.append({"type": "TextBlock", "text": "No extension requests yet — open a vulnerability from Fix or Register and tap \"Request Extension\".", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
+        body.append({"type": "TextBlock", "text": "No extension requests yet — use the \"Request Extension\" tab above.", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
         return body
     for r in page:
         icon = fix_tab._SEV_ICON.get((r.get("severity") or "medium").lower(), "🟡")
@@ -69,22 +70,52 @@ def request_list_body(member_user, team_name, offset=0):
     return body
 
 
-def new_request_info_body():
-    return [
+def _open_vulns(member_user, team_name):
+    rows = fix._fetch_team_rows(member_user, team_name)
+    return [r for r in rows if (r.get("status") or "open").strip().lower() != "closed"]
+
+
+def new_request_form_body(member_user, team_name):
+    open_rows = _open_vulns(member_user, team_name)
+    body = [
         {"type": "TextBlock", "text": "⏳ Request Extension", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {
-            "type": "TextBlock",
-            "text": "To request more time on a specific vulnerability, open it from **Fix** or **Register** and tap \"⏳ Request Extension\" there — it'll carry over the asset/severity automatically.",
-            "wrap": True, "size": "Small", "isSubtle": True, "spacing": "Medium",
-        },
+        {"type": "TextBlock", "text": f"Pick a vulnerability assigned to {team_name}, then how many extra days you need.", "size": "Small", "isSubtle": True, "wrap": True},
     ]
+    if not open_rows:
+        body.append({"type": "TextBlock", "text": "No open vulnerabilities to request an extension for.", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
+        return body
+
+    choices = [
+        {"title": f"{r.get('asset') or '—'} — {(r.get('vul_name') or 'Unnamed')[:60]}", "value": str(i)}
+        for i, r in enumerate(open_rows[:50])
+    ]
+    body.extend([
+        {"type": "Input.ChoiceSet", "id": "uex_new_idx", "label": "Vulnerability", "style": "compact", "choices": choices},
+        {"type": "Input.Number", "id": "uex_new_days", "label": "Extra days needed", "min": 1, "max": 90, "value": 7},
+        {"type": "Input.Text", "id": "uex_new_reason", "label": "Reason", "isMultiline": True, "placeholder": "e.g. Need more time for patch testing"},
+        {
+            "type": "ActionSet", "spacing": "Medium",
+            "actions": [cards._execute_action("✅ Submit Request", {"action_id": "uex_new_submit"}, style="positive")],
+        },
+    ])
+    if len(open_rows) > 50:
+        body.append({"type": "TextBlock", "text": f"Showing the first 50 of {len(open_rows)} open vulnerabilities.", "size": "Small", "isSubtle": True, "spacing": "Small"})
+    return body
+
+
+def submit_new_request(member_user, team_name, idx, days, reason):
+    open_rows = _open_vulns(member_user, team_name)
+    if idx is None or idx < 0 or idx >= len(open_rows):
+        return False, "Please pick a vulnerability."
+    merged = dict(open_rows[idx], _requested_days=days or 7, _reason=reason)
+    return fix.submit_extension_request(member_user, merged)
 
 
 def extend_tab_body(member_user, team_name, active_sub="uex_sub_list", offset=0):
     body = [extend_subnav_columnset(active_sub)]
     try:
         if active_sub == "uex_sub_new":
-            body.extend(new_request_info_body())
+            body.extend(new_request_form_body(member_user, team_name))
         else:
             body.extend(request_list_body(member_user, team_name, offset=offset))
     except Exception:
