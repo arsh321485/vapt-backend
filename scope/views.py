@@ -199,6 +199,20 @@ class ScopeCreateAPIView(APIView):
                     "error": entry_data["error"]
                 })
 
+        # Freemium/Premium routing signal — Freemium allows up to
+        # FREEMIUM_LIMITS["max_internal_ips"] targets across ALL of this
+        # admin's scopes combined (same total billing.asset_service.
+        # get_admin_scope_asset_count already uses for Management+Testing
+        # pricing), so this counts the admin's whole scope history, not
+        # just what was just submitted — an admin who's already at the
+        # limit from an earlier scope should still be routed to Premium
+        # even if this particular submission alone is small.
+        from billing.asset_service import get_admin_scope_asset_count
+        from billing.plans import FREEMIUM_LIMITS
+        total_scope_assets = get_admin_scope_asset_count(str(request.user.id))
+        freemium_limit = FREEMIUM_LIMITS["max_internal_ips"]
+        recommended_plan = "premium" if total_scope_assets > freemium_limit else "freemium"
+
         return Response({
             "message": "Scope created successfully",
             "scope": ScopeSerializer(scope, context={"request": request}).data,
@@ -209,7 +223,19 @@ class ScopeCreateAPIView(APIView):
                 "error_count": len(errors),
                 "expand_subnets": expand_subnets,
                 "errors": errors
-            }
+            },
+            "plan_recommendation": {
+                "recommended_plan": recommended_plan,
+                "total_scope_assets": total_scope_assets,
+                "freemium_limit": freemium_limit,
+                "message": (
+                    f"Your scope has {total_scope_assets} target(s), which is over the "
+                    f"Freemium limit of {freemium_limit}. Please continue with the Premium plan."
+                    if recommended_plan == "premium" else
+                    f"Your scope has {total_scope_assets} target(s), within the Freemium "
+                    f"limit of {freemium_limit} — you can continue with Freemium."
+                ),
+            },
         }, status=status.HTTP_201_CREATED)
 
 

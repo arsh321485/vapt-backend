@@ -76,8 +76,25 @@ def is_valid_subnet(value: str) -> bool:
         return False
 
 
+# Bare filenames (no http(s):// scheme) whose extension looks exactly like
+# a 2+ letter TLD — e.g. "test.apk", "report.pdf", "photo.png" — used to
+# pass is_valid_url's regex, which only checks the shape "word.word", not
+# whether that "word" is a plausible TLD. Confirmed via real testing:
+# pasting "test.apk" as a scope target got silently accepted (misdetected
+# as a mobile app URL, since ".apk" also matches MOBILE_URL_PATTERNS).
+_NON_URL_FILE_EXTENSIONS = {
+    "apk", "ipa", "exe", "msi", "dmg", "deb", "rpm", "iso",
+    "zip", "rar", "7z", "tar", "gz",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt",
+    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp",
+    "mp3", "mp4", "avi", "mov", "wav",
+    "json", "xml", "log", "bak", "tmp",
+}
+
+
 def is_valid_url(value: str) -> bool:
     """Validate if a string is a valid URL."""
+    value = value.strip()
     url_pattern = re.compile(
         r"^(https?://)?"
         r"([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}"
@@ -85,7 +102,19 @@ def is_valid_url(value: str) -> bool:
         r"(/.*)?$",
         re.IGNORECASE
     )
-    return bool(url_pattern.match(value.strip()))
+    if not url_pattern.match(value):
+        return False
+
+    # Reject bare filenames with no scheme whose "TLD" is really just a
+    # file extension — a legitimate mobile-app-download URL still passes
+    # since it either has http(s):// or a real path (contains "/").
+    has_scheme = value.lower().startswith(("http://", "https://"))
+    if not has_scheme and "/" not in value:
+        last_label = value.rsplit(".", 1)[-1].split(":")[0].lower()
+        if last_label in _NON_URL_FILE_EXTENSIONS:
+            return False
+
+    return True
 
 
 def is_mobile_url(value: str) -> bool:
