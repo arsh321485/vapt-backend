@@ -213,22 +213,31 @@ class ScopeCreateAPIView(APIView):
         # are all valid there (still subject to the separate 250-asset
         # Premium ceiling elsewhere).
         from billing.asset_service import get_admin_scope_asset_breakdown
-        from billing.plans import FREEMIUM_LIMITS
+        from billing.plans import FREEMIUM_LIMITS, MODE_MANAGEMENT_TESTING
         breakdown = get_admin_scope_asset_breakdown(str(request.user.id))
         total_scope_assets = breakdown["total"]
         freemium_limit = FREEMIUM_LIMITS["max_internal_ips"]
 
+        # Scope submission is what mode B ("I need VaptFix to run testing" /
+        # MODE_MANAGEMENT_TESTING) is for — an admin who gave scope (not a
+        # report) should always land on Management+Testing when routed to
+        # Premium, never plain Management (mode A is "I already have a
+        # report", which doesn't apply here at all).
+        recommended_mode = None
+
         if breakdown["has_external"]:
             recommended_plan = "premium"
+            recommended_mode = MODE_MANAGEMENT_TESTING
             recommendation_message = (
                 "Your scope includes external IPs/URLs — Freemium only covers internal IPs. "
-                "Please continue with the Premium plan."
+                "Please continue with the Premium plan (Management + Testing)."
             )
         elif total_scope_assets > freemium_limit:
             recommended_plan = "premium"
+            recommended_mode = MODE_MANAGEMENT_TESTING
             recommendation_message = (
                 f"Your scope has {total_scope_assets} internal target(s), which is over the "
-                f"Freemium limit of {freemium_limit}. Please continue with the Premium plan."
+                f"Freemium limit of {freemium_limit}. Please continue with the Premium plan (Management + Testing)."
             )
         else:
             recommended_plan = "freemium"
@@ -250,6 +259,7 @@ class ScopeCreateAPIView(APIView):
             },
             "plan_recommendation": {
                 "recommended_plan": recommended_plan,
+                "recommended_mode": recommended_mode,
                 "total_scope_assets": total_scope_assets,
                 "internal_count": breakdown["internal_count"],
                 "external_count": breakdown["external_count"],
