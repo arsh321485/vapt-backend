@@ -366,11 +366,7 @@ def two_row_pill_columnset(options, active_key, build_data, split=None):
 def _nav_button_columnset(active_action_id):
     """The persistent top tab bar — see two_row_pill_columnset for why
     this is two rows of 4 instead of one row of 8."""
-    # split=5 (not the even half) puts Team right after Automations in the
-    # SAME row — real feedback that having Team wrap to the start of row 2
-    # (previous split=4) made it read as unrelated to Automations instead
-    # of "the next tab over."
-    return two_row_pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}, split=5)
+    return two_row_pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}, split=4)
 
 
 def nav_buttons_card(active_action_id="nav_home", extra_body=None):
