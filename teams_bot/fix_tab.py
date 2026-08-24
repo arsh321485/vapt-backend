@@ -394,19 +394,38 @@ def step_content_items(step, os_key, truncate=None):
     (interactive, one-at-a-time + Mark Step Complete) Manual Fix views, so
     the two never drift out of sync.
 
-    NOT "fontType": "Monospace" on the command text — confirmed via real
-    testing that a step whose "command" field is actually a plain-English
-    instruction (no real shell command exists, e.g. "Run a security scan
-    using an appropriate tool (e.g., Nessus)") rendered oversized/broken
-    in Teams' monospace font stack; genuine commands still read fine as
-    plain wrapped text, so this applies to all steps uniformly rather
-    than trying to guess "real code vs. instruction sentence".
+    NOT "fontType": "Monospace" on the command text — a step whose
+    "command" field is actually a plain-English instruction (no real shell
+    command exists, e.g. "Run a security scan using an appropriate tool
+    (e.g., Nessus)") rendered oversized in Teams' monospace font stack.
+
+    Every field also goes through _escape_md_leading — confirmed via real
+    testing that "Run a security scan..." STILL rendered as a giant
+    heading even after removing Monospace: Teams' renderer treats a
+    TextBlock's text as markdown, and this particular field's stored value
+    starts with "#" (a genuine step instruction happened to be phrased
+    that way in the source data) — read as a markdown H1, which overrides
+    the "size": "Small" the JSON declares. Escaping a leading #/-/*/>/digit-dot
+    (the characters markdown treats specially at the start of a line)
+    makes it render as the plain text it's supposed to be, regardless of
+    what's actually in the stored value.
     `truncate`: char limit per field (None = no limit — safe now that only
     ONE step renders at a time, unlike the old flat 15-steps-at-once view
     this replaced, which needed [:400] to stay a sane card size).
     """
+    import re as _re
+
     def _cut(s):
-        return s[:truncate] if truncate else s
+        s = s[:truncate] if truncate else s
+        # A plain r"...\\\2..." replacement string doesn't actually insert
+        # a literal backslash here (confirmed — re.sub's own backslash
+        # handling doesn't parse the way it looks), so this uses a
+        # replacement FUNCTION instead, which unambiguously does.
+        return _re.sub(
+            r"^(\s*)([#>*+-]|\d+\.)(\s)",
+            lambda m: m.group(1) + "\\" + m.group(2) + m.group(3),
+            s,
+        )
 
     step_num = step.get("step_number")
     step_name = step.get("step_name") or f"Step {step_num}"
