@@ -325,3 +325,46 @@ def get_conversation_reference_by_email(email: str, conversation_type: str = Non
     if not aad_id:
         return None
     return get_conversation_reference(aad_id, conversation_type)
+
+
+# ── Team-side (regular member) sub-channel <-> team-name mapping ──────────
+#
+# Each admin's Team has 4 real Teams channels ("vaptfix Patch Management
+# team", "vaptfix Configuration Management team", ...) — see
+# users.views.TEAMS_CHANNEL_DISPLAY_NAMES / DEFAULT_CHANNELS. A regular
+# member's card content is scoped to whichever of these 4 channels they're
+# actually posting/clicking in (mirrors Slack's channel-name -> team-name
+# gate, see users.views._authorize_channel_access). Recording the mapping
+# once at channel-creation time (see users.views.create_default_channels)
+# avoids a live Graph API call on every single message/click just to find
+# out which team a channel belongs to.
+SUB_CHANNEL_COLLECTION = "teams_bot_sub_channels"
+
+
+def save_sub_channel_team(team_id: str, channel_id: str, team_name: str):
+    """team_id = the admin's Team (ms_team_id/aadGroupId), channel_id = this
+    one channel's Graph/Bot-Framework id (same value in both), team_name =
+    the canonical VaptFix team name ("Patch Management", etc.) it belongs to."""
+    if not team_id or not channel_id or not team_name:
+        return
+    with MongoContext() as db:
+        db[SUB_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id, "channel_id": channel_id},
+            {"$set": {
+                "team_id": team_id, "channel_id": channel_id, "team_name": team_name,
+                "updated_at": datetime.datetime.utcnow(),
+            }, "$setOnInsert": {"created_at": datetime.datetime.utcnow()}},
+            upsert=True,
+        )
+
+
+def get_team_name_for_channel(team_id: str, channel_id: str):
+    """Returns the VaptFix team name ("Configuration Management", ...) a
+    given channel was created for, or None if this channel was never
+    recorded as one of the 4 team-sub-channels (e.g. General, or the
+    private admin-dashboard channel — neither is team-scoped)."""
+    if not team_id or not channel_id:
+        return None
+    with MongoContext() as db:
+        doc = db[SUB_CHANNEL_COLLECTION].find_one({"team_id": team_id, "channel_id": channel_id})
+        return doc.get("team_name") if doc else None

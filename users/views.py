@@ -1626,11 +1626,18 @@ def _create_vaptfix_channels(team_id, headers, access_token=None, admin=None):
                 ch_data = ch_resp.json()
             except Exception:
                 ch_data = {}
+            channel_id = ch_data.get("id")
             results.append({
                 "channelName": channel_name,
-                "channelId": ch_data.get("id"),
+                "channelId": channel_id,
                 "status": "created" if ch_resp.status_code in (200, 201) else "failed"
             })
+            if channel_id:
+                try:
+                    from teams_bot.conversation_store import save_sub_channel_team
+                    save_sub_channel_team(team_id, channel_id, channel_name)
+                except Exception:
+                    logger.exception(f"[Teams] save_sub_channel_team failed for {channel_name}")
         except Exception as e:
             results.append({"channelName": channel_name, "status": "failed", "error": str(e)})
     _install_teams_bot(team_id, delegated_access_token=token)
@@ -2910,11 +2917,18 @@ class CreateTeamView(generics.GenericAPIView):
                 resp = _http_post(url, headers=headers, json=payload, timeout=15)
                 if resp.status_code in (200, 201):
                     channel_data = resp.json()
+                    channel_id = channel_data.get("id")
                     results.append({
                         "channelName": channel_name,
-                        "channelId": channel_data.get("id"),
+                        "channelId": channel_id,
                         "status": "created"
                     })
+                    if channel_id:
+                        try:
+                            from teams_bot.conversation_store import save_sub_channel_team
+                            save_sub_channel_team(team_id, channel_id, channel_name)
+                        except Exception:
+                            logger.exception(f"[Teams] save_sub_channel_team failed for {channel_name}")
                 else:
                     results.append({
                         "channelName": channel_name,

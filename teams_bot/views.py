@@ -15,6 +15,7 @@ from rest_framework import status
 
 from .auth import verify_bot_framework_request, BotAuthError
 from . import bot_api, cards, actions
+from . import member_resolve, user_actions
 from .conversation_store import save_conversation_reference, save_team_channel_reference, resolve_team_id_from_thread_id
 from .onboarding import post_onboarding_step
 
@@ -220,6 +221,12 @@ class TeamsBotMessagesView(APIView):
                 "🔒 Not linked",
                 "This Teams workspace isn't linked to a VaptFix admin account yet — please log in from the website first.",
             )
+        elif member_resolve.is_member_sender(activity, admin):
+            try:
+                card = user_actions.handle_user_activity(activity, admin, team_id, data)
+            except Exception:
+                logger.exception("[TeamsBot] handle_user_activity failed (invoke)")
+                card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
         else:
             conversation_id = (activity.get("conversation") or {}).get("id")
             try:
@@ -302,11 +309,18 @@ class TeamsBotMessagesView(APIView):
                     bot_api.text_message("This Teams workspace isn't linked to a VaptFix admin account yet — please log in from the website first."),
                 )
                 return
-            try:
-                card = actions.handle_card_action(admin, team_id, conversation_id, activity.get("value") or {})
-            except Exception:
-                logger.exception("[TeamsBot] handle_card_action failed")
-                card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
+            if member_resolve.is_member_sender(activity, admin):
+                try:
+                    card = user_actions.handle_user_activity(activity, admin, team_id, activity.get("value") or {})
+                except Exception:
+                    logger.exception("[TeamsBot] handle_user_activity failed")
+                    card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
+            else:
+                try:
+                    card = actions.handle_card_action(admin, team_id, conversation_id, activity.get("value") or {})
+                except Exception:
+                    logger.exception("[TeamsBot] handle_card_action failed")
+                    card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
 
             target_id = activity.get("replyToId")
             updated_ok = False
@@ -377,6 +391,21 @@ class TeamsBotMessagesView(APIView):
                 service_url, conversation_id, activity_id,
                 bot_api.text_message("This Teams workspace isn't linked to a VaptFix admin account yet — please log in from the website first."),
             )
+            return
+
+        # A team member @mentioning/messaging the bot in their own team
+        # channel — same "refresh my dashboard" convenience as the admin
+        # branch below, just landing on the user-side Home card instead.
+        if member_resolve.is_member_sender(activity, admin):
+            try:
+                card = user_actions.handle_user_activity(activity, admin, team_id, {})
+                bot_api.reply_to_activity(service_url, conversation_id, activity_id, bot_api.card_message(card))
+            except Exception:
+                logger.exception("[TeamsBot] handle_user_activity from plain message failed")
+                bot_api.reply_to_activity(
+                    service_url, conversation_id, activity_id,
+                    bot_api.text_message("❌ Something went wrong — please try again."),
+                )
             return
 
         # Posts a genuinely fresh onboarding/navbar card (replacing
