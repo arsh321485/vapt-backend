@@ -17,11 +17,31 @@ def get_admin_asset_count(admin_id: str) -> int:
     Unique host_name count across all of this admin's uploaded reports.
     Mirrors how vulnerability_cards already dedupes by host_name, so the
     number stays consistent with what the admin sees elsewhere in the app.
+
+    Matches on admin_id OR admin_email — every other nessus_reports lookup
+    in the app (_load_latest_report in userregister/userdashboard/userasset,
+    admindashboard's _load_latest_report_for_admin, ...) already falls back
+    to admin_email when admin_id doesn't match; this one didn't, which is
+    exactly why a report uploaded via Slack/Teams (whose write path can tag
+    admin_email correctly while admin_id ends up stale/mismatched for that
+    specific admin record) never showed up here — confirmed via a real
+    report that was clearly visible everywhere else in the app but priced
+    as "$0.00 / 0 assets" on this exact query alone.
     """
     try:
+        conditions = [{"admin_id": str(admin_id)}]
+        try:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            admin_user = User.objects.filter(id=admin_id).first()
+            if admin_user and admin_user.email:
+                conditions.append({"admin_email": admin_user.email})
+        except Exception:
+            logger.exception(f"[Billing] could not resolve admin_email for admin_id={admin_id} (falling back to admin_id-only match)")
+
         with MongoContext() as db:
             pipeline = [
-                {"$match": {"admin_id": str(admin_id)}},
+                {"$match": {"$or": conditions}},
                 {"$unwind": "$vulnerabilities_by_host"},
                 {"$match": {"vulnerabilities_by_host.host_name": {"$nin": [None, ""]}}},
                 {"$group": {"_id": "$vulnerabilities_by_host.host_name"}},
@@ -83,11 +103,25 @@ def get_admin_scope_asset_breakdown(admin_id: str) -> dict:
 
 
 def _latest_report_uploaded_at(admin_id: str):
-    """Most recent uploaded_at across this admin's reports, or None."""
+    """Most recent uploaded_at across this admin's reports, or None.
+    Same admin_id-OR-admin_email match as get_admin_asset_count, for the
+    same reason — must find the SAME report that one counted, or the
+    report-vs-scope recency comparison above wrongly treats an admin who
+    genuinely has a report as having none."""
     try:
+        conditions = [{"admin_id": str(admin_id)}]
+        try:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            admin_user = User.objects.filter(id=admin_id).first()
+            if admin_user and admin_user.email:
+                conditions.append({"admin_email": admin_user.email})
+        except Exception:
+            logger.exception(f"[Billing] could not resolve admin_email for admin_id={admin_id}")
+
         with MongoContext() as db:
             doc = db[NESSUS_COLLECTION].find_one(
-                {"admin_id": str(admin_id)},
+                {"$or": conditions},
                 {"uploaded_at": 1},
                 sort=[("uploaded_at", -1)],
             )
