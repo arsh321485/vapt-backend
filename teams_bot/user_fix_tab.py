@@ -5,9 +5,10 @@ detail layout and the same field names (both admin's
 LatestSuperAdminVulnerabilityRegisterAPIView and this one's
 UserLatestVulnerabilityRegisterAPIView return the identical vul_name/
 asset/severity/port/protocol/status shape) — reuses fix_tab's generic
-rendering helpers directly (_row, _pagination_body, _manual_fix_body,
-_automation_fix_body, ... — none of those take `admin`, just data) rather
-than duplicating them.
+rendering helpers directly (_row, _pagination_body, _automation_fix_body,
+... — none of those take `admin`, just data) rather than duplicating
+them. Manual Fix's own step display is NOT reused from admin's fix_tab
+(that one is a flat, view-only list) — see _manual_fix_body_interactive.
 
 UNLIKE the admin side (explicitly read-only, matching the website), a
 member gets real actions here: Manual/Automation Fix toggle with actual
@@ -17,6 +18,7 @@ same as Slack's /startfix, /manualfix, /autofix, /mitigated.
 import logging
 
 from . import cards
+from . import fix_tab
 from .fix_tab import (
     _row, _pagination_body, _back_action, _sev_dots_text, _status_label,
     _SEV_ICON, cached_fetch, _group_assets, PAGE_SIZE,
@@ -332,7 +334,44 @@ def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_numb
         nav_actions.append(cards._execute_action("Next Step ▶", {"action_id": "ufix_step_nav", "step": step_number + 1, **value_base}))
     if nav_actions:
         body.append({"type": "ActionSet", "spacing": "Medium", "actions": nav_actions})
+    # Per-step, not just a generic one in the Support Status tab — tied to
+    # this exact step so the admin sees precisely where the member is
+    # stuck (see usup_step_form/submit_step_support_request).
+    body.append({
+        "type": "ActionSet", "spacing": "Small",
+        "actions": [cards._execute_action("🎫 Raise Support Request", {"action_id": "usup_step_form", "step": step_number, **value_base})],
+    })
     return body
+
+
+def step_support_form_body(step_number, value_base):
+    return [
+        cards._section_title(f"🎫 Raise Support Request — Step {step_number}"),
+        {"type": "Input.Text", "id": "usup_step_message", "label": "What do you need help with on this step?", "isMultiline": True},
+        {
+            "type": "ActionSet", "spacing": "Medium",
+            "actions": [cards._execute_action("✅ Submit", {"action_id": "usup_step_submit", "step": step_number, **value_base}, style="positive")],
+        },
+    ]
+
+
+def submit_step_support_request(member_user, r, report_id, step_number, message):
+    message = (message or "").strip()
+    if not message:
+        return False, "Please describe what you need help with."
+    fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
+    if not fix_vuln_id:
+        return False, "Could not start a fix record for this vulnerability."
+    from userregister.views import UserRaiseSupportRequestAPIView
+    from .actions import _call_view_in_process
+    status_code, data = _call_view_in_process(
+        UserRaiseSupportRequestAPIView, member_user, method="post",
+        url_kwargs={"fix_vuln_id": fix_vuln_id},
+        data={"step_number": step_number, "description": message}, request_format="json",
+    )
+    if status_code >= 300:
+        return False, (data or {}).get("detail") or "Could not raise support request."
+    return True, None
 
 
 def _fix_toggle_actionset(sub, value_base):
@@ -365,7 +404,7 @@ def _retest_actionset(value_base):
     }
 
 
-def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset=0, sub="manual",
+def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=None, offset=0, sub="manual",
                       back_action_id=None, back_title=None, extra_value=None, step_number=None):
     """Shared by every entry point that drills into one vulnerability's own
     detail (flat All Vulns list, an asset's own vuln list, Register's
@@ -396,12 +435,28 @@ def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset
     value_base = {"idx": idx, "ctx": ctx, "offset": offset, **extra_value}
     if ctx == "asset":
         value_base["host"] = host
+
+    # Already fixed — nothing left to choose (Manual vs Auto), no more
+    # steps to work through, no point requesting extra time. Retest stays
+    # (it's literally what reopens an already-closed vuln — see
+    # submit_retest's docstring) since a false-positive close can happen.
+    if (r.get("status") or "open").strip().lower() == "closed":
+        body.append({"type": "TextBlock", "text": "✅ This vulnerability has been fixed and closed.", "weight": "Bolder", "size": "Small", "color": "good", "wrap": True, "spacing": "Medium"})
+        body.append(_retest_actionset(value_base))
+        return body
+
     body.append(_fix_toggle_actionset(sub, value_base))
 
     try:
         if sub == "automation":
             automation = _fetch_automation_match(member_user, r)
             body.extend(_automation_fix_body(automation))
+            plugin_id = automation.get("plugin_id") or r.get("plugin_id")
+            if automation.get("matched") and plugin_id and team_id:
+                body.append({
+                    "type": "ActionSet", "spacing": "Small",
+                    "actions": [{"type": "Action.OpenUrl", "title": "📥 Download Script", "url": fix_tab.script_download_url(team_id, team_name, plugin_id)}],
+                })
         else:
             fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
             steps_data = _fetch_fix_steps(member_user, fix_vuln_id) if fix_vuln_id else None
@@ -412,8 +467,7 @@ def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset
 
     body.append(_mark_mitigated_actionset(value_base))
     body.append(_retest_actionset(value_base))
-    if (r.get("status") or "open").strip().lower() != "closed":
-        body.append(_request_extension_actionset(value_base))
+    body.append(_request_extension_actionset(value_base))
     return body
 
 

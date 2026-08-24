@@ -42,7 +42,7 @@ _EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg"}
 # says which, so the response re-highlights the right tab.
 _VULN_DETAIL_ACTION_IDS = {
     "ufix_vuln_toggle", "ufix_mark_mitigated", "ufix_retest", "uex_request_form", "uex_submit_request",
-    "ufix_step_nav", "ufix_step_complete",
+    "ufix_step_nav", "ufix_step_complete", "usup_step_form", "usup_step_submit",
 }
 
 
@@ -65,7 +65,7 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
 
     try:
         if action_id in _FIX_ACTION_IDS:
-            body = _render_fix(member_user, admin, team_name, action_id, value)
+            body = _render_fix(member_user, admin, team_id, team_name, action_id, value)
             return home.nav_buttons_card(team_name, active_action_id="unav_fix", extra_body=body)
 
         if action_id in _REGISTER_ACTION_IDS:
@@ -94,7 +94,7 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
 
         if action_id in _VULN_DETAIL_ACTION_IDS:
             active_tab = "unav_register" if (value.get("ctx") == "register") else "unav_fix"
-            body = _render_vuln_detail_action(member_user, team_name, action_id, value)
+            body = _render_vuln_detail_action(member_user, team_id, team_name, action_id, value)
             return home.nav_buttons_card(team_name, active_action_id=active_tab, extra_body=body)
     except Exception:
         logger.exception("[TeamsBot] user_actions render failed for team=%s action_id=%s", team_name, action_id)
@@ -111,7 +111,7 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
 
 # ── Fix ──────────────────────────────────────────────────────────────────
 
-def _render_fix(member_user, admin, team_name, action_id, value):
+def _render_fix(member_user, admin, team_id, team_name, action_id, value):
     offset = _as_int(value.get("offset")) or 0
 
     if action_id == "ufix_sub_vulns":
@@ -135,9 +135,9 @@ def _render_fix(member_user, admin, team_name, action_id, value):
         return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_vulns", offset=offset)
 
     if action_id == "ufix_asset_vuln_view":
-        return fix.vuln_detail_body(member_user, team_name, _as_int(value.get("idx")), ctx="asset", host=value.get("host"), offset=offset)
+        return fix.vuln_detail_body(member_user, team_id, team_name, _as_int(value.get("idx")), ctx="asset", host=value.get("host"), offset=offset)
     if action_id == "ufix_vuln_view":
-        return fix.vuln_detail_body(member_user, team_name, _as_int(value.get("idx")), ctx="vulns", offset=offset)
+        return fix.vuln_detail_body(member_user, team_id, team_name, _as_int(value.get("idx")), ctx="vulns", offset=offset)
 
     if action_id == "ufix_common_vuln_view":
         return [fix._fix_subnav_columnset("ufix_sub_common")] + fix.common_vuln_detail_for_team(admin, team_name, _as_int(value.get("idx")), back_offset=offset)
@@ -165,7 +165,7 @@ def _render_register(member_user, team_id, team_name, action_id, value):
         return register.register_tab_body(member_user, team_id, team_name, active_sub="ureg_sub_scripts", offset=offset)
     if action_id == "ureg_view":
         return [register.register_subnav_columnset("ureg_sub_register")] + register.register_vuln_detail_body(
-            member_user, team_name, _as_int(value.get("idx")), sev=sev, st=st, offset=offset,
+            member_user, team_id, team_name, _as_int(value.get("idx")), sev=sev, st=st, offset=offset,
         )
     if action_id == "ureg_view_back":
         return register.register_tab_body(member_user, team_id, team_name, active_sub="ureg_sub_register", sev=sev, st=st, offset=offset)
@@ -214,7 +214,7 @@ def _render_fixed(member_user, team_name, action_id, value):
 
 # ── Shared vuln-detail actions (toggle / mark mitigated / extension) ─────
 
-def _render_vuln_detail_action(member_user, team_name, action_id, value):
+def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value):
     offset = _as_int(value.get("offset")) or 0
     vctx = value.get("ctx") or "vulns"
     host = value.get("host")
@@ -223,10 +223,10 @@ def _render_vuln_detail_action(member_user, team_name, action_id, value):
     if action_id == "ufix_vuln_toggle":
         if vctx == "register":
             return [register.register_subnav_columnset("ureg_sub_register")] + register.register_vuln_detail_body(
-                member_user, team_name, idx, sub=value.get("sub") or "manual",
+                member_user, team_id, team_name, idx, sub=value.get("sub") or "manual",
                 sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset,
             )
-        return fix.vuln_detail_body(member_user, team_name, idx, ctx=vctx, host=host, offset=offset, sub=value.get("sub") or "manual")
+        return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=value.get("sub") or "manual")
 
     if action_id == "ufix_mark_mitigated":
         return _handle_mark_mitigated(member_user, team_name, value, offset, vctx, host)
@@ -254,10 +254,23 @@ def _render_vuln_detail_action(member_user, team_name, action_id, value):
             step = step + 1  # auto-advance to the next step after completing this one
         if vctx == "register":
             return [register.register_subnav_columnset("ureg_sub_register")] + register.register_vuln_detail_body(
-                member_user, team_name, idx, sub="manual",
+                member_user, team_id, team_name, idx, sub="manual",
                 sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset, step_number=step,
             )
-        return fix.vuln_detail_body(member_user, team_name, idx, ctx=vctx, host=host, offset=offset, sub="manual", step_number=step)
+        return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub="manual", step_number=step)
+
+    if action_id == "usup_step_form":
+        step = _as_int(value.get("step")) or 1
+        return fix.step_support_form_body(step, value_base)
+
+    if action_id == "usup_step_submit":
+        step = _as_int(value.get("step")) or 1
+        ok, error = fix.submit_step_support_request(member_user, r, data.get("report_id"), step, value.get("usup_step_message"))
+        body = [cards._section_title("✅ Request Raised" if ok else "❌ Could not raise request")]
+        body.append(cards._body_text("Your admin has been notified about this step." if ok else (error or "Something went wrong.")))
+        step_back_value = {**value_base, "step": step}
+        body.append({"type": "ActionSet", "spacing": "Medium", "actions": [cards._execute_action("← Back to Step", {"action_id": "ufix_step_nav", **step_back_value})]})
+        return body
 
     if action_id == "ufix_retest":
         ok, error = fix.submit_retest(member_user, r, data.get("report_id"))

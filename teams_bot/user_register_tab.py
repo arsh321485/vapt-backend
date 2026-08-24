@@ -109,12 +109,12 @@ def register_list_body(member_user, team_name, sev="all", st="all", offset=0):
     return body
 
 
-def register_vuln_detail_body(member_user, team_name, idx, sub="manual", sev="all", st="all", offset=0, step_number=None):
+def register_vuln_detail_body(member_user, team_id, team_name, idx, sub="manual", sev="all", st="all", offset=0, step_number=None):
     """Same detail (facts + Manual/Auto toggle + Mark Mitigated + Request
     Extension) as the Fix tab's own vuln detail — Register is just a
     differently-filtered entry point into the identical rows."""
     return fix.vuln_detail_body(
-        member_user, team_name, idx, ctx="register", offset=offset, sub=sub,
+        member_user, team_id, team_name, idx, ctx="register", offset=offset, sub=sub,
         extra_value={"sev": sev, "st": st}, step_number=step_number,
         back_action_id="ureg_view_back", back_title="← Back to Register",
     )
@@ -131,20 +131,6 @@ def _fetch_script_stats(member_user):
             raise ValueError(f"script stats fetch failed: {status_code}")
         return data.get("stats") or []
     return fix_tab.cached_fetch(f"user_script_stats:{member_user.id}", 20, _fetch)
-
-
-def _script_download_url(team_id, team_name, plugin_id):
-    import time
-    from urllib.parse import quote
-    from django.conf import settings
-    from users.views import _dashboard_image_signer
-
-    token = _dashboard_image_signer().sign(team_id)
-    backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
-    return (
-        f"{backend}/api/admin/users/teams/script-download/?token={quote(token)}"
-        f"&team={quote(team_name)}&plugin_id={plugin_id}&t={int(time.time())}"
-    )
 
 
 def script_list_body(member_user, team_id, team_name, offset=0):
@@ -173,7 +159,7 @@ def script_list_body(member_user, team_id, team_name, offset=0):
         if plugin_id:
             items.append({
                 "type": "ActionSet", "spacing": "Small",
-                "actions": [{"type": "Action.OpenUrl", "title": "📥 Download", "url": _script_download_url(team_id, team_name, plugin_id)}],
+                "actions": [{"type": "Action.OpenUrl", "title": "📥 Download", "url": fix_tab.script_download_url(team_id, team_name, plugin_id)}],
             })
         body.append({"type": "Container", "spacing": "Medium", "separator": True, "items": items})
     body.extend(fix_tab._pagination_body(offset, total, "ureg_script_pg"))

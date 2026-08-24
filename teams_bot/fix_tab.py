@@ -84,6 +84,24 @@ def _back_action(title, action_id, value):
     return {"type": "ActionSet", "actions": [cards._execute_action(title, {"action_id": action_id, **value})]}
 
 
+def script_download_url(team_id, team_name, plugin_id):
+    """Signed-URL download link for one automation script — shared by
+    user_register_tab.py's Scripts sub-tab and user_fix_tab.py's Auto Fix
+    detail (both need it, and putting it here — the common base module
+    both already import — avoids a circular import between them)."""
+    import time
+    from urllib.parse import quote
+    from django.conf import settings
+    from users.views import _dashboard_image_signer
+
+    token = _dashboard_image_signer().sign(team_id)
+    backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+    return (
+        f"{backend}/api/admin/users/teams/script-download/?token={quote(token)}"
+        f"&team={quote(team_name)}&plugin_id={plugin_id}&t={int(time.time())}"
+    )
+
+
 def cached_fetch(cache_key, ttl, fetch_fn):
     """
     Small shared helper (used by fix_tab/register_tab/automations_tab/
