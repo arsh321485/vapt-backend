@@ -228,16 +228,12 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
             )
         return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=value.get("sub") or "manual")
 
-    if action_id == "ufix_mark_mitigated":
-        return _handle_mark_mitigated(member_user, team_name, value, offset, vctx, host)
-
     data = fix._fetch_team_data(member_user, team_name)
     rows = data.get("rows") or []
     if idx is None or idx < 0 or idx >= len(rows):
         return [cards._body_text("This vulnerability could not be found — the report may have refreshed.")]
     r = rows[idx]
 
-    back_action_id, back_value = _vuln_back_target(vctx, host, offset, value)
     value_base = {"idx": idx, "ctx": vctx, "offset": offset}
     if vctx == "asset":
         value_base["host"] = host
@@ -245,19 +241,20 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
         value_base["sev"] = value.get("sev") or "all"
         value_base["st"] = value.get("st") or "all"
 
+    if action_id == "ufix_mark_mitigated":
+        ok, error = fix.mark_mitigated(member_user, r, data.get("report_id"))
+        banner = _result_banner(ok, f"{r.get('vul_name') or 'This vulnerability'} on {r.get('asset') or '—'} marked mitigated — your admin can verify it in the dashboard." if ok else (error or "Could not update fix status."))
+        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual")
+
     if action_id in ("ufix_step_nav", "ufix_step_complete"):
         step = _as_int(value.get("step")) or 1
         if action_id == "ufix_step_complete":
             ok, error = fix.complete_step(member_user, r, data.get("report_id"), step)
             if not ok:
-                return [cards._body_text(error or "Could not update this step.")]
+                banner = _result_banner(False, error or "Could not update this step.")
+                return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step)
             step = step + 1  # auto-advance to the next step after completing this one
-        if vctx == "register":
-            return [register.register_subnav_columnset("ureg_sub_register")] + register.register_vuln_detail_body(
-                member_user, team_id, team_name, idx, sub="manual",
-                sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset, step_number=step,
-            )
-        return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub="manual", step_number=step)
+        return _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step)
 
     if action_id == "usup_step_form":
         step = _as_int(value.get("step")) or 1
@@ -266,18 +263,13 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
     if action_id == "usup_step_submit":
         step = _as_int(value.get("step")) or 1
         ok, error = fix.submit_step_support_request(member_user, r, data.get("report_id"), step, value.get("usup_step_message"))
-        body = [cards._section_title("✅ Request Raised" if ok else "❌ Could not raise request")]
-        body.append(cards._body_text("Your admin has been notified about this step." if ok else (error or "Something went wrong.")))
-        step_back_value = {**value_base, "step": step}
-        body.append({"type": "ActionSet", "spacing": "Medium", "actions": [cards._execute_action("← Back to Step", {"action_id": "ufix_step_nav", **step_back_value})]})
-        return body
+        banner = _result_banner(ok, "Your admin has been notified about this step." if ok else (error or "Could not raise support request."))
+        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step)
 
     if action_id == "ufix_retest":
         ok, error = fix.submit_retest(member_user, r, data.get("report_id"))
-        body = [cards._section_title("🔁 Retest Submitted" if ok else "❌ Could not submit")]
-        body.append(cards._body_text(f"{r.get('vul_name') or 'This vulnerability'} on {r.get('asset') or '—'} sent to your admin for verification." if ok else (error or "Something went wrong.")))
-        body.append({"type": "ActionSet", "spacing": "Medium", "actions": [cards._execute_action("← Back", {"action_id": back_action_id, **back_value})]})
-        return body
+        banner = _result_banner(ok, f"{r.get('vul_name') or 'This vulnerability'} on {r.get('asset') or '—'} sent to your admin for verification." if ok else (error or "Could not submit for retest."))
+        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual")
 
     if action_id == "uex_request_form":
         return fix.extension_form_body(r, value_base)
@@ -287,38 +279,31 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
         reason = value.get("uex_reason")
         merged = dict(r, _requested_days=_as_int(days) or 7, _reason=reason)
         ok, error = fix.submit_extension_request(member_user, merged)
-        body = [cards._section_title("✅ Extension Requested" if ok else "❌ Could not submit")]
-        body.append(cards._body_text("Your admin has been notified and can review it." if ok else (error or "Something went wrong.")))
-        body.append({"type": "ActionSet", "spacing": "Medium", "actions": [cards._execute_action("← Back", {"action_id": back_action_id, **back_value})]})
-        return body
+        banner = _result_banner(ok, "Your admin has been notified and can review it." if ok else (error or "Could not submit extension request."))
+        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual")
 
     return [cards._body_text("Nothing to show.")]
 
 
-def _vuln_back_target(vctx, host, offset, value):
+def _result_banner(ok, text):
+    return {
+        "type": "TextBlock", "text": ("✅ " if ok else "❌ ") + text,
+        "weight": "Bolder", "size": "Small", "color": "good" if ok else "attention", "wrap": True, "spacing": "Medium",
+    }
+
+
+def _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=None):
+    """Re-renders the SAME vuln's full detail (facts + toggle + steps +
+    action buttons) after an action — keeps the member's context on
+    screen instead of collapsing it down to a bare result message, and
+    naturally reflects any state change (e.g. Mark Mitigated closes the
+    vuln, so this then shows the closed-state read-only steps view)."""
     if vctx == "register":
-        return "ureg_view_back", {"offset": offset, "sev": value.get("sev") or "all", "st": value.get("st") or "all"}
-    if vctx == "asset":
-        return "ufix_asset_vuln_back", {"offset": offset, "host": host}
-    return "ufix_vuln_back", {"offset": offset}
-
-
-def _handle_mark_mitigated(member_user, team_name, value, offset, vctx, host):
-    idx = _as_int(value.get("idx"))
-    data = fix._fetch_team_data(member_user, team_name)
-    rows = data.get("rows") or []
-    if idx is None or idx < 0 or idx >= len(rows):
-        return [cards._body_text("This vulnerability could not be found — the report may have refreshed.")]
-
-    ok, error = fix.mark_mitigated(member_user, rows[idx], data.get("report_id"))
-    body = [cards._section_title("✅ Marked as Mitigated" if ok else "❌ Could not update")]
-    if ok:
-        body.append(cards._body_text(f"{rows[idx].get('vul_name') or 'This vulnerability'} on {rows[idx].get('asset') or '—'} is marked mitigated. Your admin can verify it in the dashboard."))
-    else:
-        body.append(cards._body_text(error or "Something went wrong — please try again."))
-    back_action_id, back_value = _vuln_back_target(vctx, host, offset, value)
-    body.append({"type": "ActionSet", "spacing": "Medium", "actions": [cards._execute_action("← Back", {"action_id": back_action_id, **back_value})]})
-    return body
+        return [register.register_subnav_columnset("ureg_sub_register")] + register.register_vuln_detail_body(
+            member_user, team_id, team_name, idx, sub=sub,
+            sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset, step_number=step_number,
+        )
+    return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=sub, step_number=step_number)
 
 
 def _as_int(v):
