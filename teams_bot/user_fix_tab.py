@@ -299,6 +299,30 @@ def _step_content_items(step, os_key):
     return items, done
 
 
+def _all_steps_readonly_body(steps_data, host_os_hint):
+    """All steps, flat, view-only — for an already-CLOSED vuln, where
+    there's nothing left to complete, but the member should still be able
+    to see exactly what was done (unlike the interactive one-at-a-time
+    view, which only makes sense while there's still something to do)."""
+    if not steps_data or steps_data.get("detail"):
+        return [{"type": "TextBlock", "text": "No fix steps were recorded for this vulnerability.", "wrap": True, "isSubtle": True, "spacing": "Medium"}]
+
+    steps = steps_data.get("steps") or []
+    total = steps_data.get("total_steps", 0)
+    os_v = steps_data.get("operating_system") or host_os_hint or "—"
+    os_key = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
+    if not steps:
+        return [{"type": "TextBlock", "text": "No fix steps were recorded for this vulnerability.", "isSubtle": True, "size": "Small", "spacing": "Medium"}]
+
+    body = [{"type": "TextBlock", "text": f"📋 All Steps (completed) — {total} total · OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
+    for step in steps[:15]:
+        items, _done = _step_content_items(step, os_key)
+        body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
+    if len(steps) > 15:
+        body.append({"type": "TextBlock", "text": f"+ {len(steps) - 15} more steps not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
+    return body
+
+
 def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_number=None):
     """One step at a time (not the admin side's flat view-only list) — a
     real 'Mark Step Complete' action per step, plus Previous/Next Step
@@ -436,12 +460,19 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
     if ctx == "asset":
         value_base["host"] = host
 
-    # Already fixed — nothing left to choose (Manual vs Auto), no more
-    # steps to work through, no point requesting extra time. Retest stays
-    # (it's literally what reopens an already-closed vuln — see
+    # Already fixed — nothing left to CHOOSE (Manual vs Auto toggle, which
+    # step to work on next) — but the steps themselves stay visible,
+    # read-only, so a member can see exactly what was done. Retest stays
+    # too (it's literally what reopens an already-closed vuln — see
     # submit_retest's docstring) since a false-positive close can happen.
     if (r.get("status") or "open").strip().lower() == "closed":
         body.append({"type": "TextBlock", "text": "✅ This vulnerability has been fixed and closed.", "weight": "Bolder", "size": "Small", "color": "good", "wrap": True, "spacing": "Medium"})
+        try:
+            fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
+            steps_data = _fetch_fix_steps(member_user, fix_vuln_id) if fix_vuln_id else None
+            body.extend(_all_steps_readonly_body(steps_data, r.get("operating_system")))
+        except Exception:
+            logger.exception("[TeamsBot] user closed-vuln steps fetch failed")
         body.append(_retest_actionset(value_base))
         return body
 

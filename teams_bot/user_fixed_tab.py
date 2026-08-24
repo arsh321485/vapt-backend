@@ -9,6 +9,7 @@ import logging
 
 from . import cards
 from . import fix_tab
+from . import user_fix_tab as fix_detail
 
 logger = logging.getLogger(__name__)
 
@@ -75,4 +76,11 @@ def fixed_detail_body(member_user, team_name, idx, back_offset=0):
             {"title": "Closed By", "value": str(r.get("closed_by") or "—")},
         ],
     })
+    fix_vuln_id = r.get("fix_vulnerability_id")
+    if fix_vuln_id:
+        try:
+            steps_data = fix_detail._fetch_fix_steps(member_user, fix_vuln_id)
+            body.extend(fix_detail._all_steps_readonly_body(steps_data, r.get("os")))
+        except Exception:
+            logger.exception("[TeamsBot] fixed_detail_body steps fetch failed")
     return body
