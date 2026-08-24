@@ -41,7 +41,7 @@ _EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg"}
 # opened via Fix or Register — ctx (embedded in the click's own value)
 # says which, so the response re-highlights the right tab.
 _VULN_DETAIL_ACTION_IDS = {
-    "ufix_vuln_toggle", "ufix_mark_mitigated", "uex_request_form", "uex_submit_request",
+    "ufix_vuln_toggle", "ufix_mark_mitigated", "ufix_retest", "uex_request_form", "uex_submit_request",
     "ufix_step_nav", "ufix_step_complete",
 }
 
@@ -258,6 +258,13 @@ def _render_vuln_detail_action(member_user, team_name, action_id, value):
                 sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset, step_number=step,
             )
         return fix.vuln_detail_body(member_user, team_name, idx, ctx=vctx, host=host, offset=offset, sub="manual", step_number=step)
+
+    if action_id == "ufix_retest":
+        ok, error = fix.submit_retest(member_user, r, data.get("report_id"))
+        body = [cards._section_title("🔁 Retest Submitted" if ok else "❌ Could not submit")]
+        body.append(cards._body_text(f"{r.get('vul_name') or 'This vulnerability'} on {r.get('asset') or '—'} sent to your admin for verification." if ok else (error or "Something went wrong.")))
+        body.append({"type": "ActionSet", "spacing": "Medium", "actions": [cards._execute_action("← Back", {"action_id": back_action_id, **back_value})]})
+        return body
 
     if action_id == "uex_request_form":
         return fix.extension_form_body(r, value_base)

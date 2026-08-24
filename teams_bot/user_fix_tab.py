@@ -221,6 +221,26 @@ def mark_mitigated(member_user, r, report_id):
     return True, None
 
 
+def submit_retest(member_user, r, report_id):
+    """Submits a fixed vulnerability for admin retesting — matches Slack's
+    /retest [vuln-id]. Requires every fix step already complete (via
+    complete_step/mark_mitigated first); the backend itself enforces this
+    and returns a clear error otherwise."""
+    fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
+    if not fix_vuln_id:
+        return False, "Could not start a fix record for this vulnerability."
+    from userregister.views import UserSendVerificationAPIView
+    from .actions import _call_view_in_process
+    status_code, data = _call_view_in_process(
+        UserSendVerificationAPIView, member_user, method="post", url_kwargs={"fix_vuln_id": fix_vuln_id},
+    )
+    result_status = (data or {}).get("status")
+    if status_code >= 300 or result_status not in ("open/review", "closed"):
+        err = (data or {}).get("message") or (data or {}).get("detail") or (data or {}).get("error") or "Could not submit for retest."
+        return False, f"{err} — mark every step complete first."
+    return True, None
+
+
 def complete_step(member_user, r, report_id, step_number):
     """Marks ONE specific step done (not the whole vuln) — matches Slack's
     /mitigated [vuln-id] [step-id]."""
@@ -338,6 +358,13 @@ def _request_extension_actionset(value_base):
     }
 
 
+def _retest_actionset(value_base):
+    return {
+        "type": "ActionSet", "spacing": "Small",
+        "actions": [cards._execute_action("🔁 Retest", {"action_id": "ufix_retest", **value_base})],
+    }
+
+
 def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset=0, sub="manual",
                       back_action_id=None, back_title=None, extra_value=None, step_number=None):
     """Shared by every entry point that drills into one vulnerability's own
@@ -384,6 +411,7 @@ def vuln_detail_body(member_user, team_name, idx, ctx="vulns", host=None, offset
         body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "isSubtle": True, "spacing": "Medium"})
 
     body.append(_mark_mitigated_actionset(value_base))
+    body.append(_retest_actionset(value_base))
     if (r.get("status") or "open").strip().lower() != "closed":
         body.append(_request_extension_actionset(value_base))
     return body
