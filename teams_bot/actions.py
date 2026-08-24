@@ -358,6 +358,41 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
+    if action_id == "fix_step_nav":
+        # Previous/Next Step inside Manual Fix's one-at-a-time view — same
+        # ctx-based routing as fix_vuln_toggle above, just re-rendering
+        # with a specific step_number instead of toggling sub.
+        ctx = value.get("ctx") or "vulns"
+        idx = value.get("idx")
+        idx = int(idx) if idx is not None else None
+        offset = int(value.get("offset") or 0)
+        host = value.get("host") or ""
+        step = value.get("step")
+        step = int(step) if step is not None else None
+
+        if ctx == "register":
+            sev = value.get("sev") or "all"
+            st = value.get("st") or "all"
+            try:
+                content = register_tab.register_vuln_detail_body(admin, idx, sub="manual", sev=sev, st=st, offset=offset, step_number=step)
+                body = [register_tab.register_subnav_columnset("reg_sub_register")] + content
+            except Exception:
+                logger.exception("[TeamsBot] fix_step_nav (register) failed")
+                body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+            return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
+        active_sub = "fix_sub_assets" if ctx == "asset" else "fix_sub_vulns"
+        try:
+            if ctx == "asset":
+                content = fix_tab.asset_vuln_detail_body(admin, idx, host, back_offset=offset, sub="manual", step_number=step)
+            else:
+                content = fix_tab.vuln_detail_body(admin, idx, back_offset=offset, sub="manual", step_number=step)
+            body = [cards._fix_subnav_columnset(active_sub)] + content
+        except Exception:
+            logger.exception("[TeamsBot] fix_step_nav failed")
+            body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
     # ── Register tab ──────────────────────────────────────────────────
     if action_id in ("reg_sub_register", "reg_sub_script"):
         try:

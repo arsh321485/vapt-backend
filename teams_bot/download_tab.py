@@ -49,7 +49,7 @@ def download_report_body(admin, team_id):
             "type": "FactSet",
             "facts": [
                 {"title": "Report", "value": str(data.get("vul_management_program") or "—")},
-                {"title": "Generated On", "value": str(data.get("report_generated_on") or "—")},
+                {"title": "Generated On", "value": str(data.get("report_generated_on") or "—").split(" ")[0].split("T")[0]},
                 {"title": "Total Assets", "value": str(data.get("total_assets", 0))},
                 {"title": "Risk Score", "value": f"{data.get('risk_score', 0)}/100"},
             ],

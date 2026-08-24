@@ -111,9 +111,9 @@ def register_list_body(admin, sev="all", st="all", offset=0):
     return body
 
 
-def register_vuln_detail_body(admin, idx, sub="manual", sev="all", st="all", offset=0):
+def register_vuln_detail_body(admin, idx, sub="manual", sev="all", st="all", offset=0, step_number=None):
     return fix_tab._vuln_detail_full_body(
-        admin, idx, sub=sub, ctx="register", offset=offset,
+        admin, idx, sub=sub, ctx="register", offset=offset, step_number=step_number,
         back_action_id="reg_view_back", back_title="← Back to Register",
         extra_value={"sev": sev, "st": st},
     )

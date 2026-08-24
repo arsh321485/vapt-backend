@@ -389,7 +389,70 @@ def _fetch_fix_steps(admin, fix_vuln_id):
     return data
 
 
-def _manual_fix_body(steps_data, host_os_hint=None):
+def step_content_items(step, os_key, truncate=None):
+    """
+    One step's full content (Action, File Path, Where To Run, Command,
+    Verification, Important) as a list of Adaptive Card TextBlocks — used
+    by both the admin (read-only, one-at-a-time nav) and member
+    (interactive, one-at-a-time + Mark Step Complete) Manual Fix views, so
+    the two never drift out of sync.
+
+    NOT "fontType": "Monospace" on the command text — confirmed via real
+    testing that a step whose "command" field is actually a plain-English
+    instruction (no real shell command exists, e.g. "Run a security scan
+    using an appropriate tool (e.g., Nessus)") rendered oversized/broken
+    in Teams' monospace font stack; genuine commands still read fine as
+    plain wrapped text, so this applies to all steps uniformly rather
+    than trying to guess "real code vs. instruction sentence".
+    `truncate`: char limit per field (None = no limit — safe now that only
+    ONE step renders at a time, unlike the old flat 15-steps-at-once view
+    this replaced, which needed [:400] to stay a sane card size).
+    """
+    def _cut(s):
+        return s[:truncate] if truncate else s
+
+    step_num = step.get("step_number")
+    step_name = step.get("step_name") or f"Step {step_num}"
+    status_v = step.get("status", "pending")
+    done = status_v == "completed"
+    badge = "✅ Done" if done else ("🔒 Locked" if step.get("is_locked") else "▶️ Pending")
+    os_data = step.get(os_key) or {}
+    action = (os_data.get("action") or "").strip()
+
+    items = [{"type": "TextBlock", "text": f"{step_num}. {step_name} — {badge}", "weight": "Bolder", "size": "Medium", "wrap": True}]
+    if action:
+        items.append({"type": "TextBlock", "text": _cut(action), "wrap": True, "size": "Small"})
+    file_path = (os_data.get("system_file_path") or "").strip()
+    if file_path:
+        items.append({"type": "TextBlock", "text": f"File Path: {file_path}", "wrap": True, "size": "Small", "fontType": "Monospace"})
+    where_label = (os_data.get("where_to_run_label") or "").strip()
+    if where_label:
+        items.append({"type": "TextBlock", "text": f"Where To Run: {where_label}", "wrap": True, "size": "Small", "isSubtle": True})
+    cmd_groups = os_data.get("commands_for_action")
+    command_lines = []
+    if isinstance(cmd_groups, list):
+        for grp in cmd_groups:
+            if isinstance(grp, dict):
+                command_lines.extend(str(c) for c in (grp.get("commands") or []) if c)
+    command_text = "\n".join(command_lines).strip() or (
+        str(os_data.get("command_to_run") or "").strip()
+        if not isinstance(os_data.get("commands_for_action"), list) else ""
+    )
+    if command_text:
+        items.append({"type": "TextBlock", "text": _cut(command_text), "wrap": True, "size": "Small"})
+    verification_check = (os_data.get("verification_check") or "").strip()
+    if verification_check:
+        items.append({"type": "TextBlock", "text": f"Verification: {_cut(verification_check)}", "wrap": True, "size": "Small", "isSubtle": True})
+    important = (os_data.get("important_consideration") or "").strip()
+    if important:
+        items.append({"type": "TextBlock", "text": f"⚠️ Important: {_cut(important)}", "wrap": True, "size": "Small", "color": "attention"})
+    return items, done
+
+
+def _manual_fix_body(steps_data, host_os_hint, value_base, step_number=None):
+    """One step at a time (view-only — no Mark Complete, admin can't act
+    on fix progress, matching the website's own read-only rule), with
+    Previous/Next Step navigation instead of the old flat 15-steps list."""
     if not steps_data or steps_data.get("detail"):
         return [{"type": "TextBlock", "text": "No fix has been started for this vulnerability yet — no steps to show.", "wrap": True, "isSubtle": True, "spacing": "Medium"}]
 
@@ -398,52 +461,26 @@ def _manual_fix_body(steps_data, host_os_hint=None):
     total = steps_data.get("total_steps", 0)
     os_v = steps_data.get("operating_system") or host_os_hint or "—"
     os_key = "linux" if os_v and os_v.lower() in ("linux", "unix") else "windows"
-
-    body = [{"type": "TextBlock", "text": f"📋 Mitigation Steps (view only) — {completed}/{total} done · OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
     if not steps:
-        body.append({"type": "TextBlock", "text": "No steps found.", "isSubtle": True, "size": "Small", "spacing": "Medium"})
-        return body
+        return [{"type": "TextBlock", "text": "No steps found.", "isSubtle": True, "size": "Small", "spacing": "Medium"}]
 
-    for step in steps[:15]:
-        step_num = step.get("step_number")
-        step_name = step.get("step_name") or f"Step {step_num}"
-        status_v = step.get("status", "pending")
-        done = status_v == "completed"
-        badge = "✅ Done" if done else ("🔒 Locked" if step.get("is_locked") else "▶️ Pending")
-        os_data = step.get(os_key) or {}
-        action = (os_data.get("action") or "").strip()
+    by_number = {s.get("step_number"): s for s in steps}
+    if step_number is None or step_number not in by_number:
+        current = next((s for s in steps if s.get("status") != "completed"), steps[-1])
+        step_number = current.get("step_number")
+    step = by_number[step_number]
 
-        items = [{"type": "TextBlock", "text": f"{step_num}. {step_name} — {badge}", "weight": "Bolder", "size": "Small", "wrap": True}]
-        if action:
-            items.append({"type": "TextBlock", "text": action[:400], "wrap": True, "size": "Small"})
-        file_path = (os_data.get("system_file_path") or "").strip()
-        if file_path:
-            items.append({"type": "TextBlock", "text": f"File Path: {file_path}", "wrap": True, "size": "Small", "fontType": "Monospace"})
-        where_label = (os_data.get("where_to_run_label") or "").strip()
-        if where_label:
-            items.append({"type": "TextBlock", "text": f"Where To Run: {where_label}", "wrap": True, "size": "Small", "isSubtle": True})
-        cmd_groups = os_data.get("commands_for_action")
-        command_lines = []
-        if isinstance(cmd_groups, list):
-            for grp in cmd_groups:
-                if isinstance(grp, dict):
-                    command_lines.extend(str(c) for c in (grp.get("commands") or []) if c)
-        command_text = "\n".join(command_lines).strip() or (
-            str(os_data.get("command_to_run") or "").strip()
-            if not isinstance(os_data.get("commands_for_action"), list) else ""
-        )
-        if command_text:
-            items.append({"type": "TextBlock", "text": command_text[:400], "wrap": True, "size": "Small", "fontType": "Monospace"})
-        verification_check = (os_data.get("verification_check") or "").strip()
-        if verification_check:
-            items.append({"type": "TextBlock", "text": f"Verification: {verification_check[:400]}", "wrap": True, "size": "Small", "isSubtle": True})
-        important = (os_data.get("important_consideration") or "").strip()
-        if important:
-            items.append({"type": "TextBlock", "text": f"⚠️ Important: {important[:400]}", "wrap": True, "size": "Small", "color": "attention"})
+    body = [{"type": "TextBlock", "text": f"📋 Step {step_number} of {total} (view only) — {completed}/{total} done · OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
+    items, _done = step_content_items(step, os_key)
+    body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
 
-        body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
-    if len(steps) > 15:
-        body.append({"type": "TextBlock", "text": f"+ {len(steps) - 15} more steps not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
+    nav_actions = []
+    if step_number > 1:
+        nav_actions.append(cards._execute_action("◀ Previous Step", {"action_id": "fix_step_nav", "step": step_number - 1, **value_base}))
+    if step_number < total:
+        nav_actions.append(cards._execute_action("Next Step ▶", {"action_id": "fix_step_nav", "step": step_number + 1, **value_base}))
+    if nav_actions:
+        body.append({"type": "ActionSet", "spacing": "Medium", "actions": nav_actions})
     return body
 
 
@@ -457,7 +494,7 @@ def _fix_toggle_actionset(sub, value_base):
 
 
 def _vuln_detail_full_body(admin, idx, sub="manual", ctx="vulns", host=None, offset=0,
-                            back_action_id=None, back_title=None, extra_value=None):
+                            back_action_id=None, back_title=None, extra_value=None, step_number=None):
     """Shared by every entry point that drills into one vulnerability's own
     Manual/Automation Fix detail (flat All Vulns list, an asset's own vuln
     list, and Register's filtered list) — `ctx`/`host` decide where the
@@ -497,22 +534,22 @@ def _vuln_detail_full_body(admin, idx, sub="manual", ctx="vulns", host=None, off
         else:
             fix_vuln_id = _get_or_create_fix_vuln_id(admin, r, data.get("report_id"))
             steps_data = _fetch_fix_steps(admin, fix_vuln_id) if fix_vuln_id else None
-            body.extend(_manual_fix_body(steps_data, host_os_hint=r.get("operating_system")))
+            body.extend(_manual_fix_body(steps_data, r.get("operating_system"), value_base, step_number=step_number))
     except Exception:
         logger.exception("[TeamsBot] fix content fetch failed (sub=%s)", sub)
         body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "isSubtle": True, "spacing": "Medium"})
     return body
 
 
-def vuln_detail_body(admin, idx, back_offset=0, sub="manual"):
+def vuln_detail_body(admin, idx, back_offset=0, sub="manual", step_number=None):
     """Reached from the flat All Vulns list — Back returns there."""
-    return _vuln_detail_full_body(admin, idx, sub=sub, ctx="vulns", offset=back_offset)
+    return _vuln_detail_full_body(admin, idx, sub=sub, ctx="vulns", offset=back_offset, step_number=step_number)
 
 
-def asset_vuln_detail_body(admin, idx, host, back_offset=0, sub="manual"):
+def asset_vuln_detail_body(admin, idx, host, back_offset=0, sub="manual", step_number=None):
     """Reached from an asset's own vulnerability list — Back returns to
     that asset's detail page, not the flat All Vulns list."""
-    return _vuln_detail_full_body(admin, idx, sub=sub, ctx="asset", host=host, offset=back_offset)
+    return _vuln_detail_full_body(admin, idx, sub=sub, ctx="asset", host=host, offset=back_offset, step_number=step_number)
 
 
 # ─── Common Vulns (team-scoped) ─────────────────────────────────────────

@@ -260,45 +260,6 @@ def complete_step(member_user, r, report_id, step_number):
     return True, None
 
 
-def _step_content_items(step, os_key):
-    step_num = step.get("step_number")
-    step_name = step.get("step_name") or f"Step {step_num}"
-    status_v = step.get("status", "pending")
-    done = status_v == "completed"
-    badge = "✅ Done" if done else ("🔒 Locked" if step.get("is_locked") else "▶️ Pending")
-    os_data = step.get(os_key) or {}
-    action = (os_data.get("action") or "").strip()
-
-    items = [{"type": "TextBlock", "text": f"{step_num}. {step_name} — {badge}", "weight": "Bolder", "size": "Medium", "wrap": True}]
-    if action:
-        items.append({"type": "TextBlock", "text": action, "wrap": True, "size": "Small"})
-    file_path = (os_data.get("system_file_path") or "").strip()
-    if file_path:
-        items.append({"type": "TextBlock", "text": f"File Path: {file_path}", "wrap": True, "size": "Small", "fontType": "Monospace"})
-    where_label = (os_data.get("where_to_run_label") or "").strip()
-    if where_label:
-        items.append({"type": "TextBlock", "text": f"Where To Run: {where_label}", "wrap": True, "size": "Small", "isSubtle": True})
-    cmd_groups = os_data.get("commands_for_action")
-    command_lines = []
-    if isinstance(cmd_groups, list):
-        for grp in cmd_groups:
-            if isinstance(grp, dict):
-                command_lines.extend(str(c) for c in (grp.get("commands") or []) if c)
-    command_text = "\n".join(command_lines).strip() or (
-        str(os_data.get("command_to_run") or "").strip()
-        if not isinstance(os_data.get("commands_for_action"), list) else ""
-    )
-    if command_text:
-        items.append({"type": "TextBlock", "text": command_text, "wrap": True, "size": "Small", "fontType": "Monospace"})
-    verification_check = (os_data.get("verification_check") or "").strip()
-    if verification_check:
-        items.append({"type": "TextBlock", "text": f"Verification: {verification_check}", "wrap": True, "size": "Small", "isSubtle": True})
-    important = (os_data.get("important_consideration") or "").strip()
-    if important:
-        items.append({"type": "TextBlock", "text": f"⚠️ Important: {important}", "wrap": True, "size": "Small", "color": "attention"})
-    return items, done
-
-
 def _all_steps_readonly_body(steps_data, host_os_hint):
     """All steps, flat, view-only — for an already-CLOSED vuln, where
     there's nothing left to complete, but the member should still be able
@@ -316,7 +277,7 @@ def _all_steps_readonly_body(steps_data, host_os_hint):
 
     body = [{"type": "TextBlock", "text": f"📋 All Steps (completed) — {total} total · OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
     for step in steps[:15]:
-        items, _done = _step_content_items(step, os_key)
+        items, _done = fix_tab.step_content_items(step, os_key)
         body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
     if len(steps) > 15:
         body.append({"type": "TextBlock", "text": f"+ {len(steps) - 15} more steps not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
@@ -346,7 +307,7 @@ def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_numb
     step = by_number[step_number]
 
     body = [{"type": "TextBlock", "text": f"📋 Step {step_number} of {total}  ·  {completed}/{total} done  ·  OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
-    items, done = _step_content_items(step, os_key)
+    items, done = fix_tab.step_content_items(step, os_key)
     body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
 
     nav_actions = []
