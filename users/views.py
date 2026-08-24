@@ -2022,7 +2022,13 @@ class MicrosoftTeamsCallbackView(APIView):
             }
             token_response = _http_post(settings.MICROSOFT_TOKEN_URL, data=token_payload, timeout=15)
             token_data = token_response.json()
-            print("🔑 Token Response:", token_data)
+            # Never print access_token/refresh_token/id_token — real
+            # Microsoft OAuth tokens ended up in journalctl logs (and from
+            # there, pasted into chat/git) via this exact line more than
+            # once. Log only what's useful for debugging, never the
+            # credentials themselves.
+            _redacted_token_data = {k: v for k, v in token_data.items() if k not in ("access_token", "refresh_token", "id_token")}
+            print("🔑 Token Response (redacted):", _redacted_token_data)
 
             # Extract tenant_id from id_token JWT (tid claim)
             tenant_id = ""
@@ -4917,11 +4923,15 @@ class SlackOAuthCallbackView(APIView):
             authed_user = token_json.get("authed_user", {})
             user_access_token = authed_user.get("access_token")
 
-            # ─── Print tokens to Django console (for Postman testing) ───
+            # ─── Log token receipt (never the tokens themselves — these
+            # end up in journalctl, and from there get pasted into chat/
+            # git; masked previews are enough to confirm a token arrived) ───
+            def _mask(t):
+                return f"{t[:8]}...redacted" if t else None
             print("=" * 60)
-            print("SLACK OAUTH TOKENS")
-            print(f"  bot_access_token  : {bot_token}")
-            print(f"  user_access_token : {user_access_token}")
+            print("SLACK OAUTH TOKENS (redacted)")
+            print(f"  bot_access_token  : {_mask(bot_token)}")
+            print(f"  user_access_token : {_mask(user_access_token)}")
             print(f"  team              : {team_info.get('name')} ({team_info.get('id')})")
             # Decode state to get UI admin_id (if provided)
             decoded_state = None
