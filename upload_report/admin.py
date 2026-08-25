@@ -5,7 +5,7 @@ from django.contrib import messages
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.template.response import TemplateResponse
-from .models import UploadReport, FixVulnVerification, SupportRequestReview
+from .models import UploadReport, MagicPinUpload, FixVulnVerification, SupportRequestReview
 from users.models import User
 import hashlib
 import os
@@ -711,6 +711,39 @@ class UploadReportAdmin(admin.ModelAdmin):
         if not request.user.is_authenticated:
             return False
         return getattr(request.user, 'is_superuser', False)
+
+
+# ---------------------------------------------------------------------------
+# Magic Pin Upload (Superadmin only) — dedicated tab, explicit request
+# ---------------------------------------------------------------------------
+
+@admin.register(MagicPinUpload)
+class MagicPinUploadAdmin(UploadReportAdmin):
+    """
+    A dedicated Super Admin sidebar tab for magic-pin uploads, kept
+    separate from the general 'Upload reports' list. Reuses every bit of
+    UploadReportAdmin's pipeline (form, save_model, GPT extraction for
+    custom files, card generation) unchanged via the MagicPinUpload proxy
+    model — only the entry point differs: the tab jumps straight to the
+    Add form instead of showing a list (there's nothing meaningfully
+    different to list here — a report uploaded via this tab is the exact
+    same row, and still shows up in 'Upload reports' too, since it's the
+    same underlying table).
+
+    No pricing/plan-gate call exists anywhere in this pipeline (confirmed
+    in UploadReportAdmin.save_model) — uploads from here, same as the
+    general admin panel, were never subject to Freemium limits in the
+    first place.
+    """
+    actions = None  # "Generate claim link" bulk action lives on the main Upload reports tab only
+
+    def changelist_view(self, request, extra_context=None):
+        if not (request.user.is_authenticated and request.user.is_superuser):
+            from django.contrib.auth.views import redirect_to_login
+            return redirect_to_login(request.get_full_path())
+        return HttpResponseRedirect(
+            reverse("admin:upload_report_magicpinupload_add")
+        )
 
 
 # ---------------------------------------------------------------------------

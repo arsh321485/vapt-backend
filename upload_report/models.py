@@ -52,6 +52,24 @@ class UploadReport(models.Model):
         return f"{self.file} - {loc} ({admin_email})"
 
 
+class MagicPinUpload(UploadReport):
+    """
+    Proxy of UploadReport — same table, same form, same save/parse/store
+    pipeline (UploadReportAdmin.save_model etc.) — this exists purely to
+    give Super Admin a separate, clearly-labeled sidebar tab for magic-pin
+    uploads, distinct from the general 'Upload reports' list. A report
+    uploaded from here is the exact same kind of row and still shows up in
+    the regular Upload reports list too (proxy models share the underlying
+    table) — no separate storage, just a separate entry point. See
+    upload_report/admin.py's MagicPinUploadAdmin.
+    """
+    class Meta:
+        proxy = True
+        app_label = 'upload_report'
+        verbose_name = 'Magic Pin Upload'
+        verbose_name_plural = 'Magic Pin Upload'
+
+
 class FixVulnVerification(models.Model):
     """Proxy model for Django admin — no DB table created (managed=False).
     Used only to show pending verifications panel in superadmin."""
