@@ -83,23 +83,26 @@ def _open_url_action(title, url, style=None):
 
 
 def _execute_action(title, data, style=None):
-    """Action.Execute — see the module docstring for why this replaced
-    Action.Submit everywhere. `verb` is set to the action_id mainly for
-    parity with Microsoft's own samples; nothing here actually branches on
-    it — the dispatch in teams_bot.actions reads action_id out of `data`,
-    same as it always has.
+    """Action.Submit — explicit tradeoff, chosen deliberately over
+    Action.Execute: Action.Execute's synchronous invoke round-trip is what
+    greys out the WHOLE card for the ~1-2s a click is in flight (confirmed
+    real, not fixable from card JSON — tried "requires": {"adaptiveCards":
+    "1.3"} as a workaround, which instead made the whole nav row vanish,
+    a worse regression, and was reverted). Action.Submit doesn't grey
+    anything, but Teams always shows a "Your response was sent to the
+    app" toast on every click — no card-JSON setting suppresses that
+    either. Given a straight choice between the two (real, live-tested),
+    the toast was picked over the grey-out.
 
-    Deliberately NOT setting "requires": {"adaptiveCards": "1.3"} here —
-    tried that as a fix for buttons rendering greyed-out, but real testing
-    showed it made the WHOLE nav row disappear instead (Teams apparently
-    treats an unmet/unconfirmed `requires` capability as "hide this
-    action", not "show it disabled") — a worse regression than the grey
-    state it was meant to fix. Reverted; the grey-out issue needs a
-    different real fix, not this."""
+    This one function is the single place every button in the whole
+    teams_bot module is built from, so this is genuinely the only edit a
+    switch back to Action.Execute (or another future option) needs.
+    _handle_message's existing `if activity.get("value")` branch already
+    handles Action.Submit for both admin and member dispatch — this isn't
+    new wiring, just switching which action `type` reaches it."""
     action = {
-        "type": "Action.Execute",
+        "type": "Action.Submit",
         "title": title,
-        "verb": data.get("action_id", "action"),
         "data": data,
     }
     if style:
