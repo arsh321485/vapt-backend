@@ -224,13 +224,19 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
         except Exception:
             logger.exception("[TeamsBot] save_risk_criteria failed")
             return cards.text_result_card("❌ Something went wrong", "Could not save risk criteria — please try again.")
-        # Transition complete — same follow-up Slack does: post the real
-        # navbar right after, into the admin-dashboard channel.
+        # Return the real navbar/dashboard directly as THIS action's own
+        # response — NOT a separate proactive post (post_onboarding_step)
+        # plus a generic "Loading…" placeholder returned alongside it.
+        # Confirmed real bug: those two raced to own the same "active
+        # card" slot; the placeholder always won and then nothing ever
+        # replaced it, so the risk-criteria-saved click looked
+        # permanently stuck on "Loading your dashboard…".
         try:
-            post_onboarding_step(admin, team_id=team_id, force_state="ready")
+            from . import onboarding as _onboarding
+            return _onboarding.build_state_card(admin, team_id, "ready")
         except Exception:
-            logger.exception("[TeamsBot] failed to post navbar after risk criteria save")
-        return cards.text_result_card("✅ Risk criteria saved", "Loading your dashboard…")
+            logger.exception("[TeamsBot] failed to build dashboard card after risk criteria save")
+            return cards.text_result_card("✅ Risk criteria saved", "Mention me (@VaptFix) to open your dashboard.")
 
     if action_id in ("fix_sub_assets", "fix_sub_vulns", "fix_sub_common"):
         try:

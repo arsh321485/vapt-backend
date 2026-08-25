@@ -106,28 +106,40 @@ def post_onboarding_step(admin, team_id=None, force_state=None):
         from users.views import _get_admin_onboarding_state
         state = _get_admin_onboarding_state(admin)
 
-    if state == "no_report":
-        card = cards.welcome_card()
-    elif state == "needs_risk_criteria":
-        card = cards.risk_criteria_prompt_card()
-    else:
-        # Home tab's real content, not just the bare nav bar — confirmed
-        # via real feedback that posting just the nav row (needing an
-        # extra click on "Home" to see anything) looked broken/empty.
-        # Same image-rendering call actions._handle_nav's nav_home branch
-        # uses; imported lazily to avoid a circular import (actions.py
-        # imports post_onboarding_step from this module).
-        try:
-            home_body = cards.dashboard_image_card_body(team_id, kind="dashboard", title="VaptFix Admin Dashboard")
-        except Exception:
-            logger.exception("[TeamsOnboarding] dashboard image body failed, falling back to text summary")
-            from . import actions as _actions
-            home_body = _actions._home_summary_body(admin)
-        card = cards.nav_buttons_card(active_action_id="nav_home", extra_body=home_body)
-
+    card = build_state_card(admin, team_id, state)
     new_message_id = replace_active_card(team_id, card)
     logger.info(f"[TeamsOnboarding] Posted state={state} card into team_id={team_id} (new_message_id={new_message_id})")
     return state
+
+
+def build_state_card(admin, team_id, state):
+    """The card content for a given onboarding state, WITHOUT posting it
+    anywhere — factored out of post_onboarding_step so a caller that's
+    about to return this same content as its own action response (e.g.
+    actions.submit_risk_criteria) can do that directly instead of also
+    triggering a separate proactive post here. Confirmed real bug: doing
+    both raced two different "replace the active card" operations against
+    each other — post_onboarding_step's own send would win, then the
+    action handler's own response (a generic "Loading your dashboard…"
+    placeholder) would immediately delete THAT and take over the active
+    slot instead, permanently — the placeholder had nothing further ever
+    update it, so it looked stuck."""
+    if state == "no_report":
+        return cards.welcome_card()
+    if state == "needs_risk_criteria":
+        return cards.risk_criteria_prompt_card()
+    # Home tab's real content, not just the bare nav bar — confirmed via
+    # real feedback that posting just the nav row (needing an extra click
+    # on "Home" to see anything) looked broken/empty. Same image-rendering
+    # call actions._handle_nav's nav_home branch uses; imported lazily to
+    # avoid a circular import (actions.py imports from this module).
+    try:
+        home_body = cards.dashboard_image_card_body(team_id, kind="dashboard", title="VaptFix Admin Dashboard")
+    except Exception:
+        logger.exception("[TeamsOnboarding] dashboard image body failed, falling back to text summary")
+        from . import actions as _actions
+        home_body = _actions._home_summary_body(admin)
+    return cards.nav_buttons_card(active_action_id="nav_home", extra_body=home_body)
 
 
 def post_onboarding_for_team_id(team_id, force_state=None):
