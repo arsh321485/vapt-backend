@@ -28,8 +28,16 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 # Hard cap on how much raw text goes to the model — bounds token cost/latency
-# for large PDFs while still covering realistic pentest reports.
-MAX_INPUT_CHARS = 20000
+# while still covering realistic pentest reports. Confirmed real bug at the
+# old 20000: a 27-page/13-host custom PDF report got truncated well before
+# most of its per-host detail sections, so gpt-4o-mini only ever saw (and
+# only ever extracted) the first 2 of 13 hosts — silently, no error, just a
+# report that looked "successfully" processed with most of its data
+# missing. gpt-4o-mini's context window is 128K tokens (~4 chars/token for
+# English text), so 100000 chars (~25K tokens) still leaves comfortable
+# room for the prompt wrapper and the JSON response, while covering
+# reports several times larger than the one that triggered this.
+MAX_INPUT_CHARS = 100000
 
 VALIDATION_PROMPT = """You are a strict gatekeeper for a vulnerability-management platform (VAPTFIX). \
 An admin has uploaded a file that isn't a recognized Nessus or AWS Inspector export. Your job is to \
@@ -148,6 +156,16 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         return {"valid": False, "reason": "Could not extract any readable text from this file."}
 
     truncated = document_text[:MAX_INPUT_CHARS]
+    if len(document_text) > MAX_INPUT_CHARS:
+        # Confirmed real: this silently dropping data (some hosts/findings
+        # past the cutoff never reaching the model at all) is exactly what
+        # made a 13-host report save with only 2 — now at least visible in
+        # the logs instead of looking like a clean, complete extraction.
+        logger.warning(
+            f"[CustomFileValidation] '{filename}' text is {len(document_text)} chars, "
+            f"truncated to {MAX_INPUT_CHARS} before sending to the model — some "
+            f"findings past this point may not be extracted."
+        )
 
     try:
         llm = _get_validation_llm()
