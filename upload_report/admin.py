@@ -87,27 +87,17 @@ class UploadReportAdminForm(forms.ModelForm):
         return admin_user
 
 
-class MagicPinUploadForm(UploadReportAdminForm):
+class MagicPinUploadForm(forms.ModelForm):
     """
-    Same admin dropdown as UploadReportAdminForm, except optional here —
-    explicit request: a magic-pin upload shouldn't be forced onto any
-    existing admin's account. Left blank, MagicPinUploadAdmin.save_model
-    attributes the report to the Super Admin doing the upload instead.
+    No admin dropdown at all — explicit request: a magic-pin upload should
+    never be attached to (or ask for) any existing admin's account.
+    MagicPinUploadAdmin.save_model always attributes the report to the
+    Super Admin doing the upload.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields['admin_select'].required = False
-        self.fields['admin_select'].label = "Select Admin (optional — leave blank to upload as yourself)"
-
-    def clean_admin_select(self):
-        admin_id = self.cleaned_data.get('admin_select')
-        if not admin_id:
-            return None  # MagicPinUploadAdmin.save_model fills in the Super Admin
-        try:
-            return User.objects.get(id=admin_id)
-        except User.DoesNotExist:
-            raise forms.ValidationError("Selected admin does not exist.")
+    class Meta:
+        model = UploadReport
+        fields = ['file']
 
 
 @admin.register(UploadReport)
@@ -758,17 +748,16 @@ class MagicPinUploadAdmin(UploadReportAdmin):
     general admin panel, were never subject to Freemium limits in the
     first place.
 
-    "Select Admin" is optional here (see MagicPinUploadForm) — explicit
-    request: a magic-pin upload shouldn't have to be attached to any
-    existing admin's account at all. Left blank, the report is attributed
-    to the Super Admin doing the upload.
+    There is no "Select Admin" field at all (see MagicPinUploadForm) —
+    explicit request: a magic-pin upload should never be attached to any
+    existing admin's account. Every report uploaded from this tab is
+    attributed to the Super Admin doing the upload.
     """
     form = MagicPinUploadForm
     actions = None  # "Generate claim link" bulk action lives on the main Upload reports tab only
 
     def save_model(self, request, obj, form, change):
-        if not form.cleaned_data.get('admin_select'):
-            form.cleaned_data['admin_select'] = request.user
+        form.cleaned_data['admin_select'] = request.user
         super().save_model(request, obj, form, change)
 
     def changelist_view(self, request, extra_context=None):
