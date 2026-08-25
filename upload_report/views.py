@@ -569,12 +569,22 @@ class UploadReportView(APIView):
                 # Regular flow: use the requesting user as target admin
                 target_admin = request.user
 
-            # 🔹 Plan gate — Freemium allows only 1 report upload total.
-            from billing.enforcement import assert_can_upload_report, PlanLimitExceeded
+            # A magic-link upload (SlackPricingHandoffView's exchanged
+            # JWT carries this claim, which a client can't forge) skips
+            # every Freemium plan gate below — explicit request: uploads
+            # via that link shouldn't be blocked by pricing plan at all.
             try:
-                assert_can_upload_report(target_admin)
-            except PlanLimitExceeded as e:
-                return Response({"error": str(e)}, status=403)
+                via_magic_link = bool(request.auth and request.auth.get("via_magic_link"))
+            except Exception:
+                via_magic_link = False
+
+            # 🔹 Plan gate — Freemium allows only 1 report upload total.
+            if not via_magic_link:
+                from billing.enforcement import assert_can_upload_report, PlanLimitExceeded
+                try:
+                    assert_can_upload_report(target_admin)
+                except PlanLimitExceeded as e:
+                    return Response({"error": str(e)}, status=403)
 
             # member_type is no longer a frontend-supplied field — the upload
             # request now carries only "file" (+ optional admin_id). Fixed
@@ -598,7 +608,7 @@ class UploadReportView(APIView):
             # ran). Only the first file in the batch is processed; the rest
             # are reported as errors, same shape as an unsupported file type.
             from billing.enforcement import is_freemium
-            if is_freemium(target_admin) and len(uploaded_files) > 1:
+            if not via_magic_link and is_freemium(target_admin) and len(uploaded_files) > 1:
                 for extra_file in uploaded_files[1:]:
                     errors.append({
                         "file": extra_file.name,
@@ -683,7 +693,7 @@ class UploadReportView(APIView):
                     from billing.enforcement import assert_asset_within_limit, PlanLimitExceeded
                     from billing.plans import FREEMIUM_LIMITS
                     report_host_count = parsed_data.get("total_hosts")
-                    if report_host_count:
+                    if report_host_count and not via_magic_link:
                         try:
                             assert_asset_within_limit(target_admin, int(report_host_count))
                         except PlanLimitExceeded as e:

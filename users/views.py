@@ -10737,6 +10737,15 @@ class SlackPricingHandoffView(APIView):
 
         from rest_framework_simplejwt.tokens import RefreshToken
         refresh = RefreshToken.for_user(admin)
+        # Marks this token as having arrived via the magic-link handoff —
+        # a signed JWT claim can't be forged by the client, unlike a plain
+        # request field, so upload_report/views.py's plan-gate checks can
+        # trust it to skip Freemium's report-count/asset-limit/multi-file
+        # restrictions for THIS session specifically (explicit request:
+        # uploads via this link shouldn't be blocked by pricing plan at
+        # all). Naturally time-boxed to the access token's own lifetime —
+        # no separate expiry to track.
+        refresh.access_token["via_magic_link"] = True
         return Response({
             "access": str(refresh.access_token),
             "refresh": str(refresh),
