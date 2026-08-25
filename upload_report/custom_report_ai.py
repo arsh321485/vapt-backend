@@ -99,7 +99,14 @@ def _get_validation_llm():
         raise ValueError("OPENAI_API_KEY is not configured in Django settings.")
 
     model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model, temperature=0, api_key=api_key)
+    # max_tokens was previously unset, which leaves the response capped at
+    # whatever OpenAI's default completion length is (well under what a
+    # 13-host, multi-finding-per-host JSON extraction needs) — a report
+    # that legitimately has many hosts could have its JSON response cut off
+    # mid-generation, which then fails json.loads() and silently drops
+    # everything the model hadn't finished writing yet. gpt-4o-mini
+    # supports up to 16384 output tokens; give it the full budget.
+    return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=16384)
 
 
 def _extract_document_text(parsed_data: Dict[str, Any]) -> str:
@@ -156,6 +163,15 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         return {"valid": False, "reason": "Could not extract any readable text from this file."}
 
     truncated = document_text[:MAX_INPUT_CHARS]
+    # Always visible — not just on truncation — so a run that comes back
+    # with fewer hosts than expected can be diagnosed from the logs alone:
+    # was the input text short to begin with (an extraction-quality problem
+    # in parsers.py, e.g. PyPDF2 missing text on some pages) or did it get
+    # cut off here.
+    logger.info(
+        f"[CustomFileValidation] '{filename}' extracted text length={len(document_text)} chars "
+        f"(sending {len(truncated)} chars to the model)"
+    )
     if len(document_text) > MAX_INPUT_CHARS:
         # Confirmed real: this silently dropping data (some hosts/findings
         # past the cutoff never reaching the model at all) is exactly what
@@ -172,6 +188,19 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         prompt = VALIDATION_PROMPT.format(document_text=truncated)
         response = llm.invoke(prompt)
         raw_content = getattr(response, "content", "") or ""
+        finish_reason = (
+            (response.response_metadata or {}).get("finish_reason")
+            if hasattr(response, "response_metadata") else None
+        )
+        if finish_reason and finish_reason != "stop":
+            # "length" here means the model's own JSON response got cut off
+            # mid-generation (ran out of output tokens) — the parse below
+            # will very likely fail or silently yield a partial host list.
+            logger.warning(
+                f"[CustomFileValidation] '{filename}' LLM response finish_reason="
+                f"'{finish_reason}' (not 'stop') — output may be truncated, "
+                f"raw response length={len(raw_content)} chars"
+            )
     except Exception as exc:
         logger.error(f"[CustomFileValidation] LLM call failed for '{filename}': {exc}")
         return {"valid": False, "reason": "Could not validate this file right now — please try again."}
@@ -180,8 +209,17 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         cleaned = _strip_json_fences(raw_content)
         result = json.loads(cleaned)
     except Exception as exc:
-        logger.error(f"[CustomFileValidation] Could not parse LLM response for '{filename}': {exc}")
+        logger.error(
+            f"[CustomFileValidation] Could not parse LLM response for '{filename}': {exc} "
+            f"— raw response length={len(raw_content)} chars, tail={raw_content[-200:]!r}"
+        )
         return {"valid": False, "reason": "Could not validate this file's contents — please try again."}
+
+    logger.info(
+        f"[CustomFileValidation] '{filename}' model returned {len(result.get('hosts') or [])} host(s)"
+        if isinstance(result, dict) else
+        f"[CustomFileValidation] '{filename}' model returned a non-dict result"
+    )
 
     if not isinstance(result, dict) or not result.get("valid"):
         reason = (

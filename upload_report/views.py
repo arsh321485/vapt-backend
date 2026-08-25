@@ -573,10 +573,15 @@ class UploadReportView(APIView):
             # JWT carries this claim, which a client can't forge) skips
             # every Freemium plan gate below — explicit request: uploads
             # via that link shouldn't be blocked by pricing plan at all.
+            # A Super Admin uploading on another admin's behalf (admin_id
+            # branch above — already gated to is_superuser only) gets the
+            # same treatment: explicit request that this path is for
+            # QA/manual handling of a report, not a real admin hitting
+            # their own plan's limits.
             try:
-                via_magic_link = bool(request.auth and request.auth.get("via_magic_link"))
+                via_magic_link = bool(request.auth and request.auth.get("via_magic_link")) or bool(admin_id)
             except Exception:
-                via_magic_link = False
+                via_magic_link = bool(admin_id)
 
             # 🔹 Plan gate — Freemium allows only 1 report upload total.
             if not via_magic_link:
