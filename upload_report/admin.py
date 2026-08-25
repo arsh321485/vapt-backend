@@ -323,7 +323,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                     "report_type": parsed_data.get("type", "unknown"),
                 }
 
-                if parsed_data.get("type") in ("nessus_html", "nessus"):
+                if parsed_data.get("type") in ("nessus_html", "nessus", "aws", "custom"):
                     hosts_payload = self._prepare_hosts_for_storage(
                         parsed_data.get("vulnerabilities_by_host", [])
                     )
@@ -342,6 +342,33 @@ class UploadReportAdmin(admin.ModelAdmin):
         except Exception as e:
             print(f"MongoDB storage error: {e}")
             return False
+
+    def _validate_custom_if_needed(self, parsed_data, filename):
+        """
+        Anything that isn't a recognized Nessus/AWS export (pdf/csv/excel/
+        html/docx/doc) needs the same GPT-4o-mini validate+extract step the
+        DRF upload API (upload_report/views.py post()) already runs before
+        it's allowed near storage or card generation — this admin panel
+        form is a completely separate upload path with its own
+        dispatch_parse() call, and previously skipped this step entirely,
+        so a PDF/DOCX pentest report uploaded here just landed in the
+        generic `parsed_reports` collection as raw text (no
+        vulnerabilities_by_host, no mitigation cards, nothing usable).
+
+        Returns (parsed_data, error) — error is None on success (or when
+        no validation was needed, e.g. a native Nessus/AWS file), else a
+        user-facing rejection reason and parsed_data should be discarded.
+        """
+        if parsed_data.get("type") not in ("pdf", "csv", "excel", "html", "docx", "doc"):
+            return parsed_data, None
+        from .custom_report_ai import validate_and_extract_custom_report
+        validation_result = validate_and_extract_custom_report(parsed_data, filename)
+        if not validation_result.get("valid"):
+            return parsed_data, (
+                validation_result.get("reason")
+                or "This file does not appear to contain vulnerability scan data."
+            )
+        return validation_result, None
 
     def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
         extra_context = extra_context or {}
@@ -383,8 +410,16 @@ class UploadReportAdmin(admin.ModelAdmin):
                 print(f"[AdminUploadBG] Parse failed report_id={report_id}: {error_msg}", flush=True)
                 return
 
+            parsed_data, custom_error = self._validate_custom_if_needed(parsed_data, original_filename)
+            if custom_error:
+                report_obj.status = "Parse Error"
+                report_obj.save()
+                logger.error(f"[AdminUploadBG] Custom validation failed report_id={report_id}: {custom_error}")
+                print(f"[AdminUploadBG] Custom validation failed report_id={report_id}: {custom_error}", flush=True)
+                return
+
             parsed_count = 1
-            if parsed_data.get("type") in ("nessus", "nessus_html"):
+            if parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
                 parsed_count = parsed_data.get("total_vulnerabilities", 1) or 1
             elif "rows" in parsed_data:
                 parsed_count = parsed_data.get("rows", 1)
@@ -535,9 +570,14 @@ class UploadReportAdmin(admin.ModelAdmin):
                 parsed_data = dispatch_parse(file_path, uploaded_file.name)
 
                 if parsed_data and "error" not in parsed_data:
+                    parsed_data, custom_error = self._validate_custom_if_needed(parsed_data, uploaded_file.name)
+                    if custom_error:
+                        parsed_data = {"error": custom_error}
+
+                if parsed_data and "error" not in parsed_data:
                     # Calculate parsed count
                     parsed_count = 1
-                    if parsed_data.get("type") in ("nessus", "nessus_html"):
+                    if parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
                         parsed_count = parsed_data.get("total_vulnerabilities", 1) or 1
                     elif "rows" in parsed_data:
                         parsed_count = parsed_data.get("rows", 1)
