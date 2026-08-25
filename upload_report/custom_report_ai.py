@@ -55,6 +55,16 @@ sentence.
 
 Never invent findings that are not clearly present in the text. If a field is not stated, leave it "".
 
+IMPORTANT — one finding can affect many hosts. Pentest reports are often organized by FINDING
+(one write-up per vulnerability), not by host, and that write-up may list several affected
+assets together — e.g. under a heading like "Affected Host(s)", "Affected IP(s)", "Affected
+URL(s)", "Affected Asset(s)", or as a bullet/comma list in the finding's own text. When a single
+finding lists multiple affected hosts, you MUST create a separate entry for that same
+vulnerability (same plugin_name/description/risk_factor/solution) under EACH one of those hosts
+in the "hosts" array — do not collapse them into just one representative host and do not drop
+any of the listed hosts. A report with 3 distinct findings where one of them lists 12 affected
+hosts should produce far more than 3 total host/vulnerability entries.
+
 Return ONLY a single JSON object, no markdown fences, no commentary, matching exactly this schema:
 
 {{
