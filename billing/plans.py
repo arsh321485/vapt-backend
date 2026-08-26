@@ -32,11 +32,13 @@ CYCLE_CHOICES = [
     (CYCLE_ANNUAL, "Annual"),
 ]
 
-# Freemium limits (enforced elsewhere — upload_report / automation_scripts / scope)
+# Freemium limits (enforced elsewhere — upload_report / automation_scripts / scope /
+# users_details)
 FREEMIUM_LIMITS = {
     "max_internal_ips": 5,
     "report_upload_limit": 1,
     "max_vulnerabilities": 10,
+    "max_team_members": 3,
     "teams_enabled": 1,
     "testing_retesting": False,
     "automation_scripts": False,

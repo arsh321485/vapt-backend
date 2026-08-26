@@ -873,6 +873,16 @@ class UserDetailCreateView(generics.CreateAPIView):
                         status=status.HTTP_409_CONFLICT
                     )
 
+            # Plan gate — Freemium allows up to max_team_members total.
+            if admin_id:
+                from billing.enforcement import assert_team_member_within_limit, PlanLimitExceeded
+                try:
+                    admin_user_for_gate = get_user_model().objects.filter(id=admin_id).first()
+                    if admin_user_for_gate:
+                        assert_team_member_within_limit(admin_user_for_gate)
+                except PlanLimitExceeded as e:
+                    return Response({"error": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
             # Validate and create user detail
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)

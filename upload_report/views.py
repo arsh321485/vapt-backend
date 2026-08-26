@@ -175,14 +175,15 @@ class UploadReportView(APIView):
         
         return prepared_hosts
 
-    def _store_in_mongodb(self, 
+    def _store_in_mongodb(self,
                          parsed_data: Dict[str, Any],
                          report_id: str,
                          location_id: str,
                          location_name: str,
                          admin_email: str,
                          original_filename: str,
-                         member_type: str) -> bool:
+                         member_type: str,
+                         locked_hosts: Optional[List[Dict[str, Any]]] = None) -> bool:
         """
         Store parsed report data in MongoDB.
         
@@ -229,6 +230,15 @@ class UploadReportView(APIView):
                     "total_vulnerabilities": parsed_data.get("total_vulnerabilities", 0),
                     "vulnerabilities_by_host": hosts_payload
                 })
+
+                # Freemium trim (billing.enforcement.select_freemium_active_hosts)
+                # retained the hosts/findings that didn't fit within the plan's
+                # limits instead of discarding them — stored here, same shape as
+                # vulnerabilities_by_host, so an upgrade can unlock them later
+                # (merge back in by host_name) without a re-upload.
+                if locked_hosts:
+                    document["locked_hosts"] = self._prepare_hosts_for_storage(locked_hosts)
+                    document["freemium_trimmed"] = True
 
                 # Insert into nessus_reports collection
                 db["nessus_reports"].insert_one(document)
@@ -688,44 +698,6 @@ class UploadReportView(APIView):
                     if "error" in parsed_data:
                         raise Exception(parsed_data["error"])
 
-                    # 🔹 Plan gate — Freemium allows up to 5 internal IPs per report.
-                    # Over the limit gives the caller two ways forward instead of
-                    # a hard reject: resubmit with trim_over_limit=true to keep
-                    # the first N hosts and drop the rest (stay on Freemium), or
-                    # don't — the over_limit/asset_count/limit/upgrade_url fields
-                    # in the error are enough to build a "keep vs upgrade" choice
-                    # (this is what the Slack upload flow's 2-button prompt uses).
-                    from billing.enforcement import assert_asset_within_limit, PlanLimitExceeded
-                    from billing.plans import FREEMIUM_LIMITS
-                    report_host_count = parsed_data.get("total_hosts")
-                    if report_host_count and not via_magic_link:
-                        try:
-                            assert_asset_within_limit(target_admin, int(report_host_count))
-                        except PlanLimitExceeded as e:
-                            limit = FREEMIUM_LIMITS["max_internal_ips"]
-                            trim_flag = str(request.data.get("trim_over_limit", "")).lower() in ("true", "1", "yes")
-                            if trim_flag and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
-                                kept_hosts = (parsed_data.get("vulnerabilities_by_host") or [])[:limit]
-                                parsed_data["vulnerabilities_by_host"] = kept_hosts
-                                parsed_data["total_hosts"] = len(kept_hosts)
-                                parsed_data["total_vulnerabilities"] = sum(
-                                    len(h.get("vulnerabilities") or []) for h in kept_hosts
-                                )
-                                # Falls through to normal processing below with
-                                # the trimmed data — no error, no `continue`.
-                            else:
-                                errors.append({
-                                    "file": uploaded_file.name,
-                                    "error": str(e),
-                                    "over_limit": True,
-                                    "asset_count": int(report_host_count),
-                                    "limit": limit,
-                                    "upgrade_url": "https://vaptfix.ai/pricingplan",
-                                })
-                                if file_path and os.path.exists(file_path):
-                                    os.remove(file_path)
-                                continue
-
                     # 🔹 Custom file gate — anything that isn't a recognized Nessus
                     # export or AWS Inspector CSV falls through to generic parsing
                     # (pdf/csv/excel/html). Before it's allowed anywhere near
@@ -733,6 +705,13 @@ class UploadReportView(APIView):
                     # it actually contains vulnerability data (asset + finding +
                     # severity) and extracts it into the same structured shape.
                     # Fails closed: not valid -> reject the upload outright.
+                    #
+                    # Runs BEFORE the Freemium host/vuln trim below — a pdf/docx/
+                    # csv/etc. file has no total_hosts/vulnerabilities_by_host
+                    # until AFTER this extraction step, so trimming used to
+                    # silently never apply to custom-file uploads at all (only
+                    # native Nessus/AWS files, which already have that data from
+                    # dispatch_parse, ever hit the old asset-limit check).
                     if parsed_data.get("type") in ("pdf", "csv", "excel", "html", "docx", "doc"):
                         from .custom_report_ai import validate_and_extract_custom_report
                         validation_result = validate_and_extract_custom_report(
@@ -744,6 +723,28 @@ class UploadReportView(APIView):
                                 or "This file does not appear to contain vulnerability scan data."
                             )
                         parsed_data = validation_result
+
+                    # 🔹 Plan gate — Freemium gets at most max_internal_ips hosts
+                    # and max_vulnerabilities total findings (billing/plans.py).
+                    # No more hard reject / trim_over_limit flag — a report over
+                    # either cap is now ALWAYS accepted: the lowest-vulnerability
+                    # hosts (trimmed further by severity if needed) become
+                    # "active", everything else is retained as `locked_hosts`
+                    # (see select_freemium_active_hosts) instead of being
+                    # discarded, so upgrading later unlocks it without a
+                    # re-upload (billing/views.py's StripeWebhookView).
+                    locked_hosts = []
+                    if not via_magic_link and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
+                        from billing.enforcement import select_freemium_active_hosts
+                        active_hosts, locked_hosts = select_freemium_active_hosts(
+                            parsed_data.get("vulnerabilities_by_host") or [], target_admin
+                        )
+                        if locked_hosts:
+                            parsed_data["vulnerabilities_by_host"] = active_hosts
+                            parsed_data["total_hosts"] = len(active_hosts)
+                            parsed_data["total_vulnerabilities"] = sum(
+                                len(h.get("vulnerabilities") or []) for h in active_hosts
+                            )
 
                     # 🔹 Parsed count
                     parsed_count = 1
@@ -780,6 +781,15 @@ class UploadReportView(APIView):
                             try:
                                 merge_hosts_into_report(_get_mongo_client_and_db()[1], report_id, hosts_payload)
                                 mongodb_stored = True
+                                if locked_hosts:
+                                    _mc2, _db2 = _get_mongo_client_and_db()
+                                    _db2["nessus_reports"].update_one(
+                                        {"report_id": report_id},
+                                        {
+                                            "$push": {"locked_hosts": {"$each": self._prepare_hosts_for_storage(locked_hosts)}},
+                                            "$set": {"freemium_trimmed": True},
+                                        },
+                                    )
                             except Exception as _merge_err:
                                 logger.error(f"[MergeUpload] merge failed for report_id={report_id}: {_merge_err}")
                                 mongodb_stored = False
@@ -792,7 +802,8 @@ class UploadReportView(APIView):
                                 location_name="",
                                 admin_email=target_admin.email,
                                 original_filename=uploaded_file.name,
-                                member_type=mt
+                                member_type=mt,
+                                locked_hosts=locked_hosts,
                             )
                             # Any further file (this request or a later one
                             # today) merges into this report from here on.

@@ -90,6 +90,100 @@ def assert_asset_within_limit(admin, asset_count: int):
         )
 
 
+def assert_team_member_within_limit(admin):
+    """
+    Freemium allows up to FREEMIUM_LIMITS['max_team_members'] team members
+    total across all teams for this admin. Call before creating a new
+    UserDetail row.
+    """
+    if _is_unlimited_admin(admin) or not is_freemium(admin):
+        return
+    from users_details.models import UserDetail
+
+    limit = FREEMIUM_LIMITS["max_team_members"]
+    existing = UserDetail.objects.filter(admin=admin).count()
+    if existing >= limit:
+        raise PlanLimitExceeded(
+            f"Freemium plan allows up to {limit} team members — you already have {existing}. "
+            "Upgrade to Premium to add more."
+        )
+
+
+_SEVERITY_RANK = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "informational": 1}
+
+
+def select_freemium_active_hosts(vulnerabilities_by_host, admin):
+    """
+    Freemium gets at most FREEMIUM_LIMITS['max_internal_ips'] hosts, and at
+    most FREEMIUM_LIMITS['max_vulnerabilities'] total findings across them.
+
+    Step 1 — the `max_internal_ips` hosts with the FEWEST vulnerabilities
+    become the candidate "active" set (whole hosts — every other host, in
+    full, becomes `locked`).
+
+    Step 2 — if those active hosts' vulnerabilities combined still exceed
+    `max_vulnerabilities`, the LOWEST-severity findings are trimmed off
+    first (Critical/High stay visible, Info/Low go first) until the total
+    is exactly at the cap. Trimmed findings are never discarded — they
+    move into `locked` as an extra entry for their same host_name, so an
+    upgrade can restore them exactly (see billing/views.py's
+    StripeWebhookView, which merges `locked` back into
+    vulnerabilities_by_host by host_name on a successful upgrade — no
+    re-upload needed).
+
+    Returns (active_hosts, locked_hosts). For a Premium/unlimited admin, or
+    a report already within both caps, this is a no-op: `active` is
+    everything and `locked` is empty.
+    """
+    if _is_unlimited_admin(admin) or not is_freemium(admin):
+        return list(vulnerabilities_by_host or []), []
+
+    max_hosts = FREEMIUM_LIMITS["max_internal_ips"]
+    max_vulns = FREEMIUM_LIMITS["max_vulnerabilities"]
+
+    hosts = list(vulnerabilities_by_host or [])
+    total_vulns = sum(len(h.get("vulnerabilities") or []) for h in hosts)
+    if len(hosts) <= max_hosts and total_vulns <= max_vulns:
+        return hosts, []
+
+    ordered = sorted(hosts, key=lambda h: len(h.get("vulnerabilities") or []))
+    active_hosts = [dict(h) for h in ordered[:max_hosts]]
+    locked_hosts = list(ordered[max_hosts:])
+
+    active_vuln_count = sum(len(h.get("vulnerabilities") or []) for h in active_hosts)
+    if active_vuln_count > max_vulns:
+        # (severity_rank, host_index, vuln) — sort ascending so the least
+        # severe findings sort first and are the ones cut.
+        flat = []
+        for idx, h in enumerate(active_hosts):
+            for v in (h.get("vulnerabilities") or []):
+                rank = _SEVERITY_RANK.get(str(v.get("risk_factor") or "").strip().lower(), 0)
+                flat.append((rank, idx, v))
+        flat.sort(key=lambda t: t[0])
+
+        num_to_drop = active_vuln_count - max_vulns
+        dropped = flat[:num_to_drop]
+        kept_ids = {id(v) for (_rank, _idx, v) in flat[num_to_drop:]}
+
+        overflow_by_host = {}
+        for _rank, idx, v in dropped:
+            overflow_by_host.setdefault(idx, []).append(v)
+
+        new_active_hosts = []
+        for idx, h in enumerate(active_hosts):
+            kept_vulns = [v for v in (h.get("vulnerabilities") or []) if id(v) in kept_ids]
+            new_host = dict(h)
+            new_host["vulnerabilities"] = kept_vulns
+            new_active_hosts.append(new_host)
+            if idx in overflow_by_host:
+                overflow_host = dict(h)
+                overflow_host["vulnerabilities"] = overflow_by_host[idx]
+                locked_hosts.append(overflow_host)
+        active_hosts = new_active_hosts
+
+    return active_hosts, locked_hosts
+
+
 def assert_can_use_automation_scripts(admin):
     if _is_unlimited_admin(admin):
         return
