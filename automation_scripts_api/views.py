@@ -133,6 +133,37 @@ def _resolve_admin_and_teams(request):
     return str(detail.admin.id), getattr(detail.admin, "email", None), teams
 
 
+def _premium_required_message(admin_id):
+    """
+    Same plan gate as user_download_script (assert_can_use_automation_scripts)
+    and the same 'premium_required'/'message' convention admin_download_stats
+    already uses — but checked up front here instead of only at download
+    time. Real bug: the *_match_script*/ endpoints (what actually renders
+    the automation-fix detail screen) returned the full script content with
+    no indication at all that the plan doesn't allow it — a Freemium admin
+    or member saw everything, with zero "upgrade" prompt, and would only
+    find out the plan blocked them if they clicked Download. Mirrors the
+    same fix already applied to Slack's _allvuln_detail_blocks.
+
+    Takes admin_id directly rather than resolving it internally —
+    _resolve_admin_and_teams keys off is_staff/is_superuser to decide
+    "this caller IS the admin", which a real admin account can fail (confirmed:
+    an actual report-owning admin here had is_staff=False), silently
+    resolving to admin_id=None and never locking anything. admin_* call
+    sites pass request.user.id directly (same as admin_download_stats
+    already does); user_* call sites pass _resolve_admin_and_teams(request)'s
+    own admin_id, which is correct for a genuine team-member caller.
+    """
+    from billing.enforcement import assert_can_use_automation_scripts, PlanLimitExceeded
+    if not admin_id:
+        return False, None
+    try:
+        assert_can_use_automation_scripts(admin_id)
+        return False, None
+    except PlanLimitExceeded as e:
+        return True, str(e)
+
+
 def _normalize_vuln_name(name: str) -> str:
     """Case/whitespace-insensitive key for matching a vulnerability name
     against the automation_scripts library's own "vulnerability" field.
@@ -504,8 +535,9 @@ def admin_match_script(request, plugin_id):
     """?os=Windows|Linux|Cisco — optional; omit to get any available variant."""
     os_param = request.query_params.get("os")
     doc, available_os = _fetch_script(plugin_id, os=os_param)
+    premium_required, message = _premium_required_message(str(request.user.id))
     if doc:
-        return Response(_build_response(doc, available_os))
+        return Response({**_build_response(doc, available_os), "premium_required": premium_required, "message": message})
     return Response(_not_found_response(plugin_id))
 
 
@@ -531,7 +563,8 @@ def admin_match_scripts_bulk(request):
         else _not_found_response(pid)
         for pid in int_ids
     ]
-    return Response({"results": results})
+    premium_required, message = _premium_required_message(str(request.user.id))
+    return Response({"results": results, "premium_required": premium_required, "message": message})
 
 
 @api_view(["POST"])
@@ -563,7 +596,8 @@ def admin_match_scripts_by_name(request):
             results.append(_build_response(doc))
         else:
             results.append({"matched": False, "vulnerability_name": n, "message": "No automated fix available for this vulnerability."})
-    return Response({"results": results})
+    premium_required, message = _premium_required_message(str(request.user.id))
+    return Response({"results": results, "premium_required": premium_required, "message": message})
 
 
 @api_view(["GET"])
@@ -719,8 +753,10 @@ def user_match_script(request, plugin_id):
     """?os=Windows|Linux|Cisco — optional; omit to get any available variant."""
     os_param = request.query_params.get("os")
     doc, available_os = _fetch_script(plugin_id, os=os_param)
+    _admin_id, _, _ = _resolve_admin_and_teams(request)
+    premium_required, message = _premium_required_message(_admin_id)
     if doc:
-        return Response(_build_response(doc, available_os))
+        return Response({**_build_response(doc, available_os), "premium_required": premium_required, "message": message})
     return Response(_not_found_response(plugin_id))
 
 
@@ -746,7 +782,9 @@ def user_match_scripts_bulk(request):
         else _not_found_response(pid)
         for pid in int_ids
     ]
-    return Response({"results": results})
+    _admin_id, _, _ = _resolve_admin_and_teams(request)
+    premium_required, message = _premium_required_message(_admin_id)
+    return Response({"results": results, "premium_required": premium_required, "message": message})
 
 
 @api_view(["POST"])
@@ -770,7 +808,9 @@ def user_match_scripts_by_name(request):
             results.append(_build_response(doc))
         else:
             results.append({"matched": False, "vulnerability_name": n, "message": "No automated fix available for this vulnerability."})
-    return Response({"results": results})
+    _admin_id, _, _ = _resolve_admin_and_teams(request)
+    premium_required, message = _premium_required_message(_admin_id)
+    return Response({"results": results, "premium_required": premium_required, "message": message})
 
 
 @api_view(["GET"])
