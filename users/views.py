@@ -4644,6 +4644,7 @@ def _post_freemium_trim_notice(bot_token, channel_id, report_ids):
                         "type": "actions",
                         "elements": [{
                             "type": "button",
+                            "action_id": "freemium_view_pricing_plans",
                             "text": {"type": "plain_text", "text": "⭐ View Pricing Plans", "emoji": True},
                             "url": "https://vaptfix.ai/pricingplan",
                             "style": "primary",
@@ -13444,6 +13445,7 @@ class SlackSlashCommandView(APIView):
                     "type": "actions",
                     "elements": [{
                         "type": "button",
+                        "action_id": "freemium_view_pricing_plans",
                         "text": {"type": "plain_text", "text": "⭐ Upgrade to Premium", "emoji": True},
                         "url": prompt.get("upgrade_url", "https://vaptfix.ai/pricingplan"),
                         "style": "primary",
@@ -21112,6 +21114,17 @@ class SlackInteractivityView(APIView):
                 # navigates there directly, no server work needed beyond
                 # cleaning up the cached pending-upload entry.
                 cache.delete(f"slack_pending_upload_{value}")
+                return
+
+            if action_id == "freemium_view_pricing_plans":
+                # Plain `url` button (see _post_freemium_trim_notice) —
+                # Slack navigates there directly; nothing for the backend
+                # to do. Real bug this fixes: the button had no action_id
+                # at all, so Slack's own interaction payload for it (yes,
+                # Slack still sends one for url-type buttons) fell through
+                # to the "Unknown action" fallback below, which replaced
+                # the button with that error text — the admin lost the
+                # ability to click it again later to go back and upgrade.
                 return
 
             if action_id == "team_sub_deleteteamuser":
