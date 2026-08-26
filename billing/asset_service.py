@@ -266,8 +266,14 @@ def resolve_management_testing_asset_count(admin_id: str):
 
     Returns (asset_count, source) — source is "report" or "scope", so
     callers can label where the number came from.
+
+    report_count uses get_admin_billable_asset_count (visible + locked),
+    NOT get_admin_asset_count — real bug confirmed by the frontend:
+    Management+Testing pricing was still showing the Freemium visible-only
+    count (e.g. 5) after upgrading, because this function specifically
+    hadn't been updated when Management mode was fixed for the same issue.
     """
-    report_count = get_admin_asset_count(admin_id)
+    report_count = get_admin_billable_asset_count(admin_id)
     scope_count = get_admin_scope_asset_count(admin_id)
 
     if report_count and scope_count:

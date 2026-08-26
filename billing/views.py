@@ -237,8 +237,24 @@ class PremiumCheckoutView(APIView):
                 admin, mode=mode, billing_cycle=billing_cycle, asset_count=asset_count
             )
         except Exception as e:
-            logger.error(f"[Billing] Checkout session creation failed for {admin.email}: {e}")
-            return Response({"detail": "Could not start checkout. Please try again."}, status=500)
+            # Surface the real reason instead of a generic "please try
+            # again" — the frontend was showing our own hardcoded generic
+            # string verbatim with no way to tell a Stripe configuration
+            # problem apart from a real transient failure. stripe.error.*
+            # exceptions carry a human-readable `user_message`/str(e)
+            # (e.g. "No such customer", invalid API key, card errors) —
+            # pass that through; only fall back to generic for a truly
+            # unexpected (non-Stripe) exception.
+            logger.exception(f"[Billing] Checkout session creation failed for {admin.email}")
+            try:
+                import stripe as _stripe
+                if isinstance(e, _stripe.error.StripeError):
+                    detail = getattr(e, "user_message", None) or str(e) or "Could not start checkout. Please try again."
+                else:
+                    detail = "Could not start checkout. Please try again."
+            except Exception:
+                detail = "Could not start checkout. Please try again."
+            return Response({"detail": detail}, status=500)
 
         return Response(result, status=status.HTTP_201_CREATED)
 
