@@ -334,6 +334,28 @@ def _build_response(doc, available_os=None):
     }
 
 
+def _script_response(doc, available_os, premium_required, message):
+    """
+    Full script detail when the plan allows automation scripts; otherwise
+    ONLY bare identifying fields plus the lock message — explicit request:
+    a Freemium account must not receive any of the actual script content
+    (script_description, recommended_approach, what_can_be_automated,
+    libraries, command strings, etc.) at all, not just have the frontend
+    hide it. Matches the same fix already applied to Slack's
+    _format_vulndata_automation_detail.
+    """
+    if premium_required:
+        return {
+            "matched": True,
+            "plugin_id": doc.get("plugin_id"),
+            "vulnerability": doc.get("vulnerability"),
+            "severity": doc.get("severity"),
+            "premium_required": True,
+            "message": message,
+        }
+    return {**_build_response(doc, available_os), "premium_required": False, "message": None}
+
+
 def _not_found_response(plugin_id):
     return {
         "matched": False,
@@ -537,7 +559,7 @@ def admin_match_script(request, plugin_id):
     doc, available_os = _fetch_script(plugin_id, os=os_param)
     premium_required, message = _premium_required_message(str(request.user.id))
     if doc:
-        return Response({**_build_response(doc, available_os), "premium_required": premium_required, "message": message})
+        return Response(_script_response(doc, available_os, premium_required, message))
     return Response(_not_found_response(plugin_id))
 
 
@@ -558,12 +580,12 @@ def admin_match_scripts_bulk(request):
             pass
 
     by_plugin = _fetch_scripts_bulk(int_ids, os=os_param)
+    premium_required, message = _premium_required_message(str(request.user.id))
     results = [
-        _build_response(by_plugin[pid][0], by_plugin[pid][1]) if by_plugin[pid][0]
+        _script_response(by_plugin[pid][0], by_plugin[pid][1], premium_required, message) if by_plugin[pid][0]
         else _not_found_response(pid)
         for pid in int_ids
     ]
-    premium_required, message = _premium_required_message(str(request.user.id))
     return Response({"results": results, "premium_required": premium_required, "message": message})
 
 
@@ -589,14 +611,14 @@ def admin_match_scripts_by_name(request):
     matched = _fetch_scripts_by_name(name_keys, os=os_param)
     matched_by_key = {_normalize_vuln_name(d.get("vulnerability", "")): d for d in matched}
 
+    premium_required, message = _premium_required_message(str(request.user.id))
     results = []
     for n in names:
         doc = matched_by_key.get(_normalize_vuln_name(n)) if isinstance(n, str) else None
         if doc:
-            results.append(_build_response(doc))
+            results.append(_script_response(doc, None, premium_required, message))
         else:
             results.append({"matched": False, "vulnerability_name": n, "message": "No automated fix available for this vulnerability."})
-    premium_required, message = _premium_required_message(str(request.user.id))
     return Response({"results": results, "premium_required": premium_required, "message": message})
 
 
@@ -756,7 +778,7 @@ def user_match_script(request, plugin_id):
     _admin_id, _, _ = _resolve_admin_and_teams(request)
     premium_required, message = _premium_required_message(_admin_id)
     if doc:
-        return Response({**_build_response(doc, available_os), "premium_required": premium_required, "message": message})
+        return Response(_script_response(doc, available_os, premium_required, message))
     return Response(_not_found_response(plugin_id))
 
 
@@ -777,13 +799,13 @@ def user_match_scripts_bulk(request):
             pass
 
     by_plugin = _fetch_scripts_bulk(int_ids, os=os_param)
+    _admin_id, _, _ = _resolve_admin_and_teams(request)
+    premium_required, message = _premium_required_message(_admin_id)
     results = [
-        _build_response(by_plugin[pid][0], by_plugin[pid][1]) if by_plugin[pid][0]
+        _script_response(by_plugin[pid][0], by_plugin[pid][1], premium_required, message) if by_plugin[pid][0]
         else _not_found_response(pid)
         for pid in int_ids
     ]
-    _admin_id, _, _ = _resolve_admin_and_teams(request)
-    premium_required, message = _premium_required_message(_admin_id)
     return Response({"results": results, "premium_required": premium_required, "message": message})
 
 
@@ -801,15 +823,15 @@ def user_match_scripts_by_name(request):
     matched = _fetch_scripts_by_name(name_keys, os=os_param)
     matched_by_key = {_normalize_vuln_name(d.get("vulnerability", "")): d for d in matched}
 
+    _admin_id, _, _ = _resolve_admin_and_teams(request)
+    premium_required, message = _premium_required_message(_admin_id)
     results = []
     for n in names:
         doc = matched_by_key.get(_normalize_vuln_name(n)) if isinstance(n, str) else None
         if doc:
-            results.append(_build_response(doc))
+            results.append(_script_response(doc, None, premium_required, message))
         else:
             results.append({"matched": False, "vulnerability_name": n, "message": "No automated fix available for this vulnerability."})
-    _admin_id, _, _ = _resolve_admin_and_teams(request)
-    premium_required, message = _premium_required_message(_admin_id)
     return Response({"results": results, "premium_required": premium_required, "message": message})
 
 
