@@ -20537,20 +20537,28 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id == "open_upload_report_modal":
+                # Open the modal FIRST (the file_input default, from
+                # _build_upload_report_modal(None)) with the trigger_id,
+                # THEN fetch latest_report and views.update it if a report
+                # already exists — trigger_id is only valid for ~3s from the
+                # original click, and this thread already eats into that
+                # budget just by being scheduled; doing the /latest-report/
+                # _call_api round trip BEFORE views.open used to blow the
+                # window (confirmed real: fails immediately after a fresh
+                # click, works if you wait a moment and click again — i.e.
+                # exactly what a cold connection pushing this call past 3s
+                # looks like). views.update has no such time limit once the
+                # modal is already open. Same fix already applied to
+                # team_sub_deleteteamuser's member-list fetch — see there.
                 bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
                 if not bot_token or not trigger_id:
                     self._debug_write("open_upload_report_modal: missing bot_token or trigger_id")
                     return
-                # Checked fresh on every open — see _build_upload_report_modal's
-                # docstring for why an existing report skips the file_input.
-                latest_report = slash._call_api(
-                    "/api/admin/upload_report/latest-report/", team_id, slack_user_id=slack_user_id,
-                )
-                view = _build_upload_report_modal(latest_report if isinstance(latest_report, dict) else None)
+                loading_view = _build_upload_report_modal(None)
                 resp = _http_post(
                     "https://slack.com/api/views.open",
                     headers={"Authorization": f"Bearer {bot_token}"},
-                    json={"trigger_id": trigger_id, "view": view},
+                    json={"trigger_id": trigger_id, "view": loading_view},
                     timeout=10,
                 )
                 self._debug_write(f"open_upload_report_modal views.open -> {getattr(resp, 'text', None)}")
@@ -20562,7 +20570,8 @@ class SlackInteractivityView(APIView):
                     resp_json = resp.json()
                 except Exception:
                     resp_json = {}
-                if not resp_json.get("ok"):
+                view_id = (resp_json.get("view") or {}).get("id")
+                if not resp_json.get("ok") or not view_id:
                     err = resp_json.get("error", "unknown_error")
                     self._post_response_url(
                         response_url,
@@ -20571,6 +20580,28 @@ class SlackInteractivityView(APIView):
                                  "Please try clicking the button again."},
                         action_id,
                     )
+                    return
+
+                # Checked fresh on every open — see _build_upload_report_modal's
+                # docstring for why an existing report skips the file_input.
+                # No time pressure here — the modal is already open.
+                try:
+                    latest_report = slash._call_api(
+                        "/api/admin/upload_report/latest-report/", team_id, slack_user_id=slack_user_id,
+                    )
+                except Exception:
+                    latest_report = None
+                if isinstance(latest_report, dict) and latest_report.get("report_id"):
+                    update_view = _build_upload_report_modal(latest_report)
+                    resp2 = _http_post(
+                        "https://slack.com/api/views.update",
+                        headers={"Authorization": f"Bearer {bot_token}"},
+                        json={"view_id": view_id, "view": update_view},
+                        timeout=10,
+                    )
+                    self._debug_write(f"open_upload_report_modal views.update -> {getattr(resp2, 'text', None)}")
+                # else: no existing report — loading_view (the file_input
+                # form) shown at views.open is already the correct final view.
                 return
 
             if action_id == "open_provide_scope":
