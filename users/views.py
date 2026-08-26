@@ -8224,6 +8224,15 @@ class SlackMemberLoginView(APIView):
                 "platform": "slack",
                 "role": "member",
                 "admin_id": str(admin.id),
+                # Explicit request: a member added to specific team(s) should
+                # land directly on one of them (highlighted) after logging in
+                # via Slack, instead of a generic/unscoped view. `teams` is
+                # every team this member is assigned to (Member_role can
+                # have more than one — see the "PM + CM" example); pick the
+                # first as the one to open by default, frontend highlights
+                # all of `teams`.
+                "teams": user_detail.Member_role or [],
+                "default_team": (user_detail.Member_role or [None])[0],
             },
         })
 
@@ -8301,6 +8310,9 @@ class TeamsMemberLoginView(APIView):
                 "platform": "microsoft_teams",
                 "role": "member",
                 "admin_id": str(admin.id),
+                # Same as SlackMemberLoginView — see its comment.
+                "teams": user_detail.Member_role or [],
+                "default_team": (user_detail.Member_role or [None])[0],
             },
         })
 
