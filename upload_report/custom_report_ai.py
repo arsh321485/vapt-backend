@@ -44,16 +44,30 @@ An admin has uploaded a file that isn't a recognized Nessus or AWS Inspector exp
 decide whether it actually contains vulnerability / security-assessment findings, and if so extract them.
 
 A file is VALID only if it contains, for at least one finding:
-  1. An asset/host identifier (IP, hostname, URL, ARN, server/application name — anything that
-     identifies WHAT was tested)
+  1. An asset/host identifier that is SPECIFIC to that finding (IP, hostname, URL, ARN, server/
+     application name, or a named agent/device from the document's own asset list — anything that
+     identifies WHICH machine or target that particular finding is about)
   2. A vulnerability/finding name or description (WHAT is wrong)
   3. A severity or risk indicator (Critical/High/Medium/Low/Info, a CVSS score, or equivalent)
 
-If the file is NOT a vulnerability/security report (e.g. an invoice, resume, contract, empty or
-unrelated document, or a document with no actual findings), mark it invalid and explain why in one
-sentence.
+CRITICAL — do not confuse a platform/vendor/product/OS name inside a finding's own title or rule
+category with an actual asset identifier. Names like "Cisco IOS", "Windows", "ASA", "Linux",
+"Apache" appearing in a finding's name (e.g. "Cisco IOS warning message", "CIS Microsoft Windows 11
+Benchmark: ...") describe WHAT KIND of system the underlying alerting rule is about, not WHICH
+specific host it fired on — never invent a host_name like "Cisco IOS" or "Windows" out of these
+words. Some documents (e.g. SIEM/log-monitoring alert summaries) list findings/alert types in one
+aggregate table for the whole environment, with the actual monitored hosts/agents named only
+separately (e.g. a "Top agents" list or chart) and never explicitly linked to any specific row in
+that table. If you cannot tell, for a given finding, which SPECIFIC named host it applies to, do
+NOT guess or attach it to any host anyway (not even one from an "agents" list elsewhere in the
+document) — leave that finding out entirely rather than fabricate or guess the association. A
+report that turns out to have NO finding with a genuine, specific host attribution should be marked
+invalid with a reason explaining this (e.g. "This report lists alert types in aggregate but does not
+state which specific host/agent each one applies to").
 
-Never invent findings that are not clearly present in the text. If a field is not stated, leave it "".
+Never invent findings that are not clearly present in the text, and never output the same finding
+twice for the same host unless the document itself repeats it with genuinely different specifics
+(e.g. a different port). If a field is not stated, leave it "".
 
 IMPORTANT — one finding can affect many hosts. Pentest reports are often organized by FINDING
 (one write-up per vulnerability), not by host, and that write-up may list several affected
