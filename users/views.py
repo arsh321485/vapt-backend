@@ -18996,6 +18996,20 @@ class SlackSlashCommandView(APIView):
                     "text": "_Automation script not ready for this vulnerability._"}},
             ]
 
+        if locked_reason:
+            # Freemium (or whatever plan this is) doesn't allow automation
+            # scripts at all — explicit request: don't show ANY of the
+            # script's actual content (What this does / Recommended
+            # Approach / What can be automated / libraries / etc.), only
+            # the lock notice. Previously this still rendered the full
+            # detail below and only swapped out the Download button, which
+            # wasn't a real restriction — the content itself is the thing
+            # that's supposed to be Premium-only.
+            return [
+                {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Automated Fix: {name}"[:150], "emoji": True}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"🔒 *{locked_reason}*"}},
+            ]
+
         libs = automation.get("libraries") or []
         libs_str = ", ".join(f"`{l}`" for l in libs) if isinstance(libs, list) else str(libs or "—")
 
@@ -19031,9 +19045,9 @@ class SlackSlashCommandView(APIView):
                 "text": f"*Install command*\n`{automation['command_download_libraries']}`"}})
         add_section("Before running", "considerations_before")
 
-        if can_download and locked_reason:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"🔒 *{locked_reason}*"}})
-        elif can_download:
+        # locked_reason is unreachable past this point — handled by the
+        # early return above, before any of this content was even built.
+        if can_download:
             # Use the MATCHED script's own plugin_id, not the original
             # finding's — AWS/custom findings resolve by name and never had
             # a real plugin_id to begin with, so the download button must
@@ -19050,12 +19064,6 @@ class SlackSlashCommandView(APIView):
                     "style": "primary",
                 }],
             })
-        elif locked_reason:
-            # Read-only (admin/Common Vulns) view, but the plan doesn't
-            # allow automation scripts at all — say so instead of the
-            # generic "team members can download this" caption below, which
-            # was misleading when it wasn't actually true for this plan.
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"🔒 *{locked_reason}*"}})
         else:
             blocks.append(self._ctx(
                 f"Script: `{automation.get('fix_script_name') or '—'}` — team members can download this in their team channel."
