@@ -251,6 +251,20 @@ def _on_checkout_completed(session: dict):
 
     sub.save()
 
+    # Freemium -> Premium upgrade: restore whatever upload_report/views.py's
+    # select_freemium_active_hosts set aside as locked_hosts at upload time
+    # (never discarded) back into vulnerabilities_by_host, and generate cards
+    # for anything newly unlocked — no re-upload needed. A brand-new Freemium
+    # signup or a plan that was never Freemium simply has nothing to unlock.
+    if sub.plan == PLAN_PREMIUM:
+        try:
+            from upload_report.views import unlock_freemium_hosts_for_admin
+            unlocked = unlock_freemium_hosts_for_admin(sub.admin)
+            if unlocked:
+                logger.info(f"[Billing] Upgrade unlocked {unlocked} previously-locked host entrie(s) for {sub.admin.email}")
+        except Exception:
+            logger.exception(f"[Billing] Freemium-unlock failed for {sub.admin.email} after checkout.session.completed")
+
 
 def _on_invoice_paid(invoice: dict):
     _upsert_invoice(invoice, status="paid")

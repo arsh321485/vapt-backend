@@ -1673,6 +1673,86 @@ def _get_mongo_client_and_db():
     return client, get_shared_db(client)
 
 
+def unlock_freemium_hosts_for_admin(admin) -> int:
+    """
+    Called on a successful Freemium -> Premium upgrade (see
+    billing/stripe_service.py's _on_checkout_completed) — restores every
+    report's `locked_hosts` (set aside at upload time by
+    billing.enforcement.select_freemium_active_hosts, never discarded)
+    back into `vulnerabilities_by_host`, merging by host_name so a host
+    that was already partially active just gains the findings that were
+    trimmed off rather than duplicating the host entry.
+
+    Kicks off background card generation for each affected report
+    afterwards — _auto_generate_cards_bg only ever creates a card for a
+    (host, plugin_name) pair that doesn't already have one, so this is
+    safe even when some hosts in the report were already fully active.
+
+    No re-upload needed — this is the whole point of retaining locked_hosts
+    instead of dropping the excess at upload time.
+
+    Returns how many previously-locked (host, finding) entries were
+    unlocked, across every affected report, for logging/confirmation.
+    """
+    import threading
+
+    client, db = _get_mongo_client_and_db()
+
+    conditions = [{"admin_id": str(admin.id)}]
+    if getattr(admin, "email", None):
+        conditions.append({"admin_email": admin.email})
+
+    reports = list(db[NESSUS_COLLECTION].find({
+        "$or": conditions,
+        "locked_hosts": {"$exists": True, "$ne": []},
+    }))
+    if not reports:
+        return 0
+
+    unlocked_count = 0
+    for report in reports:
+        report_id = report.get("report_id")
+        locked_hosts = report.get("locked_hosts") or []
+        if not locked_hosts:
+            continue
+
+        by_name = {}
+        for h in (report.get("vulnerabilities_by_host") or []):
+            by_name[h.get("host_name")] = h
+        for h in locked_hosts:
+            name = h.get("host_name")
+            if name in by_name:
+                existing = by_name[name]
+                existing["vulnerabilities"] = (existing.get("vulnerabilities") or []) + (h.get("vulnerabilities") or [])
+            else:
+                by_name[name] = h
+
+        merged_hosts = list(by_name.values())
+        total_vulns = sum(len(h.get("vulnerabilities") or []) for h in merged_hosts)
+
+        db[NESSUS_COLLECTION].update_one(
+            {"report_id": report_id},
+            {"$set": {
+                "vulnerabilities_by_host": merged_hosts,
+                "total_hosts": len(merged_hosts),
+                "total_vulnerabilities": total_vulns,
+                "locked_hosts": [],
+                "freemium_trimmed": False,
+            }},
+        )
+        unlocked_count += len(locked_hosts)
+        logger.info(f"[FreemiumUnlock] report_id={report_id} unlocked {len(locked_hosts)} host entrie(s) for admin={getattr(admin, 'email', admin.id)}")
+
+        t = threading.Thread(
+            target=_auto_generate_cards_bg,
+            args=(report_id, getattr(admin, "email", ""), str(admin.id)),
+            daemon=True,
+        )
+        t.start()
+
+    return unlocked_count
+
+
 def _fmt_seconds_for_status(seconds) -> str:
     sec = max(0, int(seconds or 0))
     mins, rem = divmod(sec, 60)

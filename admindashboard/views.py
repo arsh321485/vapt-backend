@@ -6,7 +6,10 @@ from django.core.cache import cache
 from datetime import date, timedelta, datetime, timezone
 import re
 import math
+import logging
 from bson import ObjectId
+
+logger = logging.getLogger(__name__)
 
 from .serializers import (
     TotalAssetsSerializer, AvgScoreSerializer,
@@ -2114,6 +2117,80 @@ class AdminReportStatusAPIView(APIView):
             )
 
 
+def _freemium_upgrade_prompt(admin) -> dict:
+    """
+    Surfaces the "upgrade to unlock N more assets" signal for the Freemium
+    dashboard banner — eligible once an admin has closed every currently
+    VISIBLE finding on a report that still has locked_hosts waiting (set
+    aside at upload time by billing.enforcement.select_freemium_active_hosts,
+    never discarded; restored automatically on upgrade by
+    upload_report.views.unlock_freemium_hosts_for_admin — no re-upload).
+
+    "Visible finding closed" reuses the exact same (plugin_name, host_name)
+    active-minus-closed set logic AdminVulnerabilitiesAPIView already uses,
+    so this never disagrees with what the admin sees elsewhere on the
+    dashboard about what's still open.
+    """
+    from billing.enforcement import is_freemium, _is_unlimited_admin
+
+    if _is_unlimited_admin(admin) or not is_freemium(admin):
+        return {"eligible": False}
+
+    with MongoContext() as db:
+        reports = list(db["nessus_reports"].find(
+            {
+                "$or": [{"admin_id": str(admin.id)}, {"admin_email": admin.email}],
+                "locked_hosts": {"$exists": True, "$ne": []},
+            },
+            {"report_id": 1, "vulnerabilities_by_host": 1, "locked_hosts": 1},
+        ))
+        if not reports:
+            return {"eligible": False}
+
+        total_locked_assets = 0
+        any_fully_closed = False
+        for report in reports:
+            report_id = report.get("report_id")
+            locked_hosts = report.get("locked_hosts") or []
+            total_locked_assets += len({h.get("host_name") for h in locked_hosts if h.get("host_name")})
+
+            active_pairs = set()
+            for host in report.get("vulnerabilities_by_host") or []:
+                host_name = (host.get("host_name") or "").strip().lower()
+                for v in (host.get("vulnerabilities") or []):
+                    p = (v.get("plugin_name") or "").strip().lower()
+                    if p:
+                        active_pairs.add((p, host_name))
+
+            if not active_pairs:
+                continue  # nothing visible on this report to have "closed" yet
+
+            closed_pairs = set()
+            for closed_doc in db["fix_vulnerabilities_closed"].find(
+                {"report_id": report_id}, {"plugin_name": 1, "host_name": 1}
+            ):
+                p = (closed_doc.get("plugin_name") or "").strip().lower()
+                h = (closed_doc.get("host_name") or "").strip().lower()
+                if p:
+                    closed_pairs.add((p, h))
+
+            if active_pairs <= closed_pairs:
+                any_fully_closed = True
+
+    if not any_fully_closed:
+        return {"eligible": False, "locked_assets": total_locked_assets}
+
+    return {
+        "eligible": True,
+        "locked_assets": total_locked_assets,
+        "message": (
+            f"You've closed every visible finding — upgrade to Premium to unlock "
+            f"{total_locked_assets} more asset(s) from this file, no re-upload needed."
+        ),
+        "upgrade_url": "https://vaptfix.ai/pricingplan",
+    }
+
+
 class AdminDashboardSummaryAPIView(APIView):
     """
     Single API that returns all 7 admin dashboard metrics in one response.
@@ -2147,6 +2224,12 @@ class AdminDashboardSummaryAPIView(APIView):
                     results[key] = future.result().data
                 except Exception as exc:
                     results[key] = {"error": str(exc)}
+
+        try:
+            results["freemium_upgrade"] = _freemium_upgrade_prompt(request.user)
+        except Exception as exc:
+            logger.warning(f"[AdminDashboardSummary] freemium_upgrade check failed: {exc}")
+            results["freemium_upgrade"] = {"eligible": False}
 
         cache.set(cache_key, results, 300)
         return Response(results, status=status.HTTP_200_OK)
