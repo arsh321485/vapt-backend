@@ -2810,17 +2810,48 @@ class UserSupportRequestsByHostAPIView(APIView):
                 }
             ).sort("requested_at", -1)
 
-            results = []
-            for doc in cursor:
-                doc_team = (doc.get("assigned_team") or "").strip().lower()
-                if doc_team not in teams_lower_set:
+            raw_docs = [
+                doc for doc in cursor
+                if (doc.get("assigned_team") or "").strip().lower() in teams_lower_set
+            ]
+
+            # Same severity fallback as UserSupportRequestsByReportAPIView —
+            # a support request's own doc doesn't always carry severity/
+            # risk_factor (e.g. a general request raised without picking a
+            # specific vulnerability), so fall back to the linked
+            # fix_vulnerabilities record's risk_factor when present.
+            fix_coll = db[FIX_VULN_COLLECTION]
+            object_ids = []
+            for sdoc in raw_docs:
+                raw_vid = str(sdoc.get("vulnerability_id") or "").strip()
+                if not raw_vid:
                     continue
+                try:
+                    object_ids.append(ObjectId(raw_vid))
+                except Exception as e:
+                    logger.warning("Suppressed error: %s", e)
+
+            fix_severity_by_id = {}
+            if object_ids:
+                for fdoc in fix_coll.find({"_id": {"$in": object_ids}}):
+                    fid = str(fdoc.get("_id"))
+                    sev = (fdoc.get("risk_factor") or fdoc.get("severity") or "").strip().title()
+                    fix_severity_by_id[fid] = sev
+
+            results = []
+            for doc in raw_docs:
+                vulnerability_id = str(doc.get("vulnerability_id") or "").strip()
+                severity = (
+                    (doc.get("severity") or doc.get("risk_factor") or "").strip().title()
+                    or fix_severity_by_id.get(vulnerability_id, "")
+                )
                 results.append({
                     "_id":                   str(doc.get("_id")),
                     "report_id":             doc.get("report_id"),
                     "vulnerability_id":      doc.get("vulnerability_id"),
                     "vul_name":              doc.get("vul_name"),
                     "host_name":             doc.get("host_name"),
+                    "severity":              severity,
                     "assigned_team":         doc.get("assigned_team"),
                     "assigned_team_members": doc.get("assigned_team_members", []),
                     "step_number":           doc.get("step_number"),
