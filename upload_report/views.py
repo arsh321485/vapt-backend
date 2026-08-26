@@ -870,6 +870,15 @@ class UploadReportView(APIView):
                             "structured_data_preview": self._create_preview(parsed_data),
                             "estimated_time_seconds": estimated_seconds,
                             "estimated_time_text": self._seconds_to_text(estimated_seconds),
+                            # Freemium trim (billing.enforcement.select_freemium_active_hosts)
+                            # — tells the frontend this report has more hosts than
+                            # what's currently shown, retained (not discarded) for
+                            # an automatic unlock on upgrade. See the
+                            # 'freemium_upgrade' field on the dashboard-summary
+                            # endpoint for the separate "ready to upgrade" banner
+                            # signal (shown once every visible finding is closed).
+                            "freemium_trimmed": bool(locked_hosts),
+                            "locked_asset_count": len(locked_hosts),
                         })
                         timings_ms["response_build_ms"] += int((time.perf_counter() - response_start) * 1000)
 
