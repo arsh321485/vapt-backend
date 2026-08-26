@@ -13952,7 +13952,8 @@ class SlackSlashCommandView(APIView):
             slack_user_id=user_id,
         )
         rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
-        return self._format_asset_list(rows)
+        all_host_names = self._fetch_all_asset_host_names(team_id, user_id)
+        return self._format_asset_list(rows, all_host_names=all_host_names)
 
     def _norm_vuln_sev(self, v):
         return (v.get("severity") or v.get("risk_factor") or "").strip().lower()
@@ -14148,7 +14149,28 @@ class SlackSlashCommandView(APIView):
     # low rgb(24,185,133)).
     _ASSET_SEV_EMOJI = [("critical", "🔴", "Critical"), ("high", "🟠", "High"), ("medium", "🟡", "Medium"), ("low", "🟢", "Low")]
 
-    def _format_asset_list(self, rows, offset=0, sev_filter="all", st_filter="all"):
+    def _fetch_all_asset_host_names(self, team_id, user_id=None):
+        """
+        Every asset in the latest report, regardless of vulnerability count
+        — calls the SAME real assets endpoint the website's All Assets tab
+        uses (AdminAssetsAPIView), unlike _group_assets_from_vulns (below),
+        which only ever sees a host at all if it has at least one row in
+        the vuln list it's derived from. Real bug confirmed: a Freemium
+        admin's 5-asset report had 2 hosts with zero open findings; the
+        website correctly showed all 5, Slack only showed the 3 that had
+        vulnerabilities. Best-effort — returns [] on any failure rather
+        than breaking the (already-working) vuln-derived list.
+        """
+        try:
+            data = self._call_api(
+                "/api/admin/adminasset/assets/", team_id, slack_user_id=user_id,
+            )
+            return [a.get("asset") for a in (data.get("assets") or []) if a.get("asset")]
+        except Exception:
+            logger.exception(f"[SlackCmd] _fetch_all_asset_host_names failed for team_id={team_id}")
+            return []
+
+    def _format_asset_list(self, rows, offset=0, sev_filter="all", st_filter="all", all_host_names=None):
         PAGE_SIZE = 5
         sev_filter = (sev_filter or "all").strip().lower()
         st_filter = (st_filter or "all").strip().lower()
@@ -14160,6 +14182,17 @@ class SlackSlashCommandView(APIView):
         _, st_counts = self._asset_sev_status_counts(rows, sev_filter, st_filter)
         filtered_rows = self._filter_vuln_rows(rows, sev_filter, st_filter)
         assets = self._group_assets_from_vulns(filtered_rows)
+        # Add back any real asset that has zero vulnerabilities at all —
+        # _group_assets_from_vulns can never produce these on its own (see
+        # _fetch_all_asset_host_names). Only under the "all"/"all" filter:
+        # a host with nothing matching a SPECIFIC severity/status filter is
+        # correctly absent from that filtered view, same as the website.
+        if all_host_names and sev_filter == "all" and st_filter == "all":
+            present = {host for host, _ in assets}
+            zero_count = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
+            extra = [(h, dict(zero_count)) for h in all_host_names if h not in present]
+            if extra:
+                assets = sorted(assets + extra, key=lambda kv: kv[0])
         count = len(assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = assets[offset:offset + PAGE_SIZE]
@@ -21756,8 +21789,10 @@ class SlackInteractivityView(APIView):
                     team_id, slack_user_id=slack_user_id,
                 )
                 rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
+                all_host_names = slash._fetch_all_asset_host_names(team_id, slack_user_id)
                 content = slash._format_asset_list(
                     rows, offset=page_offset, sev_filter=sev_filter, st_filter=st_filter,
+                    all_host_names=all_host_names,
                 )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_fix")
