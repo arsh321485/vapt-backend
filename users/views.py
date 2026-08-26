@@ -4595,6 +4595,22 @@ def _post_freemium_trim_notice(bot_token, channel_id, report_ids):
     """
     if not (bot_token and channel_id and report_ids):
         return
+
+    # Idempotency guard — same pattern/reasoning as
+    # _post_admin_onboarding_message's own dedup_key just above: this
+    # function is reachable from more than one trigger for the same
+    # report_ids (notify_admin_report_uploaded's watcher AND
+    # _submit_upload_report's own watcher both fire for a Slack-modal
+    # upload, since the modal's submit ultimately posts through the same
+    # upload API notify_admin_report_uploaded hooks into). Confirmed real:
+    # the notice was posted twice for one upload. cache.add() is atomic
+    # and never expires, so only the first caller for this exact set of
+    # report_ids actually posts.
+    dedup_key = f"slack_freemium_trim_notice:{channel_id}:{','.join(sorted(str(r) for r in report_ids))}"
+    if not cache.add(dedup_key, True, timeout=None):
+        logger.info(f"[UploadWatch] Skipped duplicate freemium-trim notice for report_ids={report_ids}")
+        return
+
     try:
         from vaptfix.mongo_client import get_shared_client, get_shared_db
         db = get_shared_db(get_shared_client())
@@ -4772,22 +4788,26 @@ def _watch_reports_and_post_onboarding(
         if not channel_id:
             logger.warning(f"[UploadWatch] could not resolve admin channel_id for team_id={team_id}")
             return
-        resolved_state = _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
-        logger.info(f"[UploadWatch] Posted onboarding message for report_ids={report_ids}, resolved_state={resolved_state}")
-
-        # Freemium trim notice — this report has more assets than the plan
-        # covers (billing.enforcement.select_freemium_active_hosts kept
-        # fewer hosts than the file actually had; the rest are saved as
-        # locked_hosts, not discarded). The OLD flow surfaced this as a
+        # Freemium trim notice — posted BEFORE the onboarding/risk-criteria
+        # message (explicit request: pricing info should be the first
+        # thing an over-limit admin sees, not something they scroll past
+        # Set Risk Criteria to find). This report has more assets than the
+        # plan covers (billing.enforcement.select_freemium_active_hosts
+        # kept fewer hosts than the file actually had; the rest are saved
+        # as locked_hosts, not discarded). The OLD flow surfaced this as a
         # "keep vs upgrade" 2-button prompt shown BEFORE the upload even
         # completed (_post_over_limit_choice) — the redesigned Freemium
         # flow (uploads always succeed, trimmed automatically) removed
         # that trigger entirely, so an admin uploading an over-limit file
         # via Slack got no explanation at all for why only some assets
-        # showed up. Confirmed real complaint: uploaded 15 IPs, got 5,
-        # no pricing prompt anywhere. Posted as its own message (not
-        # competing with _post_admin_onboarding_message's own posting).
+        # showed up. Posted as its own message (not competing with
+        # _post_admin_onboarding_message's own posting) — see its own
+        # dedup logic for why this is safe to call from more than one
+        # code path for the same report_ids.
         _post_freemium_trim_notice(bot_token, channel_id, report_ids)
+
+        resolved_state = _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
+        logger.info(f"[UploadWatch] Posted onboarding message for report_ids={report_ids}, resolved_state={resolved_state}")
     except Exception:
         logger.exception("[UploadWatch] failed to post onboarding message")
 
