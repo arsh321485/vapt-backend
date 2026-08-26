@@ -1382,6 +1382,9 @@ class UserAllVulnerabilitiesAPIView(APIView):
                                 "open_count": 0,
                                 "held_count": 0,
                                 "deleted_count": 0,
+                                # Same asset-category segregation (Assets/Web App/
+                                # Firewall/Server) as the admin-side endpoint.
+                                "asset_type_counts": {"other": 0, "web_app": 0, "firewall": 0, "server": 0},
                             }
 
                         entry = vuln_map[plugin_name]
@@ -1392,6 +1395,10 @@ class UserAllVulnerabilitiesAPIView(APIView):
                             entry["held_count"] += 1
                         else:
                             entry["open_count"] += 1
+                        asset_type = classify_asset_type(
+                            host_name, host.get("host_information"), host.get("vulnerabilities")
+                        )
+                        entry["asset_type_counts"][asset_type] += 1
 
                 return Response({
                     "report_id": str(report_id),
@@ -1485,6 +1492,9 @@ class UserVulnAssetListAPIView(APIView):
                             "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
                             "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
                             "status": vuln_status,
+                            "asset_type": classify_asset_type(
+                                host_name, host.get("host_information"), host.get("vulnerabilities")
+                            ),
                         })
                         break
 
