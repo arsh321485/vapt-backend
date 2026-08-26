@@ -304,6 +304,21 @@ def _automation_fix_body(automation):
     if not automation.get("matched"):
         return [{"type": "TextBlock", "text": "Automation script not ready for this vulnerability.", "wrap": True, "isSubtle": True, "spacing": "Medium"}]
 
+    # Plan gate — automation_scripts_api.views' admin_match_script/
+    # user_match_script (fetched in-process by _fetch_automation_match in
+    # this file and user_fix_tab.py) already strips the actual script
+    # content and adds premium_required/message when the plan doesn't
+    # allow automation scripts (see _script_response there) — show that
+    # lock notice explicitly here instead of silently rendering a
+    # near-empty FactSet with none of the "What this does"/etc. sections.
+    # Matches the same fix already applied to Slack.
+    if automation.get("premium_required"):
+        return [{
+            "type": "TextBlock",
+            "text": f"🔒 {automation.get('message') or 'Automation scripts are not available on your plan.'}",
+            "wrap": True, "weight": "Bolder", "color": "attention", "spacing": "Medium",
+        }]
+
     body = [{
         "type": "FactSet",
         "facts": [

@@ -447,7 +447,12 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
             automation = _fetch_automation_match(member_user, r)
             body.extend(_automation_fix_body(automation))
             plugin_id = automation.get("plugin_id") or r.get("plugin_id")
-            if automation.get("matched") and plugin_id and team_id:
+            # Don't offer a Download button the actual download endpoint
+            # (user_download_script, called in-process by
+            # TeamsScriptDownloadView) will just reject anyway — a visible
+            # but broken button is worse than no button. Matches
+            # _automation_fix_body's own content-hiding above.
+            if automation.get("matched") and not automation.get("premium_required") and plugin_id and team_id:
                 body.append({
                     "type": "ActionSet", "spacing": "Small",
                     "actions": [{"type": "Action.OpenUrl", "title": "📥 Download Script", "url": fix_tab.script_download_url(team_id, team_name, plugin_id)}],

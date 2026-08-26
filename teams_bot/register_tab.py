@@ -128,12 +128,20 @@ def _fetch_script_stats(admin):
         status_code, data = _call_view_in_process(auto_views.admin_download_stats, admin, method="get")
         if status_code >= 300 or not isinstance(data, dict):
             raise ValueError(f"script stats fetch failed: {status_code}")
-        return data.get("stats") or []
+        # premium_required/message already computed by admin_download_stats
+        # (a Freemium admin's counts stay permanently 0 — surface WHY
+        # instead of a misleading "no downloads yet" list).
+        return {
+            "stats": data.get("stats") or [],
+            "premium_required": bool(data.get("premium_required")),
+            "message": data.get("message"),
+        }
     return fix_tab.cached_fetch(f"script_stats:{admin.id}", 20, _fetch)
 
 
 def script_list_body(admin, offset=0):
-    stats = _fetch_script_stats(admin)
+    result = _fetch_script_stats(admin)
+    stats = result["stats"]
     total = len(stats)
     page = stats[offset:offset + PAGE_SIZE]
 
@@ -141,6 +149,13 @@ def script_list_body(admin, offset=0):
         {"type": "TextBlock", "text": "📜 Script", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": "Automation scripts library — downloads and assigned team.", "size": "Small", "isSubtle": True, "wrap": True},
     ]
+    if result["premium_required"]:
+        body.append({
+            "type": "TextBlock",
+            "text": f"🔒 {result['message'] or 'Automation scripts are not available on your plan.'}",
+            "wrap": True, "weight": "Bolder", "color": "attention", "spacing": "Medium",
+        })
+        return body
     if not page:
         body.append({"type": "TextBlock", "text": "No scripts found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body

@@ -129,12 +129,22 @@ def _fetch_script_stats(member_user):
         status_code, data = _call_view_in_process(auto_views.user_download_stats, member_user, method="get")
         if status_code >= 300 or not isinstance(data, dict):
             raise ValueError(f"script stats fetch failed: {status_code}")
-        return data.get("stats") or []
+        # premium_required/message are already computed by
+        # user_download_stats (billing.enforcement.is_freemium on the
+        # member's admin) — carried through here so script_list_body can
+        # hide the Download buttons instead of offering ones the actual
+        # download endpoint (user_download_script) would just reject.
+        return {
+            "stats": data.get("stats") or [],
+            "premium_required": bool(data.get("premium_required")),
+            "message": data.get("message"),
+        }
     return fix_tab.cached_fetch(f"user_script_stats:{member_user.id}", 20, _fetch)
 
 
 def script_list_body(member_user, team_id, team_name, offset=0):
-    stats = _fetch_script_stats(member_user)
+    result = _fetch_script_stats(member_user)
+    stats = result["stats"]
     total = len(stats)
     page = stats[offset:offset + PAGE_SIZE]
 
@@ -142,6 +152,13 @@ def script_list_body(member_user, team_id, team_name, offset=0):
         {"type": "TextBlock", "text": "📜 Scripts", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": "Automation scripts library — download the ones for your team.", "size": "Small", "isSubtle": True, "wrap": True},
     ]
+    if result["premium_required"]:
+        body.append({
+            "type": "TextBlock",
+            "text": f"🔒 {result['message'] or 'Automation scripts are not available on your plan.'}",
+            "wrap": True, "weight": "Bolder", "color": "attention", "spacing": "Medium",
+        })
+        return body
     if not page:
         body.append({"type": "TextBlock", "text": "No scripts found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
