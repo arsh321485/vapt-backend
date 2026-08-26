@@ -879,6 +879,15 @@ class UploadReportView(APIView):
                             # signal (shown once every visible finding is closed).
                             "freemium_trimmed": bool(locked_hosts),
                             "locked_asset_count": len(locked_hosts),
+                            # Same 4-field billing contract as dashboard summary/
+                            # subscription-me/estimate (billing.asset_service.
+                            # get_admin_asset_breakdown_counts) — scoped to just
+                            # this one file rather than the admin's whole account,
+                            # so the "Review plan" step can price this exact
+                            # upload immediately without a separate call.
+                            "visible_asset_count": int(parsed_data.get("total_hosts") or 0),
+                            "original_asset_count": int(parsed_data.get("total_hosts") or 0) + len(locked_hosts),
+                            "billable_asset_count": int(parsed_data.get("total_hosts") or 0) + len(locked_hosts),
                         })
                         timings_ms["response_build_ms"] += int((time.perf_counter() - response_start) * 1000)
 

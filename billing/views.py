@@ -9,7 +9,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from users.utils import Util
-from .asset_service import get_admin_asset_count, get_admin_scope_asset_count, resolve_management_testing_asset_count
+from .asset_service import (
+    get_admin_asset_count, get_admin_scope_asset_count, resolve_management_testing_asset_count,
+    get_admin_billable_asset_count, get_admin_asset_breakdown_counts,
+)
 from .models import Subscription, SalesLead
 from .plans import (
     PLAN_FREEMIUM, PLAN_PREMIUM, PLAN_CUSTOM,
@@ -66,9 +69,16 @@ class PlanEstimateView(APIView):
             # top, not a separate target list) — falls back to the scope
             # submitted via /api/admin/scope/create/ only when there's no
             # report at all.
+            #
+            # Premium billing uses get_admin_billable_asset_count (the
+            # ORIGINAL file size — visible + locked), never
+            # get_admin_asset_count (Freemium's visible-only cap of 5) —
+            # real bug confirmed by the frontend: a 15-IP file uploaded on
+            # Freemium (showing 5, 10 saved as locked_hosts) was still
+            # pricing Premium at 5 IPs after the admin chose to upgrade.
             asset_source = "report"
             if mode == MODE_MANAGEMENT:
-                asset_count = get_admin_asset_count(str(request.user.id))
+                asset_count = get_admin_billable_asset_count(str(request.user.id))
             else:
                 asset_count, asset_source = resolve_management_testing_asset_count(str(request.user.id))
 
@@ -103,6 +113,20 @@ class PlanEstimateView(APIView):
                 "amount_due": str(amount),
                 "currency": "usd",
             }
+            # Explicit billing breakdown so the frontend never has to guess
+            # which count is which — visible/locked only differ from
+            # original/billable for a Management-mode admin who has
+            # Freemium-trimmed hosts; Management+Testing (scope-based, no
+            # report trimming involved) reports the same value for all four.
+            if mode == MODE_MANAGEMENT:
+                response_data.update(get_admin_asset_breakdown_counts(str(request.user.id)))
+            else:
+                response_data.update({
+                    "visible_asset_count": asset_count,
+                    "locked_asset_count": 0,
+                    "original_asset_count": asset_count,
+                    "billable_asset_count": asset_count,
+                })
             if mode == MODE_MANAGEMENT_TESTING:
                 # Lets the frontend show "priced from your uploaded report"
                 # vs "priced from your submitted scope".
@@ -187,9 +211,11 @@ class PremiumCheckoutView(APIView):
         # Mode A bills on uploaded-report assets. Mode B prefers that SAME
         # report's asset count when one exists, falling back to the
         # submitted scope only when there's no report at all — see
-        # resolve_management_testing_asset_count().
+        # resolve_management_testing_asset_count(). Same billable-count fix
+        # as PlanEstimateView — checkout must never create a Stripe session
+        # for the Freemium visible-only count when locked_hosts exist.
         if mode == MODE_MANAGEMENT:
-            asset_count = get_admin_asset_count(str(admin.id))
+            asset_count = get_admin_billable_asset_count(str(admin.id))
             no_assets_detail = "Upload a report first — no assets found to bill for."
         else:
             asset_count, _asset_source = resolve_management_testing_asset_count(str(admin.id))
@@ -268,6 +294,7 @@ class SubscriptionMeView(APIView):
         return Response({
             "subscription": SubscriptionSerializer(sub).data,
             "invoices": InvoiceSerializer(invoices, many=True).data,
+            **get_admin_asset_breakdown_counts(str(request.user.id)),
         })
 
 
@@ -293,7 +320,12 @@ class SubscriptionSyncAssetsView(APIView):
 
     def post(self, request):
         admin = request.user
-        asset_count = get_admin_asset_count(str(admin.id))
+        # Billable (visible + locked) — a Premium/active-Management admin
+        # should never actually have locked_hosts (the trim only ever
+        # applies to Freemium), but using the same billable-count function
+        # here as estimate/checkout keeps this endpoint from ever silently
+        # under-syncing if that assumption is ever wrong.
+        asset_count = get_admin_billable_asset_count(str(admin.id))
 
         sub = Subscription.objects.filter(
             admin=admin, plan=PLAN_PREMIUM, mode=MODE_MANAGEMENT, status="active"
@@ -306,7 +338,7 @@ class SubscriptionSyncAssetsView(APIView):
                 logger.error(f"[Billing] Failed to sync Stripe quantity for {admin.email}: {e}")
                 return Response({"detail": "Asset count updated locally; Stripe sync failed."}, status=500)
 
-        return Response({"asset_count": asset_count})
+        return Response({"asset_count": asset_count, **get_admin_asset_breakdown_counts(str(admin.id))})
 
 
 @method_decorator(csrf_exempt, name="dispatch")

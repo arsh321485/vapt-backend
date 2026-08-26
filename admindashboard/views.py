@@ -2231,5 +2231,16 @@ class AdminDashboardSummaryAPIView(APIView):
             logger.warning(f"[AdminDashboardSummary] freemium_upgrade check failed: {exc}")
             results["freemium_upgrade"] = {"eligible": False}
 
+        # Explicit billing breakdown, always present (not gated behind
+        # freemium_upgrade.eligible, which only turns true once every
+        # visible finding is closed) — the pricing/Review-plan page needs
+        # to know the full original file size right after upload, not only
+        # once the admin has worked through their 5 visible assets.
+        try:
+            from billing.asset_service import get_admin_asset_breakdown_counts
+            results.update(get_admin_asset_breakdown_counts(str(request.user.id)))
+        except Exception as exc:
+            logger.warning(f"[AdminDashboardSummary] asset breakdown counts failed: {exc}")
+
         cache.set(cache_key, results, 300)
         return Response(results, status=status.HTTP_200_OK)

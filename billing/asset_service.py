@@ -54,6 +54,117 @@ def get_admin_asset_count(admin_id: str) -> int:
         return 0
 
 
+def get_admin_billable_asset_count(admin_id: str) -> int:
+    """
+    Same host-name-matching as get_admin_asset_count, but counts the UNION
+    of vulnerabilities_by_host (currently visible) AND locked_hosts (kept
+    aside, not discarded, by billing.enforcement.select_freemium_active_
+    hosts when a Freemium upload has more assets than the plan shows) —
+    this is the real, original size of the uploaded file.
+
+    Real bug this fixes: a Freemium admin uploads a 15-IP file, sees 5 (the
+    other 10 saved as locked_hosts), then upgrades to Premium — estimate/
+    checkout were pricing off get_admin_asset_count (5, visible-only) since
+    locked_hosts isn't part of vulnerabilities_by_host at all. Premium
+    billing (estimate, checkout, sync-assets, the upgrade webhook) must
+    ALWAYS use this function, never get_admin_asset_count — an admin who
+    already has all 15 unlocked (no locked_hosts anywhere, e.g. Premium
+    from day one) gets an identical number from both functions, so this is
+    a pure superset, never an undercount risk the other way.
+    """
+    try:
+        conditions = [{"admin_id": str(admin_id)}]
+        try:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            admin_user = User.objects.filter(id=admin_id).first()
+            if admin_user and admin_user.email:
+                conditions.append({"admin_email": admin_user.email})
+        except Exception:
+            logger.exception(f"[Billing] could not resolve admin_email for admin_id={admin_id} (falling back to admin_id-only match)")
+
+        with MongoContext() as db:
+            pipeline = [
+                {"$match": {"$or": conditions}},
+                {"$project": {
+                    "hosts": {"$concatArrays": [
+                        {"$ifNull": ["$vulnerabilities_by_host", []]},
+                        {"$ifNull": ["$locked_hosts", []]},
+                    ]},
+                }},
+                {"$unwind": "$hosts"},
+                {"$match": {"hosts.host_name": {"$nin": [None, ""]}}},
+                {"$group": {"_id": "$hosts.host_name"}},
+                {"$count": "unique_hosts"},
+            ]
+            result = list(db[NESSUS_COLLECTION].aggregate(pipeline))
+            return result[0]["unique_hosts"] if result else 0
+    except Exception as e:
+        logger.error(f"[Billing] billable asset count aggregation failed for admin_id={admin_id}: {e}")
+        return 0
+
+
+def get_admin_locked_asset_count(admin_id: str) -> int:
+    """
+    Sum of locked_hosts entries across every report for this admin — the
+    same 'locked_asset_count' number upload_report/views.py already
+    returns per-file at upload time, aggregated account-wide here (an
+    admin could have merged/multiple reports). Purely informational
+    (billing itself uses get_admin_billable_asset_count, the deduplicated
+    union) — this is what the API contract's separate 'locked_asset_count'
+    field reports.
+    """
+    try:
+        conditions = [{"admin_id": str(admin_id)}]
+        try:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            admin_user = User.objects.filter(id=admin_id).first()
+            if admin_user and admin_user.email:
+                conditions.append({"admin_email": admin_user.email})
+        except Exception:
+            logger.exception(f"[Billing] could not resolve admin_email for admin_id={admin_id}")
+
+        with MongoContext() as db:
+            pipeline = [
+                {"$match": {"$or": conditions}},
+                {"$project": {"locked_count": {"$size": {"$ifNull": ["$locked_hosts", []]}}}},
+                {"$group": {"_id": None, "total": {"$sum": "$locked_count"}}},
+            ]
+            result = list(db[NESSUS_COLLECTION].aggregate(pipeline))
+            return int(result[0]["total"]) if result else 0
+    except Exception as e:
+        logger.error(f"[Billing] locked asset count aggregation failed for admin_id={admin_id}: {e}")
+        return 0
+
+
+def get_admin_asset_breakdown_counts(admin_id: str) -> dict:
+    """
+    The 4-field billing contract every relevant endpoint (upload result,
+    dashboard summary, subscription/me, plan estimate) returns so the
+    frontend never has to guess or recompute this itself:
+
+        visible_asset_count   — currently shown (Freemium-capped) count
+        locked_asset_count    — hosts saved but hidden behind the cap
+        original_asset_count  — the file's real, full size (what's billed)
+        billable_asset_count  — same as original_asset_count (Premium
+                                 billing always uses this one, never
+                                 visible_asset_count)
+
+    For a Premium account (nothing ever trimmed), locked_asset_count is 0
+    and visible == original == billable.
+    """
+    visible = get_admin_asset_count(admin_id)
+    original = get_admin_billable_asset_count(admin_id)
+    locked = get_admin_locked_asset_count(admin_id)
+    return {
+        "visible_asset_count": visible,
+        "locked_asset_count": locked,
+        "original_asset_count": original,
+        "billable_asset_count": original,
+    }
+
+
 def get_admin_scope_asset_count(admin_id: str) -> int:
     """
     Unique target count across all of this admin's submitted scopes — the
