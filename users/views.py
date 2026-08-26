@@ -4580,6 +4580,68 @@ def _upload_in_progress_key(team_id):
     return f"slack_upload_in_progress:{team_id}"
 
 
+def _post_freemium_trim_notice(bot_token, channel_id, report_ids):
+    """
+    Posts a "your file had more assets than your plan covers, upgrade to
+    unlock the rest" message for any of report_ids that
+    billing.enforcement.select_freemium_active_hosts actually trimmed at
+    upload time (nessus_reports.freemium_trimmed == True) — no-op if none
+    of them were. Separate from the dashboard's freemium_upgrade banner
+    (admindashboard.views._freemium_upgrade_prompt, cards.py's
+    freemium_upgrade_banner_items): that one only fires once every VISIBLE
+    finding has been closed. This one fires immediately at upload time so
+    the admin isn't left wondering why their 15-IP file only shows 5, with
+    zero explanation anywhere.
+    """
+    if not (bot_token and channel_id and report_ids):
+        return
+    try:
+        from vaptfix.mongo_client import get_shared_client, get_shared_db
+        db = get_shared_db(get_shared_client())
+        trimmed = list(db["nessus_reports"].find(
+            {"report_id": {"$in": [str(r) for r in report_ids]}, "freemium_trimmed": True},
+            {"report_id": 1, "total_hosts": 1, "locked_hosts": 1},
+        ))
+        if not trimmed:
+            return
+        total_active = sum(int(r.get("total_hosts") or 0) for r in trimmed)
+        total_locked = sum(len(r.get("locked_hosts") or []) for r in trimmed)
+        if total_locked <= 0:
+            return
+        _http_post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            json={
+                "channel": channel_id,
+                "text": (
+                    f"Your file had more assets than your Freemium plan covers — "
+                    f"showing {total_active}, {total_locked} more saved and ready to unlock."
+                ),
+                "blocks": [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": (
+                        f"⚠️ *Your file had more assets than your Freemium plan covers.*\n"
+                        f"Showing *{total_active}* asset(s) now — *{total_locked}* more are "
+                        f"saved and will unlock automatically the moment you upgrade, no "
+                        f"re-upload needed."
+                    )}},
+                    {
+                        "type": "actions",
+                        "elements": [{
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "⭐ View Pricing Plans", "emoji": True},
+                            "url": "https://vaptfix.ai/pricingplan",
+                            "style": "primary",
+                        }],
+                    },
+                ],
+            },
+            timeout=15,
+        )
+        logger.info(f"[UploadWatch] Posted freemium-trim notice for report_ids={report_ids} (active={total_active}, locked={total_locked})")
+    except Exception:
+        logger.exception(f"[UploadWatch] freemium-trim notice failed for report_ids={report_ids}")
+
+
 def _watch_reports_and_post_onboarding(
     report_ids, admin, max_wait_seconds=1800, poll_interval=6,
     progress_channel_id=None, progress_ts=None, file_label=None,
@@ -4712,6 +4774,20 @@ def _watch_reports_and_post_onboarding(
             return
         resolved_state = _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
         logger.info(f"[UploadWatch] Posted onboarding message for report_ids={report_ids}, resolved_state={resolved_state}")
+
+        # Freemium trim notice — this report has more assets than the plan
+        # covers (billing.enforcement.select_freemium_active_hosts kept
+        # fewer hosts than the file actually had; the rest are saved as
+        # locked_hosts, not discarded). The OLD flow surfaced this as a
+        # "keep vs upgrade" 2-button prompt shown BEFORE the upload even
+        # completed (_post_over_limit_choice) — the redesigned Freemium
+        # flow (uploads always succeed, trimmed automatically) removed
+        # that trigger entirely, so an admin uploading an over-limit file
+        # via Slack got no explanation at all for why only some assets
+        # showed up. Confirmed real complaint: uploaded 15 IPs, got 5,
+        # no pricing prompt anywhere. Posted as its own message (not
+        # competing with _post_admin_onboarding_message's own posting).
+        _post_freemium_trim_notice(bot_token, channel_id, report_ids)
     except Exception:
         logger.exception("[UploadWatch] failed to post onboarding message")
 
