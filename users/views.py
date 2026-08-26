@@ -13308,7 +13308,44 @@ class SlackSlashCommandView(APIView):
             return self._cmd_downloadreport("", team_id, user_id)
 
         # nav_home (default) — real bento-grid design, rendered as an image
-        return [self._dashboard_image_block(team_id)]
+        return self._freemium_upgrade_banner_blocks(team_id) + [self._dashboard_image_block(team_id)]
+
+    def _freemium_upgrade_banner_blocks(self, team_id):
+        """
+        Slack-native banner shown above the Home dashboard image once a
+        Freemium admin has closed every currently-visible finding on a
+        report that still has hosts waiting behind the plan's asset/vuln
+        caps. Reuses admindashboard.views._freemium_upgrade_prompt directly
+        (same eligibility check the website dashboard uses) so Slack, Teams,
+        and the website never disagree about when this should show.
+        Upgrading unlocks the rest of that same report automatically — no
+        re-upload — see billing/stripe_service.py and
+        upload_report/views.py's unlock_freemium_hosts_for_admin.
+        """
+        try:
+            admin = self._get_admin_user(team_id)
+            if not admin:
+                return []
+            from admindashboard.views import _freemium_upgrade_prompt
+            prompt = _freemium_upgrade_prompt(admin)
+            if not prompt.get("eligible"):
+                return []
+            return [
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"🔓 *{prompt['message']}*"}},
+                {
+                    "type": "actions",
+                    "elements": [{
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "⭐ Upgrade to Premium", "emoji": True},
+                        "url": prompt.get("upgrade_url", "https://vaptfix.ai/pricingplan"),
+                        "style": "primary",
+                    }],
+                },
+                {"type": "divider"},
+            ]
+        except Exception:
+            logger.exception(f"[FreemiumBanner] Slack banner check failed for team_id={team_id}")
+            return []
 
     def _team_subnav_block(self, active_sub=None):
         """Second-level button row(s) shown under the 'Team Overview' nav tab."""

@@ -869,6 +869,7 @@ def _handle_nav(admin, team_id, action_id):
         except Exception:
             logger.exception("[TeamsBot] dashboard image body failed, falling back to text summary")
             body = _home_summary_body(admin)
+        body = cards.freemium_upgrade_banner_items(admin, team_id) + body
         return cards.nav_buttons_card(active_action_id="nav_home", extra_body=body)
 
     if action_id == "nav_team":

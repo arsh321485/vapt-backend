@@ -538,6 +538,49 @@ def dashboard_image_card_body(team_id, kind="dashboard", title=None, extra_param
     ]
 
 
+def freemium_upgrade_banner_items(admin, team_id):
+    """
+    Adaptive Card items (TextBlock + Upgrade button) shown above the Home
+    dashboard image once a Freemium admin has closed every currently-
+    visible finding on a report that still has hosts waiting behind the
+    plan's asset/vuln caps. Reuses
+    admindashboard.views._freemium_upgrade_prompt directly (same
+    eligibility check the website dashboard and Slack's Home tab use) so
+    Teams never disagrees with either about when this should show.
+    Upgrading unlocks the rest of that same report automatically — no
+    re-upload — see billing/stripe_service.py and
+    upload_report/views.py's unlock_freemium_hosts_for_admin. Returns []
+    when not eligible (or on any lookup failure — never blocks Home from
+    rendering).
+    """
+    try:
+        from admindashboard.views import _freemium_upgrade_prompt
+        prompt = _freemium_upgrade_prompt(admin)
+        if not prompt.get("eligible"):
+            return []
+        return [
+            {
+                "type": "TextBlock",
+                "text": f"🔓 {prompt['message']}",
+                "wrap": True,
+                "weight": "Bolder",
+                "color": "good",
+                "spacing": "Medium",
+            },
+            {
+                "type": "ActionSet",
+                "actions": [_open_url_action(
+                    "⭐ Upgrade to Premium",
+                    prompt.get("upgrade_url", "https://vaptfix.ai/pricingplan"),
+                    style="positive",
+                )],
+            },
+        ]
+    except Exception:
+        logger.exception(f"[FreemiumBanner] Teams banner check failed for team_id={team_id}")
+        return []
+
+
 # Fix tab's own sub-nav — All Assets / All Vulns / Common Vulns (matches
 # Slack's _FIX_SUBTABS, same action_id spelling so nothing else has to
 # guess at the mapping).

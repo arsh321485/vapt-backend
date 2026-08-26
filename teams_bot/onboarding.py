@@ -139,6 +139,7 @@ def build_state_card(admin, team_id, state):
         logger.exception("[TeamsOnboarding] dashboard image body failed, falling back to text summary")
         from . import actions as _actions
         home_body = _actions._home_summary_body(admin)
+    home_body = cards.freemium_upgrade_banner_items(admin, team_id) + home_body
     return cards.nav_buttons_card(active_action_id="nav_home", extra_body=home_body)
 
 
