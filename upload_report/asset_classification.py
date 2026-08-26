@@ -26,9 +26,15 @@ _WEB_APP_VULN_KEYWORDS = [
     # Deliberately specific, not bare "ssl"/"tls"/"http" — those show up on
     # plenty of non-web services (mail, RDP, DB-over-TLS) too and caused
     # false positives (e.g. "SSL Version 2/3 Protocol Detection" on a plain
-    # Windows server) when this list was broader.
+    # Windows server) when this list was broader. "web server" was also
+    # removed from here (real bug, confirmed via a live report) — a finding
+    # saying "the target web server is running IIS 8.0" describes SERVER
+    # SOFTWARE running on the host, not an application-layer trait of the
+    # host itself; it was misclassifying bare-IP hosts with no OS info as
+    # "web_app" purely because IIS/Apache findings mention "web server" in
+    # their own boilerplate description text. See _SERVER_SOFTWARE_KEYWORDS.
     "xss", "cross-site scripting", "sql injection", "csrf", "cross-site request forgery",
-    "cookie", "web server", "web application", "content-security-policy", "clickjacking",
+    "cookie", "web application", "content-security-policy", "clickjacking",
     "cors", "hsts", "strict transport security", "directory listing", "cgi",
     "http response splitting", "http header",
 ]
@@ -36,6 +42,17 @@ _WEB_APP_VULN_KEYWORDS = [
 _SERVER_OS_KEYWORDS = [
     "windows", "linux", "unix", "macos", "mac os", "ubuntu", "centos", "debian",
     "red hat", "rhel", "solaris", "freebsd", "esxi", "vmware",
+]
+
+# Known web-server SOFTWARE — a finding mentioning these describes what's
+# running on the machine (infrastructure), not that the host is itself a
+# distinct "web application" — e.g. "Outdated Microsoft IIS 8.0" on a bare
+# IP with no host_information.operating-system should land on "Server",
+# not "Web App". Checked only when no app-layer signal (XSS/SQLi/CSRF/etc.,
+# still in _WEB_APP_VULN_KEYWORDS above) already matched.
+_SERVER_SOFTWARE_KEYWORDS = [
+    "iis", "internet information services", "apache", "nginx", "tomcat",
+    "web server", "lighttpd", "jboss", "weblogic", "websphere",
 ]
 
 
@@ -62,7 +79,9 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
         return "web_app"
 
     # Server — real OS info present (Nessus host_information, or the
-    # asset.operating_system column custom_report_ai.py now captures)
+    # asset.operating_system column custom_report_ai.py now captures), OR a
+    # known web-server software mention with no accompanying app-layer
+    # signal above (see _SERVER_SOFTWARE_KEYWORDS docstring).
     os_str = (
         host_information.get("operating-system")
         or host_information.get("os")
@@ -71,7 +90,7 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
         or host_information.get("system-type")
         or ""
     ).strip().lower()
-    if os_str:
+    if os_str or any(k in combined_text for k in _SERVER_SOFTWARE_KEYWORDS):
         return "server"
 
     # Bare IP or anything else with no stronger signal -> generic "Assets" tab
