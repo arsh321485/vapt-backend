@@ -13589,7 +13589,35 @@ class SlackSlashCommandView(APIView):
             automation = self._resolve_automation_match(
                 v, team_id, os_param=v.get("operating_system"), admin_side=True,
             )
-            content = self._format_vulndata_automation_detail(v, automation)
+            # Plan gate — Freemium can't use automation scripts. This branch
+            # (Register tab, Common Vulns, standalone /vulndata — anything
+            # reaching _allvuln_detail_blocks) was never wired to the same
+            # check the team-channel member flow (_team_asset_vuln_detail_
+            # blocks's "tav_detail_automation") already had, so a Freemium
+            # admin OR a member viewing via Common Vulns saw the full
+            # automation detail with no lock notice at all. Confirmed real:
+            # screenshot showed a Freemium account's Automation Fix tab with
+            # no "upgrade" message anywhere.
+            locked_reason = None
+            try:
+                from billing.enforcement import assert_can_use_automation_scripts, PlanLimitExceeded
+                admin = User.objects.filter(slack_team_id=team_id).first()
+                if admin:
+                    assert_can_use_automation_scripts(admin.id)
+            except PlanLimitExceeded as e:
+                locked_reason = str(e)
+            except Exception:
+                logger.exception("[SlackCmd] automation plan-gate check failed (non-fatal, showing button)")
+            # can_download stays False (unchanged) — this call site is
+            # read-only for admin by design (see _format_vulndata_automation_
+            # detail's own docstring: no admin download route exists), and
+            # it's also reached by a member's Common Vulns view via
+            # _common_asset_vuln_detail_blocks, which never offered a
+            # download button here either. Only locked_reason is new — the
+            # function's can_download=False branch now shows it instead of
+            # always claiming "team members can download this" even when
+            # the plan doesn't allow it.
+            content = self._format_vulndata_automation_detail(v, automation, locked_reason=locked_reason)
         else:
             steps_data = None
             fix_vuln_id = v.get("fix_vulnerability_id")
@@ -19022,6 +19050,12 @@ class SlackSlashCommandView(APIView):
                     "style": "primary",
                 }],
             })
+        elif locked_reason:
+            # Read-only (admin/Common Vulns) view, but the plan doesn't
+            # allow automation scripts at all — say so instead of the
+            # generic "team members can download this" caption below, which
+            # was misleading when it wasn't actually true for this plan.
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"🔒 *{locked_reason}*"}})
         else:
             blocks.append(self._ctx(
                 f"Script: `{automation.get('fix_script_name') or '—'}` — team members can download this in their team channel."
