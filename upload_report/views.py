@@ -1750,6 +1750,27 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
         )
         t.start()
 
+    # Clear every cache that a freshly-unlocked host/finding would otherwise
+    # stay hidden behind for up to 5 minutes — the SAME keys the
+    # website dashboard, Slack's Home tab, and Teams' Home tab all read
+    # through (all three are backed by this one shared MongoDB, so nothing
+    # platform-specific is needed here beyond making sure none of them are
+    # looking at a stale cached copy of the still-locked state).
+    try:
+        from django.core.cache import cache as _cache
+        admin_id_str = str(admin.id)
+        for _ck in (
+            f"admin_vulnerabilities_{admin_id_str}",
+            f"admin_dashboard_summary_{admin_id_str}",
+            f"admin_total_assets_{admin_id_str}",
+            f"admin_avg_score_{admin_id_str}",
+            f"admin_inprocess_timeline_{admin_id_str}",
+            f"mitigation_by_team_v2_{admin_id_str}",
+        ):
+            _cache.delete(_ck)
+    except Exception:
+        logger.warning(f"[FreemiumUnlock] cache invalidation failed for admin_id={admin.id}")
+
     return unlocked_count
 
 
