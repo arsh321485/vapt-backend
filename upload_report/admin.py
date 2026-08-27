@@ -316,6 +316,7 @@ class UploadReportAdmin(admin.ModelAdmin):
 
                 # Resolve admin_id from admin_email
                 admin_id = None
+                admin_user = None
                 if admin_email:
                     try:
                         admin_user = User.objects.filter(email=admin_email).first()
@@ -337,6 +338,30 @@ class UploadReportAdmin(admin.ModelAdmin):
                 }
 
                 if parsed_data.get("type") in ("nessus_html", "nessus", "aws", "custom"):
+                    # Plan gate — Freemium gets at most max_internal_ips
+                    # hosts / max_vulnerabilities findings (billing/plans.py).
+                    # Real bug confirmed: this admin-panel upload path never
+                    # applied this at all (only the website's DRF upload
+                    # endpoint — upload_report/views.py's post() — did), so
+                    # a Freemium admin uploaded here saw ALL 42 hosts
+                    # instead of 5. Excess hosts are retained as
+                    # locked_hosts (not discarded), matching the website's
+                    # own behavior, so they still unlock automatically on
+                    # upgrade (billing/stripe_service.py).
+                    locked_hosts = []
+                    if admin_user:
+                        from billing.enforcement import select_freemium_active_hosts
+                        active_hosts, locked_hosts = select_freemium_active_hosts(
+                            parsed_data.get("vulnerabilities_by_host") or [], admin_user
+                        )
+                        if locked_hosts:
+                            parsed_data = dict(parsed_data)
+                            parsed_data["vulnerabilities_by_host"] = active_hosts
+                            parsed_data["total_hosts"] = len(active_hosts)
+                            parsed_data["total_vulnerabilities"] = sum(
+                                len(h.get("vulnerabilities") or []) for h in active_hosts
+                            )
+
                     hosts_payload = self._prepare_hosts_for_storage(
                         parsed_data.get("vulnerabilities_by_host", [])
                     )
@@ -346,6 +371,9 @@ class UploadReportAdmin(admin.ModelAdmin):
                         "total_vulnerabilities": parsed_data.get("total_vulnerabilities", 0),
                         "vulnerabilities_by_host": hosts_payload
                     })
+                    if locked_hosts:
+                        document["locked_hosts"] = self._prepare_hosts_for_storage(locked_hosts)
+                        document["freemium_trimmed"] = True
                     db["nessus_reports"].insert_one(document)
                 else:
                     document["parsed_data"] = parsed_data
