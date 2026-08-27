@@ -306,7 +306,10 @@ class AdminSignupSendOTPView(APIView):
             return Response({"error": e.messages}, status=400)
 
         if User.objects.filter(email=email).exists():
-            return Response({"error": "User already exists"}, status=400)
+            return Response(
+                {"error": "An admin account with this email already exists. Please sign in instead."},
+                status=400,
+            )
 
         # reCAPTCHA
         ok, msg = verify_recaptcha(recaptcha)
