@@ -1,4 +1,5 @@
 import os
+import logging
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -31,8 +32,11 @@ from .utils import (
     process_entries,
     send_scope_lock_notification,
     send_contact_superadmin_email,
+    send_new_scope_submission_email,
     get_superadmin_emails,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ScopeCreateAPIView(APIView):
@@ -231,8 +235,27 @@ class ScopeCreateAPIView(APIView):
                 "Please continue with the Premium plan (Management + Testing)."
             )
 
+        # Super Admin needs to know a new scope is waiting — email every
+        # superadmin now, and let the admin know on-screen that this isn't
+        # instant (no scanning engine exists; a human tests it externally —
+        # see upload_report/admin.py's "Fulfills Scope" dropdown for how
+        # the result comes back). Best-effort: a SendGrid hiccup here must
+        # never fail the scope submission itself.
+        try:
+            superadmin_emails = get_superadmin_emails()
+            if superadmin_emails:
+                send_new_scope_submission_email(
+                    superadmin_emails, admin_email=request.user.email, scope=scope
+                )
+        except Exception as e:
+            logger.error(f"[Scope] Failed to notify Super Admin(s) of new scope {scope.id}: {e}")
+
         return Response({
-            "message": "Scope created successfully",
+            "message": (
+                "Your scope has been submitted for review. Our security team is "
+                "working on it — we'll notify you once it's ready."
+            ),
+            "status": "pending_superadmin_review",
             "scope": ScopeSerializer(scope, context={"request": request}).data,
             "processing": {
                 "source": source_type,
@@ -282,6 +305,38 @@ class ScopeListAPIView(APIView):
             "count": len(scopes),
             "scopes": serializer.data
         }, status=status.HTTP_200_OK)
+
+
+class ScopeExportAPIView(APIView):
+    """
+    GET /api/admin/scope/<id>/export/
+
+    Download a scope's targets as CSV — works uniformly for both source
+    types, unlike the existing Scope.source_file (only populated for
+    file-upload scopes; blank for manual entry, which has no original file
+    to hand back). Lets a Super Admin download ANY scope the same way
+    before testing it externally and uploading the real result via Django
+    Admin's "Add Upload Report" -> "Fulfills Scope".
+    """
+    permission_classes = [permissions.IsAuthenticated, IsScopeOwnerOrSuperAdmin]
+
+    def get(self, request, scope_id):
+        scope = get_object_or_404(Scope, id=scope_id)
+        self.check_object_permissions(request, scope)
+
+        import csv
+        from django.http import HttpResponse
+
+        response = HttpResponse(content_type="text/csv")
+        safe_name = "".join(c for c in scope.name if c.isalnum() or c in (" ", "-", "_")).strip() or scope.id
+        response["Content-Disposition"] = f'attachment; filename="scope_{safe_name}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow(["value", "entry_type", "is_internal", "subnet_mask"])
+        for entry in scope.entries.all().order_by("value"):
+            writer.writerow([entry.value, entry.entry_type, entry.is_internal, entry.subnet_mask or ""])
+
+        return response
 
 
 class ScopeDetailAPIView(APIView):

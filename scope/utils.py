@@ -394,6 +394,56 @@ VAPTFIX Team
         return False
 
 
+def send_new_scope_submission_email(superadmin_emails: List[str], admin_email: str, scope) -> bool:
+    """
+    Sent to every Super Admin the moment an admin submits a scope via
+    "Enter Your Scope" (file upload or manual entry) — scope/views.py's
+    ScopeCreateAPIView calls this right after the Scope/ScopeEntry rows are
+    created. There's no scanning engine (see SCOPE_AUTO_SCAN_PROPOSAL.md),
+    so a human has to notice and act on this — download the scope, test it
+    externally, then upload the real result via Django Admin's "Add Upload
+    Report" form (its "Fulfills Scope" dropdown, see upload_report/admin.py).
+    """
+    try:
+        sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+
+        try:
+            target_count = scope.entries.count()
+        except Exception:
+            target_count = 0
+
+        body = f"""
+A new scope has been submitted and needs testing.
+
+Submitted by: {admin_email}
+Scope name: {scope.name}
+Testing type: {scope.get_testing_type_display()}
+Targets: {target_count}
+
+Log in to the Django Admin panel to review and download this scope, then
+upload the real test result through "Add Upload Report" (using its
+"Fulfills Scope" dropdown) once testing is complete.
+
+---
+This is an automated message from VAPTFIX.
+"""
+
+        mail = Mail(
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to_emails=superadmin_emails,
+            subject=f"New scope submitted: {scope.name} ({admin_email})",
+            plain_text_content=body,
+        )
+
+        response = sg.send(mail)
+        logger.info(f"New-scope-submission notification sent to {superadmin_emails}: {response.status_code}")
+        return response.status_code in [200, 201, 202]
+
+    except Exception as e:
+        logger.error(f"Failed to send new-scope-submission notification: {str(e)}")
+        return False
+
+
 def send_scope_report_ready_email(admin_email: str, scope_name: str) -> bool:
     """
     Sent once a Super Admin's test result "for" a submitted scope has
@@ -491,11 +541,22 @@ Please respond directly to the admin at: {admin_email}
 def get_superadmin_emails() -> List[str]:
     """
     Get list of super admin email addresses.
+
+    Real bug found via testing send_new_scope_submission_email: djongo
+    mistranslates a bare boolean filter (User.objects.filter(is_superuser=True))
+    into invalid SQL and raises, which this function's except-block was
+    silently swallowing — every call to this had been returning [] the
+    whole time, so no scope/support/contact-superadmin notification email
+    that depends on it was ever actually reaching anyone. Same djongo
+    boolean-filter issue documented elsewhere in this codebase (e.g.
+    upload_report/admin.py's admin dropdown) — fixed the same way, with a
+    raw pymongo query instead of the ORM filter.
     """
     try:
-        from users.models import User
-        superadmins = User.objects.filter(is_superuser=True).values_list('email', flat=True)
-        return list(superadmins)
+        from vaptfix.mongo_client import get_shared_db
+        db = get_shared_db()
+        docs = db["users_user"].find({"is_superuser": True}, {"email": 1})
+        return [d["email"] for d in docs if d.get("email")]
     except Exception as e:
         logger.error(f"Failed to get super admin emails: {str(e)}")
         return []

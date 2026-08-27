@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     ScopeCreateAPIView,
     ScopeListAPIView,
+    ScopeExportAPIView,
     ScopeDetailAPIView,
     ScopeEntriesAPIView,
     ScopeEntryDetailAPIView,
@@ -81,6 +82,13 @@ urlpatterns = [
         "hierarchy/<str:admin_id>/",
         ScopeHierarchyAPIView.as_view(),
         name="scope-hierarchy"
+    ),
+
+    # Download a scope's targets as CSV (Super Admin, or the owning admin)
+    path(
+        "<str:scope_id>/export/",
+        ScopeExportAPIView.as_view(),
+        name="scope-export"
     ),
 
     # Get/Update/Delete scope by ID
