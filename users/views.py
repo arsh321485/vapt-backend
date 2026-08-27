@@ -2289,10 +2289,45 @@ class MicrosoftTeamsCallbackView(APIView):
                 # Platform enforcement: block if admin already connected Slack
                 if user.login_provider == "slack" and user.slack_bot_token:
                     logger.warning(f"[TeamsOAuth] Blocked — user {user.email} already connected to Slack")
-                    return JsonResponse({
-                        "error": "Your account is connected to Slack. Please sign in using Slack.",
-                        "platform_conflict": True,
-                    }, status=400)
+                    # This callback runs in a popup (see the TEAMS_CONNECTED
+                    # postMessage below for the success case) — a bare
+                    # JsonResponse just renders as inert JSON text inside
+                    # that popup with no way for the opener window to read
+                    # it. postMessage a matching TEAMS_CONNECTED/success:false
+                    # payload instead so the frontend's existing message
+                    # listener can show the conflict error and close the
+                    # popup, exactly like the success path does.
+                    conflict_error = "Your account is connected to Slack. Please sign in using Slack."
+                    conflict_html = f"""
+                    <html>
+                    <head><title>Microsoft Teams OAuth</title></head>
+                    <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
+                        <h2>Could not connect Microsoft Teams</h2>
+                        <p>{conflict_error}</p>
+                        <script>
+                            (function() {{
+                                var frontendUrl = {json.dumps(frontend_redirect)};
+                                var frontendOrigin = frontendUrl;
+                                try {{ frontendOrigin = new URL(frontendUrl).origin; }} catch (e) {{}}
+                                if (window.opener) {{
+                                    window.opener.postMessage({{
+                                        type: "TEAMS_CONNECTED",
+                                        success: false,
+                                        error: {json.dumps(conflict_error)},
+                                        platform_conflict: true
+                                    }}, frontendOrigin);
+                                    setTimeout(function() {{
+                                        try {{ window.close(); }} catch (e) {{}}
+                                    }}, 3000);
+                                }} else {{
+                                    window.location.replace(frontendUrl);
+                                }}
+                            }})();
+                        </script>
+                    </body>
+                    </html>
+                    """
+                    return HttpResponse(conflict_html, status=400)
 
                 user.is_staff = True
                 user.login_provider = 'microsoft_teams'
