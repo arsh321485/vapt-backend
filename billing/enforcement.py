@@ -36,12 +36,25 @@ def is_freemium(admin) -> bool:
 
 def _is_unlimited_admin(admin) -> bool:
     """
-    Emails in BILLING_UNLIMITED_ADMIN_EMAILS (settings/.env) skip the
-    asset-count, automation-scripts, and testing/retesting Freemium limits —
-    NOT is_freemium() itself, so assert_can_upload_report's 1-upload-per-day
-    limit still applies to them like any other Freemium admin. Intended for
-    internal/demo accounts that need to exercise the product without an
-    actual paid plan, while still exercising the same-day-upload flow.
+    Emails in BILLING_UNLIMITED_ADMIN_EMAILS (settings/.env), OR any
+    is_superuser account, skip the asset-count, automation-scripts, and
+    testing/retesting Freemium limits — NOT is_freemium() itself, so
+    assert_can_upload_report's 1-upload-per-day limit still applies to
+    them like any other Freemium admin. Intended for internal/demo
+    accounts that need to exercise the product without an actual paid
+    plan, while still exercising the same-day-upload flow.
+
+    The is_superuser exemption specifically covers Magic Pin Upload
+    (upload_report/admin.py's MagicPinUploadAdmin) — explicit, repeated
+    request: that upload path must show EVERYTHING with zero plan
+    restriction. It attributes every report to request.user (the
+    superadmin doing the upload, no "Select Admin" field at all), so
+    without this, automation scripts on that data would still get locked
+    whenever the superadmin's own account happened to have no paid
+    subscription — the upload-time host/vuln trim being exempt
+    (_MAGIC_LINK_NO_PLAN_LIMITS) wasn't enough on its own, since
+    automation-script visibility is checked separately, per admin, at
+    view time.
 
     `admin` is a User instance at some call sites (upload_report/views.py)
     but a plain admin_id string at others (automation_scripts_api/views.py's
@@ -55,6 +68,8 @@ def _is_unlimited_admin(admin) -> bool:
     if isinstance(admin, str):
         from users.models import User
         admin = User.objects.filter(id=admin).first()
+    if getattr(admin, "is_superuser", False):
+        return True
     email = (getattr(admin, "email", "") or "").strip().lower()
     return bool(email) and email in getattr(settings, "BILLING_UNLIMITED_ADMIN_EMAILS", [])
 
