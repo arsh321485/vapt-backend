@@ -2,7 +2,6 @@ from django.contrib import admin
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
-from django.utils.safestring import mark_safe
 from django.contrib import messages
 from django.shortcuts import get_object_or_404
 from django.http import HttpResponse
@@ -21,7 +20,7 @@ class ScopeAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ("Scope Information", {
-            "fields": ("id", "name", "admin", "source_file", "download_file")
+            "fields": ("id", "name", "admin", "download_file")
         }),
         ("Lock Status", {
             "fields": ("is_locked", "locked_by", "locked_at"),
@@ -70,19 +69,19 @@ class ScopeAdmin(admin.ModelAdmin):
 
     def download_file(self, obj):
         """
-        Always offers a working download, for both scope sources — the
-        original uploaded file too when one exists, plus a CSV of the
-        parsed targets that works even for manual entry (which has no
-        source_file at all). Previously this column showed a dead
-        '— (entered manually)' with nothing to actually download.
+        Always offers a working download, for both scope sources — a CSV of
+        the parsed targets, generated fresh from the database on every
+        click. Deliberately does NOT link to the raw source_file: that link
+        only resolves on whichever server actually received the original
+        upload (MongoDB is shared across environments, MEDIA_ROOT disk
+        storage is not — confirmed via a real 404 testing locally against a
+        scope uploaded through a different server), so it was unreliable
+        depending on which server admin happened to be looking from.
         """
         if not obj.pk:
             return "—"
         csv_url = reverse("admin:scope_scope_download_csv", args=[obj.id])
-        parts = [format_html('<a href="{}" target="_blank">⬇ Download (CSV)</a>', csv_url)]
-        if obj.source_file:
-            parts.insert(0, format_html('<a href="{}" target="_blank">⬇ Original file</a>', obj.source_file.url))
-        return mark_safe(" | ".join(parts))
+        return format_html('<a href="{}" target="_blank">⬇ Download (CSV)</a>', csv_url)
     download_file.short_description = "Download"
 
     def lock_selected_scopes(self, request, queryset):
