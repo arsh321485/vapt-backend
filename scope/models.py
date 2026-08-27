@@ -47,6 +47,13 @@ class Scope(models.Model):
     is_locked = models.BooleanField(default=False)
     locked_by = models.EmailField(null=True, blank=True)
     locked_at = models.DateTimeField(null=True, blank=True)
+    # Set once a Super Admin uploads a real test result "for" this scope
+    # (Django Admin's "Add Upload Report" form gets a "Fulfills Scope"
+    # dropdown that sets these) — lets the admin-panel scope list show
+    # "pending" vs "fulfilled", and is how _auto_generate_cards_bg knows
+    # whether a given report should trigger the scope-completion email.
+    fulfilled_report_id = models.CharField(max_length=64, null=True, blank=True)
+    fulfilled_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

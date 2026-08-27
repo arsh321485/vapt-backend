@@ -1660,6 +1660,26 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             {"$set": {"cards_generation_complete": is_complete, "cards_generated_count": actual_count}}
         )
 
+        # This report is a Super Admin's real test result "for" a scope the
+        # admin submitted via "Enter Your Scope" (UploadReportAdminForm's
+        # "Fulfills Scope" dropdown set nessus_doc.scope_id at upload time —
+        # see upload_report/admin.py). That admin had nothing to watch in
+        # the meantime (the Super Admin tested it externally, maybe days
+        # later), so email them now that automation scripts are ready,
+        # instead of relying on them to notice on their own.
+        scope_id = nessus_doc.get("scope_id")
+        if is_complete and scope_id:
+            try:
+                from scope.models import Scope
+                from scope.utils import send_scope_report_ready_email
+                scope_obj = Scope.objects.filter(id=scope_id).first()
+                if scope_obj and getattr(scope_obj, "admin", None) and scope_obj.admin.email:
+                    send_scope_report_ready_email(scope_obj.admin.email, scope_obj.name)
+                else:
+                    logger.warning(f"[AutoGenCards] scope_id={scope_id} on report_id={report_id} has no resolvable admin email")
+            except Exception:
+                logger.exception(f"[AutoGenCards] Failed to send scope-ready email for report_id={report_id} scope_id={scope_id}")
+
         # Cards just changed team assignments for this report — clear the cached
         # by-team view again so Slack (/viewassigned etc.) and the dashboard don't
         # keep showing "Unassigned" for vulns that just got a real team.

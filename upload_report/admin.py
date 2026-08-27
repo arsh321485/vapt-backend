@@ -29,6 +29,24 @@ class UploadReportAdminForm(forms.ModelForm):
         label="Select Admin",
     )
 
+    # Optional — links this upload to a scope the selected admin submitted
+    # via the website's "Enter Your Scope" flow (file upload or manual
+    # entry), which never produces vulnerability data on its own (no
+    # scanning engine exists — see scope/views.py). A Super Admin tests the
+    # downloaded scope externally, then uploads the real result here and
+    # picks it from this list so the admin gets notified once automation
+    # scripts are ready (see _auto_generate_cards_bg's scope_id check).
+    fulfills_scope = forms.ChoiceField(
+        choices=[],
+        required=False,
+        label="Fulfills Scope (optional)",
+        help_text=(
+            "If this report is the real test result for a scope the admin "
+            "submitted via 'Enter Your Scope', select it here — the admin "
+            "will be emailed once automation scripts finish generating."
+        ),
+    )
+
     class Meta:
         model = UploadReport
         fields = ['file']
@@ -75,6 +93,29 @@ class UploadReportAdminForm(forms.ModelForm):
         if self.instance and self.instance.pk and self.instance.admin:
             self.fields['admin_select'].initial = str(self.instance.admin.id)
 
+        # Not-yet-fulfilled scopes, across all admins — labeled with the
+        # owning admin's email so it's usable regardless of which admin
+        # ends up picked above. Filtered in Python (not a queryset
+        # .filter(fulfilled_report_id__isnull=True)) — djongo has repeatedly
+        # mistranslated similar lookups elsewhere in this codebase (boolean
+        # filters, __in on ObjectId), so we fetch and check in Python to be
+        # safe rather than trust it here too.
+        scope_choices = [('', '--- None ---')]
+        try:
+            from scope.models import Scope
+            for s in Scope.objects.select_related('admin').order_by('-created_at')[:300]:
+                if getattr(s, 'fulfilled_report_id', None):
+                    continue
+                try:
+                    target_count = s.entries.count()
+                except Exception:
+                    target_count = 0
+                admin_label = getattr(s.admin, 'email', None) or '?'
+                scope_choices.append((str(s.id), f"{admin_label} — {s.name} ({target_count} targets)"))
+        except Exception as e:
+            logger.error(f"[UploadReportAdminForm] Failed to load scope list: {e}")
+        self.fields['fulfills_scope'].choices = scope_choices
+
     def clean_admin_select(self):
         admin_id = self.cleaned_data.get('admin_select')
         if not admin_id:
@@ -85,6 +126,27 @@ class UploadReportAdminForm(forms.ModelForm):
             raise forms.ValidationError("Selected admin does not exist.")
 
         return admin_user
+
+    def clean(self):
+        cleaned_data = super().clean()
+        scope_id = cleaned_data.get('fulfills_scope')
+        admin_user = cleaned_data.get('admin_select')
+        if scope_id:
+            from scope.models import Scope
+            scope_obj = Scope.objects.filter(id=scope_id).first()
+            if not scope_obj:
+                raise forms.ValidationError({"fulfills_scope": "Selected scope no longer exists."})
+            if admin_user and str(scope_obj.admin_id) != str(admin_user.id):
+                raise forms.ValidationError({
+                    "fulfills_scope": (
+                        f"The selected scope belongs to {getattr(scope_obj.admin, 'email', 'a different admin')}, "
+                        f"not the admin selected above."
+                    )
+                })
+            cleaned_data['fulfills_scope'] = scope_obj
+        else:
+            cleaned_data['fulfills_scope'] = None
+        return cleaned_data
 
 
 class MagicPinUploadForm(forms.ModelForm):
@@ -311,7 +373,7 @@ class UploadReportAdmin(admin.ModelAdmin):
             })
         return prepared_hosts
 
-    def _store_in_mongodb(self, parsed_data, report_id, admin_email, original_filename, member_type):
+    def _store_in_mongodb(self, parsed_data, report_id, admin_email, original_filename, member_type, scope_id=None):
         """Store parsed report data in MongoDB."""
         mongo_uri = self._get_mongo_uri()
         if not mongo_uri:
@@ -343,6 +405,12 @@ class UploadReportAdmin(admin.ModelAdmin):
                     "uploaded_at": datetime.datetime.utcnow(),
                     "report_type": parsed_data.get("type", "unknown"),
                 }
+                if scope_id:
+                    # Read by _auto_generate_cards_bg once card generation
+                    # finishes, to decide whether the admin gets the
+                    # "your automation scripts are ready" email — see
+                    # UploadReportAdminForm.fulfills_scope.
+                    document["scope_id"] = str(scope_id)
 
                 if parsed_data.get("type") in ("nessus_html", "nessus", "aws", "custom"):
                     # Plan gate — Freemium gets at most max_internal_ips
@@ -432,7 +500,23 @@ class UploadReportAdmin(admin.ModelAdmin):
         extra_context['show_save_and_continue'] = False
         return super().changeform_view(request, object_id, form_url, extra_context)
 
-    def _parse_and_store_report_bg(self, report_pk, admin_email, admin_id, original_filename, upload_estimate_seconds):
+    def _mark_scope_fulfilled(self, scope_id, report_id):
+        """Best-effort — a failure here shouldn't fail the upload itself,
+        it just means the scope keeps showing as pending and the
+        completion email (gated on nessus_reports.scope_id, not this field)
+        still fires normally."""
+        if not scope_id:
+            return
+        try:
+            from django.utils import timezone
+            from scope.models import Scope
+            Scope.objects.filter(id=scope_id).update(
+                fulfilled_report_id=str(report_id), fulfilled_at=timezone.now()
+            )
+        except Exception as e:
+            logger.warning(f"[UploadReportAdmin] Could not mark scope {scope_id} fulfilled: {e}")
+
+    def _parse_and_store_report_bg(self, report_pk, admin_email, admin_id, original_filename, upload_estimate_seconds, scope_id=None):
         """Parse report in background to avoid admin request hangs."""
         started = time.perf_counter()
         print(f"[AdminUploadBG] Worker started for report_pk={report_pk}", flush=True)
@@ -494,6 +578,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                 admin_email=admin_email,
                 original_filename=original_filename,
                 member_type=report_obj.member_type or "external",
+                scope_id=scope_id,
             )
             if not mongodb_stored:
                 report_obj.status = "MongoDB Storage Failed"
@@ -501,6 +586,8 @@ class UploadReportAdmin(admin.ModelAdmin):
                 logger.warning(f"[AdminUploadBG] MongoDB store failed report_id={report_id}")
                 print(f"[AdminUploadBG] MongoDB store failed report_id={report_id}", flush=True)
                 return
+
+            self._mark_scope_fulfilled(scope_id, report_id)
 
             upload_actual_seconds = time.perf_counter() - started
             if parsed_data.get("type") in ("nessus", "nessus_html"):
@@ -548,6 +635,8 @@ class UploadReportAdmin(admin.ModelAdmin):
         op_started = time.perf_counter()
         admin_user = form.cleaned_data.get('admin_select')
         obj.admin = admin_user
+        scope_obj = form.cleaned_data.get('fulfills_scope')
+        scope_id = str(scope_obj.id) if scope_obj else None
 
         uploaded_file = form.cleaned_data.get('file')
         is_new_file = uploaded_file and hasattr(uploaded_file, 'chunks')
@@ -601,6 +690,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                                 str(admin_user.id),
                                 uploaded_file.name,
                                 upload_estimate_seconds,
+                                scope_id,
                             ),
                             daemon=True
                         )
@@ -649,10 +739,12 @@ class UploadReportAdmin(admin.ModelAdmin):
                         report_id=str(obj._id),
                         admin_email=admin_user.email,
                         original_filename=uploaded_file.name,
-                        member_type=obj.member_type or "external"
+                        member_type=obj.member_type or "external",
+                        scope_id=scope_id,
                     )
 
                     if mongodb_stored:
+                        self._mark_scope_fulfilled(scope_id, str(obj._id))
                         upload_actual_seconds = time.perf_counter() - op_started
 
                         # Same Slack onboarding hook as the DRF upload API

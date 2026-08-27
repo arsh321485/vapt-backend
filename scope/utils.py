@@ -394,6 +394,49 @@ VAPTFIX Team
         return False
 
 
+def send_scope_report_ready_email(admin_email: str, scope_name: str) -> bool:
+    """
+    Sent once a Super Admin's test result "for" a submitted scope has
+    finished automation-script (agent) generation — see
+    upload_report/views.py's _auto_generate_cards_bg, which checks
+    nessus_reports.scope_id (set from UploadReportAdminForm's
+    "Fulfills Scope" dropdown) and calls this right after
+    cards_generation_complete flips True. The admin submitted the scope
+    and then had nothing to watch (a Super Admin tests it externally,
+    possibly days later) — this email is what tells them to come back.
+    """
+    try:
+        sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+
+        body = f"""
+Dear Administrator,
+
+Good news — your submitted scope "{scope_name}" has been tested, and the
+report is ready with full automation/remediation scripts generated for
+every finding.
+
+Log in to VAPTFIX to review the results and continue.
+
+Thank you,
+VAPTFIX Team
+"""
+
+        mail = Mail(
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to_emails=admin_email,
+            subject=f"Your scope \"{scope_name}\" is ready — automation scripts generated",
+            plain_text_content=body,
+        )
+
+        response = sg.send(mail)
+        logger.info(f"Scope-ready notification sent to {admin_email}: {response.status_code}")
+        return response.status_code in [200, 201, 202]
+
+    except Exception as e:
+        logger.error(f"Failed to send scope-ready notification: {str(e)}")
+        return False
+
+
 def send_contact_superadmin_email(
     admin_email: str,
     admin_name: str,
