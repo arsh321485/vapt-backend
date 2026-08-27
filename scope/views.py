@@ -199,51 +199,36 @@ class ScopeCreateAPIView(APIView):
                     "error": entry_data["error"]
                 })
 
-        # Freemium/Premium routing signal, across ALL of this admin's
-        # scopes combined (not just what was just submitted — an admin
-        # already over the line from an earlier scope stays routed to
-        # Premium even if this submission alone is small). Two separate
-        # Freemium restrictions, per explicit instruction:
-        #   1) Freemium is INTERNAL IPs ONLY — any external IP/subnet or
-        #      URL anywhere in the admin's scope requires Premium,
-        #      regardless of count.
-        #   2) Even all-internal, Freemium is capped at
-        #      FREEMIUM_LIMITS["max_internal_ips"] targets total.
-        # Premium has no such restriction — internal, external, and URLs
-        # are all valid there (still subject to the separate 250-asset
-        # Premium ceiling elsewhere).
+        # Plan routing, across ALL of this admin's scopes combined (not just
+        # what was just submitted — an admin who already has a web/mobile
+        # asset from an earlier scope stays routed to Custom even if this
+        # submission alone is IP-only). Explicit instruction: "scope me
+        # freemium plan aayega hi nai" — Freemium is never offered for a
+        # scope submission, full stop (see billing/views.py's
+        # FreemiumActivateView for the matching hard-block, since this is
+        # only a recommendation an admin could otherwise bypass). Routing
+        # is purely:
+        #   - any web/mobile asset anywhere in the admin's scope -> Custom
+        #   - IPs/subnets only (internal or external, any count) -> Premium
+        #     (Management + Testing — mode B, since scope submission,
+        #     unlike a report upload, is specifically what that mode is for)
         from billing.asset_service import get_admin_scope_asset_breakdown
-        from billing.plans import FREEMIUM_LIMITS, MODE_MANAGEMENT_TESTING
+        from billing.plans import MODE_MANAGEMENT_TESTING
         breakdown = get_admin_scope_asset_breakdown(str(request.user.id))
         total_scope_assets = breakdown["total"]
-        freemium_limit = FREEMIUM_LIMITS["max_internal_ips"]
 
-        # Scope submission is what mode B ("I need VaptFix to run testing" /
-        # MODE_MANAGEMENT_TESTING) is for — an admin who gave scope (not a
-        # report) should always land on Management+Testing when routed to
-        # Premium, never plain Management (mode A is "I already have a
-        # report", which doesn't apply here at all).
-        recommended_mode = None
-
-        if breakdown["has_external"]:
-            recommended_plan = "premium"
-            recommended_mode = MODE_MANAGEMENT_TESTING
+        if breakdown["has_web_asset"]:
+            recommended_plan = "custom"
+            recommended_mode = None
             recommendation_message = (
-                "Your scope includes external IPs/URLs — Freemium only covers internal IPs. "
-                "Please continue with the Premium plan (Management + Testing)."
-            )
-        elif total_scope_assets > freemium_limit:
-            recommended_plan = "premium"
-            recommended_mode = MODE_MANAGEMENT_TESTING
-            recommendation_message = (
-                f"Your scope has {total_scope_assets} internal target(s), which is over the "
-                f"Freemium limit of {freemium_limit}. Please continue with the Premium plan (Management + Testing)."
+                "Your scope includes web/mobile assets — please continue with the Custom plan."
             )
         else:
-            recommended_plan = "freemium"
+            recommended_plan = "premium"
+            recommended_mode = MODE_MANAGEMENT_TESTING
             recommendation_message = (
-                f"Your scope has {total_scope_assets} internal target(s), within the Freemium "
-                f"limit of {freemium_limit} — you can continue with Freemium."
+                f"Your scope has {total_scope_assets} target(s). "
+                "Please continue with the Premium plan (Management + Testing)."
             )
 
         return Response({
@@ -263,7 +248,7 @@ class ScopeCreateAPIView(APIView):
                 "total_scope_assets": total_scope_assets,
                 "internal_count": breakdown["internal_count"],
                 "external_count": breakdown["external_count"],
-                "freemium_limit": freemium_limit,
+                "has_web_asset": breakdown["has_web_asset"],
                 "message": recommendation_message,
             },
         }, status=status.HTTP_201_CREATED)

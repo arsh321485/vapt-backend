@@ -162,6 +162,21 @@ class FreemiumActivateView(APIView):
 
     def post(self, request):
         admin = request.user
+
+        # "scope me freemium plan aayega hi nai" — Freemium is never
+        # available once an admin has gone through "Enter Your Scope" (file
+        # upload or manual entry), regardless of what scope/create/'s own
+        # plan_recommendation said — that's only a suggestion the frontend
+        # could otherwise route around by calling this endpoint directly.
+        # Does NOT affect the separate "Upload Report" flow (report-only
+        # admins keep normal Freemium access, trimmed as usual).
+        from scope.models import ScopeEntry
+        if ScopeEntry.objects.filter(scope__admin_id=str(admin.id)).exists():
+            return Response(
+                {"detail": "Freemium plan is not available for scope-based submissions. Please choose Premium or Custom."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         asset_count = get_admin_asset_count(str(admin.id))
 
         existing = Subscription.objects.filter(admin=admin, status__in=["trialing", "active"]).first()

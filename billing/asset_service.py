@@ -187,30 +187,36 @@ def get_admin_scope_asset_breakdown(admin_id: str) -> dict:
     """
     Same dedupe as get_admin_scope_asset_count, but split by internal vs
     everything else (external IPs, subnets, and URLs — anything
-    ScopeEntry.is_internal doesn't mark True) — Freemium is restricted to
-    internal IPs only ("premium plan ke liye sare ip valid rahenge, jo
-    freemium se jata hai usko sirf internal hi ip valid rahegi"), so
-    routing needs to know not just the total count but whether any
-    non-internal target is present at all.
+    ScopeEntry.is_internal doesn't mark True). Freemium is never available
+    for scope submissions at all now ("scope me freemium plan aayega hi
+    nai") — routing is purely IP-only-vs-has-a-web/mobile-asset (see
+    has_web_asset), so callers route straight to Premium or Custom.
+    has_external/internal_count/external_count are kept for other existing
+    callers (e.g. billing amount calculations) that still care about the
+    internal/external split.
     """
     try:
         from scope.models import ScopeEntry
         # dedupe in Python — see get_admin_scope_asset_count's note on why
         # djongo can't do SELECT DISTINCT here.
         seen_internal, seen_external = set(), set()
-        for value, is_internal in ScopeEntry.objects.filter(scope__admin_id=admin_id).values_list("value", "is_internal"):
+        has_web_asset = False
+        for value, is_internal, entry_type in ScopeEntry.objects.filter(scope__admin_id=admin_id).values_list("value", "is_internal", "entry_type"):
             if not value:
                 continue
             (seen_internal if is_internal else seen_external).add(value.lower())
+            if entry_type in ("web_url", "mobile_url"):
+                has_web_asset = True
         return {
             "total": len(seen_internal | seen_external),
             "internal_count": len(seen_internal),
             "external_count": len(seen_external),
             "has_external": bool(seen_external),
+            "has_web_asset": has_web_asset,
         }
     except Exception as e:
         logger.error(f"[Billing] scope asset breakdown failed for admin_id={admin_id}: {e}")
-        return {"total": 0, "internal_count": 0, "external_count": 0, "has_external": False}
+        return {"total": 0, "internal_count": 0, "external_count": 0, "has_external": False, "has_web_asset": False}
 
 
 def _latest_report_uploaded_at(admin_id: str):
