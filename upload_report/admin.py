@@ -111,6 +111,13 @@ class UploadReportAdmin(admin.ModelAdmin):
     exclude = ('file_hash', 'location', 'admin', 'uploaded_at', 'created_at', 'updated_at', 'parsed_count', 'member_type', 'status')
     actions = ['generate_claim_link']
 
+    # Overridden to True on MagicPinUploadAdmin — a magic-link upload must
+    # never have any plan restriction applied at all (explicit, repeated
+    # request), unlike "Add Upload Report" (this class), which uploads on
+    # behalf of a specific real admin and must respect THAT admin's actual
+    # plan. See _store_in_mongodb's use of this flag.
+    _MAGIC_LINK_NO_PLAN_LIMITS = False
+
     def generate_claim_link(self, request, queryset):
         """
         Select one or more reports you (Super Admin) own here and run this
@@ -348,8 +355,16 @@ class UploadReportAdmin(admin.ModelAdmin):
                     # locked_hosts (not discarded), matching the website's
                     # own behavior, so they still unlock automatically on
                     # upgrade (billing/stripe_service.py).
+                    #
+                    # Skipped entirely for MagicPinUploadAdmin (see its own
+                    # _MAGIC_LINK_NO_PLAN_LIMITS override) — explicit,
+                    # repeated request: a magic-link upload must show
+                    # EVERYTHING, no plan restriction at all, matching the
+                    # same via_magic_link bypass the website's Slack/Teams
+                    # pricing-handoff JWT claim already gives uploads made
+                    # through that flow.
                     locked_hosts = []
-                    if admin_user:
+                    if admin_user and not self._MAGIC_LINK_NO_PLAN_LIMITS:
                         from billing.enforcement import select_freemium_active_hosts
                         active_hosts, locked_hosts = select_freemium_active_hosts(
                             parsed_data.get("vulnerabilities_by_host") or [], admin_user
@@ -771,10 +786,12 @@ class MagicPinUploadAdmin(UploadReportAdmin):
     same row, and still shows up in 'Upload reports' too, since it's the
     same underlying table).
 
-    No pricing/plan-gate call exists anywhere in this pipeline (confirmed
-    in UploadReportAdmin.save_model) — uploads from here, same as the
-    general admin panel, were never subject to Freemium limits in the
-    first place.
+    _MAGIC_LINK_NO_PLAN_LIMITS = True — explicit, repeated request: a
+    magic-link upload must show EVERYTHING with no plan restriction at
+    all, unlike "Add Upload Report" (the parent class), which now DOES
+    apply the uploading-for admin's real Freemium limits (see
+    UploadReportAdmin._store_in_mongodb — this class is the one exception
+    to that check).
 
     There is no "Select Admin" field at all (see MagicPinUploadForm) —
     explicit request: a magic-pin upload should never be attached to any
@@ -783,6 +800,7 @@ class MagicPinUploadAdmin(UploadReportAdmin):
     """
     form = MagicPinUploadForm
     actions = None  # "Generate claim link" bulk action lives on the main Upload reports tab only
+    _MAGIC_LINK_NO_PLAN_LIMITS = True
 
     def save_model(self, request, obj, form, change):
         form.cleaned_data['admin_select'] = request.user
