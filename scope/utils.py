@@ -403,44 +403,71 @@ def send_new_scope_submission_email(superadmin_emails: List[str], admin_email: s
     so a human has to notice and act on this — download the scope, test it
     externally, then upload the real result via Django Admin's "Add Upload
     Report" form (its "Fulfills Scope" dropdown, see upload_report/admin.py).
+
+    Uses the same branded HTML template as billing's account-lifecycle
+    emails (billing/account_lifecycle.py's _branded_email_html) instead of
+    a raw plain-text SendGrid message — previously this rendered as an
+    unstyled wall of text with no visual hierarchy or link to act on.
     """
+    from users.utils import Util
+    from billing.account_lifecycle import _branded_email_html
+
     try:
-        sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
+        target_count = scope.entries.count()
+    except Exception:
+        target_count = 0
 
-        try:
-            target_count = scope.entries.count()
-        except Exception:
-            target_count = 0
+    backend_url = getattr(settings, "VAPTFIX_BACKEND_URL", "").rstrip("/")
+    admin_link = f"{backend_url}/admin/scope/scope/{scope.id}/change/" if backend_url else None
 
-        body = f"""
-A new scope has been submitted and needs testing.
+    def _row(label, value):
+        return f"""
+        <tr>
+          <td style="padding:6px 0; color:#6b7280; font-size:14px; width:140px; vertical-align:top;">{label}</td>
+          <td style="padding:6px 0; color:#1f2040; font-size:14px; font-weight:600;">{value}</td>
+        </tr>
+        """
 
-Submitted by: {admin_email}
-Scope name: {scope.name}
-Targets: {target_count}
+    button_html = ""
+    if admin_link:
+        button_html = f"""
+        <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
+          <tr><td style="background:#23124d; border-radius:8px;">
+            <a href="{admin_link}"
+               style="display:inline-block; padding:12px 26px; color:#ffffff; font-size:15px;
+                      font-weight:600; text-decoration:none;">Review in Django Admin</a>
+          </td></tr>
+        </table>
+        """
 
-Log in to the Django Admin panel to review and download this scope, then
-upload the real test result through "Add Upload Report" (using its
-"Fulfills Scope" dropdown) once testing is complete.
+    body_html = f"""
+        <p style="color:#3a3f4b; font-size:15px; line-height:1.6; margin:0 0 20px 0;">
+            A new scope has been submitted and needs testing.
+        </p>
+        <table cellpadding="0" cellspacing="0" style="width:100%; margin:0 0 24px 0; border-collapse:collapse;">
+          {_row("Submitted by", admin_email)}
+          {_row("Scope name", scope.name)}
+          {_row("Targets", target_count)}
+        </table>
+        <p style="color:#3a3f4b; font-size:15px; line-height:1.6; margin:0 0 24px 0;">
+            Download this scope, test it externally, then upload the real result through
+            <strong>&quot;Add Upload Report&quot;</strong> (using its
+            <strong>&quot;Fulfills Scope&quot;</strong> dropdown) once testing is complete —
+            the submitting admin will be emailed automatically once it's ready.
+        </p>
+        {button_html}
+    """
 
----
-This is an automated message from VAPTFIX.
-"""
-
-        mail = Mail(
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            to_emails=superadmin_emails,
-            subject=f"New scope submitted: {scope.name} ({admin_email})",
-            plain_text_content=body,
-        )
-
-        response = sg.send(mail)
-        logger.info(f"New-scope-submission notification sent to {superadmin_emails}: {response.status_code}")
-        return response.status_code in [200, 201, 202]
-
-    except Exception as e:
-        logger.error(f"Failed to send new-scope-submission notification: {str(e)}")
-        return False
+    html, logo_b64 = _branded_email_html("📋 New scope submitted", body_html)
+    ok, err = Util.send_mail({
+        "to_email": superadmin_emails,
+        "subject": f"New scope submitted: {scope.name} ({admin_email})",
+        "html_content": html,
+        "inline_logo_b64": logo_b64,
+    })
+    if not ok:
+        logger.error(f"Failed to send new-scope-submission notification to {superadmin_emails}: {err}")
+    return ok
 
 
 def send_scope_report_ready_email(admin_email: str, scope_name: str) -> bool:
