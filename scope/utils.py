@@ -417,7 +417,6 @@ A new scope has been submitted and needs testing.
 
 Submitted by: {admin_email}
 Scope name: {scope.name}
-Testing type: {scope.get_testing_type_display()}
 Targets: {target_count}
 
 Log in to the Django Admin panel to review and download this scope, then
