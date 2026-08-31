@@ -597,10 +597,13 @@ class UserFixVulnerabilityCreateAPIView(APIView):
                     {"detail": "User is not linked to any team."},
                     status=status.HTTP_403_FORBIDDEN
                 )
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
             user_id     = str(request.user.id)
             admin_id    = str(admin_user.id)
             admin_email = getattr(admin_user, "email", "")
-            teams_lower = _normalize_teams(teams)
+            teams_lower = _normalize_teams(active_teams)
 
             with MongoContext() as db:
                 fix_coll      = db[FIX_VULN_COLLECTION]
@@ -2504,7 +2507,10 @@ class UserSupportRequestsByReportAPIView(APIView):
                 {"detail": "No admin assigned to this user"},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        teams_lower_set = {t.lower() for t in teams}
+        selected_team = request.query_params.get("team", "").strip()
+        active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+        teams_lower_set = {t.lower() for t in active_teams}
         admin_id = str(admin_user.id)
         admin_email = getattr(admin_user, "email", None)
 
@@ -2779,7 +2785,10 @@ class UserSupportRequestsByHostAPIView(APIView):
                 {"detail": "No admin assigned to this user"},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        teams_lower_set = {t.lower() for t in teams}
+        selected_team = request.query_params.get("team", "").strip()
+        active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+        teams_lower_set = {t.lower() for t in active_teams}
         admin_id = str(admin_user.id)
         admin_email = getattr(admin_user, "email", None)
 
@@ -3224,7 +3233,10 @@ class UserTicketByReportAPIView(APIView):
         teams, _admin = _get_user_context(request.user.email)
         if not teams:
             return Response({"detail": "No team assigned"}, status=status.HTTP_403_FORBIDDEN)
-        teams_lower_set = {t.lower() for t in teams}
+        selected_team = request.query_params.get("team", "").strip()
+        active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+        teams_lower_set = {t.lower() for t in active_teams}
 
         with MongoContext() as db:
             ticket_coll = db[TICKETS_COLLECTION]
@@ -3257,7 +3269,10 @@ class UserTicketOpenListAPIView(APIView):
         teams, _admin = _get_user_context(request.user.email)
         if not teams:
             return Response({"detail": "No team assigned"}, status=status.HTTP_403_FORBIDDEN)
-        teams_lower_set = {t.lower() for t in teams}
+        selected_team = request.query_params.get("team", "").strip()
+        active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+        teams_lower_set = {t.lower() for t in active_teams}
 
         with MongoContext() as db:
             ticket_coll = db[TICKETS_COLLECTION]
@@ -3359,7 +3374,10 @@ class UserTicketClosedListAPIView(APIView):
         teams, _admin = _get_user_context(request.user.email)
         if not teams:
             return Response({"detail": "No team assigned"}, status=status.HTTP_403_FORBIDDEN)
-        teams_lower_set = {t.lower() for t in teams}
+        selected_team = request.query_params.get("team", "").strip()
+        active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+        teams_lower_set = {t.lower() for t in active_teams}
 
         with MongoContext() as db:
             ticket_coll = db[TICKETS_COLLECTION]
@@ -3545,6 +3563,9 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
             admin_id    = str(admin_user.id)
             admin_email = getattr(admin_user, "email", None)
 
@@ -3592,7 +3613,7 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                 closed_cursor = db[FIX_VULN_CLOSED_COLLECTION].find(
                     {
                         "report_id":     report_id,
-                        "assigned_team": {"$in": teams},
+                        "assigned_team": {"$in": active_teams},
                     },
                     sort=[("closed_at", pymongo.DESCENDING)],
                 )
@@ -3626,7 +3647,7 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                 return Response(
                     {
                         "report_id":    report_id,
-                        "member_teams": teams,
+                        "member_teams": active_teams,
                         "total_closed": len(results),
                         "closed_vulnerabilities": results,
                     },
