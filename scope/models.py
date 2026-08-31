@@ -100,6 +100,14 @@ class ScopeEntry(models.Model):
     )
     subnet_mask = models.CharField(max_length=50, null=True, blank=True)
     is_internal = models.BooleanField(default=False)
+    # Set only when `value` is one of the individual IPs a subnet got
+    # auto-expanded into at submission time (process_entries() in
+    # scope/utils.py) — holds the original subnet notation the admin
+    # actually typed (e.g. "10.0.0.10/24"), so the Super Admin's download
+    # can show exactly what was entered instead of 256 separate IP rows.
+    # Blank for entries the admin typed directly (already the original
+    # value) and for subnets too large to expand (already stored as-is).
+    expanded_from = models.CharField(max_length=500, null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

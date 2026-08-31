@@ -191,6 +191,7 @@ class ScopeCreateAPIView(APIView):
                     entry_type=entry_data["entry_type"],
                     is_internal=entry_data["is_internal"],
                     subnet_mask=entry_data.get("subnet_mask"),
+                    expanded_from=entry_data.get("expanded_from"),
                 )
                 created_entries.append(ScopeEntrySerializer(entry).data)
 
@@ -341,15 +342,21 @@ class ScopeExportAPIView(APIView):
 
         import csv
         from django.http import HttpResponse
+        from .utils import reconstruct_original_scope_values
 
         response = HttpResponse(content_type="text/csv")
         safe_name = "".join(c for c in scope.name if c.isalnum() or c in (" ", "-", "_")).strip() or scope.id
         response["Content-Disposition"] = f'attachment; filename="scope_{safe_name}.csv"'
 
+        # Single "value" column, exactly what the admin typed/uploaded —
+        # no entry_type/is_internal/subnet_mask, and any subnet that got
+        # auto-expanded into individual IPs (process_entries()) collapses
+        # back into the one original subnet line instead of every IP it
+        # expanded to. See reconstruct_original_scope_values.
         writer = csv.writer(response)
-        writer.writerow(["value", "entry_type", "is_internal", "subnet_mask"])
-        for entry in scope.entries.all().order_by("value"):
-            writer.writerow([entry.value, entry.entry_type, entry.is_internal, entry.subnet_mask or ""])
+        writer.writerow(["value"])
+        for value in reconstruct_original_scope_values(scope.entries.all().order_by("created_at")):
+            writer.writerow([value])
 
         return response
 
@@ -513,6 +520,7 @@ class ScopeEntriesAPIView(APIView):
                     entry_type=entry_data["entry_type"],
                     is_internal=entry_data["is_internal"],
                     subnet_mask=entry_data.get("subnet_mask"),
+                    expanded_from=entry_data.get("expanded_from"),
                 )
                 created_entries.append(ScopeEntrySerializer(entry).data)
             else:

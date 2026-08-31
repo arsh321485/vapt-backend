@@ -50,16 +50,24 @@ class ScopeAdmin(admin.ModelAdmin):
         entry has no original file to hand back (source_file is blank), so
         this is the only download option that works uniformly for both;
         it's what 'download_file' below links to.
+
+        Single "value" column, exactly what the admin typed/uploaded — no
+        entry_type/is_internal/subnet_mask, and a subnet that got
+        auto-expanded into individual IPs at submission time collapses back
+        into the one original subnet line instead of every expanded IP
+        (real bug report: a "10.0.0.10/24" entry was downloading as 256
+        separate rows). See scope/utils.py's reconstruct_original_scope_values.
         """
         import csv
+        from .utils import reconstruct_original_scope_values
         scope = get_object_or_404(Scope, id=scope_id)
         response = HttpResponse(content_type="text/csv")
         safe_name = "".join(c for c in scope.name if c.isalnum() or c in (" ", "-", "_")).strip() or scope.id
         response["Content-Disposition"] = f'attachment; filename="scope_{safe_name}.csv"'
         writer = csv.writer(response)
-        writer.writerow(["value", "entry_type", "is_internal", "subnet_mask"])
-        for entry in scope.entries.all().order_by("value"):
-            writer.writerow([entry.value, entry.entry_type, entry.is_internal, entry.subnet_mask or ""])
+        writer.writerow(["value"])
+        for value in reconstruct_original_scope_values(scope.entries.all().order_by("created_at")):
+            writer.writerow([value])
         return response
 
     def entry_count(self, obj):

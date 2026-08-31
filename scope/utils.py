@@ -279,6 +279,33 @@ def parse_file_content(file_obj, filename: str) -> List[str]:
     return values
 
 
+def reconstruct_original_scope_values(entries) -> List[str]:
+    """
+    Collapses a scope's stored ScopeEntry rows back into exactly what the
+    admin originally typed/uploaded — for the Super Admin's download only.
+    Real bug report: subnets get auto-expanded into individual IPs at
+    submission time (process_entries(), above) so the rest of the app can
+    count/bill real targets — but that meant the download showed 256
+    separate IP rows for a single "10.0.0.10/24" the admin entered.
+
+    `entries` is any iterable of ScopeEntry (or ScopeEntry-shaped dicts with
+    "value"/"expanded_from" keys). Every expanded-IP entry sharing the same
+    expanded_from collapses into that one original subnet string; entries
+    the admin typed directly (expanded_from blank) pass through unchanged.
+    Order-preserving, first-seen-wins.
+    """
+    seen = set()
+    result = []
+    for entry in entries:
+        original = getattr(entry, "expanded_from", None) if not isinstance(entry, dict) else entry.get("expanded_from")
+        value = getattr(entry, "value", None) if not isinstance(entry, dict) else entry.get("value")
+        display = original or value
+        if display and display not in seen:
+            seen.add(display)
+            result.append(display)
+    return result
+
+
 def parse_targets_string(targets_str: str) -> List[str]:
     """
     Parse a multiline string of targets into a list.
@@ -322,7 +349,10 @@ def process_entries(values: List[str], expand_subnets: bool = True) -> List[Dict
             expanded_ips = expand_subnet(value)
 
             if expanded_ips:
-                # Add individual IPs instead of subnet
+                # Add individual IPs instead of subnet — tagged with
+                # expanded_from (the original subnet the admin actually
+                # typed) so a later download can reconstruct exactly what
+                # was entered instead of every expanded IP.
                 for ip in expanded_ips:
                     if ip not in seen_values:
                         seen_values.add(ip)
@@ -334,7 +364,8 @@ def process_entries(values: List[str], expand_subnets: bool = True) -> List[Dict
                             "is_internal": ip_is_internal,
                             "subnet_mask": None,
                             "is_valid": True,
-                            "error": None
+                            "error": None,
+                            "expanded_from": value,
                         })
             else:
                 # Subnet too large or invalid - keep as subnet entry
