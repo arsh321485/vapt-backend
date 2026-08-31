@@ -218,6 +218,12 @@ class UserAssetsAPIView(APIView):
     Returns assets from the admin's latest report filtered to
     only those that have ≥1 vulnerability assigned to the user's team(s).
     Vulnerability counts are also team-filtered.
+
+    Optional: ?team=<team name> — narrows to just that one team (must be
+    one of the member's own teams); omitted/invalid falls back to all of
+    them combined, same as before. Matches the ?team= convention already
+    used by userdashboard's views, so the Home page's team dropdown can
+    carry its selection through to this page too.
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -230,7 +236,10 @@ class UserAssetsAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
             admin_id    = str(admin_user.id)
             admin_email = getattr(admin_user, "email", None)
             search_q    = (request.query_params.get("q") or "").strip().lower()
@@ -365,7 +374,10 @@ class UserHoldAssetsAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
             admin_id    = str(admin_user.id)
             admin_email = getattr(admin_user, "email", None)
 
@@ -437,7 +449,10 @@ class UserReportAssetsAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
             search_q    = (request.query_params.get("q") or "").strip().lower()
 
             with MongoContext() as db:
@@ -560,7 +575,10 @@ class UserHoldAssetsByReportAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
 
             with MongoContext() as db:
                 coll     = db[NESSUS_COLLECTION]
@@ -622,7 +640,10 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
 
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
@@ -736,7 +757,10 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
             admin_id    = str(admin_user.id)
             admin_email = getattr(admin_user, "email", None)
 
@@ -899,8 +923,11 @@ class UserClosedFixVulnerabilitiesByHostAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
             # Case-insensitive set of user's team names
-            teams_lower_set = {t.lower() for t in teams}
+            teams_lower_set = {t.lower() for t in active_teams}
 
             with MongoContext() as db:
                 # Get admin's latest report to scope by report_id
@@ -1328,7 +1355,10 @@ class UserAllVulnerabilitiesAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
 
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
@@ -1429,7 +1459,10 @@ class UserVulnAssetListAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
 
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
@@ -1697,7 +1730,10 @@ class UserVulnHoldListByReportAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            teams_lower = _normalize_teams(teams)
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
 
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
