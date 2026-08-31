@@ -168,11 +168,20 @@ def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
     # and the next — mirror that structure here with a regex per field so
     # the lightweight path (used for HTML files >= HTML_LARGE_FILE_THRESHOLD_BYTES)
     # stores the same real text instead of a name-shaped placeholder.
+    # Note: the real markup nests a `<div class="clear"></div>` right after
+    # the label, before the details-header div's own closing </div> —
+    # e.g. `<div class="details-header">Description<div class="clear">
+    # </div>\n</div>`. Don't try to match that closing tag precisely (a
+    # first version of this fix required `field_label\s*</div>` right after
+    # the label and silently never matched anything because of that nested
+    # div). Instead just anchor on the label and lazily capture everything
+    # up to the NEXT details-header div — any leaked wrapper markup in the
+    # captured group is harmless since _extract_field_text strips all tags.
     def _details_field_regex(field_label: str) -> "re.Pattern":
         return re.compile(
             r'<div[^>]*class="[^"]*details-header[^"]*"[^>]*>\s*'
             + field_label
-            + r'\s*</div>(.*?)(?=<div[^>]*class="[^"]*details-header|\Z)',
+            + r'(.*?)(?=<div[^>]*class="[^"]*details-header|\Z)',
             re.IGNORECASE | re.DOTALL,
         )
 
