@@ -142,7 +142,20 @@ def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
         r'(\d{3,7})\s*[-:]\s*([A-Za-z][^<\n\r]{3,200})',
         re.IGNORECASE,
     )
-    risk_regex = re.compile(r"risk\s*factor.*?(critical|high|medium|low)", re.IGNORECASE | re.DOTALL)
+    # Real bug found via a real 11.96MB Nessus file (over
+    # HTML_LARGE_FILE_THRESHOLD_BYTES, so this lightweight path is what
+    # actually parsed it): this regex previously only matched
+    # Critical/High/Medium/Low. A finding whose real Risk Factor is "None"
+    # (Nessus's own value for an Info-severity finding — see the main BS4
+    # parser's _NON_RISK_SEVERITIES) never matched that capture group, so
+    # `.*?` with DOTALL just kept scanning FORWARD past it, well beyond the
+    # 8000-char tail window in the worst case, until it hit some unrelated
+    # "Low" (etc.) elsewhere in the document (extremely likely — "Low" text
+    # alone appears thousands of times in a real report) and wrongly
+    # captured that instead. Adding none/info/informational as capturable
+    # values so a real Info-severity finding gets tagged correctly instead
+    # of silently absorbing a random nearby severity word.
+    risk_regex = re.compile(r"risk\s*factor.*?(critical|high|medium|low|informational|info|none)", re.IGNORECASE | re.DOTALL)
 
     vulnerabilities_by_host: List[Dict[str, Any]] = []
     current_host: Optional[Dict[str, Any]] = None
@@ -214,7 +227,7 @@ def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
         # Try extracting risk factor from nearby section after this toggle block.
         tail = content[m.end(): m.end() + 8000]
         risk_m = re.search(
-            r"Risk\s*Factor.*?</div>\s*</div>\s*<div[^>]*>\s*(Critical|High|Medium|Low)\s*<",
+            r"Risk\s*Factor.*?</div>\s*</div>\s*<div[^>]*>\s*(Critical|High|Medium|Low|None|Informational|Info)\s*<",
             tail,
             re.IGNORECASE | re.DOTALL,
         ) or risk_regex.search(tail)
