@@ -69,6 +69,16 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                 )
 
             member_teams_normalized = {_normalize_team_name(t) for t in member_teams}
+
+            # Optional: ?team=<team name> — narrows to just that one team
+            # (must be one of the member's own teams); omitted/invalid falls
+            # back to all of them, same as before. Matches the ?team=
+            # convention already used by userdashboard's views, so the Home
+            # page's team dropdown can carry its selection through here too.
+            selected_team = _normalize_team_name(request.query_params.get("team", "").strip())
+            if selected_team and selected_team in member_teams_normalized:
+                member_teams_normalized = {selected_team}
+
             admin_id = str(user_detail.admin.id)
 
             with MongoContext() as db:
@@ -260,6 +270,16 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                 )
 
             member_teams_normalized = {_normalize_team_name(t) for t in member_teams}
+
+            # Optional: ?team=<team name> — narrows to just that one team
+            # (must be one of the member's own teams); omitted/invalid falls
+            # back to all of them, same as before. Matches the ?team=
+            # convention already used by userdashboard's views, so the Home
+            # page's team dropdown can carry its selection through here too.
+            selected_team = _normalize_team_name(request.query_params.get("team", "").strip())
+            if selected_team and selected_team in member_teams_normalized:
+                member_teams_normalized = {selected_team}
+
             admin_id = str(user_detail.admin.id)
 
             with MongoContext() as db:
