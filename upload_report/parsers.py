@@ -157,6 +157,39 @@ def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
     # of silently absorbing a random nearby severity word.
     risk_regex = re.compile(r"risk\s*factor.*?(critical|high|medium|low|informational|info|none)", re.IGNORECASE | re.DOTALL)
 
+    # Real bug report: this lightweight path never actually extracted the
+    # real Synopsis/Description/Solution text at all — it just hardcoded
+    # "description": plugin_name (the finding's own title) as a placeholder,
+    # so anything downstream that reads a fix-vulnerability's description
+    # (Manual Fix steps, AI mitigation cards, ...) silently showed the
+    # vulnerability's name instead of real descriptive text. The accurate
+    # BS4 parser (parse_nessus_html, below) reads each field's content from
+    # the siblings between one `details-header` div (e.g. "Description")
+    # and the next — mirror that structure here with a regex per field so
+    # the lightweight path (used for HTML files >= HTML_LARGE_FILE_THRESHOLD_BYTES)
+    # stores the same real text instead of a name-shaped placeholder.
+    def _details_field_regex(field_label: str) -> "re.Pattern":
+        return re.compile(
+            r'<div[^>]*class="[^"]*details-header[^"]*"[^>]*>\s*'
+            + field_label
+            + r'\s*</div>(.*?)(?=<div[^>]*class="[^"]*details-header|\Z)',
+            re.IGNORECASE | re.DOTALL,
+        )
+
+    synopsis_field_regex = _details_field_regex("Synopsis")
+    description_field_regex = _details_field_regex("Description")
+    solution_field_regex = _details_field_regex("Solution")
+
+    def _extract_field_text(regex: "re.Pattern", tail: str, max_len: int = 20000) -> str:
+        m = regex.search(tail)
+        if not m:
+            return ""
+        text = re.sub(r"<[^>]+>", " ", m.group(1))
+        text = html.unescape(text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\s*\n\s*", "\n", text).strip()
+        return text[:max_len]
+
     vulnerabilities_by_host: List[Dict[str, Any]] = []
     current_host: Optional[Dict[str, Any]] = None
     host_map: Dict[str, Dict[str, Any]] = {}
@@ -224,8 +257,13 @@ def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
         if len(host_entry["vulnerabilities"]) >= HTML_PARSE_MAX_VULNS_PER_HOST:
             continue
 
-        # Try extracting risk factor from nearby section after this toggle block.
-        tail = content[m.end(): m.end() + 8000]
+        # Try extracting risk factor and the real field text (Synopsis /
+        # Description / Solution) from the section after this toggle block.
+        # Widened from 8000 to 16000 chars — real Description text plus its
+        # surrounding markup routinely runs longer than risk_factor alone
+        # needed, and this is still well within HTML_PARSE_MAX_SECONDS for
+        # the worst-case 30000-finding report.
+        tail = content[m.end(): m.end() + 16000]
         risk_m = re.search(
             r"Risk\s*Factor.*?</div>\s*</div>\s*<div[^>]*>\s*(Critical|High|Medium|Low|None|Informational|Info)\s*<",
             tail,
@@ -233,14 +271,21 @@ def _parse_nessus_html_lightweight(content: str) -> Dict[str, Any]:
         ) or risk_regex.search(tail)
         risk_value = risk_m.group(1).title() if risk_m else ""
 
+        synopsis_value = _extract_field_text(synopsis_field_regex, tail)
+        description_value = _extract_field_text(description_field_regex, tail)
+        solution_value = _extract_field_text(solution_field_regex, tail)
+        # Fall back to the plugin title only if the real field genuinely
+        # wasn't found in this window (better than showing nothing at all).
+        description_value = description_value or plugin_name
+
         host_entry["vulnerabilities"].append(
             {
                 "plugin_id": plugin_id,
                 "plugin_name": plugin_name,
-                "synopsis": "",
-                "description": plugin_name,
-                "description_points": [plugin_name],
-                "solution": "",
+                "synopsis": synopsis_value,
+                "description": description_value,
+                "description_points": _split_text_to_points(description_value),
+                "solution": solution_value,
                 "see_also": [],
                 "risk_factor": risk_value,
                 "cvss_v3_base_score": "",
