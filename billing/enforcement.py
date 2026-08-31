@@ -132,9 +132,14 @@ def select_freemium_active_hosts(vulnerabilities_by_host, admin):
     Freemium gets at most FREEMIUM_LIMITS['max_internal_ips'] hosts, and at
     most FREEMIUM_LIMITS['max_vulnerabilities'] total findings across them.
 
-    Step 1 — the `max_internal_ips` hosts with the FEWEST vulnerabilities
-    become the candidate "active" set (whole hosts — every other host, in
-    full, becomes `locked`).
+    Step 1 — `max_internal_ips` hosts become the candidate "active" set
+    (whole hosts — every other host, in full, becomes `locked`), preferring
+    hosts that individually have at least `max_vulnerabilities //
+    max_internal_ips` findings (their own "fair share") — lightest of
+    those first — so the visible set can actually use close to the full
+    vuln budget instead of being stuck with a handful of near-empty hosts.
+    Only falls back to hosts below that threshold when there aren't enough
+    qualifying ones to fill every slot.
 
     Step 2 — if those active hosts' vulnerabilities combined still exceed
     `max_vulnerabilities`, findings are trimmed down to the cap in two
@@ -168,15 +173,40 @@ def select_freemium_active_hosts(vulnerabilities_by_host, admin):
 
     max_hosts = FREEMIUM_LIMITS["max_internal_ips"]
     max_vulns = FREEMIUM_LIMITS["max_vulnerabilities"]
+    fair_share = max_vulns // max_hosts if max_hosts else 0
 
     hosts = list(vulnerabilities_by_host or [])
     total_vulns = sum(len(h.get("vulnerabilities") or []) for h in hosts)
     if len(hosts) <= max_hosts and total_vulns <= max_vulns:
         return hosts, []
 
-    ordered = sorted(hosts, key=lambda h: len(h.get("vulnerabilities") or []))
-    active_hosts = [dict(h) for h in ordered[:max_hosts]]
-    locked_hosts = list(ordered[max_hosts:])
+    # Step 1 — prefer hosts that can each pull their own weight (at least
+    # fair_share vulnerabilities), lightest-of-those-first. Real bug
+    # report: the old version always took the max_hosts hosts with the
+    # globally fewest vulnerabilities, full stop — a Freemium admin whose
+    # 5 lightest hosts only had 1 vulnerability each ended up seeing 5
+    # assets but only ~5 total vulnerabilities, nowhere near the intended
+    # 5 x 2 = 10 allowance, even though the report had plenty of hosts
+    # with 2+ vulnerabilities that got excluded in favor of even lighter
+    # ones. Only falls back to hosts below fair_share when there genuinely
+    # aren't enough qualifying hosts to fill all max_hosts slots.
+    qualifying = sorted(
+        (h for h in hosts if len(h.get("vulnerabilities") or []) >= fair_share),
+        key=lambda h: len(h.get("vulnerabilities") or []),
+    )
+    selected = qualifying[:max_hosts]
+    remaining_needed = max_hosts - len(selected)
+    if remaining_needed > 0:
+        selected_ids = {id(h) for h in selected}
+        fallback = sorted(
+            (h for h in hosts if id(h) not in selected_ids),
+            key=lambda h: len(h.get("vulnerabilities") or []),
+        )
+        selected = selected + fallback[:remaining_needed]
+
+    selected_ids = {id(h) for h in selected}
+    active_hosts = [dict(h) for h in selected]
+    locked_hosts = [h for h in hosts if id(h) not in selected_ids]
 
     active_vuln_count = sum(len(h.get("vulnerabilities") or []) for h in active_hosts)
     if active_vuln_count > max_vulns:
