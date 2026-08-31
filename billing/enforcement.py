@@ -137,14 +137,27 @@ def select_freemium_active_hosts(vulnerabilities_by_host, admin):
     full, becomes `locked`).
 
     Step 2 — if those active hosts' vulnerabilities combined still exceed
-    `max_vulnerabilities`, the LOWEST-severity findings are trimmed off
-    first (Critical/High stay visible, Info/Low go first) until the total
-    is exactly at the cap. Trimmed findings are never discarded — they
-    move into `locked` as an extra entry for their same host_name, so an
-    upgrade can restore them exactly (see billing/views.py's
-    StripeWebhookView, which merges `locked` back into
-    vulnerabilities_by_host by host_name on a successful upgrade — no
-    re-upload needed).
+    `max_vulnerabilities`, findings are trimmed down to the cap in two
+    passes so every visible host still shows *something*, instead of a
+    handful of hosts hogging the whole budget and others going to 0:
+
+      2a. Fair share — each active host is guaranteed to keep its own
+          highest-severity findings, up to `max_vulnerabilities //
+          len(active_hosts)` (e.g. 10 // 5 = 2 per host at the default
+          limits). A host with fewer than the fair share just keeps what
+          it has. Real bug report: with the old single global sort, a host
+          could easily end up with 0 visible findings while another kept
+          most of the 10-vuln budget, even though both were shown as one
+          of the 5 "active" assets.
+      2b. Remaining budget — whatever's left of the cap after every host's
+          fair share is filled goes to the highest-severity findings still
+          left over (globally), regardless of which host they're on.
+
+    Trimmed findings are never discarded — they move into `locked` as an
+    extra entry for their same host_name, so an upgrade can restore them
+    exactly (see billing/views.py's StripeWebhookView, which merges
+    `locked` back into vulnerabilities_by_host by host_name on a
+    successful upgrade — no re-upload needed).
 
     Returns (active_hosts, locked_hosts). For a Premium/unlimited admin, or
     a report already within both caps, this is a no-op: `active` is
@@ -167,22 +180,39 @@ def select_freemium_active_hosts(vulnerabilities_by_host, admin):
 
     active_vuln_count = sum(len(h.get("vulnerabilities") or []) for h in active_hosts)
     if active_vuln_count > max_vulns:
-        # (severity_rank, host_index, vuln) — sort ascending so the least
-        # severe findings sort first and are the ones cut.
-        flat = []
-        for idx, h in enumerate(active_hosts):
-            for v in (h.get("vulnerabilities") or []):
-                rank = _SEVERITY_RANK.get(str(v.get("risk_factor") or "").strip().lower(), 0)
-                flat.append((rank, idx, v))
-        flat.sort(key=lambda t: t[0])
+        fair_share = max_vulns // len(active_hosts) if active_hosts else 0
 
-        num_to_drop = active_vuln_count - max_vulns
-        dropped = flat[:num_to_drop]
-        kept_ids = {id(v) for (_rank, _idx, v) in flat[num_to_drop:]}
+        # Per host, highest severity first — the front of each list is what
+        # that host is guaranteed to keep; the rest is its own overflow
+        # pool, still ranked highest-first for step 2b to draw from.
+        per_host_sorted = []
+        for h in active_hosts:
+            vulns_sorted = sorted(
+                h.get("vulnerabilities") or [],
+                key=lambda v: -_SEVERITY_RANK.get(str(v.get("risk_factor") or "").strip().lower(), 0),
+            )
+            per_host_sorted.append(vulns_sorted)
+
+        kept_ids = set()
+        remaining_pool = []  # (severity_rank, host_idx, vuln) — highest first
+        for idx, vulns_sorted in enumerate(per_host_sorted):
+            guaranteed = vulns_sorted[:fair_share]
+            overflow = vulns_sorted[fair_share:]
+            kept_ids.update(id(v) for v in guaranteed)
+            for v in overflow:
+                rank = _SEVERITY_RANK.get(str(v.get("risk_factor") or "").strip().lower(), 0)
+                remaining_pool.append((rank, idx, v))
+
+        remaining_pool.sort(key=lambda t: -t[0])
+        budget_left = max_vulns - len(kept_ids)
+        for rank, idx, v in remaining_pool[:max(0, budget_left)]:
+            kept_ids.add(id(v))
 
         overflow_by_host = {}
-        for _rank, idx, v in dropped:
-            overflow_by_host.setdefault(idx, []).append(v)
+        for idx, vulns_sorted in enumerate(per_host_sorted):
+            for v in vulns_sorted:
+                if id(v) not in kept_ids:
+                    overflow_by_host.setdefault(idx, []).append(v)
 
         new_active_hosts = []
         for idx, h in enumerate(active_hosts):

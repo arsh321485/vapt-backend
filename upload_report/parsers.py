@@ -1185,19 +1185,63 @@ def parse_html(file_path: str) -> Dict[str, Any]:
 
 # ==================== MAIN DISPATCHER ==================== #
 
+# Risk Factor values that mean "not a real vulnerability" for Nessus scans
+# — Nessus's own 5-tier scale is Critical/High/Medium/Low/Info, where "Info"
+# just means "here's a fact about this host" (a banner, an open port, a
+# service version) with no actual risk assigned. Explicit, repeated
+# instruction: only Critical/High/Medium/Low findings should ever be
+# stored/shown/counted for a Nessus report — a host whose ONLY findings are
+# Info-level (or missing a risk_factor entirely) isn't a real "asset" and
+# must not be counted as one anywhere downstream (dashboards, asset lists,
+# Freemium trimming, Premium/Custom pricing).
+_NON_RISK_SEVERITIES = {"info", "informational", "none", ""}
+
+
+def _strip_non_risk_findings(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Drops Info/None/blank-risk_factor findings from every host in a parsed
+    Nessus result, then drops any host left with zero findings — applied
+    once here, centrally, rather than at each of the several separate
+    Nessus parser implementations' own append sites, so it can't be missed
+    by one of them. No-op for anything that isn't Nessus-shaped
+    (vulnerabilities_by_host present) — AWS/custom reports are untouched.
+    """
+    hosts = parsed_data.get("vulnerabilities_by_host")
+    if not isinstance(hosts, list):
+        return parsed_data
+
+    new_hosts = []
+    for host in hosts:
+        kept = [
+            v for v in (host.get("vulnerabilities") or [])
+            if str(v.get("risk_factor") or "").strip().lower() not in _NON_RISK_SEVERITIES
+        ]
+        if not kept:
+            continue  # host had only Info/blank findings — not a real asset
+        new_host = dict(host)
+        new_host["vulnerabilities"] = kept
+        new_hosts.append(new_host)
+
+    parsed_data = dict(parsed_data)
+    parsed_data["vulnerabilities_by_host"] = new_hosts
+    parsed_data["total_hosts"] = len(new_hosts)
+    parsed_data["total_vulnerabilities"] = sum(len(h["vulnerabilities"]) for h in new_hosts)
+    return parsed_data
+
+
 def dispatch_parse(file_path: str, filename: str) -> Dict[str, Any]:
     """
     Main dispatcher function that routes to appropriate parser based on file extension.
-    
+
     Args:
         file_path: Full path to the file on disk
         filename: Original filename with extension
-        
+
     Returns:
         Parsed data dictionary or error dict
     """
     ext = os.path.splitext(filename)[1].lower()
-    
+
     # PDF files
     if ext == '.pdf':
         return parse_pdf(file_path)
@@ -1217,24 +1261,24 @@ def dispatch_parse(file_path: str, filename: str) -> Dict[str, Any]:
             # Sniffed as AWS Inspector but structured parse failed — fall
             # back to generic CSV rather than losing the upload entirely.
         return parse_csv(file_path)
-    
+
     # Excel files
     if ext in ('.xlsx', '.xls'):
         return parse_excel(file_path)
-    
+
     # Nessus XML files
     if ext in ('.xml', '.nessus'):
         # Try XML parser first
         result = parse_nessus_xml(file_path)
         if "error" not in result:
-            return result
+            return _strip_non_risk_findings(result)
         # Fallback to HTML parser if XML fails
-        return parse_nessus_html(file_path)
-    
+        return _strip_non_risk_findings(parse_nessus_html(file_path))
+
     # HTML files
     if ext in ('.html', '.htm'):
-        return parse_nessus_html(file_path)
-    
+        return _strip_non_risk_findings(parse_nessus_html(file_path))
+
     # Unsupported format
     return {"error": f"Unsupported file type: {ext}"}
 
