@@ -8048,7 +8048,7 @@ class SlackEventsView(APIView):
             logger.exception(f"[SlackEvent] _resolve_channel_team_role failed for channel_id={channel_id}")
             return None
 
-    def _invite_member_to_assigned_team_channels(self, admin, slack_user_id, team_names):
+    def _invite_member_to_assigned_team_channels(self, admin, slack_user_id, team_names, team_id=None):
         """
         Calls conversations.invite for slack_user_id into each of team_names'
         Slack channels — the same call /adduser already relies on (see
@@ -8058,13 +8058,24 @@ class SlackEventsView(APIView):
         member's sidebar as new-to-them, matching the native Slack-invite
         experience exactly. Best-effort per team — one failed invite (e.g.
         a channel that doesn't exist yet) must not block the others.
+
+        Also guarantees each channel actually HAS its navbar+Home-dashboard
+        message (via SlackSlashCommandView._ensure_team_navbar_posted, the
+        same idempotent call /adduser's own invite loop makes) — real bug
+        confirmed via screenshots: a member assigned two teams got
+        highlighted + joined into both channels correctly, but only the
+        channel whose navbar happened to already exist from earlier
+        actually showed any data; the other had nothing to click at all.
+        Per-channel, so this isn't a per-member gap — every member landing
+        in a channel before its own navbar exists would see the same
+        nothing-to-click channel.
         """
         if not admin.slack_bot_token or not team_names:
             return
 
         channel_name_by_team = {v: k for k, v in SlackSlashCommandView.TEAM_CHANNELS.items()}
-        wanted_channel_names = {channel_name_by_team[t] for t in team_names if t in channel_name_by_team}
-        if not wanted_channel_names:
+        wanted = {(t, channel_name_by_team[t]) for t in team_names if t in channel_name_by_team}
+        if not wanted:
             return
 
         headers = {"Authorization": f"Bearer {admin.slack_bot_token}", "Content-Type": "application/json"}
@@ -8080,7 +8091,7 @@ class SlackEventsView(APIView):
             logger.warning("[SlackEvent] _invite_member_to_assigned_team_channels: conversations.list failed", exc_info=True)
             return
 
-        for channel_name in wanted_channel_names:
+        for team_name, channel_name in wanted:
             channel_id = existing.get(channel_name)
             if not channel_id:
                 logger.warning(f"[SlackEvent] _invite_member_to_assigned_team_channels: channel '{channel_name}' not found")
@@ -8093,10 +8104,13 @@ class SlackEventsView(APIView):
                     timeout=15,
                 )
                 invite_data = invite_resp.json()
-                if not invite_data.get("ok") and invite_data.get("error") not in ("already_in_channel", "cant_invite_self"):
+                ok = bool(invite_data.get("ok")) or invite_data.get("error") in ("already_in_channel", "cant_invite_self")
+                if not ok:
                     logger.warning(f"[SlackEvent] Auto-invite of {slack_user_id} to '{channel_name}' failed: {invite_data.get('error')}")
-                else:
-                    logger.info(f"[SlackEvent] Auto-invited {slack_user_id} to '{channel_name}' (assigned via website)")
+                    continue
+                logger.info(f"[SlackEvent] Auto-invited {slack_user_id} to '{channel_name}' (assigned via website)")
+                if team_id:
+                    SlackSlashCommandView()._ensure_team_navbar_posted(admin.slack_bot_token, channel_id, team_id, team_name)
             except Exception:
                 logger.warning(f"[SlackEvent] Auto-invite to '{channel_name}' raised", exc_info=True)
 
@@ -8254,7 +8268,7 @@ class SlackEventsView(APIView):
                 if is_first_slack_link:
                     real_teams = [t for t in (user_detail.Member_role or []) if t and t != "Viewer"]
                     if real_teams:
-                        self._invite_member_to_assigned_team_channels(admin, slack_user_id, real_teams)
+                        self._invite_member_to_assigned_team_channels(admin, slack_user_id, real_teams, team_id=team_id)
 
                 logger.info(f"[SlackEvent] UserDetail already existed for {email} — email skipped")
                 return
