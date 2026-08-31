@@ -1029,44 +1029,15 @@ class GoogleOAuthView(generics.GenericAPIView):
 import base64
 import json
 
-class MicrosoftTeamsOAuthUrlView(APIView):
-    permission_classes = [AllowAny]
+# NOTE: a second, near-identical MicrosoftTeamsOAuthUrlView used to be
+# defined here (no invite_token/admin_id support, older/narrower scope
+# list) — Python silently keeps only the LAST class with a given name in a
+# module, so that copy was 100% dead code, never actually served requests.
+# Removed to avoid it being mistaken for the live one and edited by
+# accident. The real implementation (with invite_token support — see the
+# magic-link contract in MAGIC_LINK_FRONTEND_INTEGRATION.md) is the
+# MicrosoftTeamsOAuthUrlView defined further below.
 
-    def get(self, request):
-        try:
-            frontend_redirect = request.GET.get("redirect_uri")
-            if not frontend_redirect:
-                return JsonResponse({"error": "Missing redirect_uri"}, status=400)
-
-            # Encode redirect_uri into state
-            state_data = {
-                "redirect_uri": frontend_redirect,
-                "nonce": secrets.token_urlsafe(8)
-            }
-            state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
-
-            # ✅ Use the backend redirect URI that matches Azure App Registration
-            backend_redirect = settings.MICROSOFT_REDIRECT_URI
-
-            auth_url = (
-                f"{settings.MICROSOFT_AUTH_URL}?"
-                f"client_id={settings.MICROSOFT_CLIENT_ID}"
-                f"&response_type=code"
-                f"&redirect_uri={backend_redirect}"
-                f"&response_mode=query"
-                f"&scope=https://graph.microsoft.com/User.Read Team.ReadBasic.All TeamSettings.Read.All Channel.ReadBasic.All ChannelMessage.Send GroupMember.ReadWrite.All TeamMember.Read.All offline_access openid email profile"
-                f"&prompt=select_account"
-                f"&state={state}"
-            )
-
-            print("✅ Generated Microsoft Auth URL:", auth_url)
-            print("🧩 Encoded state:", state)
-
-            return JsonResponse({"auth_url": auth_url, "state": state})
-
-        except Exception as e:
-            return JsonResponse({"error": str(e)}, status=500)
-        
         
 class MicrosoftTeamsCallbackView(APIView):
     permission_classes = [AllowAny]
