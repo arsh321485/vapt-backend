@@ -8048,6 +8048,58 @@ class SlackEventsView(APIView):
             logger.exception(f"[SlackEvent] _resolve_channel_team_role failed for channel_id={channel_id}")
             return None
 
+    def _invite_member_to_assigned_team_channels(self, admin, slack_user_id, team_names):
+        """
+        Calls conversations.invite for slack_user_id into each of team_names'
+        Slack channels — the same call /adduser already relies on (see
+        ensure_vaptfix_channels and the "conversations.invite, so /adduser
+        alone is enough" note elsewhere in this file) to grant immediate
+        channel access AND get the channel highlighted/bolded in the
+        member's sidebar as new-to-them, matching the native Slack-invite
+        experience exactly. Best-effort per team — one failed invite (e.g.
+        a channel that doesn't exist yet) must not block the others.
+        """
+        if not admin.slack_bot_token or not team_names:
+            return
+
+        channel_name_by_team = {v: k for k, v in SlackSlashCommandView.TEAM_CHANNELS.items()}
+        wanted_channel_names = {channel_name_by_team[t] for t in team_names if t in channel_name_by_team}
+        if not wanted_channel_names:
+            return
+
+        headers = {"Authorization": f"Bearer {admin.slack_bot_token}", "Content-Type": "application/json"}
+        try:
+            resp = _http_get(
+                "https://slack.com/api/conversations.list",
+                headers=headers,
+                params={"types": "public_channel,private_channel", "limit": 1000},
+                timeout=15,
+            )
+            existing = {ch["name"].lower(): ch["id"] for ch in resp.json().get("channels", [])}
+        except Exception:
+            logger.warning("[SlackEvent] _invite_member_to_assigned_team_channels: conversations.list failed", exc_info=True)
+            return
+
+        for channel_name in wanted_channel_names:
+            channel_id = existing.get(channel_name)
+            if not channel_id:
+                logger.warning(f"[SlackEvent] _invite_member_to_assigned_team_channels: channel '{channel_name}' not found")
+                continue
+            try:
+                invite_resp = _http_post(
+                    "https://slack.com/api/conversations.invite",
+                    headers=headers,
+                    json={"channel": channel_id, "users": slack_user_id},
+                    timeout=15,
+                )
+                invite_data = invite_resp.json()
+                if not invite_data.get("ok") and invite_data.get("error") not in ("already_in_channel", "cant_invite_self"):
+                    logger.warning(f"[SlackEvent] Auto-invite of {slack_user_id} to '{channel_name}' failed: {invite_data.get('error')}")
+                else:
+                    logger.info(f"[SlackEvent] Auto-invited {slack_user_id} to '{channel_name}' (assigned via website)")
+            except Exception:
+                logger.warning(f"[SlackEvent] Auto-invite to '{channel_name}' raised", exc_info=True)
+
     def _save_slack_member_to_user_detail(self, slack_user_id, team_id, channel_id=None):
         """
         When a member joins a Slack channel:
@@ -8159,6 +8211,11 @@ class SlackEventsView(APIView):
             if not created:
                 logger.info(f"[SlackEvent] UserDetail already exists for {email} — updating platform fields")
                 _upd = {}
+                # Captured BEFORE _upd mutates it below — distinguishes "this
+                # Slack account was already linked" from "this is the very
+                # first time we're seeing this member's Slack identity",
+                # which is what the auto-invite right below needs.
+                is_first_slack_link = not user_detail.slack_member_id
                 if user_detail.email != email and not UserDetail.objects.filter(admin=admin, email=email).exclude(_id=user_detail._id).exists():
                     _upd["email"] = email
                 if not user_detail.slack_member_id:
@@ -8180,6 +8237,25 @@ class SlackEventsView(APIView):
                     logger.info(f"[SlackEvent] Updating existing UserDetail fields: {list(_upd.keys())}")
                     from users_details.views import _ud_set as _ud_set_event
                     _ud_set_event(user_detail, **_upd)
+
+                # This is the opposite case from the "no auto-grant" note
+                # above: the admin ALREADY assigned this member a real team
+                # on the website (UserDetail existed with a genuine
+                # Member_role before any Slack activity at all) — access was
+                # legitimately granted there, Slack is just catching up. But
+                # team channels are public, so simply joining the workspace
+                # doesn't put them IN the channel — they'd see it listed and
+                # have to notice and click "Join Channel" themselves, with no
+                # unread/highlight either (confirmed via screenshots: exactly
+                # this gap, contrasted against /adduser's flow, which calls
+                # conversations.invite and gets both automatically). Do the
+                # same here, once, the first time we link their Slack
+                # identity to an already-real UserDetail.
+                if is_first_slack_link:
+                    real_teams = [t for t in (user_detail.Member_role or []) if t and t != "Viewer"]
+                    if real_teams:
+                        self._invite_member_to_assigned_team_channels(admin, slack_user_id, real_teams)
+
                 logger.info(f"[SlackEvent] UserDetail already existed for {email} — email skipped")
                 return
 
