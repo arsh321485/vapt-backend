@@ -1917,6 +1917,19 @@ class FixVulnerabilityStepsAPIView(APIView):
             completed_count = sum(1 for s in steps if s["status"] == "completed")
             next_step = (completed_count + 1) if completed_count < total_steps else None
 
+            # Real bug report: this "Manual Fix" steps view was missing
+            # description entirely, even though the fix-vulnerability record
+            # already stores it at creation time — same fallback chain used
+            # by the card/detail endpoints (description -> description_points
+            # -> vuln_card's synopsis).
+            description = (
+                fix_doc.get("description")
+                or fix_doc.get("description_points")
+                or vuln_card.get("description")
+                or vuln_card.get("synopsis")
+                or ""
+            )
+
             return Response(
                 {
                     "message": "Steps fetched successfully",
@@ -1927,6 +1940,7 @@ class FixVulnerabilityStepsAPIView(APIView):
                     "vulnerability_name": plugin_name,
                     "asset": host_name,
                     "severity": fix_doc.get("risk_factor", ""),
+                    "description": description,
                     "operating_system": operating_system,
                     "assigned_team": assigned_team,
                     "deadline": deadline,
