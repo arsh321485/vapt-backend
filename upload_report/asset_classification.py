@@ -17,9 +17,11 @@ _IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
 _FIREWALL_KEYWORDS = [
     "firewall", "fw-", "fw_", "palo alto", "palo-alto", "paloalto", "pan-os", "panos",
-    "fortigate", "fortinet", "fortios", "cisco asa", "checkpoint", "check point",
-    "sonicwall", "juniper srx", "pfsense", "edge-gw", "edgegw", "gateway",
-    "vpn concentrator", "ngfw",
+    "fortigate", "fortinet", "fortios", "cisco asa", "cisco firepower", "cisco ftd",
+    "cisco meraki mx", "checkpoint", "check point", "sonicwall", "juniper srx",
+    "pfsense", "opnsense", "watchguard", "barracuda networks", "cyberoam",
+    "sophos xg", "sophos utm", "zyxel usg", "web application firewall",
+    "utm appliance", "edge-gw", "edgegw", "gateway", "vpn concentrator", "ngfw",
 ]
 
 _WEB_APP_VULN_KEYWORDS = [
@@ -37,11 +39,27 @@ _WEB_APP_VULN_KEYWORDS = [
     "cookie", "web application", "content-security-policy", "clickjacking",
     "cors", "hsts", "strict transport security", "directory listing", "cgi",
     "http response splitting", "http header",
+    "ssrf", "server-side request forgery", "xxe", "xml external entity",
+    "path traversal", "directory traversal", "open redirect",
+    "insecure deserialization", "template injection", "html injection",
+    "session fixation", "wordpress", "drupal", "joomla", "graphql",
+    "swagger ui", "rest api",
 ]
 
+# Real bug fix: this list existed but was never actually referenced inside
+# classify_asset_type() below (dead code) — a host with no structured
+# host_information OS field, but whose vulnerability text plainly mentions
+# an OS (e.g. "Microsoft Windows Unsupported Version Detection"), fell all
+# the way through to the generic "Assets" tab instead of "Server". Checked
+# only as a fallback, after Firewall and Web App have already both failed
+# to match, same discipline as the rest of this function — so a stray
+# "Windows"/"Linux" word appearing in an already-classified web-app finding
+# never gets a chance to override that.
 _SERVER_OS_KEYWORDS = [
-    "windows", "linux", "unix", "macos", "mac os", "ubuntu", "centos", "debian",
-    "red hat", "rhel", "solaris", "freebsd", "esxi", "vmware",
+    "windows", "windows server", "linux", "unix", "macos", "mac os", "ubuntu",
+    "centos", "debian", "red hat", "rhel", "solaris", "freebsd", "openbsd",
+    "netbsd", "aix", "hp-ux", "amazon linux", "oracle linux", "suse", "opensuse",
+    "alpine linux", "esxi", "vmware",
 ]
 
 # Known web-server SOFTWARE — a finding mentioning these describes what's
@@ -52,7 +70,10 @@ _SERVER_OS_KEYWORDS = [
 # still in _WEB_APP_VULN_KEYWORDS above) already matched.
 _SERVER_SOFTWARE_KEYWORDS = [
     "iis", "internet information services", "apache", "nginx", "tomcat",
-    "web server", "lighttpd", "jboss", "weblogic", "websphere",
+    "web server", "lighttpd", "jboss", "weblogic", "websphere", "caddy",
+    "haproxy", "varnish", "postfix", "sendmail", "exim", "mysql", "postgresql",
+    "microsoft sql server", "mssql", "oracle database", "mongodb server",
+    "redis server", "docker", "kubernetes", "hyper-v", "kvm", "proxmox",
 ]
 
 
@@ -96,7 +117,11 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
         or host_information.get("system-type")
         or ""
     ).strip().lower()
-    if os_str or any(k.lower() in combined_text for k in _SERVER_SOFTWARE_KEYWORDS):
+    if (
+        os_str
+        or any(k.lower() in combined_text for k in _SERVER_SOFTWARE_KEYWORDS)
+        or any(k.lower() in combined_text for k in _SERVER_OS_KEYWORDS)
+    ):
         return "server"
 
     # Bare IP or anything else with no stronger signal -> generic "Assets" tab
