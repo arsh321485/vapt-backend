@@ -235,6 +235,24 @@ class UserLoginView(generics.GenericAPIView):
 
         refresh = RefreshToken.for_user(user)
 
+        # Report-claim magic link (optional) — real request: an invited
+        # client whose email ALREADY has a VaptFix account (the invite
+        # flow used to only support brand-new signups) needs to be able to
+        # sign in and still claim a report a superadmin just uploaded for
+        # them. Frontend must attach invite_token to this login call when
+        # the login page was reached from an invite link — see
+        # MAGIC_LINK_FRONTEND_INTEGRATION.md. Silently no-ops if absent/
+        # expired/already used — never blocks normal login.
+        invite_token = (request.data.get("invite_token") or "").strip()
+        if invite_token:
+            from .invite_utils import claim_invite
+            try:
+                claimed = claim_invite(invite_token, user)
+                if claimed:
+                    logger.info(f"[ReportInvite] Email login claimed {claimed} report(s) for {user.email}")
+            except Exception as e:
+                logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
+
         return Response({
             "message": "Welcome back! You have successfully logged in as an admin",
             "user": {
@@ -306,8 +324,17 @@ class AdminSignupSendOTPView(APIView):
             return Response({"error": e.messages}, status=400)
 
         if User.objects.filter(email=email).exists():
+            # `already_exists` + echoing invite_token back lets the invite
+            # landing page redirect straight to the Sign In form (with the
+            # token still attached) instead of the user having to re-paste
+            # the invite link — this is the case that previously silently
+            # dropped an invited client's report claim on the floor.
             return Response(
-                {"error": "An admin account with this email already exists. Please sign in instead."},
+                {
+                    "error": "An admin account with this email already exists. Please sign in instead.",
+                    "already_exists": True,
+                    "invite_token": request.data.get("invite_token") or None,
+                },
                 status=400,
             )
 
@@ -2249,14 +2276,19 @@ class MicrosoftTeamsCallbackView(APIView):
             else:
                 created = False
 
-            # Report-claim magic link (optional) — only makes sense for a
-            # brand-new account. Silently no-ops if absent/expired/already used.
-            if created and invite_token_from_state and user:
+            # Report-claim magic link (optional). Also fires for an EXISTING
+            # account that signs in via Teams with a valid invite_token —
+            # real request: an invited client who already has a VaptFix
+            # account (from earlier testing/onboarding) should still be
+            # able to claim a newly-uploaded report through the same link,
+            # not just brand-new signups. Silently no-ops if absent/
+            # expired/already used.
+            if invite_token_from_state and user:
                 from .invite_utils import claim_invite
                 try:
                     claimed = claim_invite(invite_token_from_state, user)
                     if claimed:
-                        logger.info(f"[ReportInvite] Teams signup claimed {claimed} report(s) for {user.email}")
+                        logger.info(f"[ReportInvite] Teams {'signup' if created else 'login'} claimed {claimed} report(s) for {user.email}")
                 except Exception as e:
                     logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
 
@@ -5235,16 +5267,18 @@ class SlackOAuthCallbackView(APIView):
                     defaults={"login_provider": "slack", "password": make_password(None)},
                 )
 
-            # Report-claim magic link (optional) — only makes sense for a
-            # brand-new account (this is how a superadmin's invite hands off
-            # a pending report to a client who didn't have VaptFix before).
-            # Silently no-ops if absent/expired/already used.
-            if newly_created and invite_token_from_state:
+            # Report-claim magic link (optional). Also fires for an EXISTING
+            # account that signs in via Slack with a valid invite_token —
+            # real request: an invited client who already has a VaptFix
+            # account should still be able to claim a newly-uploaded report
+            # through the same link, not just brand-new signups. Silently
+            # no-ops if absent/expired/already used.
+            if invite_token_from_state:
                 from .invite_utils import claim_invite
                 try:
                     claimed = claim_invite(invite_token_from_state, user)
                     if claimed:
-                        logger.info(f"[ReportInvite] Slack signup claimed {claimed} report(s) for {user.email}")
+                        logger.info(f"[ReportInvite] Slack {'signup' if newly_created else 'login'} claimed {claimed} report(s) for {user.email}")
                 except Exception as e:
                     logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
 
