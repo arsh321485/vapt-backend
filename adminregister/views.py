@@ -4,7 +4,7 @@ from rest_framework import status, permissions
 from django.conf import settings
 from django.core.cache import cache
 from datetime import datetime, date, timedelta
-from django.utils.timezone import is_naive, make_aware
+from django.utils.timezone import is_naive, make_aware, utc
 import pymongo
 import uuid
 import re
@@ -45,7 +45,16 @@ def _normalize_iso(dt):
     if isinstance(dt, datetime):
         d = dt
         if is_naive(d):
-            d = make_aware(d)
+            # Real bug report: these values come straight from raw MongoDB
+            # dicts (report/fix_vulnerability docs), written with plain
+            # datetime.utcnow() — always genuinely UTC, never in
+            # settings.TIME_ZONE. make_aware() with no explicit timezone
+            # assumes the CURRENT TIME_ZONE (Asia/Kolkata) as the value's
+            # origin, which mislabels an already-UTC value as if it were
+            # IST — shifting it by 5:30 in the wrong direction. Pass utc
+            # explicitly so it's labeled correctly and converts to real
+            # IST wherever it's displayed.
+            d = make_aware(d, utc)
         return d.isoformat()
     return str(dt)
 

@@ -958,7 +958,10 @@ class MitigationGenerationTool:
             "description": description,
             "plugin_output": plugin_output or None,
             "report_id": report_id or None,
-            "generated_at": datetime.datetime.utcnow().isoformat(),
+            # Explicit UTC offset (not just .isoformat() on a naive value)
+            # so a browser's `new Date(...)` doesn't mistake this for its
+            # own local time.
+            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
 
         try:

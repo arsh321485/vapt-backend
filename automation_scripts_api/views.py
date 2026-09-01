@@ -877,7 +877,10 @@ def user_download_script(request, plugin_id):
     if not full_path.exists():
         return Response({"error": f"Script file not found on server: {fix_script_path}"}, status=404)
 
-    now = datetime.datetime.utcnow().isoformat()
+    # Explicit UTC offset (not just .isoformat() on a naive value) so any
+    # consumer that parses this string — a browser's `new Date(...)`
+    # included — doesn't silently mistake it for its own local time.
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with MongoContext() as db:
         db["automation_scripts"].update_one(
             {"plugin_id": int(plugin_id), "os": doc.get("os")},
@@ -1027,7 +1030,10 @@ def user_submit_feedback(request):
         return Response(_not_found_response(plugin_id), status=404)
 
     user_email = request.user.email
-    now = datetime.datetime.utcnow().isoformat()
+    # Explicit UTC offset (not just .isoformat() on a naive value) so any
+    # consumer that parses this string — a browser's `new Date(...)`
+    # included — doesn't silently mistake it for its own local time.
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     with MongoContext() as db:
         db["script_feedback"].update_one(

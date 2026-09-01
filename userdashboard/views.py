@@ -178,6 +178,16 @@ def _normalize_severity_key(raw):
 
 def _to_iso(dt_val):
     if hasattr(dt_val, "isoformat"):
+        # Real bug report: these values come straight from raw MongoDB
+        # dicts, written with plain datetime.utcnow() — always genuinely
+        # UTC, but naive (no tzinfo). Serializing a naive datetime with
+        # .isoformat() produces a string with no offset/'Z' suffix, which
+        # a browser's `new Date(...)` then silently interprets as its OWN
+        # local time instead of UTC — showing the wrong time with no
+        # conversion at all. Attach UTC explicitly so the ISO string is
+        # unambiguous and the frontend converts it correctly.
+        if dt_val.tzinfo is None:
+            dt_val = dt_val.replace(tzinfo=timezone.utc)
         return dt_val.isoformat()
     return str(dt_val) if dt_val else None
 

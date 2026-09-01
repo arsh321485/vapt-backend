@@ -1,3 +1,5 @@
+import datetime as _dt
+
 from bson import ObjectId
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -11,6 +13,12 @@ COLLECTION = "notifications_notification"
 
 def _serialize(doc):
     created = doc.get("created_at")
+    # notifications/utils.py's create_notification() stores this with plain
+    # datetime.utcnow() — genuinely UTC but naive. Attach UTC explicitly so
+    # the serialized string carries an offset a browser's `new Date(...)`
+    # can't misread as its own local time.
+    if isinstance(created, _dt.datetime) and created.tzinfo is None:
+        created = created.replace(tzinfo=_dt.timezone.utc)
     return {
         "id":              str(doc.get("_id", "")),
         "notif_type":      doc.get("notif_type", ""),

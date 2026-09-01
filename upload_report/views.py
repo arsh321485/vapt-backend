@@ -2417,7 +2417,7 @@ class VulnerabilityCardListView(APIView):
             for card in cards:
                 # Ensure datetime objects are serializable
                 if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
-                    card["created_at"] = card["created_at"].isoformat()
+                    card["created_at"] = _su_normalize_iso(card["created_at"])
 
             return Response(
                 {
@@ -2498,6 +2498,13 @@ def _su_normalize_iso(val):
     if val is None:
         return None
     if isinstance(val, datetime.datetime):
+        # Real bug report: these values come straight from raw MongoDB
+        # dicts, written with plain datetime.utcnow() — always genuinely
+        # UTC, but naive (no tzinfo). Serializing without an offset/'Z'
+        # suffix leaves a browser's `new Date(...)` to silently treat it
+        # as its OWN local time instead of UTC. Attach UTC explicitly.
+        if val.tzinfo is None:
+            val = val.replace(tzinfo=datetime.timezone.utc)
         return val.isoformat()
     return str(val)
 
@@ -2639,10 +2646,10 @@ class ReportHeaderAPIView(APIView):
                         or uploaded_at
                     )
                     if hasattr(report_generated_on, "isoformat"):
-                        report_generated_on = report_generated_on.isoformat()
+                        report_generated_on = _su_normalize_iso(report_generated_on)
                     date_of_testing = nessus_doc.get("scan_start")
                     if hasattr(date_of_testing, "isoformat"):
-                        date_of_testing = date_of_testing.isoformat()
+                        date_of_testing = _su_normalize_iso(date_of_testing)
                     if not report_id:
                         report_id = str(nessus_doc.get("report_id") or nessus_doc.get("_id", ""))
         except Exception:
@@ -3176,7 +3183,7 @@ class SuperAdminApproveVerificationAPIView(APIView):
                 "vulnerability_name": fix_doc.get("plugin_name"),
                 "asset": fix_doc.get("host_name"),
                 "status": "closed",
-                "closed_at": now.isoformat(),
+                "closed_at": _su_normalize_iso(now),
                 "approved_by": superadmin_id,
             }, status=200)
 

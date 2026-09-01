@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status, permissions
 from rest_framework.parsers import JSONParser
 from datetime import datetime
-from django.utils.timezone import is_naive, make_aware
+from django.utils.timezone import is_naive, make_aware, utc
 import pymongo
 import uuid
 
@@ -28,7 +28,12 @@ def _normalize_iso(dt):
     if not dt:
         return None
     if isinstance(dt, datetime):
-        d = make_aware(dt) if is_naive(dt) else dt
+        # Real bug report: these values come straight from raw MongoDB
+        # dicts, written with plain datetime.utcnow() — always genuinely
+        # UTC. make_aware() with no explicit timezone mislabels them using
+        # the current TIME_ZONE (Asia/Kolkata) instead, shifting by 5:30
+        # in the wrong direction. Pass utc explicitly.
+        d = make_aware(dt, utc) if is_naive(dt) else dt
         return d.isoformat()
     return str(dt)
 
