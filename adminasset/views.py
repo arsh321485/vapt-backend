@@ -887,7 +887,11 @@ class AdminAssetsAPIView(APIView):
                         "member_type": None,
                         "total_assets": 0,
                         "assets": [],
-                        "message": "No reports found for this admin"
+                        "message": "No reports found for this admin",
+                        "host_count": 0,
+                        "unique_ip_count": 0,
+                        "visible_asset_count": 0,
+                        "locked_asset_count": 0,
                     }, status=status.HTTP_200_OK)
 
                 report_id = doc.get("report_id") or str(doc.get("_id", ""))
@@ -967,11 +971,20 @@ class AdminAssetsAPIView(APIView):
 
                 serializer = AdminAssetSerializer(final, many=True)
 
+                # Frontend contract (upload_report/host_ip_utils.py) — same
+                # host_count/unique_ip_count/visible_asset_count/
+                # locked_asset_count fields as the upload endpoints, so the
+                # Assets page's own totals agree with the upload-time plan
+                # overlay for the same report.
+                from upload_report.host_ip_utils import counts_from_report_doc
+                counts = counts_from_report_doc(doc)
+
                 return Response({
                     "report_id": report_id,
                     "member_type": member_type,
                     "total_assets": len(final),
-                    "assets": serializer.data
+                    "assets": serializer.data,
+                    **counts,
                 }, status=status.HTTP_200_OK)
 
         except Exception as exc:

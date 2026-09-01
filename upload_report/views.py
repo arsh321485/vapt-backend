@@ -734,6 +734,21 @@ class UploadReportView(APIView):
                     # discarded, so upgrading later unlocks it without a
                     # re-upload (billing/views.py's StripeWebhookView).
                     locked_hosts = []
+                    # Frontend bug report: the "This report has X IPs" plan
+                    # overlay was using host_count (raw ReportHost rows —
+                    # can include duplicate IP+hostname pairs and non-IP
+                    # labels) instead of unique_ip_count (distinct IPv4/
+                    # IPv6 targets), disagreeing with the Assets page's real
+                    # unique-host count for the same file. Capture BOTH
+                    # counts from the full, untrimmed host list here — right
+                    # before any Freemium trim below overwrites
+                    # parsed_data["vulnerabilities_by_host"] with just the
+                    # visible subset — so unique_ip_count always reflects
+                    # the whole file, never the trimmed view.
+                    from upload_report.host_ip_utils import compute_unique_ip_count
+                    _full_hosts_for_counts = parsed_data.get("vulnerabilities_by_host") or []
+                    host_count = len(_full_hosts_for_counts)
+                    unique_ip_count = compute_unique_ip_count(_full_hosts_for_counts)
                     if not via_magic_link and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
                         from billing.enforcement import select_freemium_active_hosts
                         active_hosts, locked_hosts = select_freemium_active_hosts(
@@ -888,6 +903,13 @@ class UploadReportView(APIView):
                             "visible_asset_count": int(parsed_data.get("total_hosts") or 0),
                             "original_asset_count": int(parsed_data.get("total_hosts") or 0) + len(locked_hosts),
                             "billable_asset_count": int(parsed_data.get("total_hosts") or 0) + len(locked_hosts),
+                            # Frontend contract (see host_ip_utils.py) — host_count
+                            # is the raw Nessus row count (debug only, never use
+                            # for plan/billing decisions); unique_ip_count is the
+                            # real distinct-target count the >5/>250 plan
+                            # thresholds must use instead.
+                            "host_count": host_count,
+                            "unique_ip_count": unique_ip_count,
                         })
                         timings_ms["response_build_ms"] += int((time.perf_counter() - response_start) * 1000)
 
@@ -1121,11 +1143,31 @@ class UploadReportDetailAPIView(APIView):
             context={"request": request}
             )
 
+        # Frontend contract (upload_report/host_ip_utils.py) — same
+        # host_count/unique_ip_count/visible_asset_count/locked_asset_count
+        # fields as the upload response, sourced from the matching
+        # nessus_reports Mongo doc since UploadReport (Django ORM) itself
+        # doesn't carry host data.
+        counts = {"host_count": 0, "unique_ip_count": 0, "visible_asset_count": 0, "locked_asset_count": 0}
+        try:
+            from vaptfix.mongo_client import get_shared_db
+            from upload_report.host_ip_utils import counts_from_report_doc
+            _db = get_shared_db()
+            _doc = _db["nessus_reports"].find_one(
+                {"report_id": report_id},
+                {"vulnerabilities_by_host": 1, "locked_hosts": 1},
+            )
+            if _doc:
+                counts = counts_from_report_doc(_doc)
+        except Exception as _ce:
+            logger.warning(f"[UploadReportDetail] Could not compute host/IP counts for {report_id}: {_ce}")
+
         return Response(
             {
                 "success": True,
                 "message": "Upload report retrieved successfully",
-                "upload_report": serializer.data
+                "upload_report": serializer.data,
+                **counts,
             },
             status=200
         )
@@ -1860,6 +1902,8 @@ class UploadCardsStatusAPIView(APIView):
                 "cards_generation_complete": 1,
                 "cards_generated_count": 1,
                 "cards_generation_started_at": 1,
+                "vulnerabilities_by_host": 1,
+                "locked_hosts": 1,
             },
         )
 
@@ -1876,6 +1920,10 @@ class UploadCardsStatusAPIView(APIView):
                 "estimated_total_text": "45 sec",
                 "remaining_seconds": 45,
                 "remaining_time_text": "45 sec",
+                "host_count": 0,
+                "unique_ip_count": 0,
+                "visible_asset_count": 0,
+                "locked_asset_count": 0,
             }, status=200)
 
         # cards_expected_count (set by _auto_generate_cards_bg once it knows which
@@ -1924,6 +1972,11 @@ class UploadCardsStatusAPIView(APIView):
         estimated_total_seconds = max(45, 45 + (cards_total * 2))
         remaining_seconds = max(0, estimated_total_seconds - elapsed_seconds)
 
+        # Frontend contract (upload_report/host_ip_utils.py) — same 4 fields
+        # as the upload response and the detail endpoint.
+        from upload_report.host_ip_utils import counts_from_report_doc
+        counts = counts_from_report_doc(nessus_doc)
+
         return Response({
             "report_id": str(report_id),
             "cards_generation_complete": complete,
@@ -1935,6 +1988,7 @@ class UploadCardsStatusAPIView(APIView):
             "estimated_total_text": _fmt_seconds_for_status(estimated_total_seconds),
             "remaining_seconds": remaining_seconds,
             "remaining_time_text": _fmt_seconds_for_status(remaining_seconds),
+            **counts,
         }, status=200)
 
 
@@ -2583,7 +2637,27 @@ class AdminLatestReportAPIView(APIView):
                 "report_id":   None,
                 "file_name":   None,
                 "uploaded_at": None,
+                "host_count": 0,
+                "unique_ip_count": 0,
+                "visible_asset_count": 0,
+                "locked_asset_count": 0,
             }, status=200)
+
+        # Frontend contract (upload_report/host_ip_utils.py) — same 4 fields
+        # as the upload/detail/status endpoints.
+        counts = {"host_count": 0, "unique_ip_count": 0, "visible_asset_count": 0, "locked_asset_count": 0}
+        try:
+            from vaptfix.mongo_client import get_shared_db
+            from upload_report.host_ip_utils import counts_from_report_doc
+            _db = get_shared_db()
+            _doc = _db["nessus_reports"].find_one(
+                {"report_id": str(latest._id)},
+                {"vulnerabilities_by_host": 1, "locked_hosts": 1},
+            )
+            if _doc:
+                counts = counts_from_report_doc(_doc)
+        except Exception as _ce:
+            logger.warning(f"[AdminLatestReport] Could not compute host/IP counts for {latest._id}: {_ce}")
 
         file_name = os.path.basename(latest.file.name) if latest.file else ""
         return Response({
@@ -2591,6 +2665,7 @@ class AdminLatestReportAPIView(APIView):
             "report_id": str(latest._id),
             "file_name": file_name,
             "uploaded_at": latest.uploaded_at.isoformat() if latest.uploaded_at else None,
+            **counts,
         }, status=200)
 
 

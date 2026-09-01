@@ -13,8 +13,6 @@ Portal") that would otherwise misroute it into "web_app".
 """
 import re
 
-_IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-
 _FIREWALL_KEYWORDS = [
     "firewall", "fw-", "fw_", "palo alto", "palo-alto", "paloalto", "pan-os", "panos",
     "fortigate", "fortinet", "fortios", "cisco asa", "cisco firepower", "cisco ftd",
