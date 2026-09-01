@@ -1036,6 +1036,22 @@ class AdminAssetsByTeamAPIView(APIView):
                     if pname and matched_team:
                         plugin_team_map[pname] = matched_team
 
+                # Real bug report: held/deleted individual vulnerabilities were
+                # never excluded here — a host whose ONLY vuln for a given team
+                # got deleted/held from the All Vulns/All Assets tab kept
+                # counting as one of that team's assets. Whole-asset hold/
+                # delete needs no separate check — that already $pulls the
+                # host out of vulnerabilities_by_host, so it's absent from
+                # the loop below automatically.
+                held_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["hold_vulnerabilities"].find({"report_id": str(report_id)})
+                }
+                deleted_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["deleted_vulnerabilities"].find({"report_id": str(report_id)})
+                }
+
                 # Step 2: Loop nessus hosts, resolve host_name, group by team
                 team_hosts = {name: set() for name in TEAM_NAMES}
                 all_hosts = set()
@@ -1061,6 +1077,8 @@ class AdminAssetsByTeamAPIView(APIView):
                         pname = (
                             v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                         ).strip()
+                        if (pname, host_name) in held_vuln_keys or (pname, host_name) in deleted_vuln_keys:
+                            continue
                         matched_team = plugin_team_map.get(pname)
                         if matched_team:
                             team_hosts[matched_team].add(host_name)
@@ -1720,6 +1738,29 @@ class AdminDistributionByTeamAPIView(APIView):
                     if pname:
                         closed_vuln_keys.add((pname, hname))
 
+                # Real bug report: this view (source of the "download-data"
+                # report's team_distribution) never checked hold_vulnerabilities/
+                # deleted_vulnerabilities, nor whole-asset holds — same gap as
+                # AdminDetailedVulnerabilitiesAPIView, fixed the same way
+                # AdminDistributionByTeamDetailAPIView (the "Team Performance"
+                # view already confirmed correct) already does it: cards come
+                # from vulnerability_cards, a static snapshot never updated by
+                # hold/unhold/delete, so both an asset-level hold ($pull from
+                # vulnerabilities_by_host) and a per-vulnerability hold/delete
+                # need an explicit check here.
+                active_host_names = {
+                    (h.get("host_name") or h.get("host") or "").strip()
+                    for h in doc.get("vulnerabilities_by_host", [])
+                }
+                held_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["hold_vulnerabilities"].find({"report_id": report_id})
+                }
+                deleted_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["deleted_vulnerabilities"].find({"report_id": report_id})
+                }
+
                 # Count distribution directly from vulnerability_cards (excluding closed)
                 # Each card = one unique vulnerability — avoids inflating counts from multi-host repeats
                 counts = {name: 0 for name in TEAM_NAMES}
@@ -1729,7 +1770,10 @@ class AdminDistributionByTeamAPIView(APIView):
                 for card in vuln_card_coll.find({"report_id": report_id}):
                     plugin_name = (card.get("vulnerability_name") or "").strip()
                     host_name   = (card.get("host_name") or "").strip()
-                    if (plugin_name, host_name) in closed_vuln_keys:
+                    if host_name not in active_host_names:
+                        continue
+                    key = (plugin_name, host_name)
+                    if key in closed_vuln_keys or key in held_vuln_keys or key in deleted_vuln_keys:
                         continue
                     raw_team = (card.get("assigned_team", "") or "").strip()
                     matched_team = team_names_lower.get(raw_team.lower())
@@ -1983,6 +2027,26 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                     if pname:
                         closed_vuln_keys.add((pname, hname))
 
+                # Real bug report: this view (source of the "download-data"
+                # report's vulnerabilities_detail list) never checked
+                # hold_vulnerabilities/deleted_vulnerabilities, so a vuln
+                # deleted/held from the All Vulns/All Assets tab kept showing
+                # up here even though Team Performance
+                # (AdminDistributionByTeamDetailAPIView) already excludes it.
+                # A whole-asset hold/delete needs no separate check here —
+                # this view's row-building loop below reads straight from
+                # vulnerabilities_by_host, and asset-level hold/delete
+                # ($pull in AssetHoldAPIView/AssetDeleteAPIView) already
+                # physically removes that host from vulnerabilities_by_host,
+                # so it's absent from this loop automatically.
+                excluded_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["hold_vulnerabilities"].find({"report_id": report_id})
+                } | {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["deleted_vulnerabilities"].find({"report_id": report_id})
+                }
+
                 # ── active fix status ("in_progress" / "open/review") ────────────
                 # This previously only checked the closed collection, so any vuln
                 # a team had started (or sent for verification) but wasn't closed
@@ -2032,6 +2096,8 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             or ""
                         )
                         if not plugin_name:
+                            continue
+                        if (plugin_name, h_name) in excluded_vuln_keys:
                             continue
 
                         port = v.get("port", "")

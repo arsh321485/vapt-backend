@@ -460,6 +460,16 @@ class UserVulnerabilitiesAPIView(APIView):
                 }
                 excluded_plugins = closed_plugins | held_plugins | deleted_plugins
 
+                # A whole-asset hold/delete (AssetHoldAPIView/AssetDeleteAPIView)
+                # $pulls that host out of vulnerabilities_by_host but never
+                # touches vulnerability_cards (a static snapshot from card-
+                # generation time), so a held/deleted asset's cards would
+                # still count here without this check.
+                active_host_names = {
+                    (h.get("host_name") or h.get("host") or "").strip()
+                    for h in nessus_doc.get("vulnerabilities_by_host", [])
+                }
+
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
                 for card in db[VULN_CARD_COLLECTION].find(
@@ -471,6 +481,8 @@ class UserVulnerabilitiesAPIView(APIView):
                         continue
                     pname     = (card.get("vulnerability_name") or "").strip()
                     card_host = (card.get("host_name") or "").strip()
+                    if card_host and card_host not in active_host_names:
+                        continue
                     # Skip if this (plugin, host) pair is closed/held/deleted
                     if (pname, card_host) in excluded_plugins:
                         continue
