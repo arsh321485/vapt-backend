@@ -22,6 +22,8 @@ FIX_VULN_STEPS_COLLECTION = "fix_vulnerability_steps"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 FIX_STEP_FEEDBACK_COLLECTION = "fix_step_feedback"
 FIX_FINAL_FEEDBACK_COLLECTION = "fix_vulnerability_final_feedback"
+HOLD_VULNS_COLLECTION = "hold_vulnerabilities"
+DELETED_VULNS_COLLECTION = "deleted_vulnerabilities"
 
 
 from vaptfix.mongo_client import MongoContext
@@ -299,6 +301,22 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 admin_id = latest_doc.get("admin_id")
                 admin_email = latest_doc.get("admin_email")
 
+                # Real bug report: this view never checked hold_vulnerabilities/
+                # deleted_vulnerabilities at all, so a vuln deleted or held from
+                # the All Vulns/All Assets tab (adminasset.BulkVulnDeleteAPIView/
+                # BulkVulnHoldAPIView) kept showing up here even though the
+                # Team Performance API (distribution-by-team) already correctly
+                # excludes it — same (plugin_name, host_name) exclusion pattern
+                # as AdminAssetsAPIView.
+                _held_vuln_set = {
+                    (h.get("plugin_name", ""), h.get("host_name", ""))
+                    for h in db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+                _deleted_vuln_set = {
+                    (d.get("plugin_name", ""), d.get("host_name", ""))
+                    for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+
                 # Build fix_doc lookup (plugin_name, host_name, port) -> fix_doc
                 # Include both active and closed docs so verification_sent_at is available
                 fix_doc_lookup = {}
@@ -335,6 +353,9 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             or v.get("name")
                             or ""
                         )
+
+                        if (plugin_name, host_name) in _held_vuln_set or (plugin_name, host_name) in _deleted_vuln_set:
+                            continue
 
                         port = v.get("port", "")
 

@@ -48,6 +48,8 @@ VULN_CARD_COLLECTION       = "vulnerability_cards"
 FIX_VULN_COLLECTION        = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 FIX_VULN_STEPS_COLLECTION  = "fix_vulnerability_steps"
+HOLD_VULNS_COLLECTION      = "hold_vulnerabilities"
+DELETED_VULNS_COLLECTION   = "deleted_vulnerabilities"
 FIX_STEP_FEEDBACK_COLLECTION   = "fix_step_feedback"
 FIX_FINAL_FEEDBACK_COLLECTION  = "fix_vulnerability_final_feedback"
 SUPPORT_REQUEST_COLLECTION = "support_requests"
@@ -219,6 +221,21 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                 # Step 1: Build plugin_name -> assigned_team map (team-filtered)
                 _, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
 
+                # Real bug report: this view never checked hold_vulnerabilities/
+                # deleted_vulnerabilities at all, so a vuln deleted or held from
+                # the All Vulns/All Assets tab kept showing up here even though
+                # the Team Performance API already correctly excludes it — same
+                # (plugin_name, host_name) exclusion pattern as AdminAssetsAPIView/
+                # the admin-side LatestSuperAdminVulnerabilityRegisterAPIView.
+                _held_vuln_set = {
+                    (h.get("plugin_name", ""), h.get("host_name", ""))
+                    for h in db[HOLD_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+                _deleted_vuln_set = {
+                    (d.get("plugin_name", ""), d.get("host_name", ""))
+                    for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
+                }
+
                 # Step 2: Build fix_doc lookup (plugin_name, host_name, port) -> fix_doc
                 # Include both active and closed docs so verification_sent_at is available
                 fix_doc_lookup = {}
@@ -251,6 +268,9 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                             or v.get("name")
                             or ""
                         )
+
+                        if (plugin_name, host_name) in _held_vuln_set or (plugin_name, host_name) in _deleted_vuln_set:
+                            continue
 
                         # Only include if assigned to user's team
                         assigned_team = plugin_team_map.get(plugin_name)

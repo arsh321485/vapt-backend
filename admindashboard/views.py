@@ -1168,13 +1168,36 @@ class AdminVulnerabilitiesAPIView(APIView):
                         if p:
                             closed_vulns.add((p, h))
 
+                    # Real bug report: this view checked closed vulnerabilities
+                    # but never hold_vulnerabilities/deleted_vulnerabilities, so
+                    # a vuln deleted/held from the All Vulns/All Assets tab kept
+                    # counting here even though the Team Performance API already
+                    # correctly excludes it. Same (plugin_name, host_name)
+                    # exclusion as AdminAssetsAPIView, normalized the same
+                    # lowercase way as closed_vulns above for a consistent key.
+                    excluded_vulns = set(closed_vulns)
+                    for held_doc in db["hold_vulnerabilities"].find(
+                        {"report_id": report_id}, {"plugin_name": 1, "host_name": 1}
+                    ):
+                        p = (held_doc.get("plugin_name") or "").strip().lower()
+                        h = (held_doc.get("host_name") or "").strip().lower()
+                        if p:
+                            excluded_vulns.add((p, h))
+                    for del_doc in db["deleted_vulnerabilities"].find(
+                        {"report_id": report_id}, {"plugin_name": 1, "host_name": 1}
+                    ):
+                        p = (del_doc.get("plugin_name") or "").strip().lower()
+                        h = (del_doc.get("host_name") or "").strip().lower()
+                        if p:
+                            excluded_vulns.add((p, h))
+
                     for host in doc.get("vulnerabilities_by_host") or []:
                         host_name = (host.get("host_name") or "").strip().lower()
                         for v in (host.get("vulnerabilities") or []):
                             plugin_name = (v.get("plugin_name") or "").strip().lower()
 
-                            # Skip closed vulnerabilities
-                            if (plugin_name, host_name) in closed_vulns:
+                            # Skip closed/held/deleted vulnerabilities
+                            if (plugin_name, host_name) in excluded_vulns:
                                 continue
 
                             risk = (v.get("risk_factor") or v.get("severity") or "").strip().lower()

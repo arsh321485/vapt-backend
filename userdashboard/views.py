@@ -14,6 +14,8 @@ VULN_CARD_COLLECTION     = "vulnerability_cards"
 SUPPORT_REQUEST_COLLECTION = "support_requests"
 FIX_VULN_COLLECTION = "fix_vulnerabilities"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
+HOLD_VULNS_COLLECTION = "hold_vulnerabilities"
+DELETED_VULNS_COLLECTION = "deleted_vulnerabilities"
 FIX_VULN_STEPS_COLLECTION = "fix_vulnerability_steps"
 TIMELINE_EXTENSION_COLLECTION = "timeline_extension_requests"
 
@@ -439,6 +441,24 @@ class UserVulnerabilitiesAPIView(APIView):
                         {"plugin_name": 1, "host_name": 1}
                     )
                 }
+                # Real bug report: this view checked closed vulnerabilities but
+                # never hold_vulnerabilities/deleted_vulnerabilities, so a vuln
+                # deleted/held from the All Vulns/All Assets tab kept counting
+                # here even though the Team Performance API already correctly
+                # excludes it.
+                held_plugins = {
+                    (hdoc.get("plugin_name", ""), hdoc.get("host_name", ""))
+                    for hdoc in db[HOLD_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id)}, {"plugin_name": 1, "host_name": 1}
+                    )
+                }
+                deleted_plugins = {
+                    (ddoc.get("plugin_name", ""), ddoc.get("host_name", ""))
+                    for ddoc in db[DELETED_VULNS_COLLECTION].find(
+                        {"report_id": str(report_id)}, {"plugin_name": 1, "host_name": 1}
+                    )
+                }
+                excluded_plugins = closed_plugins | held_plugins | deleted_plugins
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
@@ -451,11 +471,12 @@ class UserVulnerabilitiesAPIView(APIView):
                         continue
                     pname     = (card.get("vulnerability_name") or "").strip()
                     card_host = (card.get("host_name") or "").strip()
-                    # Skip if this (plugin, host) pair is closed
-                    if (pname, card_host) in closed_plugins:
+                    # Skip if this (plugin, host) pair is closed/held/deleted
+                    if (pname, card_host) in excluded_plugins:
                         continue
-                    # Also skip if plugin is closed on any host (when card has no host_name)
-                    if not card_host and any(p == pname for p, _ in closed_plugins):
+                    # Also skip if plugin is closed/held/deleted on any host
+                    # (when card has no host_name)
+                    if not card_host and any(p == pname for p, _ in excluded_plugins):
                         continue
                     risk = plugin_risk.get(pname)
                     if risk in counts:
