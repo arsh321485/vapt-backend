@@ -7892,7 +7892,24 @@ class SlackEventsView(APIView):
             return None
 
     def _get_channel_name(self, bot_token, channel_id):
-        """Resolves a channel ID to its name (member_joined_channel only gives the ID)."""
+        """Resolves a channel ID to its name (member_joined_channel only gives the ID).
+
+        Real bug report: every single interactive button click pays for this
+        as part of _handle_action's access-control gate, which runs BEFORE
+        any action-specific logic — including modal-opening actions whose
+        trigger_id is only valid ~3s from the click. An uncached
+        conversations.info round trip here (plus the uncached DB lookup in
+        _get_bot_token, same gate) was easily enough on its own to blow that
+        whole budget before ever reaching e.g. open_upload_report_modal's
+        own "open the modal first" optimization — explains the intermittent
+        expired_trigger_id ("Could not open the Upload Report dialog")
+        reports. Channel names essentially never change, so cache this
+        instead of hitting Slack's API on every click.
+        """
+        cache_key = f"slack_channel_name_{channel_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached or None  # cached "" means "lookup failed" — see below
         try:
             resp = _http_get(
                 "https://slack.com/api/conversations.info",
@@ -7901,10 +7918,17 @@ class SlackEventsView(APIView):
                 timeout=10,
             )
             data = resp.json() if resp else {}
-            return (data.get("channel") or {}).get("name") if data.get("ok") else None
+            name = (data.get("channel") or {}).get("name") if data.get("ok") else None
         except Exception:
             logger.exception("[SlackEvent] _get_channel_name failed")
-            return None
+            name = None
+        # Cache a real name for a day (channel renames are rare and the
+        # access-control impact of a stale name for a while is minor); cache
+        # a failure briefly too, so a transient Slack API hiccup doesn't
+        # force every click in the next few seconds to retry the same slow
+        # call — but not so long a genuine outage keeps denying access.
+        cache.set(cache_key, name or "", 86400 if name else 30)
+        return name
 
     def _post_admin_navbar_message(self, bot_token, channel_id, team_id):
         """
@@ -11881,16 +11905,34 @@ class SlackSlashCommandView(APIView):
         return _http_get(url, headers=headers, params=params, timeout=20)
 
     def _get_bot_token(self, team_id, slack_user_id=None):
+        # Real bug report: this DB lookup (djongo, so a real round trip either
+        # way) runs uncached as part of _handle_action's access-control gate
+        # on EVERY interactive click, before any action-specific logic —
+        # including modal-opening actions where trigger_id is only valid
+        # ~3s. It's also called a second time inside individual action
+        # branches (e.g. open_upload_report_modal) that need the token
+        # themselves, so a single click could pay for this twice. Caching
+        # cuts both to effectively free after the first hit. Short-ish TTL
+        # since a token can change if the user reconnects/reinstalls Slack.
+        cache_key = f"slack_bot_token_{team_id}_{slack_user_id or ''}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached or None
+
         # Prefer the token of the specific user who ran the command (most likely valid)
+        token = None
         if slack_user_id:
             user = next((u for u in User.objects.filter(slack_user_id=slack_user_id) if u.slack_bot_token), None)
             if user:
-                return user.slack_bot_token
-        # Fallback: any Slack-connected user in this workspace
-        return next(
-            (u.slack_bot_token for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token),
-            None,
-        )
+                token = user.slack_bot_token
+        if not token:
+            # Fallback: any Slack-connected user in this workspace
+            token = next(
+                (u.slack_bot_token for u in User.objects.filter(slack_team_id=team_id) if u.slack_bot_token),
+                None,
+            )
+        cache.set(cache_key, token or "", 300 if token else 15)
+        return token
 
     # ── Command handlers ──────────────────────────────────────────────────
 
