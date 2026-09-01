@@ -108,6 +108,14 @@ class SignupOTPSession(models.Model):
     otp = models.CharField(max_length=6)
     password = models.TextField()  # plain-text; hashed when User is created
     created_at = models.DateTimeField(default=timezone.now)
+    # Real bug report: a report-claim magic link's invite_token was only
+    # ever read from the final Verify-OTP request body — if the frontend
+    # only attached it to the earlier Send-OTP call (the one actually made
+    # from the invite-link landing page) and didn't re-send it on Verify,
+    # the claim silently no-op'd and the invited admin's report never got
+    # reassigned. Carrying it here means AdminSignupVerifyOTPView can fall
+    # back to whatever was captured at Send-OTP time either way.
+    invite_token = models.CharField(max_length=64, blank=True, default="")
 
     class Meta:
         db_table = 'signup_otp_sessions'

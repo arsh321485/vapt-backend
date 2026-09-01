@@ -320,9 +320,19 @@ class AdminSignupSendOTPView(APIView):
         # Replaces cache.set (LocMemCache is per-process — breaks with multiple workers).
         otp = str(secrets.randbelow(900000) + 100000)
         from .models import SignupOTPSession
+        # Real bug report: capture invite_token here too (if the invite-link
+        # landing page's signup form includes it on this first call) so
+        # AdminSignupVerifyOTPView can still claim the report even if the
+        # frontend doesn't also resend it on the later Verify-OTP call.
+        invite_token = (request.data.get("invite_token") or "").strip()
         SignupOTPSession.objects.update_or_create(
             email=email,
-            defaults={'otp': otp, 'password': password, 'created_at': timezone.now()}
+            defaults={
+                'otp': otp,
+                'password': password,
+                'created_at': timezone.now(),
+                'invite_token': invite_token,
+            }
         )
 
         # Send OTP email
@@ -380,15 +390,20 @@ class AdminSignupVerifyOTPView(APIView):
             logger.error(f"Failed to create user: {str(e)}")
             return Response({"error": "Failed to create account"}, status=500)
 
+        # Report-claim magic link (optional) — if this signup came from a
+        # Super Admin's invite link, hand off the pending report(s) now
+        # that a real account exists. Silently no-ops if absent/expired/
+        # already used — never blocks normal signup. Prefer whatever this
+        # request itself sent; fall back to what Send-OTP captured (real
+        # bug report: the frontend only ever sent invite_token on the
+        # earlier Send-OTP call, never resent it here, so the fallback is
+        # what actually makes the claim fire).
+        invite_token = (request.data.get("invite_token") or "").strip() or session.invite_token
+
         # Delete session immediately after successful verification.
         # Use queryset delete for Djongo compatibility (model instance pk can be None).
         SignupOTPSession.objects.filter(email=email).delete()
 
-        # Report-claim magic link (optional) — if this signup came from a
-        # Super Admin's invite link, hand off the pending report(s) now
-        # that a real account exists. Silently no-ops if absent/expired/
-        # already used — never blocks normal signup.
-        invite_token = request.data.get("invite_token")
         if invite_token:
             from .invite_utils import claim_invite
             try:
