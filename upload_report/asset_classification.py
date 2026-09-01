@@ -67,15 +67,21 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
     )
 
     # Firewall — vendor names / device-role keywords, checked first (see
-    # module docstring for why priority matters here).
-    if any(k in combined_text for k in _FIREWALL_KEYWORDS):
+    # module docstring for why priority matters here). combined_text is
+    # already fully lowercased above, but a keyword is compared as-is — if
+    # a future edit adds a keyword with any uppercase in it (e.g. "Cisco
+    # ASA" instead of "cisco asa"), `k in combined_text` would silently
+    # never match. Lowercase every keyword right here too so matching
+    # stays correct regardless of how the list is written later, not just
+    # because every entry happens to be lowercase today.
+    if any(k.lower() in combined_text for k in _FIREWALL_KEYWORDS):
         return "firewall"
 
     # Web app — URL-shaped host, or vulnerability content is dominated by
     # web-layer findings (HTTP/HTTPS, XSS, SQLi, cookies, CSRF, etc.)
     if name_lower.startswith("http://") or name_lower.startswith("https://"):
         return "web_app"
-    if any(k in combined_text for k in _WEB_APP_VULN_KEYWORDS):
+    if any(k.lower() in combined_text for k in _WEB_APP_VULN_KEYWORDS):
         return "web_app"
 
     # Server — real OS info present (Nessus host_information, or the
@@ -90,7 +96,7 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
         or host_information.get("system-type")
         or ""
     ).strip().lower()
-    if os_str or any(k in combined_text for k in _SERVER_SOFTWARE_KEYWORDS):
+    if os_str or any(k.lower() in combined_text for k in _SERVER_SOFTWARE_KEYWORDS):
         return "server"
 
     # Bare IP or anything else with no stronger signal -> generic "Assets" tab
