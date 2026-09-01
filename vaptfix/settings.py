@@ -359,6 +359,30 @@ REST_FRAMEWORK = {
     ),
 }
 
+# Real bug report: neither TIME_ZONE nor USE_TZ was ever set, so both fell
+# back to Django's true defaults (TIME_ZONE='America/Chicago', USE_TZ=False)
+# rather than the 'UTC'/True that django-admin startproject normally seeds.
+# With USE_TZ=False, timezone.now() just returns the OS's naive local wall-
+# clock time (whatever that happens to be on the machine the code runs on)
+# with NO timezone conversion applied anywhere. That naive value then goes
+# straight into MongoDB as-is - but BSON always LABELS stored datetimes as
+# UTC regardless of what they actually represent, so a value written by a
+# server whose OS clock is already IST gets mislabeled "UTC" in Compass/
+# Django Admin, while a value written by a UTC-OS server (the normal case
+# for a Linux production box) is genuinely UTC. Two servers running the
+# same code could silently disagree with each other by a fixed 5:30 offset
+# depending on their OS timezone - real inconsistency, not just a display
+# nuisance.
+#
+# USE_TZ=True makes timezone.now() always return a genuinely UTC-aware
+# value regardless of OS clock, so every server agrees; TIME_ZONE=
+# 'Asia/Kolkata'
+# makes Django Admin (and anything using django.utils.timezone.localtime)
+# automatically render those UTC values back as IST for display - no
+# manual +5:30 needed when reading timestamps there.
+TIME_ZONE = "Asia/Kolkata"
+USE_TZ = True
+
 STATIC_URL = "/static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
