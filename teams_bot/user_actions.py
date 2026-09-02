@@ -36,7 +36,10 @@ _REGISTER_ACTION_IDS = {
 _SUPPORT_ACTION_IDS = {"unav_support", "usup_pg", "usup_view", "usup_raise_form", "usup_submit", "usup_back"}
 _FIXED_ACTION_IDS = {"unav_fixed", "ufixed_pg", "ufixed_view", "ufixed_step_nav", "ufixed_back"}
 _REMINDER_ACTION_IDS = {"unav_reminder", "urem_sub_overdue", "urem_sub_today", "urem_sub_thisweek", "urem_sub_nextweek", "urem_pg"}
-_EXTEND_ACTION_IDS = {"unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg", "uex_new_submit", "uex_view", "uex_view_back"}
+_EXTEND_ACTION_IDS = {
+    "unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg", "uex_new_submit", "uex_view", "uex_view_back",
+    "uex_new_pick_asset", "uex_new_back_to_asset",
+}
 # Reached from a vuln's own detail page regardless of whether it was
 # opened via Fix or Register — ctx (embedded in the click's own value)
 # says which, so the response re-highlights the right tab.
@@ -90,9 +93,17 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
             if action_id == "uex_new_submit":
                 idx = _as_int(value.get("uex_new_idx"))
                 days = _as_int(value.get("uex_new_days"))
-                ok, error = extend.submit_new_request(member_user, team_name, idx, days, value.get("uex_new_reason"))
+                selected_asset = value.get("asset")
+                ok, error = extend.submit_new_request(member_user, team_name, selected_asset, idx, days, value.get("uex_new_reason"))
                 banner = _result_banner(ok, "Your admin has been notified and can review it." if ok else (error or "Could not submit extension request."))
                 body = [banner, extend.extend_subnav_columnset("uex_sub_list")] + extend.request_list_body(member_user, team_name)
+                return home.nav_buttons_card(team_name, active_action_id="unav_extend", extra_body=body)
+            if action_id == "uex_new_pick_asset":
+                selected_asset = value.get("uex_new_asset")
+                body = extend.extend_tab_body(member_user, team_name, active_sub="uex_sub_new", selected_asset=selected_asset)
+                return home.nav_buttons_card(team_name, active_action_id="unav_extend", extra_body=body)
+            if action_id == "uex_new_back_to_asset":
+                body = extend.extend_tab_body(member_user, team_name, active_sub="uex_sub_new", selected_asset=None)
                 return home.nav_buttons_card(team_name, active_action_id="unav_extend", extra_body=body)
             if action_id == "uex_view":
                 offset = _as_int(value.get("offset")) or 0

@@ -94,19 +94,46 @@ def _open_vulns(member_user, team_name):
     return [r for r in rows if (r.get("status") or "open").strip().lower() != "closed"]
 
 
-def new_request_form_body(member_user, team_name):
+def _asset_vulns_for(open_rows, selected_asset):
+    return [r for r in open_rows if (r.get("asset") or "—") == selected_asset]
+
+
+def new_request_form_body(member_user, team_name, selected_asset=None):
+    """Two-step wizard: Asset first, then (once picked) a Vulnerability
+    dropdown filtered to that asset — same Asset → Vulnerability cascade
+    as Slack's _build_extend_request_modal (users.views.SlackSlashCommandView),
+    just as a two-screen Adaptive Card flow instead of Slack's
+    dispatch_action live-updating select (Adaptive Cards don't have an
+    equivalent "re-render on every keystroke/selection" primitive — an
+    explicit "Next" step is the documented way to get the same result)."""
     open_rows = _open_vulns(member_user, team_name)
     body = [
         {"type": "TextBlock", "text": "⏳ Request Extension", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": f"Pick a vulnerability assigned to {team_name}, then how many extra days you need.", "size": "Small", "isSubtle": True, "wrap": True},
     ]
     if not open_rows:
+        body.append({"type": "TextBlock", "text": f"Pick a vulnerability assigned to {team_name}, then how many extra days you need.", "size": "Small", "isSubtle": True, "wrap": True})
         body.append({"type": "TextBlock", "text": "No open vulnerabilities to request an extension for.", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
         return body
 
+    assets = sorted({(r.get("asset") or "—") for r in open_rows})
+
+    if not selected_asset or selected_asset not in assets:
+        body.append({"type": "TextBlock", "text": f"Pick an asset assigned to {team_name}, then a vulnerability on it.", "size": "Small", "isSubtle": True, "wrap": True})
+        asset_choices = [{"title": a, "value": a} for a in assets]
+        body.extend([
+            {"type": "Input.ChoiceSet", "id": "uex_new_asset", "label": "Asset", "style": "compact", "choices": asset_choices},
+            {
+                "type": "ActionSet", "spacing": "Medium",
+                "actions": [cards._execute_action("Next →", {"action_id": "uex_new_pick_asset"}, style="positive")],
+            },
+        ])
+        return body
+
+    asset_vulns = _asset_vulns_for(open_rows, selected_asset)
+    body.append({"type": "TextBlock", "text": f"**Asset:** {selected_asset}", "wrap": True, "spacing": "Small"})
     choices = [
-        {"title": f"{r.get('asset') or '—'} — {(r.get('vul_name') or 'Unnamed')[:60]}", "value": str(i)}
-        for i, r in enumerate(open_rows[:50])
+        {"title": (r.get("vul_name") or "Unnamed")[:75], "value": str(i)}
+        for i, r in enumerate(asset_vulns[:50])
     ]
     body.extend([
         {"type": "Input.ChoiceSet", "id": "uex_new_idx", "label": "Vulnerability", "style": "compact", "choices": choices},
@@ -114,27 +141,31 @@ def new_request_form_body(member_user, team_name):
         {"type": "Input.Text", "id": "uex_new_reason", "label": "Reason", "isMultiline": True, "placeholder": "e.g. Need more time for patch testing"},
         {
             "type": "ActionSet", "spacing": "Medium",
-            "actions": [cards._execute_action("✅ Submit Request", {"action_id": "uex_new_submit"}, style="positive")],
+            "actions": [
+                cards._execute_action("← Change asset", {"action_id": "uex_new_back_to_asset"}),
+                cards._execute_action("✅ Submit Request", {"action_id": "uex_new_submit", "asset": selected_asset}, style="positive"),
+            ],
         },
     ])
-    if len(open_rows) > 50:
-        body.append({"type": "TextBlock", "text": f"Showing the first 50 of {len(open_rows)} open vulnerabilities.", "size": "Small", "isSubtle": True, "spacing": "Small"})
+    if len(asset_vulns) > 50:
+        body.append({"type": "TextBlock", "text": f"Showing the first 50 of {len(asset_vulns)} open vulnerabilities on this asset.", "size": "Small", "isSubtle": True, "spacing": "Small"})
     return body
 
 
-def submit_new_request(member_user, team_name, idx, days, reason):
+def submit_new_request(member_user, team_name, selected_asset, idx, days, reason):
     open_rows = _open_vulns(member_user, team_name)
-    if idx is None or idx < 0 or idx >= len(open_rows):
+    asset_vulns = _asset_vulns_for(open_rows, selected_asset) if selected_asset else []
+    if not selected_asset or idx is None or idx < 0 or idx >= len(asset_vulns):
         return False, "Please pick a vulnerability."
-    merged = dict(open_rows[idx], _requested_days=days or 7, _reason=reason)
+    merged = dict(asset_vulns[idx], _requested_days=days or 7, _reason=reason)
     return fix.submit_extension_request(member_user, merged)
 
 
-def extend_tab_body(member_user, team_name, active_sub="uex_sub_list", offset=0):
+def extend_tab_body(member_user, team_name, active_sub="uex_sub_list", offset=0, selected_asset=None):
     body = [extend_subnav_columnset(active_sub)]
     try:
         if active_sub == "uex_sub_new":
-            body.extend(new_request_form_body(member_user, team_name))
+            body.extend(new_request_form_body(member_user, team_name, selected_asset=selected_asset))
         else:
             body.extend(request_list_body(member_user, team_name, offset=offset))
     except Exception:
