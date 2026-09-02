@@ -11854,11 +11854,15 @@ class SlackSlashCommandView(APIView):
         if not admin_channel_id:
             return
 
-        upgrade_url = "https://vaptfix.ai/pricingplan"
+        # source=slack — same reasoning as teams_bot.cards.open_website_upload_card's
+        # own source=teams: admin_token alone doesn't tell the frontend which
+        # platform this handoff came from (both reuse the same signer), and a
+        # post-upload/plan-selection "go back to Slack" popup needs that signal.
+        upgrade_url = "https://vaptfix.ai/pricingplan?source=slack"
         admin = self._get_admin_user(team_id, slack_user_id=slack_user_id)
         if admin:
             handoff_token = _slack_pricing_handoff_signer().sign(str(admin.id))
-            upgrade_url = f"{upgrade_url}?admin_token={quote(handoff_token)}"
+            upgrade_url = f"{upgrade_url}&admin_token={quote(handoff_token)}"
 
         blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": (

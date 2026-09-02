@@ -216,13 +216,20 @@ def open_website_upload_card(purpose="report", admin=None):
     """
     from django.conf import settings
     frontend = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
-    url = f"{frontend}/admin-upload-report"
+    # source=teams — real frontend request: after finishing upload + plan
+    # selection on this handed-off page, show a "go back to Microsoft
+    # Teams" popup. admin_token alone doesn't tell the frontend WHICH
+    # platform this visit came from (Slack's own upgrade-plan handoff
+    # link — see _slack_pricing_handoff_signer — reuses the exact same
+    # signer/param name), so this is the one explicit signal frontend can
+    # branch its popup copy on.
+    url = f"{frontend}/admin-upload-report?source=teams"
     if admin is not None:
         try:
             from users.views import _slack_pricing_handoff_signer
             from urllib.parse import quote
             handoff_token = _slack_pricing_handoff_signer().sign(str(admin.id))
-            url = f"{url}?admin_token={quote(handoff_token)}"
+            url = f"{url}&admin_token={quote(handoff_token)}"
         except Exception:
             logger.exception("[TeamsBot] failed to build signed handoff token for upload link")
     noun = "VA report" if purpose == "report" else "scope CSV"
