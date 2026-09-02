@@ -2440,9 +2440,24 @@ class MicrosoftTeamsCallbackView(APIView):
                             type: "TEAMS_CONNECTED",
                             success: true,
                             user: {json.dumps(user_data)},
+                            // "tokens" here is Microsoft's own OAuth response
+                            // (access_token/refresh_token/expires_in — MS
+                            // Graph naming), not our Django JWT. Real bug
+                            // report: a frontend reading tokens.access/
+                            // tokens.refresh (the shape every OTHER auth
+                            // endpoint in this app uses — see
+                            // AdminSignupVerifyOTPView) would find those keys
+                            // absent here and save null, even though the
+                            // Django tokens WERE generated — just under the
+                            // differently-named flat django_access_token/
+                            // django_refresh_token keys below. django_tokens
+                            // gives the same {{access, refresh}} shape as
+                            // every other login/signup response so either
+                            // reading convention picks up a real value.
                             tokens: {{...{json.dumps(token_data)}, tenant_id: "{tenant_id}"}},
                             django_access_token: "{django_access_token}",
                             django_refresh_token: "{django_refresh_token}",
+                            django_tokens: {{access: "{django_access_token}", refresh: "{django_refresh_token}"}},
                             vaptfix_team: {json.dumps(vaptfix_team)},
                             redirect_target: "team_tab",
                             teams_target_url: targetUrl,
@@ -5358,7 +5373,13 @@ class SlackOAuthCallbackView(APIView):
                             bot_token: {json.dumps(bot_token)},
                             slack_user_id: {json.dumps(user_id)},
                             django_access_token: {json.dumps(django_access_token)},
-                            django_refresh_token: {json.dumps(django_refresh_token)}
+                            django_refresh_token: {json.dumps(django_refresh_token)},
+                            // Same {{access, refresh}} shape as every other
+                            // login/signup response (AdminSignupVerifyOTPView
+                            // etc.) — see the matching comment in the Teams
+                            // callback for why this is here alongside the
+                            // flat django_access_token/django_refresh_token.
+                            django_tokens: {json.dumps({"access": django_access_token, "refresh": django_refresh_token})}
                         }}, "*");
                     }}
                     window.location.href = {json.dumps(slack_redirect_url)};
