@@ -766,25 +766,30 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             return timeline_tab.timeline_tab_body(admin, active_sub="req_sub_extensions", offset=offset)
 
         try:
+            # _back_to_list() (== timeline_tab_body) already starts its own
+            # body with request_subnav_columnset — prepending it again here
+            # on top of that produced the real bug reported: the pill row
+            # rendered TWICE the instant Approve/Reject succeeded. Only the
+            # branches that DON'T route through _back_to_list() (a failure
+            # message, or reject_reason_body, neither of which include
+            # their own subnav) still need the explicit prepend.
             if action_id == "ext_approve_do":
                 ok, message = timeline_tab.do_approve(admin, request_id)
-                body = [timeline_tab.request_subnav_columnset(active_sub)]
                 if not ok:
-                    body += [cards._header("❌ Failed"), cards._body_text(message)]
+                    body = [timeline_tab.request_subnav_columnset(active_sub), cards._header("❌ Failed"), cards._body_text(message)]
                 else:
-                    body += _back_to_list()
+                    body = _back_to_list()
             elif action_id == "ext_reject_start":
                 body = [timeline_tab.request_subnav_columnset(active_sub)] + timeline_tab.reject_reason_body(request_id, offset, src, view=view)
             elif action_id == "ext_reject_cancel":
-                body = [timeline_tab.request_subnav_columnset(active_sub)] + _back_to_list()
+                body = _back_to_list()
             else:  # ext_reject_do
                 reason = (value.get("reject_reason") or "").strip()
                 ok, message = timeline_tab.do_reject(admin, request_id, reason=reason)
-                body = [timeline_tab.request_subnav_columnset(active_sub)]
                 if not ok:
-                    body += [cards._header("❌ Failed"), cards._body_text(message)]
+                    body = [timeline_tab.request_subnav_columnset(active_sub), cards._header("❌ Failed"), cards._body_text(message)]
                 else:
-                    body += _back_to_list()
+                    body = _back_to_list()
         except Exception:
             logger.exception(f"[TeamsBot] {action_id} failed")
             body = [timeline_tab.request_subnav_columnset(active_sub), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
