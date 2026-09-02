@@ -693,9 +693,17 @@ def send_set_password_email(user, provider_label):
     # attaches inline_logo_b64 (ContentId("vaptfix_logo")). A raw base64
     # data: URI in <img src> is what the other password emails in this file
     # used and Gmail silently strips it, showing a broken-image icon.
+    #
+    # Real bug report: this email (sent to every MS Teams/Slack signup
+    # that needs to set a password) used a plain white header — every
+    # other VAPTFIX email (OTP verification, admin welcome, scoping
+    # confirmation, in users/utils.py) uses the same dark #23124d header
+    # behind the logo. Matched that here so the logo renders consistently
+    # across all outgoing mail instead of looking different on this one.
     logo_html = (
-        '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
-        if logo_b64 else '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+        '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:42px; display:block; margin:0 auto;" />'
+        if logo_b64 else
+        '<div style="font-size:20px; color:#ffffff; font-weight:700; letter-spacing:0.5px;">VAPTFIX</div>'
     )
 
     html_content = f"""
@@ -710,8 +718,7 @@ def send_set_password_email(user, provider_label):
                    style="background:#ffffff; border-radius:8px; overflow:hidden;
                           box-shadow:0 2px 8px rgba(0,0,0,0.08);">
               <tr>
-                <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
-                            border-bottom:1px solid #e8eaed;">
+                <td style="background-color:#23124d; padding:20px 30px; text-align:center;">
                   {logo_html}
                 </td>
               </tr>
@@ -837,9 +844,12 @@ class UserForgotPasswordView(generics.GenericAPIView):
         if logo_b64:
             # cid: reference, not a data: URI — Gmail silently strips inline
             # base64 images in <img src>, showing a broken-image icon.
-            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:60px;" />'
+            # Real bug report: matched the dark #23124d header every other
+            # VAPTFIX email already uses (see the set-password email above,
+            # and users/utils.py) instead of this one's plain white header.
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:42px; display:block; margin:0 auto;" />'
         else:
-            logo_html = '<h2 style="color:#1a73e8; margin:0;">VAPTFIX</h2>'
+            logo_html = '<div style="font-size:20px; color:#ffffff; font-weight:700; letter-spacing:0.5px;">VAPTFIX</div>'
 
         html_content = f"""
         <!DOCTYPE html>
@@ -853,8 +863,7 @@ class UserForgotPasswordView(generics.GenericAPIView):
                        style="background:#ffffff; border-radius:8px; overflow:hidden;
                               box-shadow:0 2px 8px rgba(0,0,0,0.08);">
                   <tr>
-                    <td style="background-color:#ffffff; padding:30px 40px; text-align:center;
-                                border-bottom:1px solid #e8eaed;">
+                    <td style="background-color:#23124d; padding:20px 30px; text-align:center;">
                       {logo_html}
                     </td>
                   </tr>
