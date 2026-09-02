@@ -1117,23 +1117,44 @@ class AdminAvgScoreAPIView(APIView):
 
             with MongoContext() as db:
                 doc = _load_latest_report_for_admin(db, admin_email, str(request.user.id),
-                    projection={"vulnerabilities_by_host.vulnerabilities.cvss_v3_base_score": 1,
+                    projection={"vulnerabilities_by_host.host_name": 1,
+                                "vulnerabilities_by_host.host": 1,
+                                "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
+                                "vulnerabilities_by_host.vulnerabilities.cvss_v3_base_score": 1,
                                 "vulnerabilities_by_host.vulnerabilities.cvss": 1,
                                 "vulnerabilities_by_host.vulnerabilities.cvss_score": 1, "report_id": 1})
 
                 if not doc:
                     return Response({"avg_score": None, "report_id": None}, status=status.HTTP_200_OK)
 
+                report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
+                # Real bug report: avg_score never excluded held/deleted
+                # vulnerabilities, so removing a high-CVSS finding from All
+                # Vulns/All Assets didn't move this number even though every
+                # other part of Summary (vulnerabilities, Team Performance,
+                # etc.) already correctly reflected the change.
+                excluded_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["hold_vulnerabilities"].find({"report_id": report_id})
+                } | {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["deleted_vulnerabilities"].find({"report_id": report_id})
+                }
+
                 cvss_vals = []
                 for host in doc.get("vulnerabilities_by_host") or []:
+                    host_name = (host.get("host_name") or host.get("host") or "").strip()
                     for v in (host.get("vulnerabilities") or []):
+                        plugin_name = (v.get("plugin_name") or "").strip()
+                        if (plugin_name, host_name) in excluded_vuln_keys:
+                            continue
                         cv_raw = v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
                         num = safe_float_from(cv_raw)
                         if num is not None:
                             cvss_vals.append(num)
 
                 avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else None
-                report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
                 data = {"avg_score": avg, "report_id": report_id}
                 cache.set(cache_key, data, 300)

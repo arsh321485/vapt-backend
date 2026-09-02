@@ -353,6 +353,19 @@ class UserAvgScoreAPIView(APIView):
                     if pname and matched:
                         plugin_team_map.setdefault(pname, set()).add(matched)
 
+                # Real bug report: avg_score never excluded held/deleted
+                # vulnerabilities, so removing a high-CVSS finding from All
+                # Vulns/All Assets didn't move this number even though every
+                # other part of the user dashboard summary already
+                # correctly reflected the change.
+                excluded_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["hold_vulnerabilities"].find({"report_id": str(report_id)})
+                } | {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["deleted_vulnerabilities"].find({"report_id": str(report_id)})
+                }
+
                 # Collect CVSS scores and unique hosts per team
                 by_team = {t: set() for t in active_teams}
                 cvss_vals = []
@@ -372,6 +385,8 @@ class UserAvgScoreAPIView(APIView):
                         ).strip()
                         matched_teams = plugin_team_map.get(pname, set())
                         if not matched_teams:
+                            continue
+                        if (pname, h_name) in excluded_vuln_keys:
                             continue
 
                         # Collect CVSS score for this vulnerability
