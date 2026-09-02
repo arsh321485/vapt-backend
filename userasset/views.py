@@ -16,6 +16,7 @@ def _clear_admin_dashboard_cache(admin_user_id):
         f"admin_vulnerabilities_{admin_user_id}",
         f"admin_inprocess_timeline_{admin_user_id}",
         f"admin_dashboard_summary_{admin_user_id}",
+        f"mitigation_by_team_v2_{admin_user_id}",
     ):
         cache.delete(key)
 
@@ -1601,6 +1602,15 @@ class UserBulkVulnHoldAPIView(APIView):
                     )
                     processed.append(host_name)
 
+                # Real bug report: the whole-asset hold/unhold/delete views
+                # already bust the owning admin's dashboard cache after a
+                # mutation, but this vulnerability-level hold never did —
+                # Summary kept serving its last cached response (up to
+                # 5 min) after a vuln hold, even though every other,
+                # non-cached view already reflected it immediately.
+                if processed:
+                    _clear_admin_dashboard_cache(admin_user.id)
+
                 return Response({
                     "detail": f"Held on {len(processed)} asset(s)",
                     "plugin_name": plugin_name,
@@ -1649,6 +1659,9 @@ class UserBulkVulnUnholdAPIView(APIView):
                     "plugin_name": plugin_name,
                     "host_name": {"$in": host_names},
                 })
+
+                if result.deleted_count:
+                    _clear_admin_dashboard_cache(admin_user.id)
 
                 return Response({
                     "detail": f"Unheld on {result.deleted_count} asset(s)",
@@ -1708,6 +1721,9 @@ class UserBulkVulnDeleteAPIView(APIView):
                         "plugin_name": plugin_name,
                         "host_name": host_name,
                     })
+
+                if host_names:
+                    _clear_admin_dashboard_cache(admin_user.id)
 
                 return Response({
                     "detail": f"Deleted from {len(host_names)} asset(s)",
