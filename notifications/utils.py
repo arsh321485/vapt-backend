@@ -418,6 +418,35 @@ def create_notification(admin, recipient_type, notif_type, title, message,
         }
         with MongoContext() as db:
             db[COLLECTION].insert_one(doc)
+        _bust_notif_cache(admin_id, recipient_type, recipient_email)
         _send_slack_notification(admin_id, recipient_type, notif_type, title, message, metadata, recipient_email)
     except Exception as exc:
         logger.error("create_notification failed [%s | %s]: %s", notif_type, recipient_type, exc)
+
+
+def _bust_notif_cache(admin_id, recipient_type, recipient_email):
+    """Notifications' own GET endpoints (notifications/views.py) cache
+    list/unread-count for a few seconds to absorb the frontend's frequent
+    polling — bust the relevant key(s) here, the single funnel every
+    notification is created through, so a brand new one still shows up
+    immediately instead of waiting out that TTL."""
+    try:
+        from django.core.cache import cache
+        if recipient_type == "admin":
+            cache.delete(f"notif_admin_unread_{admin_id}")
+            cache.delete(f"notif_admin_list_{admin_id}")
+            return
+        if recipient_email:
+            cache.delete(f"notif_user_unread_{admin_id}_{recipient_email}")
+            cache.delete(f"notif_user_list_{admin_id}_{recipient_email}")
+            return
+        # Broadcast (recipient_type == "user", no specific email) — every
+        # member under this admin can see it, so every member's cache
+        # needs busting. Same query _send_slack_notification's own
+        # broadcast branch already makes, just for this instead of Slack.
+        from users_details.models import UserDetail
+        for email in UserDetail.objects.filter(admin_id=admin_id).values_list("email", flat=True):
+            cache.delete(f"notif_user_unread_{admin_id}_{email}")
+            cache.delete(f"notif_user_list_{admin_id}_{email}")
+    except Exception:
+        logger.exception("[Notify] _bust_notif_cache failed")

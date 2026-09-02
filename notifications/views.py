@@ -1,6 +1,7 @@
 import datetime as _dt
 
 from bson import ObjectId
+from django.core.cache import cache
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -9,6 +10,27 @@ from vaptfix.mongo_client import MongoContext
 from .deadline_checker import check_deadlines_for_admin
 
 COLLECTION = "notifications_notification"
+
+# Real perf report: NotificationPanel.vue polls unread-count (and
+# sometimes the full list) every 10s, from possibly more than one mounted
+# instance at once — real, avoidable Mongo load on every single poll tick
+# regardless of whether anything actually changed. A short cache (well
+# under the poll interval, so a genuinely new notification still shows up
+# within one poll cycle) absorbs duplicate/overlapping polls without
+# making the badge feel stale. Explicitly busted below wherever a
+# notification is created or marked read, so it's still correct beyond
+# just "eventually" within the TTL.
+_NOTIF_CACHE_TTL = 8
+
+
+def _bust_admin_cache(admin_id):
+    cache.delete(f"notif_admin_unread_{admin_id}")
+    cache.delete(f"notif_admin_list_{admin_id}")
+
+
+def _bust_user_cache(admin_id, user_email):
+    cache.delete(f"notif_user_unread_{admin_id}_{user_email}")
+    cache.delete(f"notif_user_list_{admin_id}_{user_email}")
 
 
 def _serialize(doc):
@@ -58,6 +80,10 @@ class AdminNotificationListView(APIView):
 
     def get(self, request):
         admin_id = str(request.user.id)
+        cache_key = f"notif_admin_list_{admin_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
         check_deadlines_for_admin(admin_id)
         with MongoContext() as db:
             docs = list(db[COLLECTION].find(
@@ -65,7 +91,9 @@ class AdminNotificationListView(APIView):
                 sort=[("created_at", -1)]
             ))
         data = [_serialize(d) for d in docs]
-        return Response({"count": len(data), "notifications": data}, status=status.HTTP_200_OK)
+        payload = {"count": len(data), "notifications": data}
+        cache.set(cache_key, payload, _NOTIF_CACHE_TTL)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class AdminNotificationUnreadCountView(APIView):
@@ -74,10 +102,15 @@ class AdminNotificationUnreadCountView(APIView):
 
     def get(self, request):
         admin_id = str(request.user.id)
+        cache_key = f"notif_admin_unread_{admin_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response({"unread_count": cached}, status=status.HTTP_200_OK)
         with MongoContext() as db:
             count = db[COLLECTION].count_documents(
                 {"admin_id": admin_id, "recipient_type": "admin", "is_read": False}
             )
+        cache.set(cache_key, count, _NOTIF_CACHE_TTL)
         return Response({"unread_count": count}, status=status.HTTP_200_OK)
 
 
@@ -102,6 +135,7 @@ class AdminMarkNotificationReadView(APIView):
             )
         if result.deleted_count == 0:
             return Response({"detail": "Notification not found"}, status=status.HTTP_404_NOT_FOUND)
+        _bust_admin_cache(admin_id)
         return Response({"detail": "Notification cleared", "id": notif_id}, status=status.HTTP_200_OK)
 
 
@@ -119,6 +153,7 @@ class AdminMarkAllNotificationsReadView(APIView):
             result = db[COLLECTION].delete_many(
                 {"admin_id": admin_id, "recipient_type": "admin", "is_read": False}
             )
+        _bust_admin_cache(admin_id)
         return Response(
             {"detail": "All notifications cleared", "deleted": result.deleted_count},
             status=status.HTTP_200_OK
@@ -137,6 +172,11 @@ class UserNotificationListView(APIView):
         if not admin_id:
             return Response({"count": 0, "notifications": []}, status=status.HTTP_200_OK)
 
+        cache_key = f"notif_user_list_{admin_id}_{user_email}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
         with MongoContext() as db:
             docs = list(db[COLLECTION].find(
                 {
@@ -148,7 +188,9 @@ class UserNotificationListView(APIView):
                 sort=[("created_at", -1)]
             ))
         data = [_serialize(d) for d in docs]
-        return Response({"count": len(data), "notifications": data}, status=status.HTTP_200_OK)
+        payload = {"count": len(data), "notifications": data}
+        cache.set(cache_key, payload, _NOTIF_CACHE_TTL)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class UserNotificationUnreadCountView(APIView):
@@ -161,6 +203,11 @@ class UserNotificationUnreadCountView(APIView):
         if not admin_id:
             return Response({"unread_count": 0}, status=status.HTTP_200_OK)
 
+        cache_key = f"notif_user_unread_{admin_id}_{user_email}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response({"unread_count": cached}, status=status.HTTP_200_OK)
+
         with MongoContext() as db:
             count = db[COLLECTION].count_documents({
                 "admin_id": admin_id,
@@ -168,6 +215,7 @@ class UserNotificationUnreadCountView(APIView):
                 "recipient_email": {"$in": [user_email, ""]},
                 "is_read": False,
             })
+        cache.set(cache_key, count, _NOTIF_CACHE_TTL)
         return Response({"unread_count": count}, status=status.HTTP_200_OK)
 
 
@@ -201,6 +249,7 @@ class UserMarkNotificationReadView(APIView):
             )
         if result.deleted_count == 0:
             return Response({"detail": "Notification not found"}, status=status.HTTP_404_NOT_FOUND)
+        _bust_user_cache(admin_id, user_email)
         return Response({"detail": "Notification cleared", "id": notif_id}, status=status.HTTP_200_OK)
 
 
@@ -227,6 +276,7 @@ class UserMarkAllNotificationsReadView(APIView):
                     "is_read": False,
                 }
             )
+        _bust_user_cache(admin_id, user_email)
         return Response(
             {"detail": "All notifications cleared", "deleted": result.deleted_count},
             status=status.HTTP_200_OK
