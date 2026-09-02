@@ -36,6 +36,7 @@ def _clear_admin_dashboard_cache(admin_user_id):
         f"admin_vulnerabilities_{admin_user_id}",
         f"admin_inprocess_timeline_{admin_user_id}",
         f"admin_dashboard_summary_{admin_user_id}",
+        f"admin_register_list_{admin_user_id}",
     ):
         cache.delete(key)
 
@@ -270,6 +271,19 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
             current_admin_id = str(request.user.id)
             current_admin_email = getattr(request.user, 'email', None)
 
+            # Real perf report: this is the single heaviest, most-frequently-hit
+            # endpoint in the app (every "Vulnerabilities" page load) — a full
+            # scan of vulnerabilities_by_host plus two fix_vulnerability
+            # collection scans plus hold/deleted-set builds, done from scratch
+            # on every request while admindashboard's summary endpoints were
+            # already cached. Short 60s TTL (not the dashboard's 300s) so any
+            # hold/delete/fix-status change still shows up within a minute
+            # even from a call site that doesn't explicitly bust this key.
+            _cache_key = f"admin_register_list_{current_admin_id}"
+            _cached = cache.get(_cache_key)
+            if _cached is not None:
+                return Response(_cached, status=status.HTTP_200_OK)
+
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
                 closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
@@ -408,21 +422,20 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 current_admin_id = str(request.user.id)
                 current_admin_email = getattr(request.user, 'email', '')
 
-                return Response(
-                    {
-                        "report_id": str(report_id),
-                        "admin_id": current_admin_id,
-                        "admin_email": current_admin_email,
-                        "uploaded_by": {
-                            "admin_id": admin_id,
-                            "admin_email": admin_email
-                        },
-                        "uploaded_at": _normalize_iso(uploaded_at),
-                        "count": len(rows),
-                        "rows": rows
+                _payload = {
+                    "report_id": str(report_id),
+                    "admin_id": current_admin_id,
+                    "admin_email": current_admin_email,
+                    "uploaded_by": {
+                        "admin_id": admin_id,
+                        "admin_email": admin_email
                     },
-                    status=status.HTTP_200_OK
-                )
+                    "uploaded_at": _normalize_iso(uploaded_at),
+                    "count": len(rows),
+                    "rows": rows
+                }
+                cache.set(_cache_key, _payload, 60)
+                return Response(_payload, status=status.HTTP_200_OK)
 
         except pymongo.errors.ServerSelectionTimeoutError as e:
             return Response(

@@ -20,6 +20,8 @@ def _clear_dashboard_cache(user_id):
         f"admin_inprocess_timeline_{user_id}",
         f"admin_dashboard_summary_{user_id}",
         f"mitigation_by_team_v2_{user_id}",
+        f"admin_register_list_{user_id}",
+        f"admin_asset_list_{user_id}",
     ):
         cache.delete(key)
 
@@ -879,6 +881,28 @@ class AdminAssetsAPIView(APIView):
             admin_email = request.user.email
             admin_id = str(request.user.id)
 
+            # Real perf report: classify_asset_type runs per host, string-
+            # matching against 4 (recently expanded) keyword lists over
+            # every vulnerability's plugin_name+description — real work,
+            # redone from scratch on every single Assets page load. Cache
+            # the unfiltered (no `q`) classified list — short 60s TTL so a
+            # hold/delete/upload still shows up within a minute even from a
+            # call site that doesn't explicitly bust this key — and apply
+            # the search filter on the cached result instead of baking `q`
+            # into the cache key (which would fragment the cache per
+            # keystroke and never get reused).
+            _cache_key = f"admin_asset_list_{admin_id}"
+            _cached = cache.get(_cache_key)
+            if _cached is not None:
+                _assets = _cached["assets"]
+                if search_q:
+                    _assets = [a for a in _assets if search_q in a["asset"].lower()]
+                return Response({
+                    **_cached,
+                    "total_assets": len(_assets),
+                    "assets": _assets,
+                }, status=status.HTTP_200_OK)
+
             with MongoContext() as db:
                 doc = _load_latest_report_for_admin(db, admin_email, admin_id)
 
@@ -913,10 +937,6 @@ class AdminAssetsAPIView(APIView):
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
                     if not host_name:
-                        continue
-
-                    # Apply search filter
-                    if search_q and search_q not in host_name.lower():
                         continue
 
                     if host_name not in assets:
@@ -980,12 +1000,22 @@ class AdminAssetsAPIView(APIView):
                 from upload_report.host_ip_utils import counts_from_report_doc
                 counts = counts_from_report_doc(doc)
 
-                return Response({
+                _payload = {
                     "report_id": report_id,
                     "member_type": member_type,
                     "total_assets": len(final),
                     "assets": serializer.data,
                     **counts,
+                }
+                cache.set(_cache_key, _payload, 60)
+
+                _assets = _payload["assets"]
+                if search_q:
+                    _assets = [a for a in _assets if search_q in a["asset"].lower()]
+                return Response({
+                    **_payload,
+                    "total_assets": len(_assets),
+                    "assets": _assets,
                 }, status=status.HTTP_200_OK)
 
         except Exception as exc:

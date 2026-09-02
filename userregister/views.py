@@ -206,6 +206,15 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
             admin_id    = str(admin_user.id)
             admin_email = getattr(admin_user, "email", None)
 
+            # Same perf fix as the admin-side register list (uncached full
+            # report scan + fix/hold/deleted collection reads on every
+            # request) — short 60s TTL so a hold/delete/fix-status change
+            # still shows up within a minute even without an explicit bust.
+            _cache_key = f"user_register_list_{request.user.id}_{selected_team}"
+            _cached = cache.get(_cache_key)
+            if _cached is not None:
+                return Response(_cached, status=status.HTTP_200_OK)
+
             with MongoContext() as db:
                 latest_doc = _load_latest_report(db, admin_user.id, admin_email)
 
@@ -311,16 +320,15 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                             "status": vuln_status,
                         })
 
-                return Response(
-                    {
-                        "report_id": str(report_id),
-                        "teams": active_teams,
-                        "uploaded_at": _normalize_iso(uploaded_at),
-                        "count": len(rows),
-                        "rows": rows,
-                    },
-                    status=status.HTTP_200_OK
-                )
+                _payload = {
+                    "report_id": str(report_id),
+                    "teams": active_teams,
+                    "uploaded_at": _normalize_iso(uploaded_at),
+                    "count": len(rows),
+                    "rows": rows,
+                }
+                cache.set(_cache_key, _payload, 60)
+                return Response(_payload, status=status.HTTP_200_OK)
 
         except Exception as exc:
             import traceback; traceback.print_exc()

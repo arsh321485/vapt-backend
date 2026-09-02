@@ -839,15 +839,31 @@ class UploadReportView(APIView):
                             except Exception as _upe:
                                 logger.warning(f"[UploadTiming] Could not store upload_processing_seconds: {_upe}")
 
-                        # Invalidate the team-mitigation cache so /viewassigned, /startfix etc.
-                        # (Slack bot) and the admin dashboard immediately see this new report
-                        # instead of a stale cached one for up to 5 minutes.
+                        # Invalidate every cache key so /viewassigned, /startfix etc.
+                        # (Slack bot), the admin dashboard, AND the Register/Assets
+                        # pages immediately see this new report instead of a stale
+                        # cached one — comment above already claimed the dashboard
+                        # was covered here, but only mitigation_by_team_v2 was ever
+                        # actually cleared; a brand-new upload could leave the
+                        # summary/register/asset pages showing the PREVIOUS report's
+                        # data for up to 5 minutes until this was noticed.
                         if mongodb_stored:
                             try:
                                 from django.core.cache import cache as _mit_cache
-                                _mit_cache.delete(f"mitigation_by_team_v2_{target_admin.id}")
+                                _admin_id_str = str(target_admin.id)
+                                for _ck in (
+                                    f"mitigation_by_team_v2_{_admin_id_str}",
+                                    f"admin_total_assets_{_admin_id_str}",
+                                    f"admin_avg_score_{_admin_id_str}",
+                                    f"admin_vulnerabilities_{_admin_id_str}",
+                                    f"admin_inprocess_timeline_{_admin_id_str}",
+                                    f"admin_dashboard_summary_{_admin_id_str}",
+                                    f"admin_register_list_{_admin_id_str}",
+                                    f"admin_asset_list_{_admin_id_str}",
+                                ):
+                                    _mit_cache.delete(_ck)
                             except Exception as _mce:
-                                logger.warning(f"[UploadCache] Could not clear mitigation_by_team cache: {_mce}")
+                                logger.warning(f"[UploadCache] Could not clear dashboard cache: {_mce}")
 
                         # Auto-generate vulnerability cards in background (Nessus, AWS, and
                         # validated custom reports — all share the same vulnerabilities_by_host structure)
@@ -1846,6 +1862,8 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
             f"admin_avg_score_{admin_id_str}",
             f"admin_inprocess_timeline_{admin_id_str}",
             f"mitigation_by_team_v2_{admin_id_str}",
+            f"admin_register_list_{admin_id_str}",
+            f"admin_asset_list_{admin_id_str}",
         ):
             _cache.delete(_ck)
     except Exception:
@@ -3218,6 +3236,8 @@ class SuperAdminApproveVerificationAPIView(APIView):
                         f"admin_total_assets_{_admin_id_cache}",
                         f"admin_avg_score_{_admin_id_cache}",
                         f"admin_inprocess_timeline_{_admin_id_cache}",
+                        f"admin_register_list_{_admin_id_cache}",
+                        f"admin_asset_list_{_admin_id_cache}",
                     ):
                         _cache.delete(_ck)
             except Exception:

@@ -17,6 +17,8 @@ def _clear_admin_dashboard_cache(admin_user_id):
         f"admin_inprocess_timeline_{admin_user_id}",
         f"admin_dashboard_summary_{admin_user_id}",
         f"mitigation_by_team_v2_{admin_user_id}",
+        f"admin_register_list_{admin_user_id}",
+        f"admin_asset_list_{admin_user_id}",
     ):
         cache.delete(key)
 
@@ -29,6 +31,7 @@ def _clear_user_dashboard_cache(user_id, teams):
         "user_support_requests",
         "user_remediation_inprocess",
         "user_dashboard_summary",
+        "user_register_list",
     ]
     # Clear for each team variant plus the no-filter ("") variant
     for team in list(teams) + [""]:
