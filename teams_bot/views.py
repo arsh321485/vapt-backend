@@ -313,9 +313,9 @@ class TeamsBotMessagesView(APIView):
                 logger.exception("[TeamsBot] handle_user_activity failed (invoke)")
                 card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
         else:
-            conversation_id = (activity.get("conversation") or {}).get("id")
+            channel_id = member_resolve._extract_channel_id(activity)
             try:
-                card = actions.handle_card_action(admin, team_id, conversation_id, data)
+                card = actions.handle_card_action(admin, team_id, channel_id, data)
             except Exception:
                 logger.exception("[TeamsBot] handle_card_action failed (invoke)")
                 card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
@@ -402,7 +402,13 @@ class TeamsBotMessagesView(APIView):
                     card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
             else:
                 try:
-                    card = actions.handle_card_action(admin, team_id, conversation_id, activity.get("value") or {})
+                    # conversation_id is kept for the reply/update calls
+                    # further down (service_url pairing etc.) — the real
+                    # per-CHANNEL id (needed to tell "admin's own dashboard
+                    # channel" apart from one of the 4 member team
+                    # channels) is a distinct value, see _extract_channel_id.
+                    channel_id = member_resolve._extract_channel_id(activity)
+                    card = actions.handle_card_action(admin, team_id, channel_id, activity.get("value") or {})
                 except Exception:
                     logger.exception("[TeamsBot] handle_card_action failed")
                     card = cards.text_result_card("❌ Something went wrong", "Please try that again.")

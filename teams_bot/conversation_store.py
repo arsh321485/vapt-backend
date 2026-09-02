@@ -288,6 +288,18 @@ def save_admin_dashboard_channel_reference(team_id: str, channel_id: str):
         return True
 
 
+def is_admin_dashboard_channel(team_id: str, channel_id: str) -> bool:
+    """True if channel_id is the team's own admin-dashboard channel (the
+    one save_admin_dashboard_channel_reference points at) — used to tell a
+    genuinely-wrong/random channel apart from "this IS the admin's channel,
+    you're just not an admin", so the two get different, clearer messages."""
+    if not team_id or not channel_id:
+        return False
+    with MongoContext() as db:
+        doc = db[TEAM_CHANNEL_COLLECTION].find_one({"team_id": team_id})
+        return bool(doc) and doc.get("channel_id") == channel_id
+
+
 def resolve_team_id_from_thread_id(thread_id: str):
     """
     Confirmed via real production data: Bot Framework only includes

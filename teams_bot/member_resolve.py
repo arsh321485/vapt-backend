@@ -145,7 +145,17 @@ def resolve_member_context(activity: dict, admin, team_id: str):
         except Exception:
             logger.exception("[TeamsBot] _self_heal_team_name failed")
     if not team_name:
-        result["error"] = "This only works inside one of your team channels (e.g. \"vaptfix Configuration Management team\") — not here."
+        # Real request: distinguish "you clicked in the admin-only
+        # dashboard channel" (a specific, expected wrong-channel case)
+        # from any other non-team-scoped channel with a clearer message —
+        # best-effort (conversation_store's admin-dashboard reference can
+        # itself get repointed by a later conversationUpdate, same as the
+        # proactive-post routing it's also used for), so this only changes
+        # the wording, never the actual access decision.
+        if channel_id and conversation_store.is_admin_dashboard_channel(team_id, channel_id):
+            result["error"] = "Only the admin can access this channel. Please use one of your own team channels instead."
+        else:
+            result["error"] = "This only works inside one of your team channels (e.g. \"vaptfix Configuration Management team\") — not here."
         return result
     result["team_name"] = team_name
 

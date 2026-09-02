@@ -170,13 +170,32 @@ def save_risk_criteria(admin, critical, high, medium, low):
         RiskCriteria.objects.create(admin=admin, critical=critical, high=high, medium=medium, low=low)
 
 
-def handle_card_action(admin, team_id, conversation_id, value: dict):
+def handle_card_action(admin, team_id, channel_id, value: dict):
     """
     Returns an Adaptive Card (dict) to send back as the reply for a given
     action_id — the single dispatch point _handle_message hands
     Action.Submit clicks off to.
     """
     action_id = (value or {}).get("action_id")
+
+    # Real bug report: the admin themself clicking/messaging inside one of
+    # their OWN 4 team-role channels (e.g. "vaptfix Configuration
+    # Management team") fell all the way through every action_id check
+    # below with no match (those cards' action_ids belong to the member-
+    # side vocabulary, not this admin one) and landed on the generic "Not
+    # sure what that was" fallback — confusing, and no indication of WHY.
+    # get_team_name_for_channel only returns non-None for those 4 specific
+    # channels (never for the admin-dashboard channel or General), so this
+    # is a precise "you're the admin, but this is a member-only channel"
+    # signal, not just "channel_id looked unfamiliar".
+    if channel_id and team_id:
+        from . import conversation_store
+        member_team_name = conversation_store.get_team_name_for_channel(team_id, channel_id)
+        if member_team_name:
+            return cards.text_result_card(
+                "🔒 Not available",
+                f"Only {member_team_name} team members can access this channel. Please use the vaptfix admin dashboard channel instead.",
+            )
 
     if action_id == "open_provide_scope":
         return cards.provide_scope_card()
