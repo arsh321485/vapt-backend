@@ -80,9 +80,23 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
     vulnerabilities = vulnerabilities or []
     name_lower = (host_name or "").strip().lower()
 
-    combined_text = name_lower + " " + " ".join(
-        f"{v.get('plugin_name', '')} {v.get('description', '')}".lower()
-        for v in vulnerabilities
+    # Real bug report: a device whose OS/metadata field literally says
+    # "Cisco ASA 5500" (a firewall) was landing on "Server" instead of
+    # "Firewall" — confirmed on a real report. combined_text previously
+    # only drew from host_name + each vulnerability's plugin_name/
+    # description, never from host_information's own values (DNS Name, OS,
+    # etc.), so the firewall-keyword check below had no way to see
+    # "cisco asa" sitting in the OS field — it only found the OS string
+    # later, in the Server check, by which point Firewall had already been
+    # ruled out. Folding host_information's values in here means the same
+    # firewall/web-app keyword checks also catch a vendor name that only
+    # shows up in metadata, not in the hostname or a finding's own text.
+    host_info_text = " ".join(str(v) for v in host_information.values() if v)
+    combined_text = (
+        name_lower + " " + host_info_text.lower() + " " + " ".join(
+            f"{v.get('plugin_name', '')} {v.get('description', '')}".lower()
+            for v in vulnerabilities
+        )
     )
 
     # Firewall — vendor names / device-role keywords, checked first (see
