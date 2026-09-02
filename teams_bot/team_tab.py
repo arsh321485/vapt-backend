@@ -238,9 +238,109 @@ def add_user_form_body(admin):
          "choices": [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]},
         {
             "type": "ActionSet", "spacing": "Medium",
-            "actions": [cards._execute_action("✅ Add User", {"action_id": "team_adduser_submit"}, style="positive")],
+            "actions": [cards._execute_action("Next →", {"action_id": "team_adduser_pick_assets"}, style="positive")],
         },
     ])
+    return body
+
+
+def _fetch_team_assets_vulns(admin, team_names):
+    """Real assigned_team data for the selected team(s) — same source and
+    same merge/dedupe-across-teams behavior as Slack's own
+    users.views.SlackSlashCommandView._get_team_assets_vulns_combined,
+    just called in-process (Django REST view, not an HTTP round-trip to
+    our own API) matching how every other admin-data fetch in this module
+    already works. Read-only — no API changes."""
+    from users_details.views import ReportAssetsVulnsAPIView
+    from .actions import _call_view_in_process
+
+    assets_by_id, vulns_by_id = {}, {}
+    for team_name in team_names:
+        status_code, data = _call_view_in_process(
+            ReportAssetsVulnsAPIView, admin, method="get", data={"role": team_name},
+        )
+        if status_code >= 300 or not isinstance(data, dict):
+            continue
+        for a in (data.get("assets") or []):
+            host = a.get("host_name")
+            if not host:
+                continue
+            a_vulns = a.get("vulnerabilities") or []
+            if host not in assets_by_id:
+                top_sev = a_vulns[0].get("severity") if a_vulns else "—"
+                assets_by_id[host] = {"id": host, "label": host, "severity": top_sev}
+            for v in a_vulns:
+                pname = v.get("plugin_name") or "Unknown"
+                vid = f"{host}||{pname}"
+                if vid not in vulns_by_id:
+                    vulns_by_id[vid] = {
+                        "id": vid, "label": pname, "host": host,
+                        "severity": v.get("severity") or "—",
+                    }
+    return list(assets_by_id.values()), list(vulns_by_id.values())
+
+
+# Cap on how many Assets/Vulnerabilities checkboxes render on the picker
+# screen — Adaptive Cards has no hard per-element option limit the way
+# Slack's checkboxes block does (10 max), but a team with hundreds of
+# assets would still make the card unusably long, so this stays a simpler,
+# unpaginated "first N" (Slack's version paginates properly; this is a
+# deliberate scope trim — see the Request Extension form's own "first 50"
+# precedent in user_extend_tab.py for the same tradeoff).
+_ASSET_VULN_PICK_LIMIT = 40
+
+
+def assets_vulns_picker_body(admin, carried):
+    """Step 3 of Add User — optional Assets/Vulnerabilities picker, scoped
+    to whichever team(s) were just chosen. `carried` holds every field the
+    earlier steps collected (name/email/type/team codes, or the picked
+    Teams member's email) so this screen can bake them straight into the
+    final submit button's data — same "carry forward via the next
+    button's data, not by re-rendering hidden inputs" pattern
+    picked_member_preview_body already uses."""
+    team_codes = [c.strip() for c in (carried.get("au_team") or "").split(",") if c.strip()]
+    team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes if c in TEAM_CODE_TO_NAME]
+
+    body = [
+        {"type": "TextBlock", "text": "➕ Add User — Assets & Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
+        {"type": "TextBlock", "text": "Optionally pick specific assets/vulnerabilities to assign this user — or skip straight to Add User for team-level access only.", "size": "Small", "isSubtle": True, "wrap": True},
+    ]
+
+    assets, vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
+
+    if assets:
+        shown = assets[:_ASSET_VULN_PICK_LIMIT]
+        body.append({
+            "type": "Input.ChoiceSet", "id": "au_assets", "label": f"Assets ({len(assets)})",
+            "style": "expanded", "isMultiSelect": True,
+            "choices": [{"title": f"{a['label']} [{a['severity']}]"[:75], "value": a["id"]} for a in shown],
+        })
+        if len(assets) > _ASSET_VULN_PICK_LIMIT:
+            body.append({"type": "TextBlock", "text": f"Showing the first {_ASSET_VULN_PICK_LIMIT} of {len(assets)} assets.", "size": "Small", "isSubtle": True, "spacing": "Small"})
+    if vulns:
+        shown = vulns[:_ASSET_VULN_PICK_LIMIT]
+        body.append({
+            "type": "Input.ChoiceSet", "id": "au_vulns", "label": f"Vulnerabilities ({len(vulns)})",
+            "style": "expanded", "isMultiSelect": True,
+            "choices": [{"title": f"{v['label']} ({v['host']}) [{v['severity']}]"[:75], "value": v["id"]} for v in shown],
+        })
+        if len(vulns) > _ASSET_VULN_PICK_LIMIT:
+            body.append({"type": "TextBlock", "text": f"Showing the first {_ASSET_VULN_PICK_LIMIT} of {len(vulns)} vulnerabilities.", "size": "Small", "isSubtle": True, "spacing": "Small"})
+    if not assets and not vulns:
+        body.append({"type": "TextBlock", "text": "_No assets/vulnerabilities found for the selected team(s) yet — you can still add the user with team-level access._", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
+
+    # carried is the PRIOR action's own value dict, so it already has its
+    # own "action_id" (e.g. "team_adduser_pick_assets") — must be
+    # overridden AFTER spreading carried, not before, or dict-literal
+    # ordering would silently leave the old action_id in place.
+    submit_data = {**carried, "action_id": "team_adduser_submit"}
+    body.append({
+        "type": "ActionSet", "spacing": "Medium",
+        "actions": [
+            cards._execute_action("← Back", {"action_id": "team_sub_adduser"}),
+            cards._execute_action("✅ Add User", submit_data, style="positive"),
+        ],
+    })
     return body
 
 
@@ -271,8 +371,8 @@ def picked_member_preview_body(admin, picked_email):
         {
             "type": "ActionSet", "spacing": "Medium",
             "actions": [
-                cards._execute_action("✅ Add User", {
-                    "action_id": "team_adduser_submit",
+                cards._execute_action("Next →", {
+                    "action_id": "team_adduser_pick_assets",
                     "au_pick_member": picked_email,
                     "au_type": "internal",
                 }, style="positive"),
@@ -317,18 +417,28 @@ def submit_add_user(admin, form_data):
     if not email or not first or not team_names:
         return False, "Pick a Teams member (or fill in Email/First Name manually) and select at least one Team."
 
+    # Same optional field Slack's modal sends when the Assets/Vulnerabilities
+    # picker was used — see assets_vulns_picker_body. Also isMultiSelect
+    # ChoiceSets, so comma-separated the same way au_team is.
+    sel_assets = [a.strip() for a in (form_data.get("au_assets") or "").split(",") if a.strip()]
+    sel_vulns = [v.strip() for v in (form_data.get("au_vulns") or "").split(",") if v.strip()]
+    role_assignments = {"assets": sel_assets, "vulnerabilities": sel_vulns} if (sel_assets or sel_vulns) else None
+
     teams_label = ", ".join(team_names)
+    post_data = {
+        "admin_id": str(admin.id),
+        "email": email,
+        "first_name": first,
+        "last_name": last,
+        "user_type": user_type,
+        "team_name": team_names[0],
+        "Member_role": team_names,
+    }
+    if role_assignments:
+        post_data["role_assignments"] = role_assignments
     status_code, data = _call_view_in_process(
         UserDetailCreateView, admin, method="post", request_format="json",
-        data={
-            "admin_id": str(admin.id),
-            "email": email,
-            "first_name": first,
-            "last_name": last,
-            "user_type": user_type,
-            "team_name": team_names[0],
-            "Member_role": team_names,
-        },
+        data=post_data,
     )
     if status_code < 300:
         return True, f"{first} ({email}) added to {teams_label}. A welcome email has been sent."

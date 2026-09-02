@@ -558,6 +558,14 @@ def handle_card_action(admin, team_id, conversation_id, value: dict):
             body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
+    if action_id == "team_adduser_pick_assets":
+        try:
+            body = [team_tab.team_subnav_columnset("team_sub_adduser")] + team_tab.assets_vulns_picker_body(admin, value)
+        except Exception:
+            logger.exception("[TeamsBot] team_adduser_pick_assets failed")
+            body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
     if action_id == "team_adduser_submit":
         try:
             ok, message = team_tab.submit_add_user(admin, value)
