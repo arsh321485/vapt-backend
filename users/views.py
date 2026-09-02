@@ -1662,7 +1662,10 @@ def _ensure_admin_dashboard_channel(team_id, access_token, headers=None, admin=N
                 # earlier deploy, or standard from a previous run of this
                 # same code) — just make sure proactive posts point at it.
                 _repoint_and_post(channel_id)
-                return {"status": "already_exists", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id}
+                return {
+                    "status": "already_exists", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id,
+                    "id": channel_id, "displayName": ADMIN_DASHBOARD_CHANNEL_NAME, "webUrl": ch.get("webUrl"),
+                }
 
             # Otherwise this is the OLD renamed-General channel left over
             # from an earlier deploy of this feature (confirmed via real
@@ -1701,9 +1704,13 @@ def _ensure_admin_dashboard_channel(team_id, access_token, headers=None, admin=N
             logger.warning(f"[TeamsChannels] Admin dashboard channel creation failed: {resp.status_code} {resp.text[:300]}")
             return {"status": "failed", "http_status": resp.status_code, "channelId": None}
 
-        channel_id = resp.json().get("id")
+        channel_data = resp.json()
+        channel_id = channel_data.get("id")
         _repoint_and_post(channel_id)
-        return {"status": "created", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id}
+        return {
+            "status": "created", "channelName": ADMIN_DASHBOARD_CHANNEL_NAME, "channelId": channel_id,
+            "id": channel_id, "displayName": ADMIN_DASHBOARD_CHANNEL_NAME, "webUrl": channel_data.get("webUrl"),
+        }
     except Exception as e:
         logger.warning(f"[TeamsChannels] _ensure_admin_dashboard_channel failed: {e}")
         return {"status": "failed", "error": str(e), "channelId": None}
@@ -1731,6 +1738,11 @@ def _create_vaptfix_channels(team_id, headers, access_token=None, admin=None):
             results.append({
                 "channelName": channel_name,
                 "channelId": channel_id,
+                # Same additive {id, displayName, webUrl} aliases as the
+                # existing-team branch above.
+                "id": channel_id,
+                "displayName": ch_data.get("displayName") or TEAMS_CHANNEL_DISPLAY_NAMES.get(channel_name, channel_name),
+                "webUrl": ch_data.get("webUrl"),
                 "status": "created" if ch_resp.status_code in (200, 201) else "failed"
             })
             if channel_id:
@@ -1745,8 +1757,44 @@ def _create_vaptfix_channels(team_id, headers, access_token=None, admin=None):
     return results
 
 
+def _decode_jwt_tid(token):
+    """Pull the "tid" (Azure AD tenant id) claim out of a Microsoft JWT
+    (id_token OR a Graph access_token — both carry it) without verifying
+    the signature — we already trust this token (it just came back from
+    Microsoft's own token endpoint, or was handed to us to call Graph
+    with), this is purely to read one claim out of it for building deep
+    links. Returns "" on anything malformed rather than raising, since a
+    missing tenantId degrades a teams_tab_url gracefully instead of
+    breaking the whole login."""
+    if not token:
+        return ""
+    try:
+        payload_part = token.split(".")[1]
+        payload_part += "=" * (4 - len(payload_part) % 4)
+        jwt_payload = json.loads(base64.urlsafe_b64decode(payload_part))
+        return jwt_payload.get("tid", "") or ""
+    except Exception as e:
+        logger.warning("[TeamsOAuth] Could not decode tid claim from token: %s", e)
+        return ""
+
+
 def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name="General"):
-    """Build stable deep links that open the Teams tab (not chat)."""
+    """Build stable deep links that open the Teams tab (not chat).
+
+    Real bug report (frontend spec, matches the "stuck on teams.microsoft.com,
+    never lands on VaptFix" symptom seen live): this was missing THREE things
+    Teams' own deep-link contract requires to reliably open the CHANNEL Posts
+    view instead of falling back to the last-open Chat tab —
+      1. `ctx=channel` — undocumented but confirmed-mandatory; without it
+         Teams silently restores whatever was last open (Chat, home, ...).
+      2. The channel thread id (format "19:...@thread.tacv2") was interpolated
+         RAW into the URL path instead of percent-encoded — the literal ":"
+         and "@" in an unencoded path segment breaks Teams' own client-side
+         router parsing.
+      3. `tenantId` was an accepted parameter that neither call site below
+         ever actually passed, so it was silently never on any URL this
+         function has ever produced.
+    """
     if not team_id:
         return {
             "web_url": None,
@@ -1756,7 +1804,7 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
             "general_web_url_alt": None,
             "general_desktop_url": None,
         }
-    web_url = f"https://teams.cloud.microsoft/l/team/{team_id}/conversations?groupId={team_id}"
+    web_url = f"https://teams.cloud.microsoft/l/team/{quote(str(team_id), safe='')}/conversations?groupId={team_id}"
     if tenant_id:
         web_url = f"{web_url}&tenantId={tenant_id}"
     web_url_alt = web_url.replace("https://teams.cloud.microsoft/l/team/", "https://teams.cloud.microsoft/_#/l/team/")
@@ -1764,9 +1812,13 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
     channel_web_url_alt = None
     if channel_id:
         safe_name = quote(channel_name or "General")
-        channel_web_url = f"https://teams.cloud.microsoft/l/channel/{channel_id}/{safe_name}?groupId={team_id}"
+        safe_channel_id = quote(str(channel_id), safe="")
+        channel_web_url = f"https://teams.cloud.microsoft/l/channel/{safe_channel_id}/{safe_name}?groupId={team_id}"
         if tenant_id:
             channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
+        # Mandatory — see docstring. Appended last, after groupId/tenantId,
+        # matching the spec's exact example URL ordering.
+        channel_web_url = f"{channel_web_url}&ctx=channel"
         channel_web_url_alt = channel_web_url.replace("https://teams.cloud.microsoft/l/channel/", "https://teams.cloud.microsoft/_#/l/channel/")
     # general_web_url/general_web_url_alt/general_desktop_url are what
     # their name says — the General channel specifically, only equal to
@@ -1942,12 +1994,15 @@ def _set_vaptfix_team_icon(team_id, access_token):
     return False
 
 
-def auto_create_vaptfix_team(access_token, admin=None):
+def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
     """
     Auto-create a team named 'VAPTFIX' with 4 default channels if it doesn't already exist.
     Returns dict with team_id, team_name, and channels info. `admin` (the
     signed-in User) is optional but used by _ensure_admin_dashboard_channel
-    to persist ms_teams_object_id.
+    to persist ms_teams_object_id. `tenant_id` (Azure AD tenant, from the
+    id_token's "tid" claim at the caller) is threaded through to
+    _build_teams_tab_urls — every teams_tab_url this function has ever
+    returned was missing &tenantId= entirely because nothing passed it in.
     """
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -1998,6 +2053,13 @@ def auto_create_vaptfix_team(access_token, admin=None):
                                 channels_result.append({
                                     "channelName": ch.get("displayName"),
                                     "channelId": ch.get("id"),
+                                    # Aliases matching the frontend's expected
+                                    # {id, displayName, webUrl} channel shape —
+                                    # additive, channelName/channelId (read
+                                    # elsewhere in this file) stay untouched.
+                                    "id": ch.get("id"),
+                                    "displayName": ch.get("displayName"),
+                                    "webUrl": ch.get("webUrl"),
                                     "status": "exists"
                                 })
                     except Exception as e:
@@ -2023,11 +2085,20 @@ def auto_create_vaptfix_team(access_token, admin=None):
                         (c.get("channelName") for c in channels_result if c.get("channelId") == preferred_channel_id),
                         "General",
                     )
-                    urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+                    urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
                     return {
                         "team_id": team_id,
                         "team_name": "Vaptfix",
                         "status": "already_exists",
+                        # Aliases matching the frontend spec's expected
+                        # vaptfix_team shape — team_id IS the AAD group id
+                        # for a Team in Graph, so these are the same value,
+                        # just under the names the frontend's channel-list
+                        # API call actually looks for.
+                        "id": team_id,
+                        "groupId": team_id,
+                        "group_id": team_id,
+                        "displayName": "Vaptfix",
                         "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
                         "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
                         "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
@@ -2081,14 +2152,23 @@ def auto_create_vaptfix_team(access_token, admin=None):
 
                 t = threading.Thread(target=_bg_create_channels, args=(access_token, team_id, headers, admin), daemon=True)
                 t.start()
-            prov_urls = _build_teams_tab_urls(team_id)
             return {
                 "team_id": team_id,
                 "team_name": "Vaptfix",
                 "status": "provisioning",
-                "teams_tab_url": prov_urls.get("general_web_url") or prov_urls.get("web_url"),
-                "teams_tab_url_alt": prov_urls.get("general_web_url_alt") or prov_urls.get("web_url_alt"),
-                "teams_desktop_url": prov_urls.get("general_desktop_url") or prov_urls.get("desktop_url"),
+                "id": team_id,
+                "groupId": team_id,
+                "group_id": team_id,
+                "displayName": "Vaptfix",
+                # Real spec requirement: during provisioning there's no
+                # admin-dashboard channel yet, so teams_tab_url must be
+                # empty (not a team-level fallback link) — the frontend
+                # polls login-status/ until a real channel link is ready
+                # rather than opening a link that lands on the team's
+                # generic view.
+                "teams_tab_url": "",
+                "teams_tab_url_alt": "",
+                "teams_desktop_url": "",
                 "channels": [],
             }
         else:
@@ -2113,13 +2193,17 @@ def auto_create_vaptfix_team(access_token, admin=None):
             (c.get("displayName") for c in all_channels if c.get("id") == preferred_channel_id),
             "General",
         )
-        urls = _build_teams_tab_urls(team_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+        urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
 
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
         return {
             "team_id": team_id,
             "team_name": "Vaptfix",
             "status": "created",
+            "id": team_id,
+            "groupId": team_id,
+            "group_id": team_id,
+            "displayName": "Vaptfix",
             "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
             "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
             "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
@@ -2181,16 +2265,7 @@ class MicrosoftTeamsCallbackView(APIView):
             print("🔑 Token Response (redacted):", _redacted_token_data)
 
             # Extract tenant_id from id_token JWT (tid claim)
-            tenant_id = ""
-            id_token = token_data.get("id_token", "")
-            if id_token:
-                try:
-                    payload_part = id_token.split(".")[1]
-                    payload_part += "=" * (4 - len(payload_part) % 4)
-                    jwt_payload = json.loads(base64.urlsafe_b64decode(payload_part))
-                    tenant_id = jwt_payload.get("tid", "")
-                except Exception as e:
-                    logger.warning("Suppressed error: %s", e)
+            tenant_id = _decode_jwt_tid(token_data.get("id_token", ""))
 
             if token_response.status_code != 200 or "access_token" not in token_data:
                 return JsonResponse({
@@ -2385,7 +2460,7 @@ class MicrosoftTeamsCallbackView(APIView):
                 logger.info(f"Microsoft user {'created' if created else 'exists'}: {email}")
 
             # Auto-create VAPTFIX team with 4 channels
-            vaptfix_team = auto_create_vaptfix_team(access_token, admin=user)
+            vaptfix_team = auto_create_vaptfix_team(access_token, admin=user, tenant_id=tenant_id)
             logger.info(f"VAPTFIX team result: {vaptfix_team}")
 
             # Ensure ms_team_id is persisted for the correct admin user.
@@ -2507,8 +2582,15 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                 login(request, user)
                 refresh = RefreshToken.for_user(user)
 
+                # Real bug report (frontend spec): teams_tab_url never had
+                # &tenantId= on it — the Graph access_token itself is a JWT
+                # carrying the same "tid" claim the id_token does, so it's
+                # available here even though this endpoint only ever
+                # receives the bare access_token, not a full token response.
+                tenant_id = _decode_jwt_tid(access_token)
+
                 # Auto-create Vaptfix team with 4 channels
-                vaptfix_team = auto_create_vaptfix_team(access_token, admin=user)
+                vaptfix_team = auto_create_vaptfix_team(access_token, admin=user, tenant_id=tenant_id)
 
                 # Save team_id on the admin user so member-creation sync can use it
                 team_id_from_team = vaptfix_team.get("team_id") if vaptfix_team else None
@@ -2532,9 +2614,20 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                     "tokens": {
                         "refresh": str(refresh),
                         "access": str(refresh.access_token),
+                        "tenant_id": tenant_id,
                     },
+                    # Duplicate flat keys — same convention as the Slack/Teams
+                    # OAuth-popup postMessage payloads (see AdminSignupVerifyOTPView
+                    # comment on the frontend-facing shape mismatch).
+                    "django_access_token": str(refresh.access_token),
+                    "django_refresh_token": str(refresh),
                     "access_token": str(access_token),
                     "is_new_user": is_new_user,
+                    "status": (vaptfix_team or {}).get("status") or "ready",
+                    # Top-level per the frontend spec — "frontend reads
+                    # teams_tab_url + vaptfix_team.channels from response"
+                    # (also present nested in vaptfix_team for compat).
+                    "teams_tab_url": (vaptfix_team or {}).get("teams_tab_url") or "",
                     "vaptfix_team": vaptfix_team
                 }, status=status.HTTP_200_OK)
                 
@@ -2543,6 +2636,73 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
             return Response({
                 "error": "Microsoft Teams authentication failed. Please try again."
             }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MicrosoftTeamsLoginStatusView(APIView):
+    """
+    GET /api/admin/users/microsoft-teams/login-status/
+
+    Real spec requirement: when a brand-new admin signs up via Teams, the
+    team + admin-dashboard channel are created via an async Graph call and
+    finished off in a background thread (see auto_create_vaptfix_team's
+    "provisioning" branch) — MicrosoftTeamsOAuthView's own response can't
+    wait for that, so it comes back with status="provisioning" and an
+    empty teams_tab_url. Frontend polls this endpoint (~3s interval, ~45s)
+    until the channel is ready and a real deep link is returned.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        team_id = getattr(user, "ms_team_id", None)
+        access_token = getattr(user, "ms_access_token", None)
+        empty = {
+            "status": "provisioning",
+            "teams_tab_url": "",
+            "teams_tab_url_alt": "",
+            "teams_desktop_url": "",
+            "vaptfix_team": {"id": team_id, "groupId": team_id, "group_id": team_id, "displayName": "Vaptfix", "channels": []},
+        }
+        if not team_id or not access_token:
+            return Response(empty, status=status.HTTP_200_OK)
+
+        try:
+            tenant_id = _decode_jwt_tid(access_token)
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            raw_channels = _get_team_channels(team_id, headers)
+            channels_result = [
+                {
+                    "channelName": c.get("displayName"), "channelId": c.get("id"),
+                    "id": c.get("id"), "displayName": c.get("displayName"), "webUrl": c.get("webUrl"),
+                    "status": "exists",
+                }
+                for c in raw_channels
+            ]
+            preferred_channel_id = _pick_admin_dashboard_channel_id(channels_result) or _pick_general_channel_id(channels_result)
+            if not preferred_channel_id and channels_result:
+                preferred_channel_id = channels_result[0].get("channelId")
+            if not preferred_channel_id:
+                empty["vaptfix_team"]["channels"] = channels_result
+                return Response(empty, status=status.HTTP_200_OK)
+
+            preferred_channel_name = next(
+                (c.get("channelName") for c in channels_result if c.get("channelId") == preferred_channel_id),
+                "General",
+            )
+            urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+            return Response({
+                "status": "ready",
+                "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+                "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+                "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
+                "vaptfix_team": {
+                    "id": team_id, "team_id": team_id, "groupId": team_id, "group_id": team_id,
+                    "displayName": "Vaptfix", "channels": channels_result,
+                },
+            }, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("[TeamsLoginStatus] failed for team_id=%s", team_id)
+            return Response(empty, status=status.HTTP_200_OK)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -8597,10 +8757,52 @@ class TeamsMemberLoginView(APIView):
         member_user.save(update_fields=["login_provider", "ms_access_token"])
 
         refresh = RefreshToken.for_user(member_user)
+
+        # Real spec requirement: a member logging in via Teams should land
+        # on the SAME admin-dashboard channel the admin does, not wherever
+        # Teams last had open — same deep-link fields as the admin OAuth
+        # response. The member's own access_token isn't guaranteed to have
+        # Team.ReadBasic.All, so this resolves channels with the ADMIN's
+        # stored token (the admin owns/created the team either way).
+        teams_tab_url, teams_tab_url_alt, teams_desktop_url = "", "", ""
+        vaptfix_team_out = {"id": admin.ms_team_id, "groupId": admin.ms_team_id, "group_id": admin.ms_team_id, "displayName": "Vaptfix", "channels": []}
+        if admin.ms_team_id and admin.ms_access_token:
+            try:
+                admin_tenant_id = _decode_jwt_tid(admin.ms_access_token)
+                admin_headers = {"Authorization": f"Bearer {admin.ms_access_token}", "Content-Type": "application/json"}
+                raw_channels = _get_team_channels(admin.ms_team_id, admin_headers)
+                channels_result = [
+                    {
+                        "channelName": c.get("displayName"), "channelId": c.get("id"),
+                        "id": c.get("id"), "displayName": c.get("displayName"), "webUrl": c.get("webUrl"),
+                        "status": "exists",
+                    }
+                    for c in raw_channels
+                ]
+                vaptfix_team_out["channels"] = channels_result
+                preferred_channel_id = _pick_admin_dashboard_channel_id(channels_result) or _pick_general_channel_id(channels_result)
+                if not preferred_channel_id and channels_result:
+                    preferred_channel_id = channels_result[0].get("channelId")
+                if preferred_channel_id:
+                    preferred_channel_name = next(
+                        (c.get("channelName") for c in channels_result if c.get("channelId") == preferred_channel_id),
+                        "General",
+                    )
+                    urls = _build_teams_tab_urls(admin.ms_team_id, tenant_id=admin_tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+                    teams_tab_url = urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url") or ""
+                    teams_tab_url_alt = urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt") or ""
+                    teams_desktop_url = urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url") or ""
+            except Exception:
+                logger.warning("[TeamsMemberLogin] failed to resolve admin-dashboard channel link", exc_info=True)
+
         return Response({
             "success": True,
             "access_token": str(refresh.access_token),
             "refresh_token": str(refresh),
+            "teams_tab_url": teams_tab_url,
+            "teams_tab_url_alt": teams_tab_url_alt,
+            "teams_desktop_url": teams_desktop_url,
+            "vaptfix_team": vaptfix_team_out,
             "user": {
                 "id": str(member_user.id),
                 "email": member_user.email,
