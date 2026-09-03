@@ -571,24 +571,27 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = [cards._header("👥 Team"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
-    if action_id == "team_adduser_show_picked":
-        picked_email = (value.get("au_pick_member") or "").strip()
+    # Real request: team selection used to jump to a separate "Next"
+    # screen for Assets/Vulnerabilities — confusing which team's data was
+    # on screen. add_user_form_body is now ONE combined screen (see its
+    # own docstring); every one of these just re-renders it from the
+    # current click's own `value` (Adaptive Cards auto-includes every
+    # Input already on the card), optionally overriding au_assets/
+    # au_vulns first for the Select All/Clear buttons.
+    if action_id in ("team_adduser_refresh", "team_adduser_assets_all", "team_adduser_assets_none", "team_adduser_vulns_all", "team_adduser_vulns_none"):
         try:
-            if picked_email:
-                body = [team_tab.team_subnav_columnset("team_sub_adduser")] + team_tab.picked_member_preview_body(admin, picked_email)
-            else:
-                body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("Pick someone first"), cards._body_text("Select a Teams member from the dropdown, then tap Fetch Details.")]
-                body.extend(team_tab.add_user_form_body(admin))
+            form_data = value
+            if action_id == "team_adduser_assets_all":
+                form_data = team_tab._apply_select_all(admin, value, "assets", select=True)
+            elif action_id == "team_adduser_assets_none":
+                form_data = team_tab._apply_select_all(admin, value, "assets", select=False)
+            elif action_id == "team_adduser_vulns_all":
+                form_data = team_tab._apply_select_all(admin, value, "vulns", select=True)
+            elif action_id == "team_adduser_vulns_none":
+                form_data = team_tab._apply_select_all(admin, value, "vulns", select=False)
+            body = [team_tab.team_subnav_columnset("team_sub_adduser")] + team_tab.add_user_form_body(admin, form_data=form_data)
         except Exception:
-            logger.exception("[TeamsBot] team_adduser_show_picked failed")
-            body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
-        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
-
-    if action_id == "team_adduser_pick_assets":
-        try:
-            body = [team_tab.team_subnav_columnset("team_sub_adduser")] + team_tab.assets_vulns_picker_body(admin, value)
-        except Exception:
-            logger.exception("[TeamsBot] team_adduser_pick_assets failed")
+            logger.exception(f"[TeamsBot] {action_id} failed")
             body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
@@ -599,7 +602,11 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body.append(cards._header("✅ User Added" if ok else "❌ Could not add user"))
             body.append(cards._body_text(message))
             if not ok:
-                body.extend(team_tab.add_user_form_body(admin))
+                # Real bug fixed along the way: this used to re-render a
+                # blank form on failure (add_user_form_body(admin), no
+                # form_data), silently wiping out everything the admin had
+                # just typed/checked. Passing value back preserves it.
+                body.extend(team_tab.add_user_form_body(admin, form_data=value))
         except Exception:
             logger.exception("[TeamsBot] team_adduser_submit failed")
             body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]

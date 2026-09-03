@@ -191,7 +191,26 @@ def _member_detail_id(m):
 
 # ── Add User ───────────────────────────────────────────────────────────
 
-def add_user_form_body(admin):
+def add_user_form_body(admin, form_data=None):
+    """
+    One combined screen for the whole Add User flow — real request: picking
+    a team used to jump to a SEPARATE "Next" screen for Assets/Vulnerabilities,
+    which made it unclear whose assets/vulns were even being looked at.
+    Matching Slack's own Add User modal (team checkboxes -> assets/vulns
+    pickers appear right there, same screen), team selection now shows the
+    Assets/Vulnerabilities lists directly below it, still on this one card.
+
+    `form_data` is None for the very first render (nav tab click) and the
+    previous click's own `value` dict on every re-render after that (team
+    picked, "Fetch Details", Select All, etc.) — since every Input element
+    below lives on this SAME card, Adaptive Cards auto-includes their
+    current values on ANY button click, so re-rendering from `form_data`
+    naturally preserves whatever was already typed/checked without this
+    function needing to thread values through button `data` by hand (the
+    "carried" pattern the old 3-screen version needed — no longer required
+    now that it's one screen).
+    """
+    form_data = form_data or {}
     # NOTE: deliberately NOT using isRequired/errorMessage on these inputs —
     # confirmed via real testing that Adaptive Cards validates every
     # isRequired input on the CARD as a whole before letting ANY
@@ -206,41 +225,78 @@ def add_user_form_body(admin):
         {"type": "TextBlock", "text": "Add a new team member and grant them access to one team. A welcome email with login instructions is sent automatically.", "size": "Small", "isSubtle": True, "wrap": True},
     ]
 
-    # Real people already on this Teams team (confirmed via real testing
-    # this was expected — Slack's own Add User picks from a workspace
-    # member directory the same way, instead of retyping a name/email
-    # that's already known). Adaptive Cards has no live onChange between
-    # inputs — picking someone here can't auto-fill the Name/Email fields
-    # below in the same render, so "Fetch Details" does one round-trip to
-    # picked_member_preview_body(), which shows their REAL name/email
-    # pulled from Teams before asking for a team and submitting.
-    teams_members = _fetch_teams_members_from_graph(admin)
-    if teams_members:
-        body.append({"type": "TextBlock", "text": "Pick someone already in this Teams team:", "size": "Small", "weight": "Bolder", "spacing": "Medium"})
-        body.append({
-            "type": "Input.ChoiceSet", "id": "au_pick_member", "style": "compact",
-            "placeholder": "Select a Teams member",
-            "choices": [{"title": f"{m['displayName']} ({m['email']})", "value": m["email"]} for m in teams_members],
-        })
-        body.append({
-            "type": "ActionSet", "spacing": "Small",
-            "actions": [cards._execute_action("🔎 Fetch Details", {"action_id": "team_adduser_show_picked"}, style="positive")],
-        })
-        body.append({"type": "TextBlock", "text": "— or fill in manually for someone not yet in this Teams team —", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
+    picked_email = (form_data.get("au_pick_member") or "").strip()
+    picked_member = None
+    if picked_email:
+        picked_member = next((m for m in _fetch_teams_members_from_graph(admin) if m["email"] == picked_email), None)
 
-    body.extend([
-        {"type": "Input.ChoiceSet", "id": "au_type", "label": "User Type", "style": "compact", "value": "external",
-         "choices": [{"title": "External", "value": "external"}, {"title": "Internal", "value": "internal"}]},
-        {"type": "Input.Text", "id": "au_first", "label": "First Name", "placeholder": "e.g. Ritu"},
-        {"type": "Input.Text", "id": "au_last", "label": "Last Name", "placeholder": "optional"},
-        {"type": "Input.Text", "id": "au_email", "label": "Email", "style": "Email", "placeholder": "name@example.com"},
-        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team(s)", "style": "expanded", "isMultiSelect": True,
-         "choices": [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]},
-        {
-            "type": "ActionSet", "spacing": "Medium",
-            "actions": [cards._execute_action("Next →", {"action_id": "team_adduser_pick_assets"}, style="positive")],
-        },
-    ])
+    if picked_member:
+        # Fetched from the live Teams roster — shown read-only, matching
+        # the old picked_member_preview_body's FactSet. au_pick_member is
+        # re-declared as a hidden-equivalent (Input.Text, not shown) purely
+        # so its value keeps auto-carrying through every further click on
+        # this card; there's no need to let them re-pick from here.
+        body.append({
+            "type": "FactSet",
+            "facts": [
+                {"title": "Name", "value": picked_member.get("displayName") or picked_email},
+                {"title": "Email", "value": picked_email},
+            ],
+        })
+        body.append({"type": "Input.Text", "id": "au_pick_member", "value": picked_email, "isVisible": False})
+        body.append({"type": "Input.Text", "id": "au_type", "value": "internal", "isVisible": False})
+    else:
+        # Real people already on this Teams team (confirmed via real testing
+        # this was expected — Slack's own Add User picks from a workspace
+        # member directory the same way, instead of retyping a name/email
+        # that's already known). Adaptive Cards has no live onChange between
+        # inputs — picking someone here can't auto-fill the Name/Email
+        # fields below in the same render, so "Fetch Details" does one
+        # round-trip back to this same function with au_pick_member set,
+        # which then renders the read-only branch above instead.
+        teams_members = _fetch_teams_members_from_graph(admin)
+        if teams_members:
+            body.append({"type": "TextBlock", "text": "Pick someone already in this Teams team:", "size": "Small", "weight": "Bolder", "spacing": "Medium"})
+            body.append({
+                "type": "Input.ChoiceSet", "id": "au_pick_member", "style": "compact",
+                "placeholder": "Select a Teams member",
+                "choices": [{"title": f"{m['displayName']} ({m['email']})", "value": m["email"]} for m in teams_members],
+            })
+            body.append({
+                "type": "ActionSet", "spacing": "Small",
+                "actions": [cards._execute_action("🔎 Fetch Details", {"action_id": "team_adduser_refresh"}, style="positive")],
+            })
+            body.append({"type": "TextBlock", "text": "— or fill in manually for someone not yet in this Teams team —", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
+
+        body.extend([
+            {"type": "Input.ChoiceSet", "id": "au_type", "label": "User Type", "style": "compact",
+             "value": form_data.get("au_type") or "external",
+             "choices": [{"title": "External", "value": "external"}, {"title": "Internal", "value": "internal"}]},
+            {"type": "Input.Text", "id": "au_first", "label": "First Name", "placeholder": "e.g. Ritu", "value": form_data.get("au_first") or ""},
+            {"type": "Input.Text", "id": "au_last", "label": "Last Name", "placeholder": "optional", "value": form_data.get("au_last") or ""},
+            {"type": "Input.Text", "id": "au_email", "label": "Email", "style": "Email", "placeholder": "name@example.com", "value": form_data.get("au_email") or ""},
+        ])
+
+    team_codes_selected = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
+    team_options = [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]
+    team_element = {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team(s)", "style": "expanded", "isMultiSelect": True, "choices": team_options}
+    initial = [o for o in team_options if o["value"] in team_codes_selected]
+    if initial:
+        team_element["initial_options"] = initial
+    body.append(team_element)
+    body.append({
+        "type": "ActionSet", "spacing": "Small",
+        "actions": [cards._execute_action("🔄 Show Assets & Vulnerabilities for selected Team(s)", {"action_id": "team_adduser_refresh"})],
+    })
+
+    if team_codes_selected:
+        team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes_selected if c in TEAM_CODE_TO_NAME]
+        body.extend(_assets_vulns_picker_blocks(admin, team_names, form_data))
+
+    body.append({
+        "type": "ActionSet", "spacing": "Medium",
+        "actions": [cards._execute_action("✅ Add User", {"action_id": "team_adduser_submit"}, style="positive")],
+    })
     return body
 
 
@@ -290,97 +346,74 @@ def _fetch_team_assets_vulns(admin, team_names):
 _ASSET_VULN_PICK_LIMIT = 40
 
 
-def assets_vulns_picker_body(admin, carried):
-    """Step 3 of Add User — optional Assets/Vulnerabilities picker, scoped
-    to whichever team(s) were just chosen. `carried` holds every field the
-    earlier steps collected (name/email/type/team codes, or the picked
-    Teams member's email) so this screen can bake them straight into the
-    final submit button's data — same "carry forward via the next
-    button's data, not by re-rendering hidden inputs" pattern
-    picked_member_preview_body already uses."""
-    team_codes = [c.strip() for c in (carried.get("au_team") or "").split(",") if c.strip()]
-    team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes if c in TEAM_CODE_TO_NAME]
-
-    body = [
-        {"type": "TextBlock", "text": "➕ Add User — Assets & Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": "Optionally pick specific assets/vulnerabilities to assign this user — or skip straight to Add User for team-level access only.", "size": "Small", "isSubtle": True, "wrap": True},
-    ]
+def _assets_vulns_picker_blocks(admin, team_names, form_data):
+    """Assets + Vulnerabilities checkboxes for add_user_form_body, scoped to
+    the currently-selected team(s) — embedded directly in that one combined
+    screen (see its own docstring for why) rather than a separate step.
+    Select All/Clear All (real request, matching Slack's own Add User
+    picker) work the same "re-render this same screen" way every other
+    button here does: team_adduser_assets_all/_none and
+    _vulns_all/_none set au_assets/au_vulns to every currently-shown id (or
+    to none) before the very next render, via _apply_select_all below."""
+    body = [{"type": "TextBlock", "text": f"Assets & Vulnerabilities for {', '.join(team_names)}:", "size": "Small", "weight": "Bolder", "spacing": "Medium", "wrap": True}]
 
     assets, vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
+    sel_assets = [a.strip() for a in (form_data.get("au_assets") or "").split(",") if a.strip()]
+    sel_vulns = [v.strip() for v in (form_data.get("au_vulns") or "").split(",") if v.strip()]
 
     if assets:
         shown = assets[:_ASSET_VULN_PICK_LIMIT]
         body.append({
-            "type": "Input.ChoiceSet", "id": "au_assets", "label": f"Assets ({len(assets)})",
-            "style": "expanded", "isMultiSelect": True,
-            "choices": [{"title": f"{a['label']} [{a['severity']}]"[:75], "value": a["id"]} for a in shown],
+            "type": "ActionSet", "spacing": "Small",
+            "actions": [
+                cards._execute_action(f"☑️ Select All Assets ({len(shown)})", {"action_id": "team_adduser_assets_all"}, style="positive"),
+                cards._execute_action("☐ Clear Assets", {"action_id": "team_adduser_assets_none"}),
+            ],
         })
+        a_options = [{"title": f"{a['label']} [{a['severity']}]"[:75], "value": a["id"]} for a in shown]
+        a_element = {"type": "Input.ChoiceSet", "id": "au_assets", "label": f"Assets ({len(assets)})", "style": "expanded", "isMultiSelect": True, "choices": a_options}
+        a_initial = [o for o in a_options if o["value"] in sel_assets]
+        if a_initial:
+            a_element["initial_options"] = a_initial
+        body.append(a_element)
         if len(assets) > _ASSET_VULN_PICK_LIMIT:
             body.append({"type": "TextBlock", "text": f"Showing the first {_ASSET_VULN_PICK_LIMIT} of {len(assets)} assets.", "size": "Small", "isSubtle": True, "spacing": "Small"})
     if vulns:
         shown = vulns[:_ASSET_VULN_PICK_LIMIT]
         body.append({
-            "type": "Input.ChoiceSet", "id": "au_vulns", "label": f"Vulnerabilities ({len(vulns)})",
-            "style": "expanded", "isMultiSelect": True,
-            "choices": [{"title": f"{v['label']} ({v['host']}) [{v['severity']}]"[:75], "value": v["id"]} for v in shown],
+            "type": "ActionSet", "spacing": "Small",
+            "actions": [
+                cards._execute_action(f"☑️ Select All Vulnerabilities ({len(shown)})", {"action_id": "team_adduser_vulns_all"}, style="positive"),
+                cards._execute_action("☐ Clear Vulnerabilities", {"action_id": "team_adduser_vulns_none"}),
+            ],
         })
+        v_options = [{"title": f"{v['label']} ({v['host']}) [{v['severity']}]"[:75], "value": v["id"]} for v in shown]
+        v_element = {"type": "Input.ChoiceSet", "id": "au_vulns", "label": f"Vulnerabilities ({len(vulns)})", "style": "expanded", "isMultiSelect": True, "choices": v_options}
+        v_initial = [o for o in v_options if o["value"] in sel_vulns]
+        if v_initial:
+            v_element["initial_options"] = v_initial
+        body.append(v_element)
         if len(vulns) > _ASSET_VULN_PICK_LIMIT:
             body.append({"type": "TextBlock", "text": f"Showing the first {_ASSET_VULN_PICK_LIMIT} of {len(vulns)} vulnerabilities.", "size": "Small", "isSubtle": True, "spacing": "Small"})
     if not assets and not vulns:
         body.append({"type": "TextBlock", "text": "_No assets/vulnerabilities found for the selected team(s) yet — you can still add the user with team-level access._", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
-
-    # carried is the PRIOR action's own value dict, so it already has its
-    # own "action_id" (e.g. "team_adduser_pick_assets") — must be
-    # overridden AFTER spreading carried, not before, or dict-literal
-    # ordering would silently leave the old action_id in place.
-    submit_data = {**carried, "action_id": "team_adduser_submit"}
-    body.append({
-        "type": "ActionSet", "spacing": "Medium",
-        "actions": [
-            cards._execute_action("← Back", {"action_id": "team_sub_adduser"}),
-            cards._execute_action("✅ Add User", submit_data, style="positive"),
-        ],
-    })
     return body
 
 
-def picked_member_preview_body(admin, picked_email):
-    """Round-trip target for the "🔎 Fetch Details" button — shows the REAL
-    Name/Email pulled from the live Teams roster for whoever was picked in
-    add_user_form_body's au_pick_member dropdown, since Adaptive Cards has
-    no live onChange to auto-fill those fields in the same render. The
-    Team choice + final submit both happen here; submitting bakes
-    au_pick_member/au_type back into the Action.Execute data so
-    submit_add_user() resolves the name/email from the Graph roster again
-    (matching how the manual-entry path already works)."""
-    picked = next((m for m in _fetch_teams_members_from_graph(admin) if m["email"] == picked_email), None)
-    display_name = (picked or {}).get("displayName") or picked_email
-
-    body = [
-        {"type": "TextBlock", "text": "➕ Add User", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": "Fetched from this Teams team — confirm the team to grant access to:", "size": "Small", "isSubtle": True, "wrap": True},
-        {
-            "type": "FactSet",
-            "facts": [
-                {"title": "Name", "value": display_name},
-                {"title": "Email", "value": picked_email},
-            ],
-        },
-        {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team(s)", "style": "expanded", "isMultiSelect": True,
-         "choices": [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]},
-        {
-            "type": "ActionSet", "spacing": "Medium",
-            "actions": [
-                cards._execute_action("Next →", {
-                    "action_id": "team_adduser_pick_assets",
-                    "au_pick_member": picked_email,
-                    "au_type": "internal",
-                }, style="positive"),
-                cards._execute_action("← Choose someone else", {"action_id": "team_sub_adduser"}),
-            ],
-        },
-    ]
-    return body
+def _apply_select_all(admin, form_data, which, select):
+    """Handles team_adduser_assets_all/_none and _vulns_all/_none — returns
+    a NEW form_data dict with au_assets or au_vulns overridden to either
+    every currently-shown id (select=True) or cleared (select=False),
+    leaving every other field exactly as the click carried them in."""
+    team_codes = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
+    team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes if c in TEAM_CODE_TO_NAME]
+    assets, vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
+    updated = dict(form_data)
+    if which == "assets":
+        updated["au_assets"] = ",".join(a["id"] for a in assets[:_ASSET_VULN_PICK_LIMIT]) if select else ""
+    else:
+        updated["au_vulns"] = ",".join(v["id"] for v in vulns[:_ASSET_VULN_PICK_LIMIT]) if select else ""
+    return updated
 
 
 def submit_add_user(admin, form_data):
@@ -418,7 +451,7 @@ def submit_add_user(admin, form_data):
         return False, "Pick a Teams member (or fill in Email/First Name manually) and select at least one Team."
 
     # Same optional field Slack's modal sends when the Assets/Vulnerabilities
-    # picker was used — see assets_vulns_picker_body. Also isMultiSelect
+    # picker was used — see _assets_vulns_picker_blocks. Also isMultiSelect
     # ChoiceSets, so comma-separated the same way au_team is.
     sel_assets = [a.strip() for a in (form_data.get("au_assets") or "").split(",") if a.strip()]
     sel_vulns = [v.strip() for v in (form_data.get("au_vulns") or "").split(",") if v.strip()]
