@@ -580,15 +580,15 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
     # au_vulns first for the Select All/Clear buttons.
     if action_id in ("team_adduser_refresh", "team_adduser_assets_all", "team_adduser_assets_none", "team_adduser_vulns_all", "team_adduser_vulns_none"):
         try:
-            form_data = value
+            form_data = team_tab.normalize_adduser_form_data(value)
             if action_id == "team_adduser_assets_all":
-                form_data = team_tab._apply_select_all(admin, value, "assets", select=True)
+                form_data = team_tab._apply_select_all(admin, form_data, "assets", select=True)
             elif action_id == "team_adduser_assets_none":
-                form_data = team_tab._apply_select_all(admin, value, "assets", select=False)
+                form_data = team_tab._apply_select_all(admin, form_data, "assets", select=False)
             elif action_id == "team_adduser_vulns_all":
-                form_data = team_tab._apply_select_all(admin, value, "vulns", select=True)
+                form_data = team_tab._apply_select_all(admin, form_data, "vulns", select=True)
             elif action_id == "team_adduser_vulns_none":
-                form_data = team_tab._apply_select_all(admin, value, "vulns", select=False)
+                form_data = team_tab._apply_select_all(admin, form_data, "vulns", select=False)
             body = [team_tab.team_subnav_columnset("team_sub_adduser")] + team_tab.add_user_form_body(admin, form_data=form_data)
         except Exception:
             logger.exception(f"[TeamsBot] {action_id} failed")
@@ -597,7 +597,8 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
 
     if action_id == "team_adduser_submit":
         try:
-            ok, message = team_tab.submit_add_user(admin, value)
+            form_data = team_tab.normalize_adduser_form_data(value)
+            ok, message = team_tab.submit_add_user(admin, form_data)
             body = [team_tab.team_subnav_columnset("team_sub_adduser")]
             body.append(cards._header("✅ User Added" if ok else "❌ Could not add user"))
             body.append(cards._body_text(message))
@@ -605,8 +606,8 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
                 # Real bug fixed along the way: this used to re-render a
                 # blank form on failure (add_user_form_body(admin), no
                 # form_data), silently wiping out everything the admin had
-                # just typed/checked. Passing value back preserves it.
-                body.extend(team_tab.add_user_form_body(admin, form_data=value))
+                # just typed/checked. Passing form_data back preserves it.
+                body.extend(team_tab.add_user_form_body(admin, form_data=form_data))
         except Exception:
             logger.exception("[TeamsBot] team_adduser_submit failed")
             body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]

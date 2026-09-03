@@ -191,6 +191,24 @@ def _member_detail_id(m):
 
 # ── Add User ───────────────────────────────────────────────────────────
 
+def normalize_adduser_form_data(value):
+    """The raw click `value` Teams echoes back has au_team/au_assets/
+    au_vulns/au_pick_member under REV-SUFFIXED ids (au_team_3, not
+    au_team — see add_user_form_body's docstring on why those ids change
+    every render). Every actions.py dispatch handler for this flow calls
+    this first so add_user_form_body/_apply_select_all/submit_add_user
+    only ever have to deal with the plain, unsuffixed keys — this is the
+    one place that knows about the suffix scheme."""
+    value = value or {}
+    rev = value.get("_rev") or "0"
+    normalized = dict(value)
+    for field in ("au_team", "au_assets", "au_vulns", "au_pick_member"):
+        suffixed = value.get(f"{field}_{rev}")
+        if suffixed is not None:
+            normalized[field] = suffixed
+    return normalized
+
+
 def add_user_form_body(admin, form_data=None):
     """
     One combined screen for the whole Add User flow — real request: picking
@@ -208,9 +226,29 @@ def add_user_form_body(admin, form_data=None):
     naturally preserves whatever was already typed/checked without this
     function needing to thread values through button `data` by hand (the
     "carried" pattern the old 3-screen version needed — no longer required
-    now that it's one screen).
+    now that it's one screen). actions.py normalizes the raw click `value`
+    into this plain-keyed shape (au_team, au_assets, au_vulns — not their
+    rev-suffixed on-card ids) before calling in — see _normalize_form_data.
+
+    Real bug report: checking Team(s), then clicking "Show Assets &
+    Vulnerabilities", visually UNCHECKED the team box again in the
+    re-rendered card — even though the assets/vulns shown were correctly
+    for that team (form_data really did carry it through correctly; only
+    the checkbox's own displayed state was wrong). Same root cause as the
+    "stuck checkbox" issue Slack's own Add User modal already had to work
+    around (see users.views.SlackSlashCommandView._build_adduser_picker_blocks):
+    once a user has touched a checkbox-style input, the client ignores a
+    later render's initial_options for that SAME element id and keeps
+    showing whatever the user last set. Every dynamic ChoiceSet below
+    (au_pick_member, au_team, au_assets, au_vulns) gets a fresh,
+    rev-suffixed id every render (au_team_1, au_team_2, ...) so the client
+    treats each render as a brand-new widget instead of an update to a
+    "dirty" one — _rev (a hidden field) carries the current render's
+    number forward so the next click's normalization knows which suffix
+    to read the submitted value back from.
     """
     form_data = form_data or {}
+    rev = int(form_data.get("_rev") or 0) + 1
     # NOTE: deliberately NOT using isRequired/errorMessage on these inputs —
     # confirmed via real testing that Adaptive Cards validates every
     # isRequired input on the CARD as a whole before letting ANY
@@ -258,7 +296,7 @@ def add_user_form_body(admin, form_data=None):
         if teams_members:
             body.append({"type": "TextBlock", "text": "Pick someone already in this Teams team:", "size": "Small", "weight": "Bolder", "spacing": "Medium"})
             body.append({
-                "type": "Input.ChoiceSet", "id": "au_pick_member", "style": "compact",
+                "type": "Input.ChoiceSet", "id": f"au_pick_member_{rev}", "style": "compact",
                 "placeholder": "Select a Teams member",
                 "choices": [{"title": f"{m['displayName']} ({m['email']})", "value": m["email"]} for m in teams_members],
             })
@@ -279,7 +317,7 @@ def add_user_form_body(admin, form_data=None):
 
     team_codes_selected = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
     team_options = [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]
-    team_element = {"type": "Input.ChoiceSet", "id": "au_team", "label": "Team(s)", "style": "expanded", "isMultiSelect": True, "choices": team_options}
+    team_element = {"type": "Input.ChoiceSet", "id": f"au_team_{rev}", "label": "Team(s)", "style": "expanded", "isMultiSelect": True, "choices": team_options}
     initial = [o for o in team_options if o["value"] in team_codes_selected]
     if initial:
         team_element["initial_options"] = initial
@@ -291,8 +329,9 @@ def add_user_form_body(admin, form_data=None):
 
     if team_codes_selected:
         team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes_selected if c in TEAM_CODE_TO_NAME]
-        body.extend(_assets_vulns_picker_blocks(admin, team_names, form_data))
+        body.extend(_assets_vulns_picker_blocks(admin, team_names, form_data, rev))
 
+    body.append({"type": "Input.Text", "id": "_rev", "value": str(rev), "isVisible": False})
     body.append({
         "type": "ActionSet", "spacing": "Medium",
         "actions": [cards._execute_action("✅ Add User", {"action_id": "team_adduser_submit"}, style="positive")],
@@ -346,7 +385,7 @@ def _fetch_team_assets_vulns(admin, team_names):
 _ASSET_VULN_PICK_LIMIT = 40
 
 
-def _assets_vulns_picker_blocks(admin, team_names, form_data):
+def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
     """Assets + Vulnerabilities checkboxes for add_user_form_body, scoped to
     the currently-selected team(s) — embedded directly in that one combined
     screen (see its own docstring for why) rather than a separate step.
@@ -354,7 +393,10 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data):
     picker) work the same "re-render this same screen" way every other
     button here does: team_adduser_assets_all/_none and
     _vulns_all/_none set au_assets/au_vulns to every currently-shown id (or
-    to none) before the very next render, via _apply_select_all below."""
+    to none) before the very next render, via _apply_select_all below.
+    `rev` (same counter add_user_form_body computed for au_team) keeps
+    these two ChoiceSets' ids fresh every render too — see
+    add_user_form_body's own docstring for why that's needed."""
     body = [{"type": "TextBlock", "text": f"Assets & Vulnerabilities for {', '.join(team_names)}:", "size": "Small", "weight": "Bolder", "spacing": "Medium", "wrap": True}]
 
     assets, vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
@@ -371,7 +413,7 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data):
             ],
         })
         a_options = [{"title": f"{a['label']} [{a['severity']}]"[:75], "value": a["id"]} for a in shown]
-        a_element = {"type": "Input.ChoiceSet", "id": "au_assets", "label": f"Assets ({len(assets)})", "style": "expanded", "isMultiSelect": True, "choices": a_options}
+        a_element = {"type": "Input.ChoiceSet", "id": f"au_assets_{rev}", "label": f"Assets ({len(assets)})", "style": "expanded", "isMultiSelect": True, "choices": a_options}
         a_initial = [o for o in a_options if o["value"] in sel_assets]
         if a_initial:
             a_element["initial_options"] = a_initial
@@ -388,7 +430,7 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data):
             ],
         })
         v_options = [{"title": f"{v['label']} ({v['host']}) [{v['severity']}]"[:75], "value": v["id"]} for v in shown]
-        v_element = {"type": "Input.ChoiceSet", "id": "au_vulns", "label": f"Vulnerabilities ({len(vulns)})", "style": "expanded", "isMultiSelect": True, "choices": v_options}
+        v_element = {"type": "Input.ChoiceSet", "id": f"au_vulns_{rev}", "label": f"Vulnerabilities ({len(vulns)})", "style": "expanded", "isMultiSelect": True, "choices": v_options}
         v_initial = [o for o in v_options if o["value"] in sel_vulns]
         if v_initial:
             v_element["initial_options"] = v_initial
