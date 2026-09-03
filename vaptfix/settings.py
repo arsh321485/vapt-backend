@@ -57,7 +57,11 @@ vaptbackend.secureitlab.com,
 vaptfix.ai
 """.split(",")]
 
-DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
+DATA_UPLOAD_MAX_MEMORY_SIZE = 524288000  # 500MB — real bug report: a large .nessus/.xml scan
+                                          # file could exceed the previous 50MB ceiling; Django
+                                          # doesn't apply this check to individual request.FILES
+                                          # content, but the aggregate-request-body check it does
+                                          # do needs real headroom for a big multi-file upload.
 FILE_UPLOAD_MAX_MEMORY_SIZE = 2621440   # 2.5MB — files larger than this go to disk temp file, not RAM
 
 
