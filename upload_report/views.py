@@ -636,20 +636,24 @@ class UploadReportView(APIView):
             upload_results = []
             errors = []
 
-            # Freemium is capped at 1 report upload total (the plan gate
-            # above only blocks a *second request* — a Freemium admin who
-            # picks 2+ files in this SAME request would otherwise slip
-            # through, since they had 0 uploads on record when the gate
-            # ran). Only the first file in the batch is processed; the rest
-            # are reported as errors, same shape as an unsupported file type.
+            # Real spec from the frontend team: Freemium allows only 1 FILE
+            # per upload attempt (distinct from freemium_report_limit above,
+            # which is about already HAVING a report at all — this is about
+            # file COUNT on this specific request). Silently processing the
+            # first file and burying the rest as generic per-file errors
+            # left the admin with no clear way to fix it — reject the whole
+            # request instead so the frontend can send them back to drop
+            # the extra files, exactly like it already does for
+            # freemium_report_limit.
             from billing.enforcement import is_freemium
             if not via_magic_link and is_freemium(target_admin) and len(uploaded_files) > 1:
-                for extra_file in uploaded_files[1:]:
-                    errors.append({
-                        "file": extra_file.name,
-                        "error": "Freemium plan allows only 1 report upload total. Upgrade to Premium to upload more.",
-                    })
-                uploaded_files = uploaded_files[:1]
+                return Response({
+                    "success": False,
+                    "code": "freemium_single_file_required",
+                    "max_files": 1,
+                    "file_count": len(uploaded_files),
+                    "error": "Freemium allows only 1 file. Go back to Upload Report, keep one file, then choose Freemium again.",
+                }, status=400)
 
             # Same-day merge target — if the admin already uploaded something
             # today (this request or an earlier one today), every file in
