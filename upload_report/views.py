@@ -651,8 +651,27 @@ class UploadReportView(APIView):
             # request instead so the frontend can send them back to drop
             # the extra files, exactly like it already does for
             # freemium_report_limit.
-            from billing.enforcement import is_freemium, _is_unlimited_admin
-            if not via_magic_link and not _is_unlimited_admin(target_admin) and is_freemium(target_admin) and len(uploaded_files) > 1:
+            #
+            # Real bug report: this fired on the SIGN-UP "Provide Scope"
+            # step too — a brand-new admin has no Subscription row yet at
+            # that point, and is_freemium() treats "no plan chosen" the
+            # same as "explicitly Freemium", so a 2-file discovery upload
+            # (whose whole purpose is to compute the TRUE combined unique-
+            # IP count so the right plan can be recommended — e.g. 9 IPs
+            # across 2 files pointing at Premium) was hard-rejected before
+            # that calculation ever ran, instead of showing the merged
+            # numbers. The single-file limit is a real Freemium plan rule,
+            # not an onboarding rule — only enforce it once the admin has
+            # actually picked Freemium (a real Subscription row exists).
+            from billing.enforcement import is_freemium, _is_unlimited_admin, get_active_plan
+            plan_already_chosen = get_active_plan(target_admin) is not None
+            if (
+                not via_magic_link
+                and not _is_unlimited_admin(target_admin)
+                and plan_already_chosen
+                and is_freemium(target_admin)
+                and len(uploaded_files) > 1
+            ):
                 return Response({
                     "success": False,
                     "code": "freemium_single_file_required",
