@@ -3986,9 +3986,18 @@ def _build_report_data(request):
     weighted = critical * 8 + high * 5 + medium * 3 + low * 1
     risk_score = round((weighted / (total * 8)) * 100) if total else 0
 
+    # Real bug report: this rendered the FULL ISO timestamp (date AND
+    # time, e.g. "2026-09-03T05:43:21.168000+00:00") next to "Report
+    # Generated On" — the report only ever wants the date here, not the
+    # time-of-day. _normalize_iso is kept for anything that genuinely
+    # needs the full timestamp elsewhere; this report specifically only
+    # takes the date portion off the front of it.
+    _generated_iso = _normalize_iso(latest_upload.get("uploaded_at") or latest_doc.get("uploaded_at"))
+    _generated_date = (_generated_iso or "")[:10] if _generated_iso else "—"
+
     return {
         "report_id": str(latest_upload.get("report_id") or latest_doc.get("report_id", "")),
-        "report_generated_on": _normalize_iso(latest_upload.get("uploaded_at") or latest_doc.get("uploaded_at")),
+        "report_generated_on": _generated_date,
         "vul_management_program": latest_upload.get("file_name") or latest_doc.get("file_name") or "—",
         "total_assets": (summary.get("total_assets") or {}).get("total_assets", 0),
         "risk_score": risk_score,
@@ -4130,7 +4139,7 @@ def _render_report_html(data):
   .score-grid .score-box {{ flex: 1 1 0; }}
   .score-box {{ background: #f4f5f8; border-radius: 10px; padding: 12px; }}
   .score-box span {{ display: block; font-size: 11px; color: #8b95a7; text-transform: uppercase; font-weight: 700; letter-spacing: .06em; }}
-  .score-box strong {{ font-size: 34px; color: #1f2a42; line-height: 1.08; }}
+  .score-box strong {{ font-size: 22px; color: #1f2a42; line-height: 1.08; }}
   .dark-card {{ background: #25124d; color: #fff; text-align: center; display: flex; flex-direction: column; gap: 10px; justify-content: center; }}
   .dark-card h3 {{ color: #fff; font-size: 22px; }}
   .progress-ring {{ margin: 8px auto; width: 140px; height: 140px; border-radius: 50%;
