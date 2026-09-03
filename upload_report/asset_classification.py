@@ -94,17 +94,30 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
     vulnerabilities = vulnerabilities or []
     name_lower = (host_name or "").strip().lower()
 
-    # Real bug report: a device whose OS/metadata field literally says
-    # "Cisco ASA 5500" (a firewall) was landing on "Server" instead of
-    # "Firewall" — confirmed on a real report. combined_text previously
-    # only drew from host_name + each vulnerability's plugin_name/
-    # description, never from host_information's own values (DNS Name, OS,
-    # etc.), so the firewall-keyword check below had no way to see
-    # "cisco asa" sitting in the OS field — it only found the OS string
-    # later, in the Server check, by which point Firewall had already been
-    # ruled out. Folding host_information's values in here means the same
-    # firewall/web-app keyword checks also catch a vendor name that only
-    # shows up in metadata, not in the hostname or a finding's own text.
+    # Two text blobs, deliberately different scope:
+    #
+    # combined_text — EVERYTHING, including each finding's free-text
+    # description. Used only for the Server check below (OS/software
+    # mentions in description prose are a genuine, desired signal there —
+    # e.g. "the target web server is running IIS 8.0" correctly implying
+    # Server infrastructure, see _SERVER_SOFTWARE_KEYWORDS).
+    #
+    # title_text — host name + host_information's own values (DNS Name,
+    # OS, etc. — real bug report: a device whose OS/metadata field
+    # literally said "Cisco ASA 5500" was landing on "Server" instead of
+    # "Firewall" until this was folded in) + each finding's own TITLE
+    # (plugin_name) ONLY, never its free-text description. Used for
+    # Firewall and Web App — two real bugs, same root cause, both fixed
+    # this way: a description explaining RC4's impact "...if plaintext is
+    # repeatedly encrypted (e.g., HTTP cookies)..." false-positived "cookie"
+    # into Web App, and a description mentioning a host's "default
+    # gateway" while explaining an unrelated network issue could just as
+    # easily false-positive "gateway" into Firewall — free prose can
+    # mention almost anything in passing, unlike a finding's own name. The
+    # real vendor/app-layer detection plugins these two lists exist to
+    # catch say so directly in their own title ("Fortinet FortiOS
+    # Detected", "Web Application Potentially Vulnerable to Clickjacking"),
+    # so restricting to titles loses no real signal.
     host_info_text = " ".join(str(v) for v in host_information.values() if v)
     combined_text = (
         name_lower + " " + host_info_text.lower() + " " + " ".join(
@@ -112,35 +125,27 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
             for v in vulnerabilities
         )
     )
-
-    # Real bug report: a plain server (host_information.OS = "OpenBSD
-    # 3.1, ...", clearly a Server) was misclassified as "Web App" because
-    # one totally unrelated finding — "SSL RC4 Cipher Suites Supported
-    # (Bar Mitzvah)" — has generic Nessus boilerplate description text
-    # that happens to say "...if plaintext is repeatedly encrypted (e.g.,
-    # HTTP cookies)..." while explaining RC4's impact in the abstract;
-    # nothing to do with the host actually running a web application.
-    # Same failure class as the "web server" keyword removed below —
-    # free-text description prose can mention almost anything in passing.
-    # Web-app keyword matching uses this narrower text (host name/
-    # metadata + each finding's own TITLE only, never its free-text
-    # description) so a finding is only "web app" when its own name says
-    # so, not because some unrelated finding's explanatory prose used a
-    # word like "cookie" in an example. Firewall/Server keep using the
-    # full combined_text below — a vendor name (e.g. "Cisco ASA") or an
-    # OS mention legitimately only shows up in a description sometimes.
     plugin_names_text = " ".join((v.get("plugin_name") or "") for v in vulnerabilities).lower()
     title_text = name_lower + " " + host_info_text.lower() + " " + plugin_names_text
 
     # Firewall — vendor names / device-role keywords, checked first (see
-    # module docstring for why priority matters here). combined_text is
-    # already fully lowercased above, but a keyword is compared as-is — if
-    # a future edit adds a keyword with any uppercase in it (e.g. "Cisco
-    # ASA" instead of "cisco asa"), `k in combined_text` would silently
-    # never match. Lowercase every keyword right here too so matching
-    # stays correct regardless of how the list is written later, not just
-    # because every entry happens to be lowercase today.
-    if any(k.lower() in combined_text for k in _FIREWALL_KEYWORDS):
+    # module docstring for why priority matters here). Same discipline as
+    # Web App below: title_text (host name/metadata + each finding's own
+    # TITLE), never free-text descriptions. A word like "gateway" is
+    # common enough in generic boilerplate prose (e.g. a finding
+    # explaining a host's "default gateway" while describing an unrelated
+    # network issue) to false-positive the same way "cookie" did for Web
+    # App — the real vendor-detection plugins that this list exists to
+    # catch ("Fortinet FortiOS Detected", "Cisco ASA Software Detection",
+    # etc.) say so directly in their own title, and a vendor name sitting
+    # only in host_information (e.g. OS="Cisco ASA 5500") is still caught
+    # here since host_info_text is folded into title_text too. A keyword
+    # is compared as-is — if a future edit adds one with any uppercase in
+    # it (e.g. "Cisco ASA" instead of "cisco asa"), `k in title_text`
+    # would silently never match. Lowercase every keyword right here too
+    # so matching stays correct regardless of how the list is written
+    # later, not just because every entry happens to be lowercase today.
+    if any(k.lower() in title_text for k in _FIREWALL_KEYWORDS):
         return "firewall"
 
     # Web app — URL-shaped host, or vulnerability content is dominated by
