@@ -1952,18 +1952,30 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                     if key in held_vuln_keys or key in deleted_vuln_keys:
                         continue
 
+                    risk_label  = plugin_risk.get(plugin_name)
+                    # Real bug report: Info-severity (and any other
+                    # unrecognized risk_factor) findings still counted
+                    # toward a team's "total"/"open" here even though they
+                    # never match any of the 4 risk_levels buckets above —
+                    # inflated the OPEN count (e.g. 14 shown, but
+                    # critical+high+medium+low only summed to 13) with an
+                    # Info finding invisible anywhere in the severity
+                    # breakdown. Info must never be counted, same explicit
+                    # repeated rule as everywhere else — skip the card
+                    # entirely instead of just leaving it out of by_risk.
+                    if not risk_label:
+                        continue
+
                     raw_team    = (card.get("assigned_team", "") or "").strip()
                     team_key    = team_names_lower.get(raw_team.lower(), "") or "Unassigned"
 
-                    risk_label  = plugin_risk.get(plugin_name)
                     is_closed   = (plugin_name, host_name) in closed_vuln_keys
                     vuln_status = "closed" if is_closed else "open"
 
                     bucket = teams[team_key]
                     bucket["total"] += 1
                     bucket[vuln_status] += 1
-                    if risk_label:
-                        bucket["by_risk"][risk_label] += 1
+                    bucket["by_risk"][risk_label] += 1
 
                 return Response(
                     {

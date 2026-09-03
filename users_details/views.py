@@ -1879,6 +1879,15 @@ class ReportAssetsVulnsAPIView(APIView):
                         ).strip()
                         if not plugin_name:
                             continue
+                        # Real bug report: Info-severity findings were
+                        # showing up in the "Add Team Member" > "Configure
+                        # assets & vulnerabilities" picker (and inflating
+                        # its "N vulns selected" count) — same explicit,
+                        # repeated rule as everywhere else: Info must never
+                        # be shown, selectable, or counted.
+                        severity = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
+                        if severity in ("info", "informational", "none", ""):
+                            continue
                         # Filter by role if requested
                         if role_plugins is not None and plugin_name.lower() not in role_plugins:
                             continue
