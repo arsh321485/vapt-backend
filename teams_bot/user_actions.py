@@ -58,7 +58,7 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
     """
     ctx = member_resolve.resolve_member_context(activity, admin, team_id)
     if ctx["error"]:
-        return cards.text_result_card("🔒 Not available", ctx["error"])
+        return cards.access_blocked_card(ctx["error"])
 
     team_name = ctx["team_name"]
     member_user = ctx["member_user"]

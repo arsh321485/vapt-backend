@@ -262,6 +262,26 @@ def text_result_card(title, message):
     return _card(body=[_header(title), _body_text(message)])
 
 
+def access_blocked_card(message):
+    """
+    "You don't have access to this channel/team" — same shape as
+    text_result_card, but stamped with a marker key views.py's
+    _handle_message checks for and strips before ever sending this to
+    Teams. Real bug report: a click that resolves to a blocked-access
+    card was being sent through the normal update_activity path, which
+    EDITS the shared channel message the person clicked on IN PLACE —
+    since Teams cards aren't per-viewer, a non-team-member clicking the
+    shared dashboard card replaced it with "Not available" for EVERYONE
+    looking at that channel, including the legitimate admin whose own
+    card had been showing correctly a moment before. The marker tells
+    the caller to post this as a brand-new reply instead, leaving
+    whatever shared card was already there untouched.
+    """
+    card = text_result_card("🔒 Not available", message)
+    card["_is_access_blocked"] = True
+    return card
+
+
 def risk_criteria_prompt_card():
     """Mirrors _build_admin_risk_criteria_prompt_blocks()."""
     return _card(

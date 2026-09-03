@@ -192,8 +192,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         from . import conversation_store
         member_team_name = conversation_store.get_team_name_for_channel(team_id, channel_id)
         if member_team_name:
-            return cards.text_result_card(
-                "🔒 Not available",
+            return cards.access_blocked_card(
                 f"Only {member_team_name} team members can access this channel. Please use the vaptfix admin dashboard channel instead.",
             )
 

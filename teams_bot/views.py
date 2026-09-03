@@ -413,6 +413,20 @@ class TeamsBotMessagesView(APIView):
                     logger.exception("[TeamsBot] handle_card_action failed")
                     card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
 
+            # Real bug report: a blocked-access card (wrong channel, not on
+            # this team, etc.) was going through the SAME update_activity
+            # path below as any normal click — which EDITS the shared
+            # channel message the person clicked on IN PLACE. Since Teams
+            # cards aren't per-viewer, that overwrote the shared dashboard
+            # card with "Not available" for EVERYONE looking at that
+            # channel, including whoever's card had been showing correctly
+            # a moment before (e.g. the admin's own, in their own channel).
+            # Post it as a brand-new reply instead — never touches the
+            # existing shared card.
+            if card.pop("_is_access_blocked", False):
+                bot_api.reply_to_activity(service_url, conversation_id, activity_id, bot_api.card_message(card))
+                return
+
             target_id = activity.get("replyToId")
             updated_ok = False
             if target_id:
