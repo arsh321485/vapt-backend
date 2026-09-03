@@ -1804,9 +1804,20 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
             "general_web_url_alt": None,
             "general_desktop_url": None,
         }
+    # Graph guarantees a Team's General channel thread id IS the team id
+    # itself (see _ensure_admin_dashboard_channel's own comment on this) —
+    # so this /l/team/.../conversations link is structurally a CHANNEL
+    # link (General's) wearing a different prefix/suffix, and needs the
+    # same mandatory ctx=channel this function's channel_web_url below
+    # already carries. Missing it here specifically (while channel_web_url
+    # had it) was still enough to reproduce the "lands on last-open Chat"
+    # symptom live whenever no OTHER channel_id was available and this was
+    # the URL actually used — real bug report, not the channel_web_url
+    # path this function's docstring above already covers.
     web_url = f"https://teams.cloud.microsoft/l/team/{quote(str(team_id), safe='')}/conversations?groupId={team_id}"
     if tenant_id:
         web_url = f"{web_url}&tenantId={tenant_id}"
+    web_url = f"{web_url}&ctx=channel"
     web_url_alt = web_url.replace("https://teams.cloud.microsoft/l/team/", "https://teams.cloud.microsoft/_#/l/team/")
     channel_web_url = None
     channel_web_url_alt = None
@@ -2493,11 +2504,19 @@ class MicrosoftTeamsCallbackView(APIView):
                     var teamsWebUrl = {json.dumps(vaptfix_team.get('teams_tab_url') if vaptfix_team else None)};
                     var teamsWebUrlAlt = {json.dumps(vaptfix_team.get('teams_tab_url_alt') if vaptfix_team else None)};
                     var teamsDesktopUrl = {json.dumps(vaptfix_team.get('teams_desktop_url') if vaptfix_team else None)};
+                    // Same real bug as _build_teams_tab_urls's own web_url (see its
+                    // docstring/comment) — this is a duplicate of that exact
+                    // fallback construction, done client-side for whenever
+                    // vaptfix_team.teams_tab_url itself came back empty, and it
+                    // was missing the same mandatory ctx=channel.
                     if (!teamsWebUrl && teamId) {{
-                        teamsWebUrl = "https://teams.cloud.microsoft/l/team/" + teamId + "/conversations?groupId=" + teamId;
+                        teamsWebUrl = "https://teams.cloud.microsoft/l/team/" + encodeURIComponent(teamId) + "/conversations?groupId=" + teamId;
                     }}
                     if (teamsWebUrl && tenantId && teamsWebUrl.indexOf("tenantId=") === -1) {{
                         teamsWebUrl = teamsWebUrl + "&tenantId=" + tenantId;
+                    }}
+                    if (teamsWebUrl && teamsWebUrl.indexOf("ctx=channel") === -1) {{
+                        teamsWebUrl = teamsWebUrl + "&ctx=channel";
                     }}
                     if (teamsWebUrlAlt && tenantId && teamsWebUrlAlt.indexOf("tenantId=") === -1) {{
                         teamsWebUrlAlt = teamsWebUrlAlt + "&tenantId=" + tenantId;
