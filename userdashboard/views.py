@@ -1531,9 +1531,21 @@ class UserMitigationTimelineExtensionReportAPIView(APIView):
                         "vul_name": doc.get("vulnerability_name"),
                         "status": doc.get("status", "review"),
                         "requested_by": team_name,
+                        # Real bug report: the actual submitter's email IS
+                        # already stored (requested_by_email, set at create
+                        # time) but was never returned here — "requested_by"
+                        # is the TEAM, not the person, so there was no way
+                        # to see WHO on the team actually asked.
+                        "requested_by_email": doc.get("requested_by_email") or "",
                         "request_date": _to_iso(doc.get("request_date")),
                         "extension_days": int(doc.get("requested_extension_days") or 0),
                         "reason": doc.get("reason") or "",
+                        # Real bug report: the admin's own reject reason
+                        # (admin_comment, set by
+                        # AdminMitigationTimelineExtensionStatusAPIView) was
+                        # never surfaced back to the user who gets rejected —
+                        # they only ever saw their OWN original "reason".
+                        "admin_comment": doc.get("admin_comment") or "",
                     })
 
                 return Response({

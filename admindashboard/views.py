@@ -813,9 +813,15 @@ class AdminMitigationTimelineExtensionReportAPIView(APIView):
                         "vul_name": doc.get("vulnerability_name"),
                         "status": doc.get("status", "review"),
                         "requested_by": doc.get("team_name"),
+                        # Same fields added to the user-side report view —
+                        # kept consistent so admin can see who actually
+                        # submitted it (not just which team) and their own
+                        # past reject reason when reviewing history.
+                        "requested_by_email": doc.get("requested_by_email") or "",
                         "request_date": _to_iso(doc.get("request_date")),
                         "extension_days": int(doc.get("requested_extension_days") or 0),
                         "reason": doc.get("reason") or "",
+                        "admin_comment": doc.get("admin_comment") or "",
                     })
 
                 return Response({

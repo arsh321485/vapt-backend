@@ -165,6 +165,11 @@ def history_detail_body(admin, request_id, view="approve", back_offset=0):
         "facts": [
             {"title": "Status", "value": st_label},
             {"title": "Team", "value": str(r.get("requested_by") or "—")},
+            # Real bug report: "Team" alone doesn't say WHO on the team
+            # actually asked — requested_by_email is the real submitter,
+            # already stored at request-creation time, now also returned
+            # by AdminMitigationTimelineExtensionReportAPIView.
+            {"title": "Requested By", "value": str(r.get("requested_by_email") or "—")},
             {"title": "Asset", "value": str(r.get("asset") or "—")},
             {"title": "Severity", "value": str(r.get("severity") or "—")},
             {"title": "Extension", "value": f"+{r.get('extension_days', 0)} days"},
@@ -173,6 +178,9 @@ def history_detail_body(admin, request_id, view="approve", back_offset=0):
     })
     body.append({"type": "TextBlock", "text": "Reason", "weight": "Bolder", "size": "Small", "spacing": "Medium"})
     body.append({"type": "TextBlock", "text": r.get("reason") or "—", "wrap": True, "size": "Small"})
+    if st == "rejected" and r.get("admin_comment"):
+        body.append({"type": "TextBlock", "text": "Your Reason for Rejection", "weight": "Bolder", "size": "Small", "spacing": "Medium", "color": "attention"})
+        body.append({"type": "TextBlock", "text": r.get("admin_comment"), "wrap": True, "size": "Small"})
     return body
 
 

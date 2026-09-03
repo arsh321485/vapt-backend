@@ -112,11 +112,18 @@ def request_detail_body(member_user, team_name, idx, back_offset=0):
             {"title": "Asset", "value": str(r.get("asset") or "—")},
             {"title": "Severity", "value": f"{icon} {(r.get('severity') or '—').title()}"},
             {"title": "Extension", "value": f"+{r.get('extension_days', 0)} days"},
+            {"title": "Requested By", "value": str(r.get("requested_by_email") or "—")},
             {"title": "Requested At", "value": str(r.get("request_date") or "—")[:10]},
         ],
     })
     body.append({"type": "TextBlock", "text": "Reason", "weight": "Bolder", "size": "Small", "spacing": "Medium"})
     body.append({"type": "TextBlock", "text": r.get("reason") or "—", "wrap": True, "size": "Small"})
+    # Real bug report: admin's own reject reason (admin_comment) never
+    # showed here — the user could see their request got rejected, but not
+    # WHY, since only their own original "Reason" was ever displayed.
+    if (r.get("status") or "").strip().lower() == "rejected" and r.get("admin_comment"):
+        body.append({"type": "TextBlock", "text": "Admin's Reason for Rejection", "weight": "Bolder", "size": "Small", "spacing": "Medium", "color": "attention"})
+        body.append({"type": "TextBlock", "text": r.get("admin_comment"), "wrap": True, "size": "Small"})
     return body
 
 
