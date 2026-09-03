@@ -42,6 +42,20 @@ _WEB_APP_VULN_KEYWORDS = [
     "insecure deserialization", "template injection", "html injection",
     "session fixation", "wordpress", "drupal", "joomla", "graphql",
     "swagger ui", "rest api",
+    # Real bug report: the extremely common Nessus/web-scanner finding
+    # "Missing HTTP Security Headers" (and its many variants — "X-Frame-
+    # Options Header Not Set", "X-Content-Type-Options Header Missing",
+    # etc.) never matched anything above — "http header" only matches
+    # when those two words sit right next to each other, which they don't
+    # in "HTTP Security Headers". Confirmed on a real report: 11 of 13
+    # web-facing subdomains (portal.sedco.com, taxapp.sedco.com, ...) fell
+    # through to the generic "Assets" tab instead of "Web App" solely
+    # because of this gap — every one of them had nothing but this one
+    # finding. "security header"/"security headers" catches the phrase
+    # regardless of vendor wording, without the false-positive risk of a
+    # bare "header" keyword.
+    "security header", "security headers", "x-frame-options", "x-content-type-options",
+    "referrer-policy", "permissions-policy",
 ]
 
 # Real bug fix: this list existed but was never actually referenced inside
