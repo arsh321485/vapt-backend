@@ -201,7 +201,14 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         return cards.provide_scope_card()
 
     if action_id == "open_enter_scope_options":
-        return cards.enter_scope_options_card()
+        # Real request: "Upload Report" already hands off to the website
+        # (open_website_upload_card) instead of showing an inline Teams
+        # form — "Enter Your Scope" should do the exact same thing.
+        # cards.enter_scope_options_card()/manual_scope_form_card() (the
+        # CSV-vs-Manual sub-menu this used to open) are now unreachable
+        # from any button — left in place rather than deleted in case this
+        # inline-entry path is wanted back later, but nothing routes to it.
+        return cards.open_website_upload_card("scope", admin=admin)
 
     if action_id == "back_to_provide_scope":
         return cards.provide_scope_card()
