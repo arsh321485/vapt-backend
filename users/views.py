@@ -241,13 +241,16 @@ class UserLoginView(generics.GenericAPIView):
         # sign in and still claim a report a superadmin just uploaded for
         # them. Frontend must attach invite_token to this login call when
         # the login page was reached from an invite link — see
-        # MAGIC_LINK_FRONTEND_INTEGRATION.md. Silently no-ops if absent/
+        # MAGIC_LINK_FRONTEND_INTEGRATION.md. Body OR ?invite_token= query
+        # param, same as send-otp/verify-otp. Silently no-ops if absent/
         # expired/already used — never blocks normal login.
-        invite_token = (request.data.get("invite_token") or "").strip()
+        invite_token = (request.data.get("invite_token") or request.query_params.get("invite_token") or "").strip()
+        logger.info(f"[ReportInvite] login for {user.email}: invite_token_present={bool(invite_token)}")
         if invite_token:
             from .invite_utils import claim_invite
             try:
                 claimed = claim_invite(invite_token, user)
+                logger.info(f"[ReportInvite] claim_invite returned claimed={claimed} for {user.email}")
                 if claimed:
                     logger.info(f"[ReportInvite] Email login claimed {claimed} report(s) for {user.email}")
             except Exception as e:
@@ -351,7 +354,11 @@ class AdminSignupSendOTPView(APIView):
         # landing page's signup form includes it on this first call) so
         # AdminSignupVerifyOTPView can still claim the report even if the
         # frontend doesn't also resend it on the later Verify-OTP call.
-        invite_token = (request.data.get("invite_token") or "").strip()
+        # Per the frontend team's own spec, this can arrive either in the
+        # JSON body OR as a ?invite_token= query param — checking body only
+        # silently missed the query-param case.
+        invite_token = (request.data.get("invite_token") or request.query_params.get("invite_token") or "").strip()
+        logger.info(f"[ReportInvite] send-otp for {email}: invite_token_present={bool(invite_token)}")
         SignupOTPSession.objects.update_or_create(
             email=email,
             defaults={
@@ -421,11 +428,20 @@ class AdminSignupVerifyOTPView(APIView):
         # Super Admin's invite link, hand off the pending report(s) now
         # that a real account exists. Silently no-ops if absent/expired/
         # already used — never blocks normal signup. Prefer whatever this
-        # request itself sent; fall back to what Send-OTP captured (real
-        # bug report: the frontend only ever sent invite_token on the
-        # earlier Send-OTP call, never resent it here, so the fallback is
-        # what actually makes the claim fire).
-        invite_token = (request.data.get("invite_token") or "").strip() or session.invite_token
+        # request itself sent (body OR query param — see send-otp's own
+        # comment on why query param is also checked); fall back to
+        # what Send-OTP captured (real bug report: the frontend only ever
+        # sent invite_token on the earlier Send-OTP call, never resent it
+        # here, so the fallback is what actually makes the claim fire).
+        invite_token = (
+            (request.data.get("invite_token") or request.query_params.get("invite_token") or "").strip()
+            or session.invite_token
+        )
+        logger.info(
+            f"[ReportInvite] verify-otp for {email}: invite_token_present={bool(invite_token)} "
+            f"(from_request={bool(request.data.get('invite_token') or request.query_params.get('invite_token'))}, "
+            f"from_send_otp_session={bool(session.invite_token)})"
+        )
 
         # Delete session immediately after successful verification.
         # Use queryset delete for Djongo compatibility (model instance pk can be None).
@@ -435,6 +451,7 @@ class AdminSignupVerifyOTPView(APIView):
             from .invite_utils import claim_invite
             try:
                 claimed = claim_invite(invite_token, user)
+                logger.info(f"[ReportInvite] claim_invite returned claimed={claimed} for {user.email}")
                 if claimed:
                     logger.info(f"[ReportInvite] Email signup claimed {claimed} report(s) for {user.email}")
             except Exception as e:
