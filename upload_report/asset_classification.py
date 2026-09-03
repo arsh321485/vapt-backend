@@ -113,6 +113,25 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
         )
     )
 
+    # Real bug report: a plain server (host_information.OS = "OpenBSD
+    # 3.1, ...", clearly a Server) was misclassified as "Web App" because
+    # one totally unrelated finding — "SSL RC4 Cipher Suites Supported
+    # (Bar Mitzvah)" — has generic Nessus boilerplate description text
+    # that happens to say "...if plaintext is repeatedly encrypted (e.g.,
+    # HTTP cookies)..." while explaining RC4's impact in the abstract;
+    # nothing to do with the host actually running a web application.
+    # Same failure class as the "web server" keyword removed below —
+    # free-text description prose can mention almost anything in passing.
+    # Web-app keyword matching uses this narrower text (host name/
+    # metadata + each finding's own TITLE only, never its free-text
+    # description) so a finding is only "web app" when its own name says
+    # so, not because some unrelated finding's explanatory prose used a
+    # word like "cookie" in an example. Firewall/Server keep using the
+    # full combined_text below — a vendor name (e.g. "Cisco ASA") or an
+    # OS mention legitimately only shows up in a description sometimes.
+    plugin_names_text = " ".join((v.get("plugin_name") or "") for v in vulnerabilities).lower()
+    title_text = name_lower + " " + host_info_text.lower() + " " + plugin_names_text
+
     # Firewall — vendor names / device-role keywords, checked first (see
     # module docstring for why priority matters here). combined_text is
     # already fully lowercased above, but a keyword is compared as-is — if
@@ -128,7 +147,7 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
     # web-layer findings (HTTP/HTTPS, XSS, SQLi, cookies, CSRF, etc.)
     if name_lower.startswith("http://") or name_lower.startswith("https://"):
         return "web_app"
-    if any(k.lower() in combined_text for k in _WEB_APP_VULN_KEYWORDS):
+    if any(k.lower() in title_text for k in _WEB_APP_VULN_KEYWORDS):
         return "web_app"
 
     # Server — real OS info present (Nessus host_information, or the
