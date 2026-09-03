@@ -393,6 +393,14 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             else ""
                         )
 
+                        # Real request: Info-severity findings (Nessus's own
+                        # "informational, not actually a vulnerability" tier)
+                        # should never appear in the Register at all — not
+                        # just filtered out by the severity pills, excluded
+                        # from the data entirely.
+                        if severity.lower() == "info":
+                            continue
+
                         protocol = v.get("protocol", "")
 
                         first_obs  = v.get("created_at") or uploaded_at

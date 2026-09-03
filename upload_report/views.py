@@ -645,8 +645,8 @@ class UploadReportView(APIView):
             # request instead so the frontend can send them back to drop
             # the extra files, exactly like it already does for
             # freemium_report_limit.
-            from billing.enforcement import is_freemium
-            if not via_magic_link and is_freemium(target_admin) and len(uploaded_files) > 1:
+            from billing.enforcement import is_freemium, _is_unlimited_admin
+            if not via_magic_link and not _is_unlimited_admin(target_admin) and is_freemium(target_admin) and len(uploaded_files) > 1:
                 return Response({
                     "success": False,
                     "code": "freemium_single_file_required",

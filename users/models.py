@@ -80,6 +80,15 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
 
+    # Real request: an admin whose report was handed to them via a Super
+    # Admin's magic-link invite (see users.invite_utils.claim_invite) gets
+    # NO Freemium restrictions at all — automation scripts, asset/vuln
+    # count ceilings, everything. Set to True the moment claim_invite
+    # successfully reassigns a report to this admin; checked in
+    # billing.enforcement._is_unlimited_admin alongside the existing
+    # is_superuser/BILLING_UNLIMITED_ADMIN_EMAILS exemptions.
+    magic_link_unlimited = models.BooleanField(default=False)
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     last_login = models.DateTimeField(null=True, blank=True)

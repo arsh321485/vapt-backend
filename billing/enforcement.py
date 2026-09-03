@@ -70,6 +70,12 @@ def _is_unlimited_admin(admin) -> bool:
         admin = User.objects.filter(id=admin).first()
     if getattr(admin, "is_superuser", False):
         return True
+    # Real request: an admin whose report was claimed via a magic-link
+    # invite (users.invite_utils.claim_invite sets this) gets no Freemium
+    # restrictions at all — same exemption tier as is_superuser/the fixed
+    # email allowlist below.
+    if getattr(admin, "magic_link_unlimited", False):
+        return True
     email = (getattr(admin, "email", "") or "").strip().lower()
     return bool(email) and email in getattr(settings, "BILLING_UNLIMITED_ADMIN_EMAILS", [])
 
@@ -83,7 +89,7 @@ def assert_can_upload_report(admin):
     (upload_report/merge_service.py) is untouched — this gate only blocks
     Freemium accounts that already have an upload on record at all.
     """
-    if not is_freemium(admin):
+    if _is_unlimited_admin(admin) or not is_freemium(admin):
         return
     from upload_report.models import UploadReport
 

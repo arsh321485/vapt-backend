@@ -97,4 +97,20 @@ def claim_invite(token: str, new_admin) -> int:
         "[ReportInvite] Claimed token for new_admin=%s (%s) — reassigned %d report(s): %s",
         new_admin.id, new_admin.email, result.modified_count, report_ids,
     )
+
+    # Real request: an admin who received their report via a magic-link
+    # invite gets NO Freemium restrictions at all (automation scripts,
+    # asset/vuln ceilings, everything) — see billing.enforcement.
+    # _is_unlimited_admin, which checks this flag. Set unconditionally on
+    # any successful claim (result.modified_count > 0 confirmed by the
+    # caller already logging "claimed N report(s)" only when N > 0 above,
+    # but this runs either way — harmless if 0 reports were actually
+    # matched, since nothing else changes for this admin in that case).
+    if result.modified_count > 0 and not new_admin.magic_link_unlimited:
+        try:
+            new_admin.magic_link_unlimited = True
+            new_admin.save(update_fields=["magic_link_unlimited"])
+        except Exception as e:
+            logger.warning("[ReportInvite] Could not set magic_link_unlimited for %s: %s", new_admin.email, e)
+
     return result.modified_count

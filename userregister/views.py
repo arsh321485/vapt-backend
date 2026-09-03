@@ -304,6 +304,12 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                         )
                         severity = risk_raw.strip().title() if isinstance(risk_raw, str) else ""
 
+                        # Real request: Info-severity findings should never
+                        # appear in the Register at all — see the same fix
+                        # in adminregister/views.py.
+                        if severity.lower() == "info":
+                            continue
+
                         first_obs  = v.get("created_at") or uploaded_at
                         second_obs = _fix.get("verification_sent_at") or v.get("updated_at")
 
