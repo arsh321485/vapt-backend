@@ -313,11 +313,31 @@ def _automation_fix_body(automation):
     # near-empty FactSet with none of the "What this does"/etc. sections.
     # Matches the same fix already applied to Slack.
     if automation.get("premium_required"):
-        return [{
-            "type": "TextBlock",
-            "text": f"🔒 {automation.get('message') or 'Automation scripts are not available on your plan.'}",
-            "wrap": True, "weight": "Bolder", "color": "attention", "spacing": "Medium",
-        }]
+        # Real bug report: this stopped at the text notice — Slack's
+        # equivalent lock message (users.views._freemium_upgrade_prompt
+        # blocks, and the plan-limit chat.postMessage in
+        # SlackUploadReportView) always pairs the notice with an actual
+        # "Upgrade to Premium" button (?source=slack on the pricing URL).
+        # Teams had no way to act on the notice at all — add the same
+        # button here, ?source=teams so pricing-page analytics can tell
+        # the two apart.
+        return [
+            {
+                "type": "TextBlock",
+                "text": f"🔒 {automation.get('message') or 'Automation scripts are not available on your plan.'}",
+                "wrap": True, "weight": "Bolder", "color": "attention", "spacing": "Medium",
+            },
+            {
+                "type": "ActionSet",
+                "spacing": "Small",
+                "actions": [{
+                    "type": "Action.OpenUrl",
+                    "title": "⭐ Upgrade to Premium",
+                    "url": "https://vaptfix.ai/pricingplan?source=teams",
+                    "style": "positive",
+                }],
+            },
+        ]
 
     body = [{
         "type": "FactSet",

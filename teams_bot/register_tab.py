@@ -155,6 +155,19 @@ def script_list_body(admin, offset=0):
             "text": f"🔒 {result['message'] or 'Automation scripts are not available on your plan.'}",
             "wrap": True, "weight": "Bolder", "color": "attention", "spacing": "Medium",
         })
+        # Same parity fix as fix_tab.py's _automation_fix_body — Slack's
+        # equivalent lock notice always ships with an "Upgrade to Premium"
+        # button, Teams only had the text.
+        body.append({
+            "type": "ActionSet",
+            "spacing": "Small",
+            "actions": [{
+                "type": "Action.OpenUrl",
+                "title": "⭐ Upgrade to Premium",
+                "url": "https://vaptfix.ai/pricingplan?source=teams",
+                "style": "positive",
+            }],
+        })
         return body
     if not page:
         body.append({"type": "TextBlock", "text": "No scripts found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
