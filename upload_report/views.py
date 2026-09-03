@@ -593,13 +593,33 @@ class UploadReportView(APIView):
             except Exception:
                 via_magic_link = bool(admin_id)
 
-            # 🔹 Plan gate — Freemium allows only 1 report upload total.
+            # 🔹 Plan gate — Freemium allows only 1 report upload total, but
+            # that ONE slot must be REPLACEABLE (real bug report: testing
+            # team needs to re-upload/replace the same slot — extra
+            # additional reports blocked is correct, blocking a replace of
+            # the existing one is not). Frontend sends any of these
+            # multipart fields truthy when the admin explicitly chose to
+            # overwrite (either proactively on a Freemium admin's first
+            # retry, or after seeing the freemium_report_limit response
+            # below and picking "Replace").
             if not via_magic_link:
-                from billing.enforcement import assert_can_upload_report, PlanLimitExceeded
-                try:
-                    assert_can_upload_report(target_admin)
-                except PlanLimitExceeded as e:
-                    return Response({"error": str(e)}, status=403)
+                from billing.enforcement import assert_can_upload_report, PlanLimitExceeded, is_freemium
+                replace_requested = any(
+                    str(request.data.get(f) or "").strip().lower() in ("true", "1", "yes")
+                    for f in ("replace", "replace_existing", "force_replace")
+                )
+                if is_freemium(target_admin) and replace_requested:
+                    _replace_freemium_report(target_admin)
+                else:
+                    try:
+                        assert_can_upload_report(target_admin)
+                    except PlanLimitExceeded as e:
+                        return Response({
+                            "success": False,
+                            "code": "freemium_report_limit",
+                            "replace_allowed": True,
+                            "error": str(e),
+                        }, status=403)
 
             # member_type is no longer a frontend-supplied field — the upload
             # request now carries only "file" (+ optional admin_id). Fixed
@@ -1767,6 +1787,42 @@ def _get_mongo_client_and_db():
     """Return (client, db) using the shared MongoDB connection pool."""
     client = get_shared_client()
     return client, get_shared_db(client)
+
+
+def _replace_freemium_report(admin):
+    """
+    Real bug report (frontend spec): Freemium's "1 report slot" was being
+    enforced as a hard, permanent block after the first upload — blocking
+    a genuine REPLACE of that same slot, not just an extra additional
+    report. Frontend now sends replace/replace_existing/force_replace=true
+    when the admin explicitly chose to overwrite; the caller (UploadReportView
+    .post) checks that flag and calls this INSTEAD of the normal
+    assert_can_upload_report gate.
+
+    Deletes the existing nessus_reports doc(s) (admin_id OR admin_email —
+    same ownership match every other report lookup in this app uses) and
+    UploadReport row(s) for this admin, so the normal upload path right
+    after this call creates a fresh report_id completely unimpeded — no
+    same-day-merge conflict with a doc that no longer exists, and every
+    report-status/dashboard/register endpoint (which all resolve "the
+    latest report for this admin" from nessus_reports fresh on every
+    request) naturally points at the new one afterward. Vulnerability-level
+    collections keyed by the OLD report_id (vulnerability_cards,
+    hold_vulnerabilities, fix_vulnerabilities, ...) are deliberately left
+    as-is rather than chased down here — every reader of those already
+    scopes to whatever report_id the CURRENT latest report resolves to, so
+    once that's the new one, the old report_id's rows are simply never
+    looked up again (harmless orphaned documents, not a visible bug).
+    """
+    try:
+        _, db = _get_mongo_client_and_db()
+        result = db["nessus_reports"].delete_many({
+            "$or": [{"admin_id": str(admin.id)}, {"admin_email": admin.email}]
+        })
+        logger.info(f"[FreemiumReplace] Deleted {result.deleted_count} nessus_reports doc(s) for admin_id={admin.id}")
+    except Exception:
+        logger.exception(f"[FreemiumReplace] Mongo cleanup failed for admin_id={admin.id}")
+    UploadReport.objects.filter(admin=admin).delete()
 
 
 def unlock_freemium_hosts_for_admin(admin) -> int:
