@@ -793,33 +793,32 @@ class UploadReportView(APIView):
                     # (see select_freemium_active_hosts) instead of being
                     # discarded, so upgrading later unlocks it without a
                     # re-upload (billing/views.py's StripeWebhookView).
+                    #
+                    # Real bug report: this used to trim PER FILE, right here,
+                    # before storage — fine for a single file, but a same-day
+                    # multi-file upload (sign-up's "Provide Scope" step allows
+                    # several files, for the plan-recommendation calculation)
+                    # had each file independently trimmed to 5 hosts, then
+                    # merged — 2 files -> 10 "active" hosts stored, double the
+                    # real Freemium cap. Trimming now happens ONCE, on the
+                    # report's true combined host set, right after this
+                    # file's data is stored/merged in (see the
+                    # select_freemium_active_hosts call further down, after
+                    # the is_merge/else block) — this file's own data is
+                    # always stored in full here.
                     locked_hosts = []
                     # Frontend bug report: the "This report has X IPs" plan
                     # overlay was using host_count (raw ReportHost rows —
                     # can include duplicate IP+hostname pairs and non-IP
                     # labels) instead of unique_ip_count (distinct IPv4/
                     # IPv6 targets), disagreeing with the Assets page's real
-                    # unique-host count for the same file. Capture BOTH
-                    # counts from the full, untrimmed host list here — right
-                    # before any Freemium trim below overwrites
-                    # parsed_data["vulnerabilities_by_host"] with just the
-                    # visible subset — so unique_ip_count always reflects
-                    # the whole file, never the trimmed view.
+                    # unique-host count for the same file. Always the full,
+                    # untrimmed file's count — trimming (if any) happens at
+                    # the report level afterward and never touches this.
                     from upload_report.host_ip_utils import compute_unique_ip_count
                     _full_hosts_for_counts = parsed_data.get("vulnerabilities_by_host") or []
                     host_count = len(_full_hosts_for_counts)
                     unique_ip_count = compute_unique_ip_count(_full_hosts_for_counts)
-                    if not via_magic_link and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
-                        from billing.enforcement import select_freemium_active_hosts
-                        active_hosts, locked_hosts = select_freemium_active_hosts(
-                            parsed_data.get("vulnerabilities_by_host") or [], target_admin
-                        )
-                        if locked_hosts:
-                            parsed_data["vulnerabilities_by_host"] = active_hosts
-                            parsed_data["total_hosts"] = len(active_hosts)
-                            parsed_data["total_vulnerabilities"] = sum(
-                                len(h.get("vulnerabilities") or []) for h in active_hosts
-                            )
 
                     # 🔹 Parsed count
                     parsed_count = 1
@@ -867,15 +866,6 @@ class UploadReportView(APIView):
                                     {"report_id": report_id},
                                     {"$addToSet": {"uploaded_file_names": uploaded_file.name}},
                                 )
-                                if locked_hosts:
-                                    _mc2, _db2 = _get_mongo_client_and_db()
-                                    _db2["nessus_reports"].update_one(
-                                        {"report_id": report_id},
-                                        {
-                                            "$push": {"locked_hosts": {"$each": self._prepare_hosts_for_storage(locked_hosts)}},
-                                            "$set": {"freemium_trimmed": True},
-                                        },
-                                    )
                             except Exception as _merge_err:
                                 logger.error(f"[MergeUpload] merge failed for report_id={report_id}: {_merge_err}")
                                 mongodb_stored = False
@@ -895,6 +885,47 @@ class UploadReportView(APIView):
                             # today) merges into this report from here on.
                             if mongodb_stored and is_structured and not todays_report_id:
                                 todays_report_id = report_id
+
+                        # Real bug report — see the plan-gate comment above:
+                        # Freemium/undecided-plan trimming now happens ONCE
+                        # here, on the report's actual combined host set
+                        # (whatever's already active + already-locked), right
+                        # after this file's own contribution was just stored/
+                        # merged in — so a same-day multi-file upload is
+                        # capped at the Freemium totals ACROSS THE WHOLE
+                        # REPORT, not per file. No-op for Premium/unlimited/
+                        # magic-link admins (select_freemium_active_hosts
+                        # returns everything as "active" then), and for an
+                        # admin still within both caps.
+                        report_active_count = host_count
+                        report_locked_count = 0
+                        if mongodb_stored and not via_magic_link and is_structured:
+                            try:
+                                from billing.enforcement import select_freemium_active_hosts
+                                _mc4, _db4 = _get_mongo_client_and_db()
+                                _trim_doc = _db4["nessus_reports"].find_one(
+                                    {"report_id": report_id},
+                                    {"vulnerabilities_by_host": 1, "locked_hosts": 1},
+                                )
+                                if _trim_doc:
+                                    _full_report_hosts = (
+                                        list(_trim_doc.get("vulnerabilities_by_host") or [])
+                                        + list(_trim_doc.get("locked_hosts") or [])
+                                    )
+                                    _active, _locked = select_freemium_active_hosts(_full_report_hosts, target_admin)
+                                    if _locked:
+                                        _db4["nessus_reports"].update_one(
+                                            {"report_id": report_id},
+                                            {"$set": {
+                                                "vulnerabilities_by_host": _active,
+                                                "locked_hosts": _locked,
+                                                "freemium_trimmed": True,
+                                            }},
+                                        )
+                                    report_active_count = len(_active)
+                                    report_locked_count = len(_locked)
+                            except Exception as _trim_err:
+                                logger.error(f"[FreemiumTrim] Could not reapply trim for report_id={report_id}: {_trim_err}")
 
                         # Store actual upload processing time for UploadStatusView ETA
                         if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
@@ -979,17 +1010,16 @@ class UploadReportView(APIView):
                             # 'freemium_upgrade' field on the dashboard-summary
                             # endpoint for the separate "ready to upgrade" banner
                             # signal (shown once every visible finding is closed).
-                            "freemium_trimmed": bool(locked_hosts),
-                            "locked_asset_count": len(locked_hosts),
+                            "freemium_trimmed": bool(report_locked_count),
+                            "locked_asset_count": report_locked_count,
                             # Same 4-field billing contract as dashboard summary/
                             # subscription-me/estimate (billing.asset_service.
-                            # get_admin_asset_breakdown_counts) — scoped to just
-                            # this one file rather than the admin's whole account,
-                            # so the "Review plan" step can price this exact
-                            # upload immediately without a separate call.
-                            "visible_asset_count": int(parsed_data.get("total_hosts") or 0),
-                            "original_asset_count": int(parsed_data.get("total_hosts") or 0) + len(locked_hosts),
-                            "billable_asset_count": int(parsed_data.get("total_hosts") or 0) + len(locked_hosts),
+                            # get_admin_asset_breakdown_counts). Report-level
+                            # (not just this one file) since trimming itself
+                            # is now report-level — see the trim step above.
+                            "visible_asset_count": report_active_count,
+                            "original_asset_count": report_active_count + report_locked_count,
+                            "billable_asset_count": report_active_count + report_locked_count,
                             # Frontend contract (see host_ip_utils.py) — host_count
                             # is the raw Nessus row count (debug only, never use
                             # for plan/billing decisions); unique_ip_count is the
