@@ -747,6 +747,17 @@ class UploadReportView(APIView):
                                 or "This file does not appear to contain vulnerability scan data."
                             )
                         parsed_data = validation_result
+                        # Real bug report: a PDF/DOCX/CSV/Excel/HTML "custom"
+                        # report's Info-severity findings were still ending
+                        # up in Register/dashboards/everywhere downstream —
+                        # _strip_non_risk_findings (parsers.py) was only ever
+                        # wired into dispatch_parse's native Nessus XML/HTML
+                        # paths, never applied to what THIS AI extraction
+                        # step produces. Same explicit, repeated instruction
+                        # ("only Critical/High/Medium/Low should ever be
+                        # stored") — apply it here too.
+                        from .parsers import _strip_non_risk_findings
+                        parsed_data = _strip_non_risk_findings(parsed_data)
 
                     # 🔹 Plan gate — Freemium gets at most max_internal_ips hosts
                     # and max_vulnerabilities total findings (billing/plans.py).

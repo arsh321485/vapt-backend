@@ -1267,11 +1267,15 @@ _NON_RISK_SEVERITIES = {"info", "informational", "none", ""}
 def _strip_non_risk_findings(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Drops Info/None/blank-risk_factor findings from every host in a parsed
-    Nessus result, then drops any host left with zero findings — applied
-    once here, centrally, rather than at each of the several separate
-    Nessus parser implementations' own append sites, so it can't be missed
-    by one of them. No-op for anything that isn't Nessus-shaped
-    (vulnerabilities_by_host present) — AWS/custom reports are untouched.
+    report, then drops any host left with zero findings. Called from every
+    call site that can produce vulnerabilities_by_host-shaped data — native
+    Nessus XML/HTML (dispatch_parse), AWS Inspector CSV (dispatch_parse),
+    and the AI-extracted "custom" report path (pdf/docx/doc/csv/excel/html
+    — see UploadReportView.post's validate_and_extract_custom_report call)
+    — so a real bug (a PDF report's Info findings surviving all the way to
+    the Register) can't recur by a future report TYPE skipping this. No-op
+    for anything that isn't vulnerabilities_by_host-shaped at all (e.g. a
+    "custom" report the AI extraction rejected as invalid).
     """
     hosts = parsed_data.get("vulnerabilities_by_host")
     if not isinstance(hosts, list):
@@ -1324,7 +1328,13 @@ def dispatch_parse(file_path: str, filename: str) -> Dict[str, Any]:
         if _sniff_is_aws_inspector_csv(file_path):
             result = parse_aws_inspector_csv(file_path)
             if "error" not in result:
-                return result
+                # Real, repeated instruction: Info/Informational findings
+                # must never be stored, regardless of report source — this
+                # path (type="aws") was the one gap left after the Nessus
+                # XML/HTML paths already had this and the pdf/docx/csv/
+                # excel/html "custom" AI-extraction path was just fixed too
+                # (see upload_report/views.py's UploadReportView.post).
+                return _strip_non_risk_findings(result)
             # Sniffed as AWS Inspector but structured parse failed — fall
             # back to generic CSV rather than losing the upload entirely.
         return parse_csv(file_path)
