@@ -207,6 +207,12 @@ class UploadReportView(APIView):
             document = {
                 "report_id": report_id,
                 "original_filename": original_filename,
+                # List form of the same thing, kept in sync as more files
+                # merge into this report (see the merge branch's own
+                # $addToSet) — original_filename itself stays as the FIRST
+                # file's name for anything already reading that singular
+                # field, but every contributing file's name is here too.
+                "uploaded_file_names": [original_filename],
                 "location_id": location_id,
                 "location_name": location_name,
                 "admin_id": admin_id,  # Store admin_id for ownership validation
@@ -831,6 +837,17 @@ class UploadReportView(APIView):
                             try:
                                 merge_hosts_into_report(_get_mongo_client_and_db()[1], report_id, hosts_payload)
                                 mongodb_stored = True
+                                # Real bug report: a merged report only ever
+                                # kept ONE contributing filename (whichever
+                                # _store_in_mongodb call created it) — the
+                                # 2nd/3rd file's name was silently dropped,
+                                # so the frontend could only ever show 1
+                                # filename regardless of how many were
+                                # actually uploaded/merged.
+                                _get_mongo_client_and_db()[1]["nessus_reports"].update_one(
+                                    {"report_id": report_id},
+                                    {"$addToSet": {"uploaded_file_names": uploaded_file.name}},
+                                )
                                 if locked_hosts:
                                     _mc2, _db2 = _get_mongo_client_and_db()
                                     _db2["nessus_reports"].update_one(
@@ -1003,12 +1020,57 @@ class UploadReportView(APIView):
                 except Exception:
                     logger.exception("Failed to trigger Slack onboarding notification after upload")
 
+            # Real bug report: multiple files uploaded in one request only
+            # ever showed 1 filename and a single-file IP count on the
+            # Recommended-plan pricing UI — results[] always had one entry
+            # per file (nothing was silently dropped there), but nothing
+            # combined them into a merged, top-level summary, so a frontend
+            # reading response.unique_ip_count / .report_id (singular,
+            # matching every OTHER upload flow's contract) only ever saw
+            # the first file's own numbers.
+            merged_report_id = next((r.get("report_id") for r in upload_results if r.get("report_id")), None)
+            uploaded_file_names = [r.get("file_name") for r in upload_results if r.get("file_name")]
+            files_breakdown = [
+                {"file_name": r.get("file_name"), "unique_ip_count": r.get("unique_ip_count")}
+                for r in upload_results
+            ]
+            merged_unique_ip_count = None
+            if merged_report_id:
+                try:
+                    from upload_report.host_ip_utils import counts_from_report_doc
+                    _mc3, _db3 = _get_mongo_client_and_db()
+                    _final_doc = _db3["nessus_reports"].find_one({"report_id": merged_report_id})
+                    if _final_doc:
+                        merged_unique_ip_count = counts_from_report_doc(_final_doc).get("unique_ip_count")
+                        # original_filename stays singular (the first file)
+                        # for any existing reader of that field; the real
+                        # per-report list lives in uploaded_file_names —
+                        # already updated in place by the per-file loop
+                        # above, just re-read here so the response matches
+                        # what's actually persisted.
+                        uploaded_file_names = _final_doc.get("uploaded_file_names") or uploaded_file_names
+                except Exception:
+                    logger.exception(f"[UploadSummary] Could not compute merged unique_ip_count for report_id={merged_report_id}")
+            if merged_unique_ip_count is None:
+                # Fallback — no report_id resolved (shouldn't normally
+                # happen if anything succeeded) or the re-read failed;
+                # sum of per-file counts is an approximation (can double-
+                # count a host shared across files) but is still better
+                # than silently returning nothing.
+                merged_unique_ip_count = sum(r.get("unique_ip_count") or 0 for r in upload_results)
+
             return Response({
                 "success": True,
                 "message": "Files Uploaded Successfully",
                 "count": len(upload_results),
                 "results": upload_results,
                 "errors": errors,
+                # Top-level merged summary (real bug report — see above).
+                "report_id": merged_report_id,
+                "unique_ip_count": merged_unique_ip_count,
+                "uploaded_file_names": uploaded_file_names,
+                "files": files_breakdown,
+                "file_count": len(uploaded_file_names),
                 "total_processing_time_seconds": round(time.perf_counter() - api_start, 2),
                 "total_processing_time_text": self._seconds_to_text(time.perf_counter() - api_start),
             }, status=201)
@@ -1200,16 +1262,24 @@ class UploadReportDetailAPIView(APIView):
         # nessus_reports Mongo doc since UploadReport (Django ORM) itself
         # doesn't carry host data.
         counts = {"host_count": 0, "unique_ip_count": 0, "visible_asset_count": 0, "locked_asset_count": 0}
+        # Real bug report: multi-file uploads merged into this same report
+        # only ever exposed 1 filename anywhere — see the upload response's
+        # own uploaded_file_names field (upload_report/views.py's
+        # UploadReportView.post) for where this is actually populated.
+        uploaded_file_names = []
         try:
             from vaptfix.mongo_client import get_shared_db
             from upload_report.host_ip_utils import counts_from_report_doc
             _db = get_shared_db()
             _doc = _db["nessus_reports"].find_one(
                 {"report_id": report_id},
-                {"vulnerabilities_by_host": 1, "locked_hosts": 1},
+                {"vulnerabilities_by_host": 1, "locked_hosts": 1, "uploaded_file_names": 1, "original_filename": 1},
             )
             if _doc:
                 counts = counts_from_report_doc(_doc)
+                uploaded_file_names = _doc.get("uploaded_file_names") or (
+                    [_doc["original_filename"]] if _doc.get("original_filename") else []
+                )
         except Exception as _ce:
             logger.warning(f"[UploadReportDetail] Could not compute host/IP counts for {report_id}: {_ce}")
 
@@ -1218,6 +1288,7 @@ class UploadReportDetailAPIView(APIView):
                 "success": True,
                 "message": "Upload report retrieved successfully",
                 "upload_report": serializer.data,
+                "uploaded_file_names": uploaded_file_names,
                 **counts,
             },
             status=200
@@ -2735,24 +2806,45 @@ class AdminLatestReportAPIView(APIView):
         # Frontend contract (upload_report/host_ip_utils.py) — same 4 fields
         # as the upload/detail/status endpoints.
         counts = {"host_count": 0, "unique_ip_count": 0, "visible_asset_count": 0, "locked_asset_count": 0}
+        uploaded_file_names = []
+        resolved_report_id = str(latest._id)
         try:
             from vaptfix.mongo_client import get_shared_db
             from upload_report.host_ip_utils import counts_from_report_doc
             _db = get_shared_db()
+            # Real bug report: for a file that MERGED into an existing
+            # report (2nd+ file, same day), its own UploadReport row's _id
+            # is NOT the Mongo report_id — the merge target's is (see
+            # UploadReportView.post's is_merge branch, report_id =
+            # todays_report_id). Looking this doc up by str(latest._id)
+            # silently found nothing whenever the ADMIN'S most recently-
+            # created UploadReport row happened to be a merged file, so
+            # host/IP counts (and, before this fix, filenames) came back
+            # as zero/empty instead of the real merged totals. Resolving
+            # by admin_id/admin_email + most-recent uploaded_at directly
+            # against nessus_reports — same robust pattern every other
+            # "find this admin's latest report" view in this app already
+            # uses — always finds the real merged doc regardless of which
+            # specific UploadReport row is newest.
             _doc = _db["nessus_reports"].find_one(
-                {"report_id": str(latest._id)},
-                {"vulnerabilities_by_host": 1, "locked_hosts": 1},
+                {"$or": [{"admin_id": str(request.user.id)}, {"admin_email": request.user.email}]},
+                sort=[("uploaded_at", -1)],
             )
             if _doc:
                 counts = counts_from_report_doc(_doc)
+                resolved_report_id = _doc.get("report_id") or resolved_report_id
+                uploaded_file_names = _doc.get("uploaded_file_names") or (
+                    [_doc["original_filename"]] if _doc.get("original_filename") else []
+                )
         except Exception as _ce:
             logger.warning(f"[AdminLatestReport] Could not compute host/IP counts for {latest._id}: {_ce}")
 
         file_name = os.path.basename(latest.file.name) if latest.file else ""
         return Response({
             "success":   True,
-            "report_id": str(latest._id),
+            "report_id": resolved_report_id,
             "file_name": file_name,
+            "uploaded_file_names": uploaded_file_names,
             "uploaded_at": latest.uploaded_at.isoformat() if latest.uploaded_at else None,
             **counts,
         }, status=200)
