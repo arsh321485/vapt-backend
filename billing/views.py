@@ -318,13 +318,22 @@ class SubscriptionMeView(APIView):
             .order_by("-created_at")
             .first()
         )
+        # Real request: an admin whose report was claimed via a magic-link
+        # invite has zero Freemium restrictions backend-side (see
+        # billing.enforcement._is_unlimited_admin), but the frontend has no
+        # way to know that from this response alone — a magic-link admin
+        # with no Subscription row would otherwise still get "subscription:
+        # null" here and could keep showing Freemium upgrade prompts /
+        # greyed-out buttons for actions the backend would actually allow.
+        magic_link_unlimited = bool(getattr(request.user, "magic_link_unlimited", False))
         if not sub:
-            return Response({"subscription": None})
+            return Response({"subscription": None, "magic_link_unlimited": magic_link_unlimited})
 
         invoices = sub.invoices.order_by("-created_at")[:20]
         return Response({
             "subscription": SubscriptionSerializer(sub).data,
             "invoices": InvoiceSerializer(invoices, many=True).data,
+            "magic_link_unlimited": magic_link_unlimited,
             **get_admin_asset_breakdown_counts(str(request.user.id)),
         })
 
