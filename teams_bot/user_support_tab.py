@@ -41,13 +41,14 @@ def list_support_requests(admin, member_user, team_name, offset=0):
     open_count = sum(1 for t in tickets if (t.get("status") or "open").strip().lower() != "closed")
     closed_count = total - open_count
 
+    # Real request: "Raise Support Request" button removed — this tab
+    # should only show the list, not offer to create a new one. The
+    # underlying raise-request flow (usup_raise_form/raise_request_form_body/
+    # usup_submit) is left in place but is now unreachable from any button,
+    # same as other since-removed entry points elsewhere in this module.
     body = [
         {"type": "TextBlock", "text": "🎫 Support Status", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": f"{team_name} — {open_count} open, {closed_count} closed.", "size": "Small", "isSubtle": True, "wrap": True},
-        {
-            "type": "ActionSet", "spacing": "Medium",
-            "actions": [cards._execute_action("➕ Raise Support Request", {"action_id": "usup_raise_form"}, style="positive")],
-        },
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No support requests yet.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
