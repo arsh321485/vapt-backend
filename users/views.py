@@ -1478,6 +1478,54 @@ def _install_teams_bot(team_id, delegated_access_token=None):
         return False
 
 
+def _background_retry_sub_channel_welcome(team_id, channel_id, team_name, service_url):
+    """Real bug report: even 3 synchronous retries (~3s) inside the login
+    request itself weren't always enough for a genuinely brand-new
+    channel — Teams' own propagation delay for the bot's access to it can
+    outlast that whole window. Runs OUTSIDE the login HTTP request
+    entirely (daemon thread, spawned by _backfill_sub_channel_bot_presence
+    once its own synchronous attempts are exhausted), retrying both the
+    welcome text and the Home nav card over a much longer horizon without
+    ever risking the login response itself timing out. Gives up quietly
+    after the last attempt — the channel still self-heals on the admin's
+    NEXT login either way (is_sub_channel_welcomed/mark_sub_channel_
+    welcomed is the same idempotent gate _backfill_sub_channel_bot_presence
+    itself checks), this is just trying to avoid needing one."""
+    from .conversation_store import is_sub_channel_welcomed, mark_sub_channel_welcomed
+    from teams_bot import bot_api
+
+    for delay_seconds in (10, 20, 40, 60):
+        time.sleep(delay_seconds)
+        if is_sub_channel_welcomed(team_id, channel_id):
+            return  # a later login (or an earlier attempt in this same loop) already succeeded
+        try:
+            resp = bot_api.send_activity(
+                service_url, channel_id,
+                bot_api.text_message(
+                    f"👋 VaptFix bot is here for the **{team_name}** team! "
+                    f"Mention me (@VaptFix) anytime to see your team's dashboard, fix vulnerabilities and more."
+                ),
+            )
+        except Exception:
+            logger.exception(f"[TeamsChannels] background welcome retry raised for {team_name}")
+            continue
+        if resp is None or resp.status_code >= 300:
+            logger.warning(f"[TeamsChannels] background welcome retry failed for {team_name}: {getattr(resp, 'status_code', None)}")
+            continue
+
+        mark_sub_channel_welcomed(team_id, channel_id)
+        logger.info(f"[TeamsChannels] background retry succeeded — sent sub-channel welcome for team_id={team_id} channel={team_name}")
+        try:
+            from teams_bot import user_home_tab
+            home_body = user_home_tab.home_tab_body(team_id, team_name)
+            card = user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
+            bot_api.send_activity(service_url, channel_id, bot_api.card_message(card))
+        except Exception:
+            logger.exception(f"[TeamsChannels] background retry: initial Home card send failed for {team_name}")
+        return
+    logger.warning(f"[TeamsChannels] background welcome retry exhausted every attempt for {team_name} — will retry on next login instead")
+
+
 def _backfill_sub_channel_bot_presence(team_id, channels_result):
     """
     Retrofit for teams whose 4 team-sub-channels (Patch/Configuration/
@@ -1563,7 +1611,24 @@ def _backfill_sub_channel_bot_presence(team_id, channels_result):
             mark_sub_channel_welcomed(team_id, channel_id)
             logger.info(f"[TeamsChannels] Sent sub-channel welcome for team_id={team_id} channel={team_name}")
         else:
-            logger.warning(f"[TeamsChannels] sub-channel welcome send exhausted retries for {team_name}")
+            # Real bug report: this still failed on EVERY one of the 3
+            # synchronous retries above for a genuinely brand-new team —
+            # confirmed via real data that Teams' own propagation delay
+            # for a just-created channel can outlast that whole ~3s
+            # window. Rather than stretch the synchronous window (this
+            # runs inside the actual login HTTP request — admin_id x 4
+            # channels x a much longer wait risks the login itself timing
+            # out), hand off to a background thread that keeps trying for
+            # up to a few more minutes, well outside the login response.
+            # Still safe to call is_sub_channel_welcomed/mark_sub_channel_
+            # welcomed from a thread — MongoContext opens its own
+            # connection per call, no shared request-scoped state.
+            logger.warning(f"[TeamsChannels] sub-channel welcome exhausted sync retries for {team_name} — backgrounding further attempts")
+            threading.Thread(
+                target=_background_retry_sub_channel_welcome,
+                args=(team_id, channel_id, team_name, service_url),
+                daemon=True,
+            ).start()
             continue
 
         # Immediately follow the plain welcome text with the real Home nav

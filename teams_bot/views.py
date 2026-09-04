@@ -353,15 +353,13 @@ class TeamsBotMessagesView(APIView):
         # _handle_message's own _is_access_blocked fix targets, just via
         # the OTHER (invoke) code path every real button click actually
         # goes through. The real response still reaches whoever clicked —
-        # as a brand-new private-style reply — while the invoke response
-        # itself re-renders this channel's own correct default Home card,
-        # so the in-place replacement is a no-op for every legitimate
-        # viewer instead of corrupting what they see.
+        # via a genuine private 1:1 conversation, see _send_private_notice
+        # — while the invoke response itself re-renders this channel's own
+        # correct default Home card, so the in-place replacement is a
+        # no-op for every legitimate viewer instead of corrupting what
+        # they see.
         if card.pop("_is_access_blocked", False):
-            service_url = activity.get("serviceUrl")
-            conversation_id = (activity.get("conversation") or {}).get("id")
-            activity_id = activity.get("id")
-            bot_api.reply_to_activity(service_url, conversation_id, activity_id, bot_api.card_message(card))
+            self._send_private_notice(activity, card)
             card = self._safe_default_card(admin, team_id, channel_id) or card
 
         return Response(
@@ -389,6 +387,41 @@ class TeamsBotMessagesView(APIView):
         except Exception:
             logger.exception("[TeamsBot] _safe_default_card failed")
             return None
+
+    def _send_private_notice(self, activity: dict, card: dict):
+        """Real bug report: an "access blocked" reply posted via
+        reply_to_activity into the SAME channel was still visible to
+        EVERYONE in it — including the admin, for whom "Only the admin
+        can access this channel" made no sense showing up in their OWN
+        dashboard channel. Unlike Slack's chat.postEphemeral, Bot
+        Framework has no per-viewer/ephemeral message concept for a
+        channel conversation at all — any message posted into one is
+        visible to every member, no matter how it's sent.
+
+        Creates a genuine personal (1:1) conversation with whoever
+        clicked and sends the notice there instead — the real,
+        documented way to reach just one person privately (a bot can
+        start a 1:1 with any member it's already seen in a team
+        conversation, no separate personal-scope install needed). Falls
+        back to the old channel-visible reply only if that fails (a
+        notice everyone sees is still better than the click silently
+        doing nothing)."""
+        service_url = activity.get("serviceUrl")
+        bot_id = (activity.get("recipient") or {}).get("id")
+        user_id = (activity.get("from") or {}).get("id")
+        tenant_id = ((activity.get("channelData") or {}).get("tenant") or {}).get("id")
+        personal_conversation_id = None
+        try:
+            personal_conversation_id = bot_api.create_personal_conversation(service_url, bot_id, tenant_id, user_id)
+        except Exception:
+            logger.exception("[TeamsBot] create_personal_conversation failed")
+        if personal_conversation_id:
+            bot_api.send_activity(service_url, personal_conversation_id, bot_api.card_message(card))
+            return
+        logger.warning("[TeamsBot] could not create a private 1:1 conversation — falling back to a channel-visible reply")
+        conversation_id = (activity.get("conversation") or {}).get("id")
+        activity_id = activity.get("id")
+        bot_api.reply_to_activity(service_url, conversation_id, activity_id, bot_api.card_message(card))
 
     def _resolve_admin(self, activity: dict):
         # Bot Framework's channelData.team.id is a CONVERSATION/thread id
@@ -493,9 +526,16 @@ class TeamsBotMessagesView(APIView):
             # channel, including whoever's card had been showing correctly
             # a moment before (e.g. the admin's own, in their own channel).
             # Post it as a brand-new reply instead — never touches the
-            # existing shared card.
+            # existing shared card. Real follow-up bug report: that "new
+            # reply" is STILL posted into the same shared channel, so
+            # everyone in it (the admin included) saw the notice too —
+            # Bot Framework has no ephemeral/per-viewer message at all for
+            # channel conversations. _send_private_notice sends it to just
+            # the clicker via a genuine personal (1:1) conversation
+            # instead, falling back to this same channel reply only if
+            # that fails.
             if card.pop("_is_access_blocked", False):
-                bot_api.reply_to_activity(service_url, conversation_id, activity_id, bot_api.card_message(card))
+                self._send_private_notice(activity, card)
                 return
 
             target_id = activity.get("replyToId")

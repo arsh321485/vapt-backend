@@ -88,6 +88,44 @@ def update_activity(service_url: str, conversation_id: str, activity_id: str, ac
     return resp
 
 
+def create_personal_conversation(service_url: str, bot_id: str, tenant_id: str, user_id: str):
+    """
+    Real bug report: a "private" reply (reply_to_activity into the SAME
+    channel) was still visible to EVERYONE in that channel — including
+    the admin, for whom it made no sense ("Only the admin can access
+    this channel" showing up in the admin's OWN dashboard channel).
+    Unlike Slack's chat.postEphemeral, Bot Framework has no per-viewer/
+    ephemeral message concept for a channel conversation at all — any
+    message posted into one, however it's sent, is visible to every
+    member of that channel.
+
+    The real, documented way to actually reach just ONE person privately
+    is a genuine personal (1:1) conversation — Teams lets a bot create
+    one with any member it has already seen in a team conversation, no
+    separate personal-scope install needed. Returns the new
+    conversation's id (pass straight to send_activity), or None if
+    creation failed — caller should fall back to a channel post rather
+    than silently dropping the message.
+    """
+    if not (service_url and bot_id and user_id):
+        return None
+    url = f"{service_url.rstrip('/')}/v3/conversations"
+    payload = {
+        "bot": {"id": bot_id},
+        "members": [{"id": user_id}],
+        "channelData": {"tenant": {"id": tenant_id}} if tenant_id else {},
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=_connector_headers(), timeout=15)
+    except Exception:
+        logger.exception("[TeamsBot] create_personal_conversation request failed")
+        return None
+    if resp.status_code >= 300:
+        logger.warning(f"[TeamsBot] create_personal_conversation failed ({resp.status_code}): {resp.text[:500]}")
+        return None
+    return (resp.json() or {}).get("id")
+
+
 def send_activity(service_url: str, conversation_id: str, activity: dict):
     """
     Send a NEW message into an existing conversation (not a reply to a
