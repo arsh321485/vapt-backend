@@ -899,7 +899,22 @@ class UploadReportView(APIView):
                         # admin still within both caps.
                         report_active_count = host_count
                         report_locked_count = 0
-                        if mongodb_stored and not via_magic_link and is_structured:
+                        # Perf: this round-trip (read the WHOLE report back,
+                        # possibly write it all back again) is a real, non-
+                        # trivial extra Mongo I/O cost — worth paying only
+                        # when trimming can actually apply. Mirrors
+                        # select_freemium_active_hosts' own no-op guard
+                        # exactly, so skipping it here changes nothing about
+                        # the result — a Premium/unlimited/magic-link admin
+                        # (i.e. most uploads) was doing this full read/
+                        # compare/maybe-write on EVERY file for nothing.
+                        if (
+                            mongodb_stored
+                            and not via_magic_link
+                            and is_structured
+                            and not _is_unlimited_admin(target_admin)
+                            and is_freemium(target_admin)
+                        ):
                             try:
                                 from billing.enforcement import select_freemium_active_hosts
                                 _mc4, _db4 = _get_mongo_client_and_db()
