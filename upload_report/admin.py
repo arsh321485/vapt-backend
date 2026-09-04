@@ -635,6 +635,7 @@ class UploadReportAdmin(admin.ModelAdmin):
         op_started = time.perf_counter()
         admin_user = form.cleaned_data.get('admin_select')
         obj.admin = admin_user
+        obj.admin_email = getattr(admin_user, "email", None)
         scope_obj = form.cleaned_data.get('fulfills_scope')
         scope_id = str(scope_obj.id) if scope_obj else None
 

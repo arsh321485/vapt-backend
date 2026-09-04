@@ -855,6 +855,7 @@ class UploadReportView(APIView):
                             file_hash=file_hash,
                             location=None,
                             admin=target_admin,
+                            admin_email=target_admin.email,
                             member_type=mt,
                             status="Sucessfully Processed",
                             parsed_count=parsed_count,

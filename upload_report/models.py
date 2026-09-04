@@ -26,6 +26,13 @@ class UploadReport(models.Model):
         User, on_delete=models.SET_NULL,
         null=True, blank=True, related_name="upload_reports"
     )
+    # Real request: the raw upload_reports collection (e.g. viewed directly
+    # in MongoDB Compass) only ever showed admin_id (a UUID) — no way to
+    # tell which admin a row belongs to without a separate lookup.
+    # Denormalized alongside `admin` the same way nessus_reports already
+    # stores both admin_id and admin_email — set at creation time, so it
+    # stays correct even if the User's email later changes.
+    admin_email = models.CharField(max_length=255, null=True, blank=True, db_index=True)
 
     member_type = models.CharField(
         max_length=100,
