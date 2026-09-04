@@ -3957,15 +3957,22 @@ def _risk_rating_label(critical, high, medium, low):
     _build_executive_summary). Same tiering used there, extracted here so
     the "Sensitivity" badge and any other short rating label can use the
     real calculation too, without duplicating it a third time.
+
+    Real follow-up request: the first version of this used its own made-up
+    rating words ("Elevated Risk", "Moderate Risk") instead of the same
+    Critical/High/Medium/Low vocabulary already used everywhere else on
+    the report (the 4 severity boxes, the donut legend) — confusing next
+    to them. Only ever returns one of those 4 exact words now (whichever
+    is the highest severity actually present), or "No Findings".
     """
     if critical > 0:
-        return "High Risk"
+        return "Critical"
     if high > 0:
-        return "Elevated Risk"
+        return "High"
     if medium > 0:
-        return "Moderate Risk"
+        return "Medium"
     if low > 0:
-        return "Low Risk"
+        return "Low"
     return "No Findings"
 
 
@@ -3990,31 +3997,36 @@ def _build_executive_summary(critical, high, medium, low, total, total_assets, r
             "findings. No remediation is currently required."
         )
 
+    # Same Critical/High/Medium/Low vocabulary as the "Sensitivity" badge
+    # (_risk_rating_label) — real follow-up request: no separate made-up
+    # rating words ("Elevated Risk" etc.) anywhere on the report.
+    rating = _risk_rating_label(critical, high, medium, low)
+
     if critical > 0:
         high_clause = (
             f" and {high} high-severity finding{'s' if high != 1 else ''}" if high else ""
         )
         severity_line = (
-            f"The overall security posture is currently rated as High Risk, primarily driven by "
+            f"The overall security posture is currently rated as {rating}, primarily driven by "
             f"{critical} critical vulnerabilit{'y' if critical == 1 else 'ies'}{high_clause} that "
             "require immediate remediation to reduce the attack surface."
         )
     elif high > 0:
         severity_line = (
             f"No critical vulnerabilities were identified. The overall security posture is "
-            f"currently rated as Elevated Risk, driven by {high} high-severity finding"
+            f"currently rated as {rating}, driven by {high} high-severity finding"
             f"{'s' if high != 1 else ''} that should be prioritized for remediation."
         )
     elif medium > 0:
         severity_line = (
             "No critical or high-severity vulnerabilities were identified. The overall security "
-            f"posture is currently rated as Moderate Risk, with {medium} medium-severity finding"
+            f"posture is currently rated as {rating}, with {medium} medium-severity finding"
             f"{'s' if medium != 1 else ''} recommended for scheduled remediation."
         )
     else:
         severity_line = (
             "No critical, high, or medium-severity vulnerabilities were identified. The overall "
-            "security posture is currently rated as Low Risk — the remaining low-severity finding"
+            f"security posture is currently rated as {rating} — the remaining low-severity finding"
             f"{'s' if low != 1 else ''} can be addressed as routine maintenance."
         )
 
