@@ -3947,6 +3947,28 @@ _REPORT_SEVERITY_COLORS = {
 }
 
 
+def _risk_rating_label(critical, high, medium, low):
+    """
+    Real bug report: the report's "Sensitivity" badge was hardcoded to
+    just 'HIGH' if (critical or high or medium) else 'MODERATE' — a
+    report with 0 critical, 0 high, and even a single medium-severity
+    finding showed "HIGH", same overstated-severity problem the Executive
+    Summary text had before it was made data-driven (see
+    _build_executive_summary). Same tiering used there, extracted here so
+    the "Sensitivity" badge and any other short rating label can use the
+    real calculation too, without duplicating it a third time.
+    """
+    if critical > 0:
+        return "High Risk"
+    if high > 0:
+        return "Elevated Risk"
+    if medium > 0:
+        return "Moderate Risk"
+    if low > 0:
+        return "Low Risk"
+    return "No Findings"
+
+
 def _build_executive_summary(critical, high, medium, low, total, total_assets, risk_score):
     """
     Real bug report: the "Vul management program Report" page's Executive
@@ -4070,6 +4092,10 @@ def _build_report_data(request):
         "vulnerabilities_fixed": summary.get("vulnerabilities_fixed") or {},
         "team_distribution": distribution_data.get("distribution") or [],
         "vulnerabilities_detail": detailed_data.get("vulnerabilities") or [],
+        # Real bug report: the "Sensitivity" badge was hardcoded to just
+        # HIGH/MODERATE (HIGH the instant even one medium finding existed,
+        # 0 critical/high included) — see _risk_rating_label.
+        "risk_rating": _risk_rating_label(critical, high, medium, low),
         # Real bug report: frontend's Executive Summary paragraph was
         # hardcoded, generic placeholder copy that never matched the
         # report's real severity counts — see _build_executive_summary.
@@ -4300,7 +4326,7 @@ def _render_report_html(data):
         <p>{esc(data.get('executive_summary') or f"The security assessment identified a total of {total} distinct security findings across {data['total_assets']} assets.")}</p>
         <div class="score-grid">
           <div class="score-box"><span>Risk Score</span><strong>{data['risk_score']}/100</strong></div>
-          <div class="score-box"><span>Sensitivity</span><strong>{'HIGH' if (crit or high or med) else 'MODERATE'}</strong></div>
+          <div class="score-box"><span>Sensitivity</span><strong>{esc(data.get('risk_rating') or _risk_rating_label(crit, high, med, low)).upper()}</strong></div>
         </div>
       </div>
       <div class="card dark-card">
