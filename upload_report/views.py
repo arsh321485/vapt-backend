@@ -3120,6 +3120,22 @@ def _render_html_report(data, file_name, generated_on, date_of_testing):
     open_  = sum(1 for r in rows if r["status"] == "open")
     rem_pct = round((closed / len(rows)) * 100) if rows else 0
 
+    # Real bug report: the Executive Summary paragraph below was hardcoded
+    # ("...primarily driven by unpatched critical assets...", always
+    # "High Risk") regardless of the report's real severity counts — same
+    # bug already fixed on the website/Slack/Teams download path
+    # (adminregister.views._build_executive_summary / _render_report_html).
+    # This is a separate, legacy download endpoint with its own duplicate
+    # template, so it needs the same fix applied here too.
+    total_assets = len({r["asset"] for r in rows if r.get("asset")})
+    _weighted = stats["critical"] * 8 + stats["high"] * 5 + stats["medium"] * 3 + stats["low"] * 1
+    risk_score = round((_weighted / (total * 8)) * 100) if total else 0
+    from adminregister.views import _build_executive_summary
+    executive_summary = _build_executive_summary(
+        stats["critical"], stats["high"], stats["medium"], stats["low"],
+        total, total_assets, risk_score,
+    )
+
     _sev_colors = {
         "critical": ("#fee2e2", "#b91c1c"),
         "high":     ("#ffedd5", "#c2410c"),
@@ -3244,11 +3260,7 @@ def _render_html_report(data, file_name, generated_on, date_of_testing):
     <div class="card">
       <h2>◫ Executive Summary</h2>
       <p style="color:#5a6477;font-size:14px;line-height:1.6;">
-        The security assessment reveals a total of <strong>{total}</strong> distinct security findings.
-        The overall security posture is currently rated as
-        <em style="color:#b72323;font-weight:700;">High Risk</em>,
-        primarily driven by unpatched critical assets.
-        Immediate remediation is advised for top findings to reduce the attack surface.
+        {executive_summary}
       </p>
       <div class="score-grid">
         <div class="score-box"><span>Total Findings</span><strong>{total}</strong></div>
