@@ -1010,29 +1010,45 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
             # Check for "Host Information" section
             if current.name == "div":
                 classes = current.get("class", [])
-                if "details-header" in classes:
-                    header_text = _clean_text(current).lower()
-                    
-                    if "host information" in header_text:
-                        # Extract host properties table — try table-wrapper div first, then direct table sibling
-                        table = None
-                        table_wrapper = current.find_next_sibling("div", class_="table-wrapper")
-                        if table_wrapper:
-                            table = table_wrapper.find("table")
-                        if not table:
-                            table = current.find_next_sibling("table")
-                        if not table:
-                            # Last resort: find any next sibling with a table inside it
-                            for sib in current.next_siblings:
-                                if hasattr(sib, "find"):
-                                    table = sib.find("table")
-                                    if table:
-                                        break
-                                    if getattr(sib, "name", None) in ("div",) and \
-                                       "host" not in (getattr(sib, "get", lambda k, d=None: d)("class") or []):
-                                        break
-                        if table:
-                            host_entry["host_information"] = _html_table_to_map(table)
+                header_text = _clean_text(current).lower()
+                # Real bug report: a whole report (5/5 hosts) came back with
+                # host_information = {} for EVERY host, even though the
+                # export genuinely had a proper "Host Information" table for
+                # each (DNS Name/Netbios Name/IP/OS — confirmed missing only
+                # from OUR parsed data, not from the source file) — that
+                # template variant doesn't tag the section header with the
+                # "details-header" class this check required, so it never
+                # fired at all. Broadened to also fire on the header's own
+                # short TEXT ("host information", under 60 chars — a section
+                # label, not some unrelated block of prose that happens to
+                # mention the phrase), same discipline scan_info's own
+                # extraction above already uses (text-based, not
+                # class-based). The class check stays as the fast, already-
+                # proven path; text is only a fallback, and never overrides
+                # an already-found result.
+                is_host_info_header = "details-header" in classes or (
+                    "host information" in header_text and len(header_text) < 60
+                )
+                if is_host_info_header and "host information" in header_text and not host_entry["host_information"]:
+                    # Extract host properties table — try table-wrapper div first, then direct table sibling
+                    table = None
+                    table_wrapper = current.find_next_sibling("div", class_="table-wrapper")
+                    if table_wrapper:
+                        table = table_wrapper.find("table")
+                    if not table:
+                        table = current.find_next_sibling("table")
+                    if not table:
+                        # Last resort: find any next sibling with a table inside it
+                        for sib in current.next_siblings:
+                            if hasattr(sib, "find"):
+                                table = sib.find("table")
+                                if table:
+                                    break
+                                if getattr(sib, "name", None) in ("div",) and \
+                                   "host" not in (getattr(sib, "get", lambda k, d=None: d)("class") or []):
+                                    break
+                    if table:
+                        host_entry["host_information"] = _html_table_to_map(table)
                 
                 # Check for vulnerability toggle divs (containing plugin ID and name)
                 onclick = current.get("onclick", "")
