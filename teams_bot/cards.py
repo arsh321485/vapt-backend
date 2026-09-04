@@ -21,6 +21,40 @@ Action.Execute + a synchronous invoke response as the only way around it.
 import logging
 logger = logging.getLogger(__name__)
 
+
+def pricing_url(admin=None):
+    """Every "Upgrade to Premium"/"Upgrade Plan" button's target — matches
+    Slack's own equivalent (users.views._freemium_upgrade_prompt,
+    _post_over_limit_choice's "Upgrade plan" button).
+
+    Real bug report: this used to be a bare static URL
+    ("https://vaptfix.ai/pricingplan?source=teams") — Action.OpenUrl opens
+    in the CLICKER's own default browser (same reasoning as
+    download_tab.py's module docstring), which has no way to carry the
+    admin's website session, so the pricing page had no idea which admin
+    was visiting and showed "$0.00 / 0 assets" instead of their real
+    report's numbers — same failure Slack's own pricing handoff
+    (SlackPricingHandoffView) already exists to fix for that platform.
+    Reuses that exact same signer/token (its name says "Slack" but the
+    mechanism and the exchange endpoint are platform-agnostic — a short-
+    lived signed admin id, exchanged for real JWTs) rather than building
+    a parallel one, so the frontend's existing SlackPricingHandoffView
+    integration covers Teams too with no separate endpoint to call. Falls
+    back to the bare URL (no token) when `admin` isn't available at the
+    call site — better than a broken button, but the frontend then has no
+    way to identify the visitor, same as before this fix.
+    """
+    if not admin:
+        return "https://vaptfix.ai/pricingplan?source=teams"
+    try:
+        from urllib.parse import quote
+        from users.views import _slack_pricing_handoff_signer
+        token = _slack_pricing_handoff_signer().sign(str(admin.id))
+        return f"https://vaptfix.ai/pricingplan?source=teams&admin_token={quote(token)}"
+    except Exception:
+        logger.exception("[TeamsBot] pricing_url: could not build signed admin_token")
+        return "https://vaptfix.ai/pricingplan?source=teams"
+
 _SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
 # Stayed on 1.4 deliberately — a 1.5-only ActionSet "orientation" property
 # was tried for the tab bars and, along with the (already-reverted)

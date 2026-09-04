@@ -164,7 +164,7 @@ def script_list_body(admin, offset=0):
             "actions": [{
                 "type": "Action.OpenUrl",
                 "title": "⭐ Upgrade to Premium",
-                "url": "https://vaptfix.ai/pricingplan?source=teams",
+                "url": cards.pricing_url(admin),
                 "style": "positive",
             }],
         })

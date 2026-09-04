@@ -125,7 +125,7 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
 
         if action_id in _VULN_DETAIL_ACTION_IDS:
             active_tab = "unav_register" if (value.get("ctx") == "register") else "unav_fix"
-            body = _render_vuln_detail_action(member_user, team_id, team_name, action_id, value)
+            body = _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id, value)
             return home.nav_buttons_card(team_name, active_action_id=active_tab, extra_body=body)
     except Exception:
         logger.exception("[TeamsBot] user_actions render failed for team=%s action_id=%s", team_name, action_id)
@@ -166,9 +166,9 @@ def _render_fix(member_user, admin, team_id, team_name, action_id, value):
         return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_vulns", offset=offset)
 
     if action_id == "ufix_asset_vuln_view":
-        return fix.vuln_detail_body(member_user, team_id, team_name, _as_int(value.get("idx")), ctx="asset", host=value.get("host"), offset=offset)
+        return fix.vuln_detail_body(member_user, team_id, team_name, _as_int(value.get("idx")), ctx="asset", host=value.get("host"), offset=offset, admin=admin)
     if action_id == "ufix_vuln_view":
-        return fix.vuln_detail_body(member_user, team_id, team_name, _as_int(value.get("idx")), ctx="vulns", offset=offset)
+        return fix.vuln_detail_body(member_user, team_id, team_name, _as_int(value.get("idx")), ctx="vulns", offset=offset, admin=admin)
 
     if action_id == "ufix_common_vuln_view":
         return [fix._fix_subnav_columnset("ufix_sub_common")] + fix.common_vuln_detail_for_team(admin, team_name, _as_int(value.get("idx")), back_offset=offset)
@@ -250,7 +250,7 @@ def _render_fixed(member_user, team_name, action_id, value):
 
 # ── Shared vuln-detail actions (toggle / mark mitigated / extension) ─────
 
-def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value):
+def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id, value):
     offset = _as_int(value.get("offset")) or 0
     vctx = value.get("ctx") or "vulns"
     host = value.get("host")
@@ -262,7 +262,7 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
                 member_user, team_id, team_name, idx, sub=value.get("sub") or "manual",
                 sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset,
             )
-        return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=value.get("sub") or "manual")
+        return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=value.get("sub") or "manual", admin=admin)
 
     data = fix._fetch_team_data(member_user, team_name)
     rows = data.get("rows") or []
@@ -280,7 +280,7 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
     if action_id == "ufix_mark_mitigated":
         ok, error = fix.mark_mitigated(member_user, r, data.get("report_id"))
         banner = _result_banner(ok, f"{r.get('vul_name') or 'This vulnerability'} on {r.get('asset') or '—'} marked mitigated — your admin can verify it in the dashboard." if ok else (error or "Could not update fix status."))
-        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual")
+        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", admin=admin)
 
     if action_id in ("ufix_step_nav", "ufix_step_complete"):
         step = _as_int(value.get("step")) or 1
@@ -288,9 +288,9 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
             ok, error = fix.complete_step(member_user, r, data.get("report_id"), step)
             if not ok:
                 banner = _result_banner(False, error or "Could not update this step.")
-                return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step)
+                return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step, admin=admin)
             step = step + 1  # auto-advance to the next step after completing this one
-        return _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step)
+        return _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step, admin=admin)
 
     if action_id == "usup_step_form":
         step = _as_int(value.get("step")) or 1
@@ -300,12 +300,12 @@ def _render_vuln_detail_action(member_user, team_id, team_name, action_id, value
         step = _as_int(value.get("step")) or 1
         ok, error = fix.submit_step_support_request(member_user, r, data.get("report_id"), step, value.get("usup_step_message"))
         banner = _result_banner(ok, "Your admin has been notified about this step." if ok else (error or "Could not raise support request."))
-        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step)
+        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step, admin=admin)
 
     if action_id == "ufix_retest":
         ok, error = fix.submit_retest(member_user, r, data.get("report_id"))
         banner = _result_banner(ok, f"{r.get('vul_name') or 'This vulnerability'} on {r.get('asset') or '—'} sent to your admin for verification." if ok else (error or "Could not submit for retest."))
-        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual")
+        return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", admin=admin)
 
     return [cards._body_text("Nothing to show.")]
 
@@ -317,7 +317,7 @@ def _result_banner(ok, text):
     }
 
 
-def _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=None):
+def _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=None, admin=None):
     """Re-renders the SAME vuln's full detail (facts + toggle + steps +
     action buttons) after an action — keeps the member's context on
     screen instead of collapsing it down to a bare result message, and
@@ -328,7 +328,7 @@ def _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset
             member_user, team_id, team_name, idx, sub=sub,
             sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset, step_number=step_number,
         )
-    return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=sub, step_number=step_number)
+    return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=sub, step_number=step_number, admin=admin)
 
 
 def _as_int(v):

@@ -300,7 +300,7 @@ def _fetch_automation_match(admin, r):
     return {"matched": False, "message": "No automated fix available for this vulnerability."}
 
 
-def _automation_fix_body(automation):
+def _automation_fix_body(automation, admin=None):
     if not automation.get("matched"):
         return [{"type": "TextBlock", "text": "Automation script not ready for this vulnerability.", "wrap": True, "isSubtle": True, "spacing": "Medium"}]
 
@@ -333,7 +333,7 @@ def _automation_fix_body(automation):
                 "actions": [{
                     "type": "Action.OpenUrl",
                     "title": "⭐ Upgrade to Premium",
-                    "url": "https://vaptfix.ai/pricingplan?source=teams",
+                    "url": cards.pricing_url(admin),
                     "style": "positive",
                 }],
             },
@@ -596,7 +596,7 @@ def _vuln_detail_full_body(admin, idx, sub="manual", ctx="vulns", host=None, off
     try:
         if sub == "automation":
             automation = _fetch_automation_match(admin, r)
-            body.extend(_automation_fix_body(automation))
+            body.extend(_automation_fix_body(automation, admin=admin))
         else:
             fix_vuln_id = _get_or_create_fix_vuln_id(admin, r, data.get("report_id"))
             steps_data = _fetch_fix_steps(admin, fix_vuln_id) if fix_vuln_id else None

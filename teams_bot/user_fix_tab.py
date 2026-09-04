@@ -393,7 +393,7 @@ def _retest_actionset(value_base):
 
 
 def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=None, offset=0, sub="manual",
-                      back_action_id=None, back_title=None, extra_value=None, step_number=None):
+                      back_action_id=None, back_title=None, extra_value=None, step_number=None, admin=None):
     """Shared by every entry point that drills into one vulnerability's own
     detail (flat All Vulns list, an asset's own vuln list, Register's
     filtered list — ctx/host decide where Back goes for the two built-in
@@ -445,7 +445,7 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
     try:
         if sub == "automation":
             automation = _fetch_automation_match(member_user, r)
-            body.extend(_automation_fix_body(automation))
+            body.extend(_automation_fix_body(automation, admin=admin))
             plugin_id = automation.get("plugin_id") or r.get("plugin_id")
             # Don't offer a Download button the actual download endpoint
             # (user_download_script, called in-process by
