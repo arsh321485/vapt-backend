@@ -229,6 +229,51 @@ def release_report_watch(team_id: str):
         )
 
 
+def was_state_recently_posted(team_id: str, state: str, within_seconds: int = 20) -> bool:
+    """
+    Real bug report (screenshot): a fresh admin signup showed the SAME
+    welcome card posted TWICE, back to back, in the admin-dashboard
+    channel. Root cause — two independent, legitimate triggers for
+    teams_bot.onboarding.post_onboarding_step both fire around the same
+    login: the synchronous one in users.views._ensure_admin_dashboard_
+    channel's _repoint_and_post, and the async one in teams_bot.views.
+    _handle_conversation_update (Teams' own "bot added" webhook, which
+    can arrive a couple seconds after the synchronous post already
+    finished). claim_post_slot already guards against two truly
+    CONCURRENT posts, but its lock is only held for the few seconds the
+    delete+send itself takes — by the time the webhook-driven call comes
+    in, the first claim has already been released, so it just sees the
+    slot free and posts a genuine duplicate.
+    This is a coarser, state-aware guard on top of that: if the SAME
+    state was already posted within the last `within_seconds`, treat it
+    as already handled and skip reposting entirely, regardless of which
+    trigger asked. A genuine state change (e.g. "no_report" ->
+    "needs_risk_criteria" right after upload) always has a different
+    `state` string, so it's never suppressed by this.
+    """
+    if not team_id or not state:
+        return False
+    with MongoContext() as db:
+        doc = db[TEAM_CHANNEL_COLLECTION].find_one({"team_id": team_id})
+        if not doc or doc.get("last_posted_state") != state:
+            return False
+        last_posted_at = doc.get("last_posted_at")
+        if not last_posted_at:
+            return False
+        age = (datetime.datetime.utcnow() - last_posted_at).total_seconds()
+        return age < within_seconds
+
+
+def mark_state_posted(team_id: str, state: str):
+    if not team_id or not state:
+        return
+    with MongoContext() as db:
+        db[TEAM_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id},
+            {"$set": {"last_posted_state": state, "last_posted_at": datetime.datetime.utcnow()}},
+        )
+
+
 def set_active_message_id(team_id: str, message_id):
     """
     Tracks the id of the single "live" onboarding/dashboard card currently

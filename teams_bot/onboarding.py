@@ -11,7 +11,10 @@ three surfaces can never drift out of sync on what "ready" means.
 import logging
 
 from . import bot_api, cards
-from .conversation_store import get_team_channel_reference, set_active_message_id, claim_post_slot, release_post_slot
+from .conversation_store import (
+    get_team_channel_reference, set_active_message_id, claim_post_slot, release_post_slot,
+    was_state_recently_posted, mark_state_posted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +109,14 @@ def post_onboarding_step(admin, team_id=None, force_state=None):
         from users.views import _get_admin_onboarding_state
         state = _get_admin_onboarding_state(admin)
 
+    if was_state_recently_posted(team_id, state):
+        logger.info(f"[TeamsOnboarding] state={state} was already posted for team_id={team_id} moments ago — skipping duplicate")
+        return state
+
     card = build_state_card(admin, team_id, state)
     new_message_id = replace_active_card(team_id, card)
+    if new_message_id:
+        mark_state_posted(team_id, state)
     logger.info(f"[TeamsOnboarding] Posted state={state} card into team_id={team_id} (new_message_id={new_message_id})")
     return state
 
