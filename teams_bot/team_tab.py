@@ -20,12 +20,18 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
 
+
+# Real follow-up request: back to one row, full text still visible — see
+# cards.NAV_ITEMS' own comment for the reasoning (emoji dropped, same
+# unverified-in-real-Teams status; revert to
+# cards.two_row_pill_columnset(TEAM_SUBTABS, ..., split=3) if this row
+# renders broken/truncated in real Teams).
 TEAM_SUBTABS = [
-    ("team_sub_team", "📈 Team Performance"),
-    ("team_sub_adduser", "➕ Add User"),
-    ("team_sub_deleteuser", "🗑️ Delete User"),
-    ("team_sub_deleteteamuser", "🔄 Update User Role"),
-    ("team_sub_externaluser", "🌐 External User"),
+    ("team_sub_team", "Team Performance"),
+    ("team_sub_adduser", "Add User"),
+    ("team_sub_deleteuser", "Delete User"),
+    ("team_sub_deleteteamuser", "Update User Role"),
+    ("team_sub_externaluser", "External User"),
 ]
 
 # code -> full team name, matches SlackSlashCommandView._TEAM_MAP exactly.
@@ -39,9 +45,7 @@ TEAM_CODE_TO_NAME = dict(TEAM_ROLE_OPTIONS)
 
 
 def team_subnav_columnset(active_sub):
-    # 5 items, one of them ("Update User Role") long enough to truncate
-    # in a single row — same two-row fix as the top nav bar and Reminder.
-    return cards.two_row_pill_columnset(TEAM_SUBTABS, active_sub, lambda k: {"action_id": k})
+    return cards.pill_columnset(TEAM_SUBTABS, active_sub, lambda k: {"action_id": k})
 
 
 # ── shared data fetch ─────────────────────────────────────────────────

@@ -299,20 +299,30 @@ def risk_criteria_prompt_card():
 # Same tab set + order as SlackSlashCommandView._NAV_ITEMS, and the same
 # internal action_id spelling (nav_home, nav_fix, ...) so any shared
 # downstream data-formatting code keys off one consistent name across both
-# platforms. Full names kept (not shortened) per explicit request — real
-# Action.Execute buttons get a narrow, roughly-uniform rendered width in
-# Teams regardless of label length, so all 8 in one row truncated these;
-# see _nav_button_columnset for how that's solved (two rows) instead of
-# shortening the text.
+# platforms.
+#
+# Real follow-up request: wanted this back to one row instead of two, full
+# text still visible (no more shortening than this). Emoji icons dropped
+# from every label — they render as their own glyph and eat into each
+# button's real, roughly-uniform width the same as a character does, so
+# this is the one variable not yet tried for fitting all 8 in a single
+# pill_columnset row without truncating the words themselves.
+# UNVERIFIED IN REAL TEAMS — the two-row split this replaces was only
+# adopted after real testing showed 8-in-one-row truncated with emoji
+# still in the labels; that same experiment was never re-run with emoji
+# removed. If this row renders broken/truncated in real Teams, revert
+# _nav_button_columnset to `two_row_pill_columnset(NAV_ITEMS, ...,
+# split=4)` (still using this same label list, whether emoji comes back
+# is a separate call).
 NAV_ITEMS = [
-    ("nav_home", "🏠 Home"),
-    ("nav_fix", "🔧 Fix"),
-    ("nav_register", "📋 Register"),
-    ("nav_automation", "🤖 Automations"),
-    ("nav_team", "👥 Team"),
-    ("nav_request", "📨 Timeline Ext."),
-    ("nav_notification", "🔔 Reminder"),
-    ("nav_download", "📥 Download Report"),
+    ("nav_home", "Home"),
+    ("nav_fix", "Fix"),
+    ("nav_register", "Register"),
+    ("nav_automation", "Automations"),
+    ("nav_team", "Team"),
+    ("nav_request", "Timeline Ext."),
+    ("nav_notification", "Reminder"),
+    ("nav_download", "Download Report"),
 ]
 
 
@@ -394,9 +404,9 @@ def two_row_pill_columnset(options, active_key, build_data, split=None):
 
 
 def _nav_button_columnset(active_action_id):
-    """The persistent top tab bar — see two_row_pill_columnset for why
-    this is two rows of 4 instead of one row of 8."""
-    return two_row_pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}, split=4)
+    """The persistent top tab bar — one row of all 8, see NAV_ITEMS'
+    own comment for the real-Teams-testing status of this."""
+    return pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id})
 
 
 def nav_buttons_card(active_action_id="nav_home", extra_body=None):
