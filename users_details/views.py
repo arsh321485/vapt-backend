@@ -353,8 +353,21 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
             logger.info(f"[TeamsSync] channels fetched count={len(channels)}")
             # Build O(1) lookup map instead of linear search per role
             channel_map_display = {ch['displayName']: ch for ch in channels}
+            # Real bug: `role` here is the bare VaptFix team name ("Configuration
+            # Management") but the actual Teams channel's displayName is
+            # "vaptfix Configuration Management team" (see
+            # users.views.TEAMS_CHANNEL_DISPLAY_NAMES) — a direct dict lookup by
+            # `role` never matched anything, so every member add reported
+            # "channel_not_found" even when the channel existed and the member
+            # already had access to it via team membership (standard channels
+            # don't need an individual add — see the comment below). Map through
+            # the same display-name table the channels were created with before
+            # looking up, falling back to the raw role for any custom/renamed
+            # channel that table doesn't know about.
+            from users.views import TEAMS_CHANNEL_DISPLAY_NAMES
             for role in member_roles:
-                matching_channel = channel_map_display.get(role)
+                display_name = TEAMS_CHANNEL_DISPLAY_NAMES.get(role, role)
+                matching_channel = channel_map_display.get(display_name) or channel_map_display.get(role)
                 if not matching_channel:
                     results.append({"channel": role, "status": "channel_not_found"})
                     continue
