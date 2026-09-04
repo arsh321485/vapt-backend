@@ -17,14 +17,19 @@ from . import cards
 
 logger = logging.getLogger(__name__)
 
+# Real follow-up request: same one-row-full-text experiment as the
+# admin-side nav (cards.NAV_ITEMS) — see its comment for the reasoning
+# and the unverified-in-real-Teams caveat. Emoji dropped, nav_buttons_card
+# below switched from two_row_pill_columnset to plain pill_columnset;
+# revert both together if this renders broken/truncated in real Teams.
 UNAV_ITEMS = [
-    ("unav_home",     "🏠 Home"),
-    ("unav_fix",      "🔧 Fix"),
-    ("unav_register", "📋 Register"),
-    ("unav_extend",   "📨 Timeline Ext."),
-    ("unav_support",  "🎫 Support Status"),
-    ("unav_fixed",    "✅ Fixed"),
-    ("unav_reminder", "🔔 Reminder"),
+    ("unav_home",     "Home"),
+    ("unav_fix",      "Fix"),
+    ("unav_register", "Register"),
+    ("unav_extend",   "Timeline Ext."),
+    ("unav_support",  "Support Status"),
+    ("unav_fixed",    "Fixed"),
+    ("unav_reminder", "Reminder"),
 ]
 UFIX_SUBTABS = [
     ("ufix_sub_assets", "🖥 All Assets"),
@@ -58,11 +63,12 @@ def nav_buttons_card(team_name, active_action_id="unav_home", extra_body=None):
     """
     body = [
         {"type": "TextBlock", "text": f"👥 {team_name}", "weight": "Bolder", "size": "Small", "isSubtle": True, "spacing": "None", "wrap": True},
-        # split=4: Home/Fix/Register/Timeline Ext. in row 1, Support
-        # Status/Fixed/Reminder in row 2 — confirmed via real feedback
-        # that Timeline Ext. belongs in the upper row (the split=3 tried
-        # right before this made Timeline Ext. wrap down to row 2 instead).
-        cards.two_row_pill_columnset(UNAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}, split=4),
+        # One row of all 7 — see UNAV_ITEMS' own comment for the real-
+        # Teams-testing status of this. Revert to
+        # cards.two_row_pill_columnset(UNAV_ITEMS, active_action_id,
+        # lambda action_id: {"action_id": action_id}, split=4) if this
+        # renders broken/truncated in real Teams.
+        cards.pill_columnset(UNAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}),
     ]
     body.extend(extra_body or [])
     return cards._card(body=body)
