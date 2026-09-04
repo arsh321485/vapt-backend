@@ -16,7 +16,7 @@ from rest_framework import status
 from .auth import verify_bot_framework_request, BotAuthError
 from . import bot_api, cards, actions
 from . import member_resolve, user_actions
-from .conversation_store import save_conversation_reference, save_team_channel_reference, resolve_team_id_from_thread_id
+from .conversation_store import save_conversation_reference, save_team_channel_reference, resolve_team_id_from_thread_id, is_admin_dashboard_channel
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -301,6 +301,7 @@ class TeamsBotMessagesView(APIView):
         data = action.get("data") or {}
 
         admin, team_id = self._resolve_admin(activity)
+        channel_id = member_resolve._extract_channel_id(activity)
         if not admin:
             card = cards.text_result_card(
                 "🔒 Not linked",
@@ -313,28 +314,81 @@ class TeamsBotMessagesView(APIView):
                 logger.exception("[TeamsBot] handle_user_activity failed (invoke)")
                 card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
         else:
-            channel_id = member_resolve._extract_channel_id(activity)
             try:
                 card = actions.handle_card_action(admin, team_id, channel_id, data)
             except Exception:
                 logger.exception("[TeamsBot] handle_card_action failed (invoke)")
                 card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
 
-            # Keep the tracked "active" message id in sync too — other,
-            # unrelated proactive pushes (post_onboarding_step after a
-            # report upload, etc.) still edit/replace via that id.
-            try:
-                target_id = activity.get("replyToId") or activity.get("id")
-                if team_id and target_id:
-                    from .conversation_store import set_active_message_id
-                    set_active_message_id(team_id, target_id)
-            except Exception:
-                logger.exception("[TeamsBot] set_active_message_id (invoke) failed")
+            # Real bug report: the admin clicking around inside one of the
+            # 4 TEAM channels (not their own admin-dashboard channel)
+            # still generates admin-scoped content (handle_card_action
+            # always does, regardless of which channel the click came
+            # from) — same mirrored check as _handle_message's own fix,
+            # needed separately here since Action.Execute clicks (this
+            # handler, not _handle_message) are what every button in this
+            # bot actually uses.
+            if channel_id and not is_admin_dashboard_channel(team_id, channel_id):
+                card["_is_access_blocked"] = True
+            else:
+                # Keep the tracked "active" message id in sync too —
+                # other, unrelated proactive pushes (post_onboarding_step
+                # after a report upload, etc.) still edit/replace via
+                # that id.
+                try:
+                    target_id = activity.get("replyToId") or activity.get("id")
+                    if team_id and target_id:
+                        from .conversation_store import set_active_message_id
+                        set_active_message_id(team_id, target_id)
+                except Exception:
+                    logger.exception("[TeamsBot] set_active_message_id (invoke) failed")
+
+        # Real bug report: a blocked-access card (member in the admin's
+        # own channel, or — see above — the admin in a member channel)
+        # was returned straight as the invoke response, which Action.
+        # Execute ALWAYS uses to replace the clicked message IN PLACE —
+        # there's no per-viewer option at the protocol level, so that
+        # silently overwrote the shared card everyone else in that
+        # channel was supposed to see, same underlying bug
+        # _handle_message's own _is_access_blocked fix targets, just via
+        # the OTHER (invoke) code path every real button click actually
+        # goes through. The real response still reaches whoever clicked —
+        # as a brand-new private-style reply — while the invoke response
+        # itself re-renders this channel's own correct default Home card,
+        # so the in-place replacement is a no-op for every legitimate
+        # viewer instead of corrupting what they see.
+        if card.pop("_is_access_blocked", False):
+            service_url = activity.get("serviceUrl")
+            conversation_id = (activity.get("conversation") or {}).get("id")
+            activity_id = activity.get("id")
+            bot_api.reply_to_activity(service_url, conversation_id, activity_id, bot_api.card_message(card))
+            card = self._safe_default_card(admin, team_id, channel_id) or card
 
         return Response(
             {"statusCode": 200, "type": "application/vnd.microsoft.card.adaptive", "value": card},
             status=status.HTTP_200_OK,
         )
+
+    def _safe_default_card(self, admin, team_id, channel_id):
+        """Whatever this channel's OWN correct default Home card actually
+        is — see the _is_access_blocked handling above for why this is
+        needed instead of just returning the blocked-notice/admin-scoped
+        card as the invoke response. Never raises — a None return just
+        falls back to the (real, private-reply-already-sent) card the
+        caller already has."""
+        try:
+            if is_admin_dashboard_channel(team_id, channel_id):
+                return actions.handle_card_action(admin, team_id, channel_id, {"action_id": "nav_home"})
+            from .conversation_store import get_team_name_for_channel
+            team_name = get_team_name_for_channel(team_id, channel_id)
+            if not team_name:
+                return None
+            from . import user_home_tab
+            home_body = user_home_tab.home_tab_body(team_id, team_name)
+            return user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
+        except Exception:
+            logger.exception("[TeamsBot] _safe_default_card failed")
+            return None
 
     def _resolve_admin(self, activity: dict):
         # Bot Framework's channelData.team.id is a CONVERSATION/thread id
@@ -394,6 +448,15 @@ class TeamsBotMessagesView(APIView):
                     bot_api.text_message("This Teams workspace isn't linked to a VaptFix admin account yet — please log in from the website first."),
                 )
                 return
+            # conversation_id is kept for the reply/update calls further
+            # down (service_url pairing etc.) — the real per-CHANNEL id
+            # (needed to tell "admin's own dashboard channel" apart from
+            # one of the 4 member team channels) is a distinct value, see
+            # _extract_channel_id. Computed unconditionally now (used by
+            # both branches below, and by the admin-in-member-channel
+            # check right after).
+            channel_id = member_resolve._extract_channel_id(activity)
+
             if member_resolve.is_member_sender(activity, admin):
                 try:
                     card = user_actions.handle_user_activity(activity, admin, team_id, activity.get("value") or {})
@@ -402,16 +465,24 @@ class TeamsBotMessagesView(APIView):
                     card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
             else:
                 try:
-                    # conversation_id is kept for the reply/update calls
-                    # further down (service_url pairing etc.) — the real
-                    # per-CHANNEL id (needed to tell "admin's own dashboard
-                    # channel" apart from one of the 4 member team
-                    # channels) is a distinct value, see _extract_channel_id.
-                    channel_id = member_resolve._extract_channel_id(activity)
                     card = actions.handle_card_action(admin, team_id, channel_id, activity.get("value") or {})
                 except Exception:
                     logger.exception("[TeamsBot] handle_card_action failed")
                     card = cards.text_result_card("❌ Something went wrong", "Please try that again.")
+
+                # Real bug report: the admin clicking around inside one of
+                # the 4 TEAM channels (not their own admin-dashboard
+                # channel) still generates admin-scoped content (this
+                # branch always does, regardless of which channel the
+                # click came from) — that response then went through the
+                # same update_activity path below as any normal click,
+                # overwriting the shared Home card team MEMBERS see in
+                # that channel with the admin's own nav/dashboard. Mirror
+                # of the _is_access_blocked fix below, other direction:
+                # the admin still gets their response, just as a private-
+                # style reply instead of editing the team's shared card.
+                if channel_id and not is_admin_dashboard_channel(team_id, channel_id):
+                    card["_is_access_blocked"] = True
 
             # Real bug report: a blocked-access card (wrong channel, not on
             # this team, etc.) was going through the SAME update_activity
