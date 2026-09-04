@@ -1521,21 +1521,49 @@ def _backfill_sub_channel_bot_presence(team_id, channels_result):
         save_sub_channel_team(team_id, channel_id, team_name)
         if is_sub_channel_welcomed(team_id, channel_id):
             continue
-        try:
-            resp = bot_api.send_activity(
-                service_url, channel_id,
-                bot_api.text_message(
-                    f"👋 VaptFix bot is here for the **{team_name}** team! "
-                    f"Mention me (@VaptFix) anytime to see your team's dashboard, fix vulnerabilities and more."
-                ),
-            )
-            if resp is not None and resp.status_code < 300:
-                mark_sub_channel_welcomed(team_id, channel_id)
-                logger.info(f"[TeamsChannels] Sent sub-channel welcome for team_id={team_id} channel={team_name}")
-            else:
-                logger.warning(f"[TeamsChannels] sub-channel welcome send failed for {team_name}: {getattr(resp, 'status_code', None)}")
-        except Exception:
-            logger.exception(f"[TeamsChannels] sub-channel welcome send raised for {team_name}")
+
+        # Real bug report: a fresh team's 4 sub-channels all came back with
+        # welcomed_at still unset after this function had already run once
+        # at creation time — the very first send here happens milliseconds
+        # after the channel was just created via Graph, and Teams needs a
+        # moment to finish propagating the bot's access to a BRAND-NEW
+        # channel server-side, so that first attempt can transiently fail.
+        # This function is "safe to call on every login" so a later login
+        # WOULD eventually retry it — but that meant an admin had to notice
+        # the missing card and manually log in again themselves. Retrying
+        # a few times with a short delay, all still inside this one login
+        # request, means the very first login has a real chance to just
+        # work instead of silently needing a second one.
+        def _send_with_retry(build_activity, label, attempts=3, delay_seconds=1.5):
+            last_resp = None
+            for attempt in range(attempts):
+                if attempt:
+                    time.sleep(delay_seconds)
+                try:
+                    last_resp = bot_api.send_activity(service_url, channel_id, build_activity())
+                except Exception:
+                    logger.exception(f"[TeamsChannels] {label} send attempt {attempt + 1}/{attempts} raised for {team_name}")
+                    continue
+                if last_resp is not None and last_resp.status_code < 300:
+                    return last_resp
+                logger.warning(
+                    f"[TeamsChannels] {label} send attempt {attempt + 1}/{attempts} failed for {team_name}: "
+                    f"{getattr(last_resp, 'status_code', None)}"
+                )
+            return last_resp
+
+        resp = _send_with_retry(
+            lambda: bot_api.text_message(
+                f"👋 VaptFix bot is here for the **{team_name}** team! "
+                f"Mention me (@VaptFix) anytime to see your team's dashboard, fix vulnerabilities and more."
+            ),
+            "welcome text",
+        )
+        if resp is not None and resp.status_code < 300:
+            mark_sub_channel_welcomed(team_id, channel_id)
+            logger.info(f"[TeamsChannels] Sent sub-channel welcome for team_id={team_id} channel={team_name}")
+        else:
+            logger.warning(f"[TeamsChannels] sub-channel welcome send exhausted retries for {team_name}")
             continue
 
         # Immediately follow the plain welcome text with the real Home nav
@@ -1549,7 +1577,7 @@ def _backfill_sub_channel_bot_presence(team_id, channels_result):
             from teams_bot import user_home_tab
             home_body = user_home_tab.home_tab_body(team_id, team_name)
             card = user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
-            bot_api.send_activity(service_url, channel_id, bot_api.card_message(card))
+            _send_with_retry(lambda: bot_api.card_message(card), "initial Home card")
         except Exception:
             logger.exception(f"[TeamsChannels] initial Home card send failed for {team_name}")
 
