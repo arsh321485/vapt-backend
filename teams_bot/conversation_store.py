@@ -429,3 +429,30 @@ def mark_sub_channel_welcomed(team_id: str, channel_id: str):
             {"team_id": team_id, "channel_id": channel_id},
             {"$set": {"welcomed_at": datetime.datetime.utcnow()}},
         )
+
+
+def get_sub_channel_active_message_id(team_id: str, channel_id: str):
+    """The Bot Framework activity id of whichever card is currently the
+    "live" one in this team-sub-channel (Configuration Management,
+    Network Security, ...), or None if nothing's been tracked yet (e.g.
+    only the plain welcome TEXT has ever been sent, never a card). Used
+    to delete-then-repost on login so a member always lands on a fresh
+    Home tab instead of whatever tab someone last clicked — the same
+    single-live-card pattern the admin-dashboard channel already gets via
+    teams_bot.onboarding.replace_active_card, just keyed per sub-channel
+    here since a team can have 4 of these instead of just one."""
+    if not team_id or not channel_id:
+        return None
+    with MongoContext() as db:
+        doc = db[SUB_CHANNEL_COLLECTION].find_one({"team_id": team_id, "channel_id": channel_id})
+        return doc.get("active_message_id") if doc else None
+
+
+def set_sub_channel_active_message_id(team_id: str, channel_id: str, message_id):
+    if not team_id or not channel_id:
+        return
+    with MongoContext() as db:
+        db[SUB_CHANNEL_COLLECTION].update_one(
+            {"team_id": team_id, "channel_id": channel_id},
+            {"$set": {"active_message_id": message_id}},
+        )

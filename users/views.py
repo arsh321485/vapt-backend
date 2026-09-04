@@ -1491,7 +1491,7 @@ def _background_retry_sub_channel_welcome(team_id, channel_id, team_name, servic
     NEXT login either way (is_sub_channel_welcomed/mark_sub_channel_
     welcomed is the same idempotent gate _backfill_sub_channel_bot_presence
     itself checks), this is just trying to avoid needing one."""
-    from .conversation_store import is_sub_channel_welcomed, mark_sub_channel_welcomed
+    from teams_bot.conversation_store import is_sub_channel_welcomed, mark_sub_channel_welcomed, set_sub_channel_active_message_id
     from teams_bot import bot_api
 
     for delay_seconds in (10, 20, 40, 60):
@@ -1519,11 +1519,53 @@ def _background_retry_sub_channel_welcome(team_id, channel_id, team_name, servic
             from teams_bot import user_home_tab
             home_body = user_home_tab.home_tab_body(team_id, team_name)
             card = user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
-            bot_api.send_activity(service_url, channel_id, bot_api.card_message(card))
+            card_resp = bot_api.send_activity(service_url, channel_id, bot_api.card_message(card))
+            card_message_id = card_resp.json().get("id") if card_resp is not None and card_resp.status_code < 300 else None
+            if card_message_id:
+                set_sub_channel_active_message_id(team_id, channel_id, card_message_id)
         except Exception:
             logger.exception(f"[TeamsChannels] background retry: initial Home card send failed for {team_name}")
         return
     logger.warning(f"[TeamsChannels] background welcome retry exhausted every attempt for {team_name} — will retry on next login instead")
+
+
+def _reset_sub_channel_to_home(team_id, channel_id, team_name, service_url):
+    """
+    Real bug report: unlike the admin-dashboard channel (which gets its
+    active card replaced with a fresh Home-tab one on EVERY login — see
+    _ensure_admin_dashboard_channel's _repoint_and_post), a team
+    sub-channel's card was only ever posted ONCE, at first welcome
+    (_backfill_sub_channel_bot_presence below). After that, the channel
+    just kept showing whatever tab ANY member (or the admin, clicking in
+    to check on it) had last clicked — never resetting, so the next
+    person to open the channel could land on "Fix" or "Register" instead
+    of Home. Mirrors teams_bot.onboarding.replace_active_card's
+    delete-then-send approach (confirmed there that Bot Framework's PUT
+    edit-in-place doesn't reliably keep a stable clickable identity in
+    Teams anyway), just keyed per sub-channel via conversation_store's
+    get/set_sub_channel_active_message_id instead of the single
+    team-wide reference the admin channel uses.
+    """
+    from teams_bot.conversation_store import (
+        get_sub_channel_active_message_id, set_sub_channel_active_message_id,
+    )
+    from teams_bot import bot_api, user_home_tab
+
+    try:
+        old_message_id = get_sub_channel_active_message_id(team_id, channel_id)
+        if old_message_id:
+            bot_api.delete_activity(service_url, channel_id, old_message_id)
+
+        home_body = user_home_tab.home_tab_body(team_id, team_name)
+        card = user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
+        resp = bot_api.send_activity(service_url, channel_id, bot_api.card_message(card))
+        new_message_id = resp.json().get("id") if resp is not None and resp.status_code < 300 else None
+        if new_message_id:
+            set_sub_channel_active_message_id(team_id, channel_id, new_message_id)
+        else:
+            logger.warning(f"[TeamsChannels] reset-to-Home send failed for {team_name}: {getattr(resp, 'status_code', None)}")
+    except Exception:
+        logger.exception(f"[TeamsChannels] reset-to-Home raised for team_id={team_id} channel={team_name}")
 
 
 def _backfill_sub_channel_bot_presence(team_id, channels_result):
@@ -1568,6 +1610,15 @@ def _backfill_sub_channel_bot_presence(team_id, channels_result):
             continue
         save_sub_channel_team(team_id, channel_id, team_name)
         if is_sub_channel_welcomed(team_id, channel_id):
+            # Already welcomed on a previous login — the one-time welcome
+            # text/card doesn't need resending, but the card itself still
+            # needs resetting to Home so this login doesn't land on
+            # whatever tab was last left active (see
+            # _reset_sub_channel_to_home's own docstring).
+            try:
+                _reset_sub_channel_to_home(team_id, channel_id, team_name, service_url)
+            except Exception:
+                logger.exception(f"[TeamsChannels] reset-to-Home call failed for {team_name}")
             continue
 
         # Real bug report: a fresh team's 4 sub-channels all came back with
@@ -1640,9 +1691,13 @@ def _backfill_sub_channel_bot_presence(team_id, channels_result):
         # already knowing to type something).
         try:
             from teams_bot import user_home_tab
+            from teams_bot.conversation_store import set_sub_channel_active_message_id
             home_body = user_home_tab.home_tab_body(team_id, team_name)
             card = user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
-            _send_with_retry(lambda: bot_api.card_message(card), "initial Home card")
+            card_resp = _send_with_retry(lambda: bot_api.card_message(card), "initial Home card")
+            card_message_id = card_resp.json().get("id") if card_resp is not None and card_resp.status_code < 300 else None
+            if card_message_id:
+                set_sub_channel_active_message_id(team_id, channel_id, card_message_id)
         except Exception:
             logger.exception(f"[TeamsChannels] initial Home card send failed for {team_name}")
 
