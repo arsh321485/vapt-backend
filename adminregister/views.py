@@ -3947,6 +3947,61 @@ _REPORT_SEVERITY_COLORS = {
 }
 
 
+def _build_executive_summary(critical, high, medium, low, total, total_assets, risk_score):
+    """
+    Real bug report: the "Vul management program Report" page's Executive
+    Summary paragraph was frontend-hardcoded, generic placeholder copy
+    ("...Enterprise Logic Corp digital perimeter... primarily driven by
+    unpatched critical assets...") that never matched the report's REAL
+    severity counts — it kept saying "critical assets" even for a report
+    with 0 critical AND 0 high findings. Backend now computes an accurate,
+    data-driven paragraph straight from the actual Critical/High/Medium/Low
+    counts, so the frontend has one field to render instead of authoring
+    copy that can silently drift from the numbers next to it.
+    """
+    asset_word = "asset" if total_assets == 1 else "assets"
+    finding_word = "finding" if total == 1 else "findings"
+
+    if total == 0:
+        return (
+            f"The security assessment across {total_assets} {asset_word} identified no security "
+            "findings. No remediation is currently required."
+        )
+
+    if critical > 0:
+        high_clause = (
+            f" and {high} high-severity finding{'s' if high != 1 else ''}" if high else ""
+        )
+        severity_line = (
+            f"The overall security posture is currently rated as High Risk, primarily driven by "
+            f"{critical} critical vulnerabilit{'y' if critical == 1 else 'ies'}{high_clause} that "
+            "require immediate remediation to reduce the attack surface."
+        )
+    elif high > 0:
+        severity_line = (
+            f"No critical vulnerabilities were identified. The overall security posture is "
+            f"currently rated as Elevated Risk, driven by {high} high-severity finding"
+            f"{'s' if high != 1 else ''} that should be prioritized for remediation."
+        )
+    elif medium > 0:
+        severity_line = (
+            "No critical or high-severity vulnerabilities were identified. The overall security "
+            f"posture is currently rated as Moderate Risk, with {medium} medium-severity finding"
+            f"{'s' if medium != 1 else ''} recommended for scheduled remediation."
+        )
+    else:
+        severity_line = (
+            "No critical, high, or medium-severity vulnerabilities were identified. The overall "
+            "security posture is currently rated as Low Risk — the remaining low-severity finding"
+            f"{'s' if low != 1 else ''} can be addressed as routine maintenance."
+        )
+
+    return (
+        f"The security assessment identified a total of {total} distinct security {finding_word} "
+        f"across {total_assets} {asset_word}. {severity_line}"
+    )
+
+
 def _build_report_data(request):
     """
     Aggregates everything the downloadable report needs by calling the
@@ -4003,16 +4058,24 @@ def _build_report_data(request):
     _generated_iso = _normalize_iso(latest_upload.get("uploaded_at") or latest_doc.get("uploaded_at"))
     _generated_date = (_generated_iso or "")[:10] if _generated_iso else "—"
 
+    _total_assets = (summary.get("total_assets") or {}).get("total_assets", 0)
+
     return {
         "report_id": str(latest_upload.get("report_id") or latest_doc.get("report_id", "")),
         "report_generated_on": _generated_date,
         "vul_management_program": latest_upload.get("file_name") or latest_doc.get("file_name") or "—",
-        "total_assets": (summary.get("total_assets") or {}).get("total_assets", 0),
+        "total_assets": _total_assets,
         "risk_score": risk_score,
         "vulnerabilities": {"critical": critical, "high": high, "medium": medium, "low": low},
         "vulnerabilities_fixed": summary.get("vulnerabilities_fixed") or {},
         "team_distribution": distribution_data.get("distribution") or [],
         "vulnerabilities_detail": detailed_data.get("vulnerabilities") or [],
+        # Real bug report: frontend's Executive Summary paragraph was
+        # hardcoded, generic placeholder copy that never matched the
+        # report's real severity counts — see _build_executive_summary.
+        "executive_summary": _build_executive_summary(
+            critical, high, medium, low, total, _total_assets, risk_score
+        ),
     }
 
 
@@ -4234,7 +4297,7 @@ def _render_report_html(data):
     <div class="top-grid">
       <div class="card">
         <h3><span class="icon-mark">◫</span> Executive Summary</h3>
-        <p>The security assessment identified a total of {total} distinct security findings across {esc(data['total_assets'])} assets.</p>
+        <p>{esc(data.get('executive_summary') or f"The security assessment identified a total of {total} distinct security findings across {data['total_assets']} assets.")}</p>
         <div class="score-grid">
           <div class="score-box"><span>Risk Score</span><strong>{data['risk_score']}/100</strong></div>
           <div class="score-box"><span>Sensitivity</span><strong>{'HIGH' if (crit or high or med) else 'MODERATE'}</strong></div>
