@@ -393,6 +393,244 @@ def _send_slack_notification(admin_id, recipient_type, notif_type, title, messag
         logger.exception("[SlackNotify] _send_slack_notification failed")
 
 
+# ── Microsoft Teams — real request: "jaise Slack me aur website me
+# notification aata hai admin/user dono ko sahi, waise MS Teams me bhi
+# chahiye". Same 7 rich card types as the Slack builders above, translated
+# to Adaptive Card TextBlock/FactSet instead of Block Kit sections/fields.
+# Delivered as a channel post (admin-dashboard channel, or the specific
+# team's own sub-channel) rather than a Slack-style DM — this bot is
+# team-scope installed only (no personal/1:1 install anywhere else in this
+# codebase either), so there's no Teams equivalent of a personal DM to
+# fall back on; the channel post every admin/team member can already see
+# is the real notification surface here. ──────────────────────────────────
+
+def _teams_facts(facts):
+    """facts: list of (label, value, full_width) — full_width only mattered
+    for Slack's 2-per-row packing; Adaptive Cards' FactSet is always one
+    per line, so it's accepted-and-ignored here purely so callers can
+    share the exact same fact lists the Slack builders above already
+    compute, instead of a second copy."""
+    return [{"title": label, "value": str(value)} for label, value, _full in facts if value]
+
+
+def _teams_card_extension_requested(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vulnerability_name", "")
+    asset = meta.get("asset", "")
+    days = meta.get("requested_days") or meta.get("extension_days")
+    reason = meta.get("reason", "")
+    requested_by = meta.get("requested_by", "")
+    team = meta.get("assigned_team", "")
+    title_text = f"Timeline Extension Request — {team}" if team else "Timeline Extension Request"
+    facts = _teams_facts([
+        ("Vulnerability", vuln, True), ("Asset / IP", asset, False),
+        ("Requested", f"+{days} day(s)" if days else "", False),
+        ("Reason", reason, False), ("Requested by", requested_by, True),
+    ])
+    return [
+        {"type": "TextBlock", "text": f"⏳ {title_text}", "weight": "Bolder", "size": "Medium", "wrap": True},
+        {"type": "FactSet", "facts": facts},
+        {"type": "TextBlock", "text": "Use the Timeline Ext. tab to review, then Approve or Reject.", "size": "Small", "isSubtle": True, "wrap": True, "spacing": "Small"},
+    ]
+
+
+def _teams_card_extension_approved(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vulnerability_name", "")
+    asset = meta.get("asset", "")
+    days = meta.get("extension_days") or meta.get("requested_days")
+    decided_by = meta.get("decided_by", "")
+    facts = _teams_facts([
+        ("Vulnerability", vuln, True), ("Asset / IP", asset, False),
+        ("Extension", f"+{days} day(s)" if days else "", False), ("Approved by", decided_by, True),
+    ])
+    return [
+        {"type": "TextBlock", "text": f"✅ Extension Approved: {vuln}"[:150], "weight": "Bolder", "size": "Medium", "color": "good", "wrap": True},
+        {"type": "TextBlock", "text": "Your timeline extension request has been approved by admin.", "wrap": True, "isSubtle": True, "spacing": "Small"},
+        {"type": "FactSet", "facts": facts},
+    ]
+
+
+def _teams_card_extension_rejected(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vulnerability_name", "")
+    asset = meta.get("asset", "")
+    reason = meta.get("admin_comment", "")
+    decided_by = meta.get("decided_by", "")
+    facts = _teams_facts([
+        ("Vulnerability", vuln, True), ("Asset / IP", asset, False),
+        ("Rejected by", decided_by, False), ("Admin reason", reason, True),
+    ])
+    return [
+        {"type": "TextBlock", "text": f"❌ Extension Rejected: {vuln}"[:150], "weight": "Bolder", "size": "Medium", "color": "attention", "wrap": True},
+        {"type": "TextBlock", "text": "Your timeline extension request has been rejected by admin.", "wrap": True, "isSubtle": True, "spacing": "Small"},
+        {"type": "FactSet", "facts": facts},
+    ]
+
+
+def _teams_card_support_submitted(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vul_name", "")
+    asset = meta.get("host_name", "")
+    step = meta.get("step_number", "")
+    facts = _teams_facts([
+        ("Vulnerability", vuln, True), ("Asset / IP", asset, False),
+        ("Step", f"Step {step}" if step else "", False),
+    ])
+    return [
+        {"type": "TextBlock", "text": f"🔔 Support Request Submitted: {vuln}"[:150], "weight": "Bolder", "size": "Medium", "wrap": True},
+        {"type": "TextBlock", "text": "Your support request has been submitted and is waiting for admin response.", "wrap": True, "isSubtle": True, "spacing": "Small"},
+        {"type": "FactSet", "facts": facts},
+    ]
+
+
+def _teams_card_support_admin_action(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vul_name", "")
+    asset = meta.get("host_name", "")
+    team = meta.get("assigned_team", "")
+    requested_by = meta.get("requested_by", "")
+    details = meta.get("description", "")
+    title_text = f"Support Request — {team}" if team else "Support Request"
+    facts = _teams_facts([
+        ("Vulnerability", vuln, True), ("Asset / IP", asset, False),
+        ("From", requested_by, True), ("Details", details, True),
+    ])
+    return [
+        {"type": "TextBlock", "text": f"🆘 {title_text}"[:150], "weight": "Bolder", "size": "Medium", "wrap": True},
+        {"type": "FactSet", "facts": facts},
+        {"type": "TextBlock", "text": "Use the Support Status tab to review and reply.", "size": "Small", "isSubtle": True, "wrap": True, "spacing": "Small"},
+    ]
+
+
+def _teams_card_mitigation_submitted(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vulnerability_name", "")
+    asset = meta.get("asset", "")
+    submitted_by = meta.get("requested_by", "")
+    facts = _teams_facts([
+        ("Vulnerability", vuln, True), ("Asset / IP", asset, False),
+        ("Method", "Manual Fix", False), ("Submitted by", submitted_by, True),
+    ])
+    body_text = f"{submitted_by} has submitted a mitigation for review." if submitted_by else "A mitigation has been submitted for review."
+    return [
+        {"type": "TextBlock", "text": f"🔔 Mitigation Submitted: {vuln}"[:150], "weight": "Bolder", "size": "Medium", "wrap": True},
+        {"type": "TextBlock", "text": body_text, "wrap": True, "isSubtle": True, "spacing": "Small"},
+        {"type": "FactSet", "facts": facts},
+    ]
+
+
+def _teams_card_vuln_closed(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vulnerability_name", "")
+    asset = meta.get("asset", "")
+    team = meta.get("assigned_team", "")
+    closed_by = meta.get("closed_by_name") or team
+    approved_by = meta.get("approved_by_name", "")
+    facts = _teams_facts([
+        ("Vulnerability", vuln, True), ("Asset / IP", asset, False),
+        ("Closed by", closed_by, False), ("Team", team, False), ("Approved by", approved_by, True),
+    ])
+    body_text = f"This vulnerability has been verified and closed{f' by {closed_by}' if closed_by else ''}."
+    return [
+        {"type": "TextBlock", "text": f"✅ Vulnerability Verified & Closed: {vuln}"[:150], "weight": "Bolder", "size": "Medium", "color": "good", "wrap": True},
+        {"type": "TextBlock", "text": body_text, "wrap": True, "isSubtle": True, "spacing": "Small"},
+        {"type": "FactSet", "facts": facts},
+    ]
+
+
+# notif_type -> (title, message, metadata) -> Adaptive Card `body` list —
+# same keys as _NOTIF_CARD_BUILDERS above, one-to-one.
+_TEAMS_NOTIF_CARD_BUILDERS = {
+    "extension_requested":       _teams_card_extension_requested,
+    "extension_approved":        _teams_card_extension_approved,
+    "extension_rejected":        _teams_card_extension_rejected,
+    "support_request_received":  _teams_card_support_submitted,
+    "support_request_created":   _teams_card_support_admin_action,
+    "vuln_verification_request": _teams_card_mitigation_submitted,
+    "vuln_closed":                _teams_card_vuln_closed,
+}
+
+
+def _teams_notification_body(notif_type, title, message):
+    """Real content builders take (title, message, metadata) — kept out
+    of this helper's own signature since every caller already has
+    metadata in scope; this just picks the builder (or the generic
+    fallback for any notif_type without a dedicated template, same
+    discipline as _build_notification_blocks above)."""
+    return _TEAMS_NOTIF_CARD_BUILDERS.get(notif_type)
+
+
+def _send_teams_notification(admin_id, recipient_type, notif_type, title, message, metadata, recipient_email):
+    """Best-effort mirror of every website in-app notification into
+    Microsoft Teams — same trigger points as _send_slack_notification,
+    posted into the relevant Teams CHANNEL instead of a DM (see module
+    section docstring above for why). Never raises — a Teams-side
+    failure must never break the underlying notification record that
+    already exists regardless (the website bell doesn't depend on this)."""
+    try:
+        from django.contrib.auth import get_user_model
+        from users_details.models import UserDetail
+        from teams_bot import bot_api
+        from teams_bot.cards import _card
+        from teams_bot.conversation_store import get_team_channel_reference, get_sub_channel_id
+
+        User = get_user_model()
+        admin = User.objects.filter(id=admin_id).first()
+        team_id = getattr(admin, "ms_team_id", None) if admin else None
+        if not admin or not team_id:
+            return
+        ref = get_team_channel_reference(team_id)
+        service_url = ref.get("service_url") if ref else None
+        admin_channel_id = ref.get("channel_id") if ref else None
+        if not service_url:
+            return
+
+        builder = _teams_notification_body(notif_type, title, message)
+        body = builder(title, message, metadata) if builder else [
+            {"type": "TextBlock", "text": f"🔔 {title}"[:150], "weight": "Bolder", "size": "Medium", "wrap": True},
+            {"type": "TextBlock", "text": message, "wrap": True, "spacing": "Small"},
+        ]
+        message_obj = bot_api.card_message(_card(body))
+
+        def _post_admin_channel():
+            if admin_channel_id:
+                bot_api.send_activity(service_url, admin_channel_id, message_obj)
+
+        def _post_team_channel(team_name):
+            channel_id = get_sub_channel_id(team_id, team_name)
+            if channel_id:
+                bot_api.send_activity(service_url, channel_id, message_obj)
+
+        if recipient_email:
+            # A specific person — either the admin themselves or one team member.
+            if recipient_email.strip().lower() == (admin.email or "").strip().lower():
+                _post_admin_channel()
+                return
+            member = UserDetail.objects.filter(admin=admin, email=recipient_email).first()
+            if member:
+                team_name = (metadata or {}).get("assigned_team") or member.team_name or next(iter(member.Member_role or []), None)
+                if team_name:
+                    _post_team_channel(team_name)
+            return
+
+        if recipient_type == "admin":
+            _post_admin_channel()
+            return
+
+        # Broadcast to every user under this admin — no Teams-side "DM
+        # every member" equivalent exists (see module docstring), so only
+        # post into a team channel when metadata pins this to one
+        # specific team, same restraint Slack's own broadcast branch uses
+        # to avoid spamming all 4 team channels with something that isn't
+        # really team-specific.
+        pinned_team = (metadata or {}).get("assigned_team")
+        if pinned_team:
+            _post_team_channel(pinned_team)
+    except Exception:
+        logger.exception("[TeamsNotify] _send_teams_notification failed")
+
+
 def create_notification(admin, recipient_type, notif_type, title, message,
                         metadata=None, recipient_email=''):
     """
@@ -420,6 +658,7 @@ def create_notification(admin, recipient_type, notif_type, title, message,
             db[COLLECTION].insert_one(doc)
         _bust_notif_cache(admin_id, recipient_type, recipient_email)
         _send_slack_notification(admin_id, recipient_type, notif_type, title, message, metadata, recipient_email)
+        _send_teams_notification(admin_id, recipient_type, notif_type, title, message, metadata, recipient_email)
     except Exception as exc:
         logger.error("create_notification failed [%s | %s]: %s", notif_type, recipient_type, exc)
 

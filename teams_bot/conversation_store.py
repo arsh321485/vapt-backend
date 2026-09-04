@@ -382,6 +382,23 @@ def get_team_name_for_channel(team_id: str, channel_id: str):
         return doc.get("team_name") if doc else None
 
 
+def get_sub_channel_id(team_id: str, team_name: str):
+    """Reverse of get_team_name_for_channel — given a VaptFix team name
+    ("Network Security", etc.), returns that team's own channel id for
+    this admin's Team, or None if it was never recorded (e.g. the team
+    isn't one of the 4 standard ones, or the sub-channel welcome/
+    save_sub_channel_team backfill hasn't run yet for this Team). Used
+    by notifications/utils.py's Teams notifier to know which channel to
+    post a team-scoped notification into — the same channel-per-team
+    mapping save_sub_channel_team already maintains, just read the other
+    direction."""
+    if not team_id or not team_name:
+        return None
+    with MongoContext() as db:
+        doc = db[SUB_CHANNEL_COLLECTION].find_one({"team_id": team_id, "team_name": team_name})
+        return doc.get("channel_id") if doc else None
+
+
 def is_sub_channel_welcomed(team_id: str, channel_id: str) -> bool:
     """
     Confirmed via real testing: Teams' own @mention picker in a channel's
