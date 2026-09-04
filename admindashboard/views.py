@@ -2145,13 +2145,27 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             continue
                         seen.add(row_key)
 
+                        risk_factor = plugin_risk.get(plugin_name)
+                        # Real bug report: this row still showed up in the
+                        # downloadable report's "Detailed Vulnerability Log"
+                        # (with a blank Severity pill) even though the
+                        # dashboard summary/donut totals it feeds alongside
+                        # already exclude Info — plugin_risk is None for
+                        # anything outside Critical/High/Medium/Low, but
+                        # that was only ever used to blank out the severity
+                        # column, never to skip the row. Same explicit,
+                        # repeated rule as every other Info fix: skip it
+                        # entirely, matching AdminDistributionByTeamDetail
+                        # APIView's identical fix.
+                        if not risk_factor:
+                            continue
+
                         # Exact (vuln, host) match first; fall back to vuln-only
                         info = card_by_host.get((plugin_name, h_name)) \
                                or card_by_name.get(plugin_name) \
                                or {}
 
-                        found_date    = info.get("found_date")
-                        risk_factor   = plugin_risk.get(plugin_name)
+                        found_date = info.get("found_date")
                         if (plugin_name, h_name) in closed_vuln_keys:
                             vuln_status = "closed"
                         else:
