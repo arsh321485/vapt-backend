@@ -234,18 +234,31 @@ def add_user_form_body(admin, form_data=None):
     Vulnerabilities", visually UNCHECKED the team box again in the
     re-rendered card — even though the assets/vulns shown were correctly
     for that team (form_data really did carry it through correctly; only
-    the checkbox's own displayed state was wrong). Same root cause as the
-    "stuck checkbox" issue Slack's own Add User modal already had to work
-    around (see users.views.SlackSlashCommandView._build_adduser_picker_blocks):
-    once a user has touched a checkbox-style input, the client ignores a
-    later render's initial_options for that SAME element id and keeps
-    showing whatever the user last set. Every dynamic ChoiceSet below
-    (au_pick_member, au_team, au_assets, au_vulns) gets a fresh,
-    rev-suffixed id every render (au_team_1, au_team_2, ...) so the client
-    treats each render as a brand-new widget instead of an update to a
-    "dirty" one — _rev (a hidden field) carries the current render's
-    number forward so the next click's normalization knows which suffix
-    to read the submitted value back from.
+    the checkbox's own displayed state was wrong). Two compounding causes,
+    both fixed:
+      1. The actual root cause: the team/assets/vulns ChoiceSet elements
+         below were setting "initial_options" (a list of {title, value}
+         dicts) to preselect values — that's Slack Block Kit's
+         multi_static_select convention, not a real Adaptive Cards
+         Input.ChoiceSet property, so Teams silently ignored it and the
+         checkbox never showed as checked on ANY render, touched or not.
+         Adaptive Cards' real property is "value": a plain string,
+         comma-separated when isMultiSelect is true — see where each
+         element sets it below.
+      2. A real, separate Adaptive Cards quirk that's still worth guarding
+         against even with (1) fixed: once a user HAS touched a
+         checkbox-style input, some clients ignore a later render's
+         preset "value" for that SAME element id and keep showing
+         whatever the user last set (the "stuck checkbox" issue Slack's
+         own Add User modal already had to work around — see
+         users.views.SlackSlashCommandView._build_adduser_picker_blocks).
+         Every dynamic ChoiceSet below (au_pick_member, au_team,
+         au_assets, au_vulns) gets a fresh, rev-suffixed id every render
+         (au_team_1, au_team_2, ...) so the client treats each render as
+         a brand-new widget instead of an update to a "dirty" one — _rev
+         (a hidden field) carries the current render's number forward so
+         the next click's normalization knows which suffix to read the
+         submitted value back from.
     """
     form_data = form_data or {}
     rev = int(form_data.get("_rev") or 0) + 1
@@ -318,9 +331,17 @@ def add_user_form_body(admin, form_data=None):
     team_codes_selected = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
     team_options = [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]
     team_element = {"type": "Input.ChoiceSet", "id": f"au_team_{rev}", "label": "Team(s)", "style": "expanded", "isMultiSelect": True, "choices": team_options}
+    # Real bug report: this was setting "initial_options" (a list of
+    # {title, value} dicts) — that's Slack Block Kit's multi_static_select
+    # convention, not a real Adaptive Cards Input.ChoiceSet property, so
+    # Teams silently ignored it and the checkbox never showed as checked
+    # on re-render at all (form_data itself carried the selection through
+    # correctly the whole time — only the visual checkbox state was ever
+    # wrong). Adaptive Cards' actual property is "value": a single string,
+    # comma-separated when isMultiSelect is true.
     initial = [o for o in team_options if o["value"] in team_codes_selected]
     if initial:
-        team_element["initial_options"] = initial
+        team_element["value"] = ",".join(o["value"] for o in initial)
     body.append(team_element)
     body.append({
         "type": "ActionSet", "spacing": "Small",
@@ -414,9 +435,12 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
         })
         a_options = [{"title": f"{a['label']} [{a['severity']}]"[:75], "value": a["id"]} for a in shown]
         a_element = {"type": "Input.ChoiceSet", "id": f"au_assets_{rev}", "label": f"Assets ({len(assets)})", "style": "expanded", "isMultiSelect": True, "choices": a_options}
+        # Real bug report — see add_user_form_body's team_element comment:
+        # "initial_options" isn't a real Adaptive Cards property, use
+        # "value" (comma-separated string) instead.
         a_initial = [o for o in a_options if o["value"] in sel_assets]
         if a_initial:
-            a_element["initial_options"] = a_initial
+            a_element["value"] = ",".join(o["value"] for o in a_initial)
         body.append(a_element)
         if len(assets) > _ASSET_VULN_PICK_LIMIT:
             body.append({"type": "TextBlock", "text": f"Showing the first {_ASSET_VULN_PICK_LIMIT} of {len(assets)} assets.", "size": "Small", "isSubtle": True, "spacing": "Small"})
@@ -431,9 +455,12 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
         })
         v_options = [{"title": f"{v['label']} ({v['host']}) [{v['severity']}]"[:75], "value": v["id"]} for v in shown]
         v_element = {"type": "Input.ChoiceSet", "id": f"au_vulns_{rev}", "label": f"Vulnerabilities ({len(vulns)})", "style": "expanded", "isMultiSelect": True, "choices": v_options}
+        # Real bug report — see add_user_form_body's team_element comment:
+        # "initial_options" isn't a real Adaptive Cards property, use
+        # "value" (comma-separated string) instead.
         v_initial = [o for o in v_options if o["value"] in sel_vulns]
         if v_initial:
-            v_element["initial_options"] = v_initial
+            v_element["value"] = ",".join(o["value"] for o in v_initial)
         body.append(v_element)
         if len(vulns) > _ASSET_VULN_PICK_LIMIT:
             body.append({"type": "TextBlock", "text": f"Showing the first {_ASSET_VULN_PICK_LIMIT} of {len(vulns)} vulnerabilities.", "size": "Small", "isSubtle": True, "spacing": "Small"})
