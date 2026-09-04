@@ -3962,17 +3962,20 @@ def _risk_rating_label(critical, high, medium, low):
     rating words ("Elevated Risk", "Moderate Risk") instead of the same
     Critical/High/Medium/Low vocabulary already used everywhere else on
     the report (the 4 severity boxes, the donut legend) — confusing next
-    to them. Only ever returns one of those 4 exact words now (whichever
-    is the highest severity actually present), or "No Findings".
+    to them. Reduced to those 4 exact words, then a second follow-up
+    request asked for "Risk" back as a plain suffix on all 4 (never a
+    separate synonym) — "Critical Risk"/"High Risk"/"Medium Risk"/
+    "Low Risk", whichever is the highest severity actually present, or
+    "No Findings" when there's nothing to rate.
     """
     if critical > 0:
-        return "Critical"
+        return "Critical Risk"
     if high > 0:
-        return "High"
+        return "High Risk"
     if medium > 0:
-        return "Medium"
+        return "Medium Risk"
     if low > 0:
-        return "Low"
+        return "Low Risk"
     return "No Findings"
 
 
