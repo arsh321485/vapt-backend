@@ -17,12 +17,17 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 5
 _SEV_ICON = fix_tab._SEV_ICON
 
+# Real follow-up request: same one-row-full-text experiment as the top
+# nav bar (cards.NAV_ITEMS) — see its comment for the reasoning and the
+# unverified-in-real-Teams caveat. Emoji dropped from every label except
+# the colored circles, which are the actual severity/urgency indicator
+# (not decoration) so they stay.
 REMINDER_SUBTABS = [
     ("notif_sub_overdue", "🔴 Overdue"),
     ("notif_sub_today", "🟠 Due Today"),
     ("notif_sub_thisweek", "🟡 This Week"),
     ("notif_sub_nextweek", "🟢 Next Week"),
-    ("notif_sub_support", "🎫 Support"),
+    ("notif_sub_support", "Support"),
 ]
 
 SUPPORT_STATUS_FILTERS = [("all", "All"), ("open", "Open"), ("closed", "Closed")]
@@ -37,10 +42,11 @@ _SUPPORT_TEAM_MATCH = {
 
 
 def reminder_subnav_columnset(active_sub):
-    # 5 items with full-length labels — two_row_pill_columnset (3+2)
-    # instead of one row, same reasoning as the top nav bar (real Teams
-    # buttons truncate long labels crammed into one row).
-    return cards.two_row_pill_columnset(REMINDER_SUBTABS, active_sub, lambda k: {"action_id": k})
+    # One row — see REMINDER_SUBTABS' own comment for the real-Teams-
+    # testing status of this. Revert to cards.two_row_pill_columnset(
+    # REMINDER_SUBTABS, active_sub, lambda k: {"action_id": k}) if this
+    # renders broken/truncated in real Teams.
+    return cards.pill_columnset(REMINDER_SUBTABS, active_sub, lambda k: {"action_id": k})
 
 
 # ── Deadline buckets (Overdue / Due Today / This Week / Next Week) ──────
