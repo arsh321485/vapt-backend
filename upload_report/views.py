@@ -725,13 +725,32 @@ class UploadReportView(APIView):
                     timings_ms["save_and_hash_ms"] = int((time.perf_counter() - save_hash_start) * 1000)
 
                     dup_start = time.perf_counter()
-                    if UploadReport.objects.filter(
-                        admin=target_admin,
-                        file_hash=file_hash
-                    ).exists():
+                    # Real request: Freemium's "1 report" cap was trivially
+                    # bypassable — a same-admin-only duplicate check let a
+                    # DIFFERENT Freemium account upload the exact same file
+                    # (e.g. a shared demo/sample report) with no restriction
+                    # at all. Premium/Custom/unlimited (is_superuser,
+                    # BILLING_UNLIMITED_ADMIN_EMAILS, magic_link_unlimited —
+                    # all covered by _is_unlimited_admin, so a magic-link-
+                    # claimed admin needs no separate check here) get NO
+                    # duplicate check whatsoever — explicit request, they
+                    # can re-upload the same file as many times as they
+                    # want, by themselves or matching anyone else's file.
+                    # A genuinely-Freemium (or still-undecided, no plan
+                    # chosen yet) admin now gets checked against EVERY
+                    # admin's file_hash, not just their own.
+                    _dup_qs = UploadReport.objects.filter(file_hash=file_hash)
+                    if not (_is_unlimited_admin(target_admin) or not is_freemium(target_admin)):
+                        _is_duplicate = _dup_qs.exists()
+                    else:
+                        _is_duplicate = False
+                    if _is_duplicate:
                         if file_path and os.path.exists(file_path):
                             os.remove(file_path)
                         timings_ms["duplicate_check_ms"] = int((time.perf_counter() - dup_start) * 1000)
+                        # Never reveal WHICH admin uploaded it first — same
+                        # generic wording regardless of self- or cross-admin
+                        # match, no account/email leaked.
                         errors.append({
                             "file": uploaded_file.name,
                             "error": "Duplicate file detected. This file was already uploaded."
