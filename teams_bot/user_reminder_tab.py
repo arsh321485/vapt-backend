@@ -61,7 +61,7 @@ def _parse_rc_days(raw_value):
 def _bucket_deadline_rows(rows, rc_days):
     buckets = {"overdue": [], "today": [], "thisweek": [], "nextweek": []}
     today = datetime.now(_tz.utc).date()
-    for row in rows:
+    for row_idx, row in enumerate(rows):
         status = (row.get("status") or "open").strip().lower()
         if status == "closed":
             continue
@@ -78,7 +78,11 @@ def _bucket_deadline_rows(rows, rc_days):
             continue
         elapsed = max(0, (today - first_obs.date()).days)
         remaining_days = days - elapsed
-        row_out = dict(row, remaining_days=remaining_days)
+        # Real request: a View button per row, opening the vuln's own Fix
+        # detail — needs the ORIGINAL index into the flat `rows` list (the
+        # same one this module's own vuln_detail_body indexes into), not
+        # just this row's position within its bucket.
+        row_out = dict(row, remaining_days=remaining_days, _row_idx=row_idx)
         if remaining_days < 0:
             buckets["overdue"].append(row_out)
         elif remaining_days == 0:
@@ -146,12 +150,33 @@ def reminder_list_body(member_user, team_name, sub_action_id="urem_sub_overdue",
         host = r.get("asset") or "—"
         remaining = r.get("remaining_days", 0)
         due_text = f"{abs(remaining)}d overdue" if remaining < 0 else ("Due today" if remaining == 0 else f"{remaining}d left")
-        body.append({
-            "type": "Container", "spacing": "Medium", "separator": True,
-            "items": [
-                {"type": "TextBlock", "text": f"{_SEV_ICON[sev]} {name}", "weight": "Bolder", "size": "Small", "wrap": True},
-                {"type": "TextBlock", "text": f"{host}   ·   {due_text}", "size": "Small", "isSubtle": True, "spacing": "None"},
-            ],
-        })
+        body.append(fix_tab._row(
+            f"{_SEV_ICON[sev]} {name}", f"{host}   ·   {due_text}", "urem_view",
+            {"idx": r.get("_row_idx"), "sub": sub_action_id, "offset": offset},
+        ))
     body.extend(fix_tab._pagination_body(offset, total, "urem_pg", {"sub": sub_action_id}))
     return body
+
+
+def reminder_vuln_detail_body(member_user, team_id, team_name, idx, sub_action_id, back_offset=0, sub="manual", step_number=None, admin=None):
+    """Real request: a View button per Reminder-bucket row, opening that
+    vulnerability's own (interactive — Manual/Automation Fix + Mark
+    Mitigated + Retest, same as every other member detail) Fix view —
+    reuses this module's own vuln_detail_body via its ctx="reminder"
+    extension point (same shape as ctx="common"), so this never drifts
+    out of sync. `idx` is the row's index into the SAME flat
+    fix._fetch_team_rows(member_user, team_name) list _bucket_deadline_
+    rows itself read from — no separate index-mapping needed."""
+    # Real gotcha: the Manual/Automation Fix toggle button already uses
+    # "sub" for its own value ("manual"/"automation" — see
+    # user_fix_tab._fix_toggle_actionset, whose click payload is built as
+    # {"action_id": ..., "sub": sub_val, **value_base} — value_base's own
+    # key wins if it also used "sub", corrupting the toggle). The bucket
+    # identifier is kept under "rem_sub" instead to avoid that collision.
+    bucket_key = _BUCKET_KEY.get(sub_action_id, "overdue")
+    return fix.vuln_detail_body(
+        member_user, team_id, team_name, idx, ctx="reminder", offset=back_offset, sub=sub, step_number=step_number, admin=admin,
+        back_action_id="urem_view_back",
+        back_title=f"← Back to {_BUCKET_LABEL.get(bucket_key, 'Reminder')}",
+        extra_value={"rem_sub": sub_action_id},
+    )

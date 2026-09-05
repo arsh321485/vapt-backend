@@ -395,6 +395,17 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
                 body = [cards._header("🧩 Vulnerability"), cards._body_text("Could not load this right now.")]
             return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
+        if ctx == "reminder":
+            bucket = value.get("bucket") or "overdue"
+            active_sub = {v: k for k, v in reminder_tab._SUB_TO_BUCKET.items()}.get(bucket, "notif_sub_overdue")
+            try:
+                content = reminder_tab.deadline_vuln_detail_body(admin, idx, bucket, back_offset=offset, sub=sub)
+                body = [reminder_tab.reminder_subnav_columnset(active_sub)] + content
+            except Exception:
+                logger.exception("[TeamsBot] fix_vuln_toggle (reminder) failed")
+                body = [cards._header("🔔 Vulnerability"), cards._body_text("Could not load this right now.")]
+            return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
         active_sub = "fix_sub_assets" if ctx == "asset" else "fix_sub_vulns"
         try:
             if ctx == "asset":
@@ -443,6 +454,17 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
                 logger.exception("[TeamsBot] fix_step_nav (common) failed")
                 body = [cards._header("🧩 Vulnerability"), cards._body_text("Could not load this right now.")]
             return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+        if ctx == "reminder":
+            bucket = value.get("bucket") or "overdue"
+            active_sub = {v: k for k, v in reminder_tab._SUB_TO_BUCKET.items()}.get(bucket, "notif_sub_overdue")
+            try:
+                content = reminder_tab.deadline_vuln_detail_body(admin, idx, bucket, back_offset=offset, sub="manual", step_number=step)
+                body = [reminder_tab.reminder_subnav_columnset(active_sub)] + content
+            except Exception:
+                logger.exception("[TeamsBot] fix_step_nav (reminder) failed")
+                body = [cards._header("🔔 Vulnerability"), cards._body_text("Could not load this right now.")]
+            return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
 
         active_sub = "fix_sub_assets" if ctx == "asset" else "fix_sub_vulns"
         try:
@@ -920,6 +942,30 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = reminder_tab.reminder_tab_body(admin, active_sub=active_sub, offset=offset)
         except Exception:
             logger.exception("[TeamsBot] remind_bucket_pg failed")
+            body = [cards._header("🔔 Reminder"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
+    if action_id == "remind_bucket_view":
+        bucket = value.get("bucket") or "overdue"
+        idx = value.get("idx")
+        idx = int(idx) if idx is not None else None
+        back_offset = int(value.get("offset") or 0)
+        active_sub = {v: k for k, v in reminder_tab._SUB_TO_BUCKET.items()}.get(bucket, "notif_sub_overdue")
+        try:
+            body = [reminder_tab.reminder_subnav_columnset(active_sub)] + reminder_tab.deadline_vuln_detail_body(admin, idx, bucket, back_offset=back_offset)
+        except Exception:
+            logger.exception("[TeamsBot] remind_bucket_view failed")
+            body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
+
+    if action_id == "remind_bucket_back":
+        bucket = value.get("bucket") or "overdue"
+        offset = int(value.get("offset") or 0)
+        active_sub = {v: k for k, v in reminder_tab._SUB_TO_BUCKET.items()}.get(bucket, "notif_sub_overdue")
+        try:
+            body = reminder_tab.reminder_tab_body(admin, active_sub=active_sub, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] remind_bucket_back failed")
             body = [cards._header("🔔 Reminder"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_notification", extra_body=body)
 

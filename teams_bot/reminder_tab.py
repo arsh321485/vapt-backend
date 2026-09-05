@@ -103,7 +103,7 @@ def _bucket_deadline_rows(rows, rc_days):
     buckets = {"overdue": [], "today": [], "thisweek": [], "nextweek": []}
     today = datetime.now(_tz.utc).date()
 
-    for row in rows:
+    for row_idx, row in enumerate(rows):
         status = (row.get("status") or "open").strip().lower()
         if status == "closed":
             continue
@@ -120,7 +120,11 @@ def _bucket_deadline_rows(rows, rc_days):
             continue
         elapsed = max(0, (today - first_obs.date()).days)
         remaining_days = days - elapsed
-        row_out = dict(row, remaining_days=remaining_days)
+        # Real request: a View button per row, opening the vuln's own Fix
+        # detail — needs the ORIGINAL index into the flat `rows` list (the
+        # same one fix_tab._vuln_detail_full_body indexes into), not just
+        # this row's position within its bucket.
+        row_out = dict(row, remaining_days=remaining_days, _row_idx=row_idx)
         if remaining_days < 0:
             buckets["overdue"].append(row_out)
         elif remaining_days == 0:
@@ -184,15 +188,30 @@ def deadline_bucket_body(admin, bucket_key, offset=0):
         else:
             due_label = f"Due in {remaining} day{'s' if remaining != 1 else ''}"
         subtitle = f"{asset}   ·   {_SEV_ICON[sev]} {sev.title()}   ·   {due_label}"
-        body.append({
-            "type": "Container", "spacing": "Medium", "separator": True,
-            "items": [
-                {"type": "TextBlock", "text": name, "weight": "Bolder", "size": "Small", "wrap": True},
-                {"type": "TextBlock", "text": subtitle, "size": "Small", "isSubtle": True, "spacing": "None"},
-            ],
-        })
+        body.append(fix_tab._row(
+            name, subtitle, "remind_bucket_view",
+            {"idx": v.get("_row_idx"), "bucket": bucket_key, "offset": offset},
+        ))
     body.extend(fix_tab._pagination_body(offset, total, "remind_bucket_pg", {"bucket": bucket_key}))
     return body
+
+
+def deadline_vuln_detail_body(admin, idx, bucket_key, back_offset=0, sub="manual", step_number=None):
+    """Real request: a View button per Reminder-bucket row, opening that
+    vulnerability's own (read-only, admin-side) Fix detail — reuses
+    fix_tab._vuln_detail_full_body verbatim via its ctx="reminder"
+    extension point (same shape as Register's ctx="register"), so this
+    never drifts out of sync with the identical detail every other entry
+    point already shows. `idx` is the row's index into the SAME flat
+    fix_tab._fetch_register_rows(admin) list _bucket_deadline_rows itself
+    read from — no separate index-mapping needed (unlike Common Vulns,
+    which has a genuine two-index problem)."""
+    return fix_tab._vuln_detail_full_body(
+        admin, idx, sub=sub, ctx="reminder", offset=back_offset, step_number=step_number,
+        back_action_id="remind_bucket_back",
+        back_title=f"← Back to {_BUCKET_TITLES.get(bucket_key, 'Reminder')}",
+        extra_value={"bucket": bucket_key},
+    )
 
 
 # ── Support ───────────────────────────────────────────────────────────

@@ -38,7 +38,7 @@ _REGISTER_ACTION_IDS = {
 }
 _SUPPORT_ACTION_IDS = {"unav_support", "usup_pg", "usup_view", "usup_raise_form", "usup_submit", "usup_back"}
 _FIXED_ACTION_IDS = {"unav_fixed", "ufixed_pg", "ufixed_view", "ufixed_step_nav", "ufixed_back"}
-_REMINDER_ACTION_IDS = {"unav_reminder", "urem_sub_overdue", "urem_sub_today", "urem_sub_thisweek", "urem_sub_nextweek", "urem_pg"}
+_REMINDER_ACTION_IDS = {"unav_reminder", "urem_sub_overdue", "urem_sub_today", "urem_sub_thisweek", "urem_sub_nextweek", "urem_pg", "urem_view", "urem_view_back"}
 _EXTEND_ACTION_IDS = {
     "unav_extend", "uex_sub_list", "uex_sub_new", "uex_pg", "uex_new_submit", "uex_view", "uex_view_back",
     "uex_new_pick_asset", "uex_new_back_to_asset", "uex_new_pick_vuln",
@@ -102,7 +102,12 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
         if action_id in _REMINDER_ACTION_IDS:
             sub = action_id if action_id.startswith("urem_sub_") else (value.get("sub") or "urem_sub_overdue")
             offset = _as_int(value.get("offset")) or 0
-            body = reminder.reminder_list_body(member_user, team_name, sub_action_id=sub, offset=offset)
+            if action_id == "urem_view":
+                body = [reminder.reminder_subnav_columnset(sub)] + reminder.reminder_vuln_detail_body(
+                    member_user, team_id, team_name, _as_int(value.get("idx")), sub, back_offset=offset, admin=admin,
+                )
+            else:
+                body = reminder.reminder_list_body(member_user, team_name, sub_action_id=sub, offset=offset)
             return home.nav_buttons_card(team_name, active_action_id="unav_reminder", extra_body=body)
 
         if action_id in _EXTEND_ACTION_IDS:
@@ -317,6 +322,12 @@ def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id
                 asset_offset=_as_int(value.get("cv_offset")) or 0, back_offset=_as_int(value.get("back_offset")) or 0,
                 sub=value.get("sub") or "manual",
             )
+        if vctx == "reminder":
+            sub_action_id = value.get("rem_sub") or "urem_sub_overdue"
+            return [reminder.reminder_subnav_columnset(sub_action_id)] + reminder.reminder_vuln_detail_body(
+                member_user, team_id, team_name, idx, sub_action_id, back_offset=offset,
+                sub=value.get("sub") or "manual", admin=admin,
+            )
         return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=value.get("sub") or "manual", admin=admin)
 
     data = fix._fetch_team_data(member_user, team_name)
@@ -337,6 +348,8 @@ def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id
         value_base["cv_idx"] = value.get("cv_idx")
         value_base["cv_offset"] = value.get("cv_offset")
         value_base["back_offset"] = value.get("back_offset")
+    if vctx == "reminder":
+        value_base["rem_sub"] = value.get("rem_sub")
 
     if action_id == "ufix_mark_mitigated":
         ok, error = fix.mark_mitigated(member_user, r, data.get("report_id"))
@@ -394,6 +407,11 @@ def _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset
             member_user, admin, team_id, team_name, _as_int(value.get("cv_idx")), host,
             asset_offset=_as_int(value.get("cv_offset")) or 0, back_offset=_as_int(value.get("back_offset")) or 0,
             sub=sub, step_number=step_number,
+        )
+    if vctx == "reminder":
+        sub_action_id = value.get("rem_sub") or "urem_sub_overdue"
+        return [reminder.reminder_subnav_columnset(sub_action_id)] + reminder.reminder_vuln_detail_body(
+            member_user, team_id, team_name, idx, sub_action_id, back_offset=offset, sub=sub, step_number=step_number, admin=admin,
         )
     return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=sub, step_number=step_number, admin=admin)
 
