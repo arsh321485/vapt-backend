@@ -677,6 +677,7 @@ def _fix_subnav_columnset(active_sub):
 # — only the DISPLAY text changes, the key ("config", etc.) driving all
 # actual data lookups is untouched.
 COMMON_VULNS_TEAMS = [
+    ("all", "All Teams"),
     ("patch", "Patch Mgmt"),
     ("config", "Config Mgmt"),
     ("network", "Network Sec."),

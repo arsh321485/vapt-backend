@@ -706,6 +706,25 @@ def _fetch_common_vulns_grouped(admin):
     return SlackSlashCommandView()._group_common_vulns_by_team(data)
 
 
+def _combined_common_vulns_team(grouped):
+    """Real request: an "All Teams" view across Common Vulns, not just one
+    team at a time — synthesizes a pseudo-team from the 4 real ones,
+    tagging each vuln with its real team's display name (via "_team_name",
+    read back by common_vulns_list_body's own row rendering) since which
+    team a vuln belongs to is no longer implied by a single selection."""
+    all_vulns = []
+    totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for key, team in (grouped or {}).items():
+        for v in team.get("vulns") or []:
+            tagged = dict(v)
+            tagged["_team_name"] = team.get("display_name") or dict(cards.COMMON_VULNS_TEAMS).get(key, key)
+            all_vulns.append(tagged)
+        sev = team.get("severity") or {}
+        for k in totals:
+            totals[k] += sev.get(k, 0)
+    return {"display_name": "All Teams", "severity": totals, "vulns": all_vulns}
+
+
 def common_vulns_list_body(admin, team_key="config", sev="all", st="all", offset=0, prefix="fix_common"):
     """`prefix` lets the user (member) side reuse this exact function with
     its own "ufix_common_*" action-id family instead of admin's "fix_common_*"
@@ -714,7 +733,10 @@ def common_vulns_list_body(admin, team_key="config", sev="all", st="all", offset
     for a member card would leave every pagination/filter click on it
     unrecognized."""
     grouped = _fetch_common_vulns_grouped(admin)
-    team = grouped.get(team_key) or {"display_name": dict(cards.COMMON_VULNS_TEAMS).get(team_key, team_key), "severity": {}, "vulns": []}
+    if team_key == "all":
+        team = _combined_common_vulns_team(grouped)
+    else:
+        team = grouped.get(team_key) or {"display_name": dict(cards.COMMON_VULNS_TEAMS).get(team_key, team_key), "severity": {}, "vulns": []}
     all_vulns = team.get("vulns") or []
     sev_summary = team.get("severity") or {}
 
@@ -766,6 +788,12 @@ def common_vulns_list_body(admin, team_key="config", sev="all", st="all", offset
             vsev = "medium"
         asset_count = v.get("asset_count") or len(v.get("assets") or [])
         subtitle = f"💻 {asset_count} assets   ·   {_SEV_ICON[vsev]} {vsev.title()}"
+        # Real request: show which team a vuln is assigned to — mainly
+        # matters in "All Teams" view (see _combined_common_vulns_team's
+        # "_team_name" tag) where it's no longer implied by the current
+        # single-team selection.
+        if v.get("_team_name"):
+            subtitle += f"   ·   Team: {v['_team_name']}"
         body.append(_row(v.get("name") or "Unnamed vulnerability", subtitle, f"{prefix}_vuln_view", {"team": team_key, "idx": idx, "offset": offset}))
     body.extend(_pagination_body(offset, total, f"{prefix}_vuln_pg", {"team": team_key, "sev": sev, "st": st}))
     return body
@@ -788,7 +816,10 @@ def _find_row_idx_for_asset(admin, vuln_name, host):
 
 def common_vuln_detail_body(admin, team_key, idx, back_offset=0, asset_offset=0, prefix="fix_common"):
     grouped = _fetch_common_vulns_grouped(admin)
-    team = grouped.get(team_key) or {"vulns": []}
+    if team_key == "all":
+        team = _combined_common_vulns_team(grouped)
+    else:
+        team = grouped.get(team_key) or {"vulns": []}
     vulns = team.get("vulns") or []
 
     body = [_back_action("← Back to Common Vulns", f"{prefix}_vuln_back", {"team": team_key, "offset": back_offset})]
@@ -803,10 +834,13 @@ def common_vuln_detail_body(admin, team_key, idx, back_offset=0, asset_offset=0,
     total = len(assets)
     page = assets[asset_offset:asset_offset + PAGE_SIZE]
     body.append({"type": "TextBlock", "text": v.get("name") or "Unnamed vulnerability", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
-    body.append({"type": "TextBlock", "text": f"{_SEV_ICON[sev]} {sev.title()}   ·   Affects {total} asset(s)", "size": "Small", "weight": "Bolder", "spacing": "Small"})
+    sev_line = f"{_SEV_ICON[sev]} {sev.title()}   ·   Affects {total} asset(s)"
+    if v.get("_team_name"):
+        sev_line += f"   ·   Team: {v['_team_name']}"
+    body.append({"type": "TextBlock", "text": sev_line, "size": "Small", "weight": "Bolder", "spacing": "Small"})
     for a in page:
         host = a.get("host") or "—"
-        subtitle = f"{_status_label(a.get('status'))}   ·   port {a.get('port') or '—'}"
+        subtitle = _status_label(a.get('status'))
         body.append(_row(
             f"🖥 {host}", subtitle, f"{prefix}_vuln_asset_view",
             {"team": team_key, "idx": idx, "host": host, "offset": asset_offset, "back_offset": back_offset},
@@ -831,7 +865,7 @@ def common_vuln_asset_detail_body(admin, team_key, idx, host, asset_offset=0, ba
     "cv_idx"/"cv_offset" keys instead (read back by the *_vuln_asset_back
     / *_vuln_toggle / *_step_nav handlers in actions.py/user_actions.py)."""
     grouped = _fetch_common_vulns_grouped(admin)
-    team = grouped.get(team_key) or {"vulns": []}
+    team = _combined_common_vulns_team(grouped) if team_key == "all" else (grouped.get(team_key) or {"vulns": []})
     vulns = team.get("vulns") or []
     vuln_name = vulns[idx].get("name") if (idx is not None and 0 <= idx < len(vulns)) else None
 
