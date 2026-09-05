@@ -30,6 +30,7 @@ _FIX_ACTION_IDS = {
     "ufix_asset_vuln_view", "ufix_asset_vuln_back",
     "ufix_vuln_view", "ufix_vuln_back",
     "ufix_common_vuln_view", "ufix_common_vuln_back",
+    "ufix_common_vuln_asset_view", "ufix_common_vuln_asset_pg", "ufix_common_vuln_asset_back",
 }
 _REGISTER_ACTION_IDS = {
     "unav_register", "ureg_sub_register", "ureg_sub_scripts",
@@ -187,10 +188,41 @@ def _render_fix(member_user, admin, team_id, team_name, action_id, value):
     if action_id == "ufix_vuln_view":
         return fix.vuln_detail_body(member_user, team_id, team_name, _as_int(value.get("idx")), ctx="vulns", offset=offset, admin=admin)
 
-    if action_id == "ufix_common_vuln_view":
-        return [fix._fix_subnav_columnset("ufix_sub_common")] + fix.common_vuln_detail_for_team(admin, team_name, _as_int(value.get("idx")), back_offset=offset)
+    if action_id in ("ufix_common_vuln_view", "ufix_common_vuln_asset_pg"):
+        idx = _as_int(value.get("idx"))
+        # Same distinction as admin's fix_common_vuln_view/asset_pg
+        # handler: "_view" arrives from the Common Vulns LIST ("offset" is
+        # that list's own paging, asset sub-list starts fresh at 0);
+        # "_asset_pg" arrives from Prev/Next inside the asset sub-list
+        # itself ("offset" is the new asset page, "back_offset" is the
+        # list's own preserved offset).
+        if action_id == "ufix_common_vuln_asset_pg":
+            asset_offset = offset
+            back_offset = _as_int(value.get("back_offset")) or 0
+        else:
+            asset_offset = 0
+            back_offset = offset
+        return [fix._fix_subnav_columnset("ufix_sub_common")] + fix.common_vuln_detail_for_team(
+            admin, team_name, idx, back_offset=back_offset, asset_offset=asset_offset,
+        )
     if action_id == "ufix_common_vuln_back":
         return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_common", offset=offset)
+
+    if action_id == "ufix_common_vuln_asset_view":
+        idx = _as_int(value.get("idx"))
+        asset_offset = offset
+        back_offset = _as_int(value.get("back_offset")) or 0
+        return [fix._fix_subnav_columnset("ufix_sub_common")] + fix.common_vuln_asset_detail_for_team(
+            member_user, admin, team_id, team_name, idx, value.get("host"),
+            asset_offset=asset_offset, back_offset=back_offset,
+        )
+    if action_id == "ufix_common_vuln_asset_back":
+        idx = _as_int(value.get("cv_idx"))
+        asset_offset = _as_int(value.get("cv_offset")) or 0
+        back_offset = _as_int(value.get("back_offset")) or 0
+        return [fix._fix_subnav_columnset("ufix_sub_common")] + fix.common_vuln_detail_for_team(
+            admin, team_name, idx, back_offset=back_offset, asset_offset=asset_offset,
+        )
 
     # unav_fix (default) / ufix_sub_assets
     return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets")
@@ -279,6 +311,12 @@ def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id
                 member_user, team_id, team_name, idx, sub=value.get("sub") or "manual",
                 sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset,
             )
+        if vctx == "common":
+            return [fix._fix_subnav_columnset("ufix_sub_common")] + fix.common_vuln_asset_detail_for_team(
+                member_user, admin, team_id, team_name, _as_int(value.get("cv_idx")), host,
+                asset_offset=_as_int(value.get("cv_offset")) or 0, back_offset=_as_int(value.get("back_offset")) or 0,
+                sub=value.get("sub") or "manual",
+            )
         return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=value.get("sub") or "manual", admin=admin)
 
     data = fix._fetch_team_data(member_user, team_name)
@@ -293,6 +331,12 @@ def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id
     if vctx == "register":
         value_base["sev"] = value.get("sev") or "all"
         value_base["st"] = value.get("st") or "all"
+    if vctx == "common":
+        value_base["host"] = host
+        value_base["team"] = value.get("team")
+        value_base["cv_idx"] = value.get("cv_idx")
+        value_base["cv_offset"] = value.get("cv_offset")
+        value_base["back_offset"] = value.get("back_offset")
 
     if action_id == "ufix_mark_mitigated":
         ok, error = fix.mark_mitigated(member_user, r, data.get("report_id"))
@@ -344,6 +388,12 @@ def _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset
         return [register.register_subnav_columnset("ureg_sub_register")] + register.register_vuln_detail_body(
             member_user, team_id, team_name, idx, sub=sub,
             sev=value.get("sev") or "all", st=value.get("st") or "all", offset=offset, step_number=step_number,
+        )
+    if vctx == "common":
+        return [fix._fix_subnav_columnset("ufix_sub_common")] + fix.common_vuln_asset_detail_for_team(
+            member_user, admin, team_id, team_name, _as_int(value.get("cv_idx")), host,
+            asset_offset=_as_int(value.get("cv_offset")) or 0, back_offset=_as_int(value.get("back_offset")) or 0,
+            sub=sub, step_number=step_number,
         )
     return fix.vuln_detail_body(member_user, team_id, team_name, idx, ctx=vctx, host=host, offset=offset, sub=sub, step_number=step_number, admin=admin)
 

@@ -676,10 +676,11 @@ COMMON_VULNS_TEAMS = [
 
 
 def _common_vulns_team_columnset(active_team):
-    # All 4 real team names ("Configuration Management", 25 chars) crammed
-    # into one row of narrow auto-width columns truncated mid-word — same
-    # reasoning as the top nav bar and Reminder's own two-row split.
-    return two_row_pill_columnset(COMMON_VULNS_TEAMS, active_team, lambda key: {"action_id": "fix_common_team", "team": key}, split=2)
+    # Real request: single row, matching the top nav bar's own successful
+    # single-row fix (see NAV_ITEMS) — pill_columnset's stretch columns
+    # handle the 4 real team names fine in one row without the earlier
+    # two-row split this used to need.
+    return pill_columnset(COMMON_VULNS_TEAMS, active_team, lambda key: {"action_id": "fix_common_team", "team": key})
 
 
 # Full Fix-tab body building (sub-nav + real, clickable content) now lives

@@ -251,9 +251,10 @@ def support_list_body(admin, st="all", team="all", offset=0):
         host = r.get("host_name") or "—"
         team_name = r.get("assigned_team") or "—"
         requester = r.get("requested_by") or "Unknown"
+        when = str(r.get("requested_at") or "")[:10]
         st_val = (r.get("status") or "open").strip().lower()
         st_label = "🟢 Closed" if st_val == "closed" else "🔴 Open"
-        subtitle = f"{host}   ·   Team: {team_name}\nBy: {requester}   ·   {st_label}"
+        subtitle = f"{host}   ·   Team: {team_name}\nBy: {requester}   ·   {when}   ·   {st_label}"
         body.append(fix_tab._row(
             name, subtitle, "remind_sup_view",
             {"idx": offset + i, "st": st, "team": team, "offset": offset},

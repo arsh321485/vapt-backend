@@ -771,7 +771,22 @@ def common_vulns_list_body(admin, team_key="config", sev="all", st="all", offset
     return body
 
 
-def common_vuln_detail_body(admin, team_key, idx, back_offset=0, prefix="fix_common"):
+def _find_row_idx_for_asset(admin, vuln_name, host):
+    """Common Vulns' own data source (MitigationStrategyByTeamAPIView, an
+    aggregate across assets) is separate from the flat register rows
+    _vuln_detail_full_body indexes into — this bridges the two by matching
+    on (vuln name, host), the same identity a real vulnerability instance
+    has in both places, so a common vuln's own per-asset "View" can reuse
+    the exact same Manual/Automation Fix detail every other entry point
+    already renders instead of duplicating it."""
+    rows = _fetch_register_rows(admin)
+    for i, r in enumerate(rows):
+        if (r.get("vul_name") or "").strip() == (vuln_name or "").strip() and (r.get("asset") or "").strip() == (host or "").strip():
+            return i
+    return None
+
+
+def common_vuln_detail_body(admin, team_key, idx, back_offset=0, asset_offset=0, prefix="fix_common"):
     grouped = _fetch_common_vulns_grouped(admin)
     team = grouped.get(team_key) or {"vulns": []}
     vulns = team.get("vulns") or []
@@ -785,17 +800,48 @@ def common_vuln_detail_body(admin, team_key, idx, back_offset=0, prefix="fix_com
     if sev not in _SEV_ICON:
         sev = "medium"
     assets = v.get("assets") or []
+    total = len(assets)
+    page = assets[asset_offset:asset_offset + PAGE_SIZE]
     body.append({"type": "TextBlock", "text": v.get("name") or "Unnamed vulnerability", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
-    body.append({"type": "TextBlock", "text": f"{_SEV_ICON[sev]} {sev.title()}   ·   Affects {len(assets)} asset(s)", "size": "Small", "weight": "Bolder", "spacing": "Small"})
-    for a in assets[:15]:
-        body.append({
-            "type": "TextBlock",
-            "text": f"🖥 {a.get('host') or '—'}   ·   {_status_label(a.get('status'))}   ·   port {a.get('port') or '—'}",
-            "size": "Small", "wrap": True, "spacing": "Small",
-        })
-    if len(assets) > 15:
-        body.append({"type": "TextBlock", "text": f"+ {len(assets) - 15} more not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
+    body.append({"type": "TextBlock", "text": f"{_SEV_ICON[sev]} {sev.title()}   ·   Affects {total} asset(s)", "size": "Small", "weight": "Bolder", "spacing": "Small"})
+    for a in page:
+        host = a.get("host") or "—"
+        subtitle = f"{_status_label(a.get('status'))}   ·   port {a.get('port') or '—'}"
+        body.append(_row(
+            f"🖥 {host}", subtitle, f"{prefix}_vuln_asset_view",
+            {"team": team_key, "idx": idx, "host": host, "offset": asset_offset, "back_offset": back_offset},
+        ))
+    body.extend(_pagination_body(asset_offset, total, f"{prefix}_vuln_asset_pg", {"team": team_key, "idx": idx, "back_offset": back_offset}))
     return body
+
+
+def common_vuln_asset_detail_body(admin, team_key, idx, host, asset_offset=0, back_offset=0, sub="manual", step_number=None, prefix="fix_common"):
+    """One specific (vuln, asset) instance's own Manual/Automation Fix
+    detail, reached from common_vuln_detail_body's per-asset "View" —
+    resolves the matching flat register row (see _find_row_idx_for_asset)
+    and reuses _vuln_detail_full_body verbatim so this never drifts out
+    of sync with the identical detail every other entry point shows.
+
+    Real gotcha: _vuln_detail_full_body's own value_base already owns
+    "idx" (the row_idx, for its Fix/Automation toggle + step-nav to
+    refetch the SAME row) and "offset" (this call's own `offset` param).
+    extra_value gets merged on TOP of those, so reusing either name here
+    for the common-vuln's own idx/asset-list-offset would silently
+    clobber the ones _vuln_detail_full_body needs — kept under distinct
+    "cv_idx"/"cv_offset" keys instead (read back by the *_vuln_asset_back
+    / *_vuln_toggle / *_step_nav handlers in actions.py/user_actions.py)."""
+    grouped = _fetch_common_vulns_grouped(admin)
+    team = grouped.get(team_key) or {"vulns": []}
+    vulns = team.get("vulns") or []
+    vuln_name = vulns[idx].get("name") if (idx is not None and 0 <= idx < len(vulns)) else None
+
+    row_idx = _find_row_idx_for_asset(admin, vuln_name, host)
+    return _vuln_detail_full_body(
+        admin, row_idx, sub=sub, ctx="common", step_number=step_number,
+        back_action_id=f"{prefix}_vuln_asset_back",
+        back_title=f"← Back to {vuln_name or 'vulnerability'}",
+        extra_value={"team": team_key, "cv_idx": idx, "host": host, "cv_offset": asset_offset, "back_offset": back_offset},
+    )
 
 
 # ─── Top-level entry point ──────────────────────────────────────────────

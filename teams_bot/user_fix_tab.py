@@ -538,6 +538,43 @@ def _common_vulns_for_team(admin, team_name, sev="all", st="all", offset=0):
     return common_vulns_list_body(admin, team_key=team_key, sev=sev, st=st, offset=offset, prefix="ufix_common")
 
 
-def common_vuln_detail_for_team(admin, team_name, idx, back_offset=0):
+def common_vuln_detail_for_team(admin, team_name, idx, back_offset=0, asset_offset=0):
     team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
-    return common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset, prefix="ufix_common")
+    return common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset, asset_offset=asset_offset, prefix="ufix_common")
+
+
+def _find_team_row_idx_for_asset(member_user, team_name, vuln_name, host):
+    """Member-scoped counterpart of fix_tab._find_row_idx_for_asset —
+    Common Vulns' own grouped data (shared, admin-authenticated) doesn't
+    carry the same row identity user_fix_tab.vuln_detail_body indexes
+    into (that one reads the MEMBER's own team-scoped rows), so a common
+    vuln's per-asset "View" bridges the two by matching (vuln name, host),
+    same as admin's version."""
+    rows = _fetch_team_rows(member_user, team_name)
+    for i, r in enumerate(rows):
+        if (r.get("vul_name") or "").strip() == (vuln_name or "").strip() and (r.get("asset") or "").strip() == (host or "").strip():
+            return i
+    return None
+
+
+def common_vuln_asset_detail_for_team(member_user, admin, team_id, team_name, idx, host, asset_offset=0, back_offset=0, sub="manual", step_number=None):
+    """Member-side counterpart of fix_tab.common_vuln_asset_detail_body —
+    same (vuln, asset) -> real Manual/Automation Fix + Mark Mitigated
+    detail, just reusing THIS module's own interactive vuln_detail_body
+    (member gets real actions, unlike admin's read-only equivalent) —
+    see that function's own docstring for why "cv_idx"/"cv_offset" are
+    used instead of "idx"/"offset" in extra_value."""
+    from . import fix_tab as _admin_fix_tab
+    team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
+    grouped = _admin_fix_tab._fetch_common_vulns_grouped(admin)
+    team = grouped.get(team_key) or {"vulns": []}
+    vulns = team.get("vulns") or []
+    vuln_name = vulns[idx].get("name") if (idx is not None and 0 <= idx < len(vulns)) else None
+
+    row_idx = _find_team_row_idx_for_asset(member_user, team_name, vuln_name, host)
+    return vuln_detail_body(
+        member_user, team_id, team_name, row_idx, ctx="common", host=host, sub=sub, step_number=step_number,
+        back_action_id="ufix_common_vuln_asset_back",
+        back_title=f"← Back to {vuln_name or 'vulnerability'}",
+        extra_value={"team": team_key, "cv_idx": idx, "host": host, "cv_offset": asset_offset, "back_offset": back_offset},
+    )

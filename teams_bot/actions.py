@@ -381,6 +381,20 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
                 body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
             return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
 
+        if ctx == "common":
+            team_key = value.get("team") or "config"
+            cv_idx = value.get("cv_idx")
+            cv_idx = int(cv_idx) if cv_idx is not None else None
+            cv_offset = int(value.get("cv_offset") or 0)
+            back_offset = int(value.get("back_offset") or 0)
+            try:
+                content = fix_tab.common_vuln_asset_detail_body(admin, team_key, cv_idx, host, asset_offset=cv_offset, back_offset=back_offset, sub=sub)
+                body = [cards._fix_subnav_columnset("fix_sub_common")] + content
+            except Exception:
+                logger.exception("[TeamsBot] fix_vuln_toggle (common) failed")
+                body = [cards._header("🧩 Vulnerability"), cards._body_text("Could not load this right now.")]
+            return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
         active_sub = "fix_sub_assets" if ctx == "asset" else "fix_sub_vulns"
         try:
             if ctx == "asset":
@@ -415,6 +429,20 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
                 logger.exception("[TeamsBot] fix_step_nav (register) failed")
                 body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
             return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
+
+        if ctx == "common":
+            team_key = value.get("team") or "config"
+            cv_idx = value.get("cv_idx")
+            cv_idx = int(cv_idx) if cv_idx is not None else None
+            cv_offset = int(value.get("cv_offset") or 0)
+            back_offset = int(value.get("back_offset") or 0)
+            try:
+                content = fix_tab.common_vuln_asset_detail_body(admin, team_key, cv_idx, host, asset_offset=cv_offset, back_offset=back_offset, sub="manual", step_number=step)
+                body = [cards._fix_subnav_columnset("fix_sub_common")] + content
+            except Exception:
+                logger.exception("[TeamsBot] fix_step_nav (common) failed")
+                body = [cards._header("🧩 Vulnerability"), cards._body_text("Could not load this right now.")]
+            return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
         active_sub = "fix_sub_assets" if ctx == "asset" else "fix_sub_vulns"
         try:
@@ -545,15 +573,56 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = [cards._header("🧩 Common Vulns"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
-    if action_id == "fix_common_vuln_view":
+    if action_id in ("fix_common_vuln_view", "fix_common_vuln_asset_pg"):
         team_key = value.get("team") or "config"
         idx = value.get("idx")
         idx = int(idx) if idx is not None else None
-        back_offset = int(value.get("offset") or 0)
+        # "fix_common_vuln_view" arrives from the Common Vulns LIST, where
+        # "offset" is that list's own pagination — the asset sub-list
+        # inside the detail always starts fresh at 0 from there.
+        # "fix_common_vuln_asset_pg" arrives from Prev/Next INSIDE this
+        # same detail's own asset list, where "offset" is the new asset
+        # page and the list's own offset is preserved separately as
+        # "back_offset" (see common_vuln_detail_body's pagination call).
+        if action_id == "fix_common_vuln_asset_pg":
+            asset_offset = int(value.get("offset") or 0)
+            back_offset = int(value.get("back_offset") or 0)
+        else:
+            asset_offset = 0
+            back_offset = int(value.get("offset") or 0)
         try:
-            body = [cards._fix_subnav_columnset("fix_sub_common")] + fix_tab.common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset)
+            body = [cards._fix_subnav_columnset("fix_sub_common")] + fix_tab.common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset, asset_offset=asset_offset)
         except Exception:
-            logger.exception("[TeamsBot] fix_common_vuln_view failed")
+            logger.exception("[TeamsBot] fix_common_vuln_view/asset_pg failed")
+            body = [cards._header("🧩 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_common_vuln_asset_view":
+        team_key = value.get("team") or "config"
+        idx = value.get("idx")
+        idx = int(idx) if idx is not None else None
+        host = value.get("host") or ""
+        asset_offset = int(value.get("offset") or 0)
+        back_offset = int(value.get("back_offset") or 0)
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_common")] + fix_tab.common_vuln_asset_detail_body(
+                admin, team_key, idx, host, asset_offset=asset_offset, back_offset=back_offset,
+            )
+        except Exception:
+            logger.exception("[TeamsBot] fix_common_vuln_asset_view failed")
+            body = [cards._header("🧩 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_common_vuln_asset_back":
+        team_key = value.get("team") or "config"
+        idx = value.get("cv_idx")
+        idx = int(idx) if idx is not None else None
+        asset_offset = int(value.get("cv_offset") or 0)
+        back_offset = int(value.get("back_offset") or 0)
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_common")] + fix_tab.common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset, asset_offset=asset_offset)
+        except Exception:
+            logger.exception("[TeamsBot] fix_common_vuln_asset_back failed")
             body = [cards._header("🧩 Vulnerability"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 

@@ -26,6 +26,53 @@ def _status_icon(status):
     return "✅" if s == "closed" else ("🟠" if "progress" in s else "🔴")
 
 
+def _status_color(status):
+    """Adaptive Cards' semantic TextBlock colors — real request: the
+    status badge on each row should be colored according to status, not
+    just carry an emoji."""
+    s = (status or "open").strip().lower()
+    if s == "closed":
+        return "good"
+    if "progress" in s:
+        return "warning"
+    return "attention"
+
+
+def _support_row(title_text, subtitle_text, status, action_id, value):
+    """Same 2-column shape as fix_tab._row, plus a 3rd column for a
+    colored status badge between the title/subtitle and the View button —
+    real request: the vuln name row should show status (colored) on its
+    right, not just inside the View column."""
+    return {
+        "type": "ColumnSet",
+        "spacing": "Medium",
+        "separator": True,
+        "columns": [
+            {
+                "type": "Column", "width": "stretch",
+                "items": [
+                    {"type": "TextBlock", "text": title_text, "weight": "Bolder", "size": "Small", "wrap": True},
+                    {"type": "TextBlock", "text": subtitle_text, "size": "Small", "isSubtle": True, "wrap": True, "spacing": "None"},
+                ],
+            },
+            {
+                "type": "Column", "width": "auto", "verticalContentAlignment": "Center",
+                "items": [{
+                    "type": "TextBlock", "text": fix_tab._status_label(status),
+                    "weight": "Bolder", "size": "Small", "color": _status_color(status), "wrap": False,
+                }],
+            },
+            {
+                "type": "Column", "width": "auto", "verticalContentAlignment": "Center",
+                "items": [{
+                    "type": "ActionSet",
+                    "actions": [cards._execute_action("View ›", {"action_id": action_id, **value})],
+                }],
+            },
+        ],
+    }
+
+
 def list_support_requests(admin, member_user, team_name, offset=0):
     from vaptfix.mongo_client import MongoContext
 
@@ -55,13 +102,14 @@ def list_support_requests(admin, member_user, team_name, offset=0):
         return body
 
     for i, t in enumerate(page):
-        icon = _status_icon(t.get("status"))
         title = t.get("vul_name") or "General request"
         when = str(t.get("requested_at") or "")[:10]
-        subtitle = f"{t.get('description') or ''}".strip()[:120]
-        body.append(fix_tab._row(
-            f"{icon} {title}",
-            f"{subtitle or '—'}\nBy {t.get('requested_by') or '—'}   ·   {when}",
+        reason = f"{t.get('description') or ''}".strip()[:120] or "—"
+        asset_line = f"**Asset:** {t.get('host_name') or '—'}"
+        reason_line = f"**Reason:** {reason}"
+        by_line = f"**By:** {t.get('requested_by') or '—'}   ·   {when}"
+        body.append(_support_row(
+            title, f"{asset_line}\n{reason_line}\n{by_line}", t.get("status"),
             "usup_view", {"idx": offset + i, "offset": offset},
         ))
     body.extend(fix_tab._pagination_body(offset, total, "usup_pg"))
