@@ -1568,6 +1568,117 @@ def _reset_sub_channel_to_home(team_id, channel_id, team_name, service_url):
         logger.exception(f"[TeamsChannels] reset-to-Home raised for team_id={team_id} channel={team_name}")
 
 
+def _ensure_one_sub_channel_welcomed(team_id, channel_id, team_name, service_url):
+    """
+    Welcomes (or, if already welcomed, resets to Home — see
+    _reset_sub_channel_to_home) ONE team sub-channel. Extracted out of
+    _backfill_sub_channel_bot_presence's per-channel loop body so it can
+    ALSO be called right after a brand-new member is added to a team —
+    see users_details.views.sync_member_to_teams_channels.
+
+    Real bug report: a member added via the admin-dashboard bot's own
+    "Add User" button (not the admin's own website/OAuth login) landed
+    in their new channel correctly (confirmed via the welcome email's
+    Teams deep link — see users_details/views.py) but saw Teams' own
+    generic empty-channel placeholder, no bot welcome/Home card at all.
+    _backfill_sub_channel_bot_presence — the only thing that ever sent
+    that first card — only ever ran from auto_create_vaptfix_team,
+    i.e. the admin's OWN OAuth login, never from the "Add User" bot-
+    command flow. The channel would eventually self-heal on the admin's
+    NEXT full login, but that could be arbitrarily far away. Calling
+    this right at add-time closes that gap without waiting on it.
+    """
+    from teams_bot.conversation_store import (
+        is_sub_channel_welcomed, mark_sub_channel_welcomed, set_sub_channel_active_message_id,
+    )
+    from teams_bot import bot_api, user_home_tab
+
+    if is_sub_channel_welcomed(team_id, channel_id):
+        # Already welcomed before — the one-time welcome text doesn't need
+        # resending, but the card itself still needs resetting to Home so
+        # a newly-added member doesn't land on whatever tab was last left
+        # active by someone else (see _reset_sub_channel_to_home's own
+        # docstring).
+        try:
+            _reset_sub_channel_to_home(team_id, channel_id, team_name, service_url)
+        except Exception:
+            logger.exception(f"[TeamsChannels] reset-to-Home call failed for {team_name}")
+        return
+
+    # Real bug report: a fresh team's sub-channels all came back with
+    # welcomed_at still unset the very first time this ran — the very
+    # first send happens milliseconds after the channel was just created
+    # via Graph, and Teams needs a moment to finish propagating the bot's
+    # access to a BRAND-NEW channel server-side, so that first attempt can
+    # transiently fail. Retrying a few times with a short delay, all still
+    # inside this one caller's request, gives the very first call a real
+    # chance to just work instead of silently needing a second one.
+    def _send_with_retry(build_activity, label, attempts=3, delay_seconds=1.5):
+        last_resp = None
+        for attempt in range(attempts):
+            if attempt:
+                time.sleep(delay_seconds)
+            try:
+                last_resp = bot_api.send_activity(service_url, channel_id, build_activity())
+            except Exception:
+                logger.exception(f"[TeamsChannels] {label} send attempt {attempt + 1}/{attempts} raised for {team_name}")
+                continue
+            if last_resp is not None and last_resp.status_code < 300:
+                return last_resp
+            logger.warning(
+                f"[TeamsChannels] {label} send attempt {attempt + 1}/{attempts} failed for {team_name}: "
+                f"{getattr(last_resp, 'status_code', None)}"
+            )
+        return last_resp
+
+    resp = _send_with_retry(
+        lambda: bot_api.text_message(
+            f"👋 VaptFix bot is here for the **{team_name}** team! "
+            f"Mention me (@VaptFix) anytime to see your team's dashboard, fix vulnerabilities and more."
+        ),
+        "welcome text",
+    )
+    if resp is not None and resp.status_code < 300:
+        mark_sub_channel_welcomed(team_id, channel_id)
+        logger.info(f"[TeamsChannels] Sent sub-channel welcome for team_id={team_id} channel={team_name}")
+    else:
+        # Real bug report: this still failed on EVERY one of the 3
+        # synchronous retries above for a genuinely brand-new team —
+        # confirmed via real data that Teams' own propagation delay for a
+        # just-created channel can outlast that whole ~3s window. Rather
+        # than stretch the synchronous window (this can run inside an
+        # actual HTTP request — a much longer wait risks THAT request
+        # itself timing out), hand off to a background thread that keeps
+        # trying for up to a few more minutes, well outside the response.
+        # Still safe to call is_sub_channel_welcomed/mark_sub_channel_
+        # welcomed from a thread — MongoContext opens its own connection
+        # per call, no shared request-scoped state.
+        logger.warning(f"[TeamsChannels] sub-channel welcome exhausted sync retries for {team_name} — backgrounding further attempts")
+        threading.Thread(
+            target=_background_retry_sub_channel_welcome,
+            args=(team_id, channel_id, team_name, service_url),
+            daemon=True,
+        ).start()
+        return
+
+    # Immediately follow the plain welcome text with the real Home nav
+    # card — no one specific member is known yet at this point, but Home
+    # is genuinely team-scoped (any member of this team sees the same
+    # data), so this doesn't need to wait for someone to actually @mention
+    # the bot first (confirmed real request: the welcome text alone left
+    # the channel with no visible way to open a card without already
+    # knowing to type something).
+    try:
+        home_body = user_home_tab.home_tab_body(team_id, team_name)
+        card = user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
+        card_resp = _send_with_retry(lambda: bot_api.card_message(card), "initial Home card")
+        card_message_id = card_resp.json().get("id") if card_resp is not None and card_resp.status_code < 300 else None
+        if card_message_id:
+            set_sub_channel_active_message_id(team_id, channel_id, card_message_id)
+    except Exception:
+        logger.exception(f"[TeamsChannels] initial Home card send failed for {team_name}")
+
+
 def _backfill_sub_channel_bot_presence(team_id, channels_result):
     """
     Retrofit for teams whose 4 team-sub-channels (Patch/Configuration/
@@ -1578,20 +1689,15 @@ def _backfill_sub_channel_bot_presence(team_id, channels_result):
     channel — which gets a real proactive post on every login), Teams'
     own @mention picker in a channel's compose box only lists the bot
     once it has actually sent/received some activity in THAT specific
-    channel — General included. Sends one real welcome message into each
-    of the 4 channels (skipped per-channel once already sent, tracked via
-    teams_bot.conversation_store.is_sub_channel_welcomed/
-    mark_sub_channel_welcomed) — safe/cheap to call on every login.
-    `channels_result`: the [{"channelName": <displayName>, "channelId": ...}]
-    list the caller already fetched from Graph (avoids a second round-trip).
+    channel — General included. Ensures each of the 4 channels is
+    welcomed/reset (see _ensure_one_sub_channel_welcomed) — safe/cheap to
+    call on every login. `channels_result`: the
+    [{"channelName": <displayName>, "channelId": ...}] list the caller
+    already fetched from Graph (avoids a second round-trip).
     """
     if not team_id or not channels_result:
         return
-    from teams_bot.conversation_store import (
-        get_team_channel_reference, save_sub_channel_team,
-        is_sub_channel_welcomed, mark_sub_channel_welcomed,
-    )
-    from teams_bot import bot_api
+    from teams_bot.conversation_store import get_team_channel_reference, save_sub_channel_team
 
     ref = get_team_channel_reference(team_id)
     service_url = ref.get("service_url") if ref else None
@@ -1609,97 +1715,10 @@ def _backfill_sub_channel_bot_presence(team_id, channels_result):
         if not team_name or not channel_id:
             continue
         save_sub_channel_team(team_id, channel_id, team_name)
-        if is_sub_channel_welcomed(team_id, channel_id):
-            # Already welcomed on a previous login — the one-time welcome
-            # text/card doesn't need resending, but the card itself still
-            # needs resetting to Home so this login doesn't land on
-            # whatever tab was last left active (see
-            # _reset_sub_channel_to_home's own docstring).
-            try:
-                _reset_sub_channel_to_home(team_id, channel_id, team_name, service_url)
-            except Exception:
-                logger.exception(f"[TeamsChannels] reset-to-Home call failed for {team_name}")
-            continue
-
-        # Real bug report: a fresh team's 4 sub-channels all came back with
-        # welcomed_at still unset after this function had already run once
-        # at creation time — the very first send here happens milliseconds
-        # after the channel was just created via Graph, and Teams needs a
-        # moment to finish propagating the bot's access to a BRAND-NEW
-        # channel server-side, so that first attempt can transiently fail.
-        # This function is "safe to call on every login" so a later login
-        # WOULD eventually retry it — but that meant an admin had to notice
-        # the missing card and manually log in again themselves. Retrying
-        # a few times with a short delay, all still inside this one login
-        # request, means the very first login has a real chance to just
-        # work instead of silently needing a second one.
-        def _send_with_retry(build_activity, label, attempts=3, delay_seconds=1.5):
-            last_resp = None
-            for attempt in range(attempts):
-                if attempt:
-                    time.sleep(delay_seconds)
-                try:
-                    last_resp = bot_api.send_activity(service_url, channel_id, build_activity())
-                except Exception:
-                    logger.exception(f"[TeamsChannels] {label} send attempt {attempt + 1}/{attempts} raised for {team_name}")
-                    continue
-                if last_resp is not None and last_resp.status_code < 300:
-                    return last_resp
-                logger.warning(
-                    f"[TeamsChannels] {label} send attempt {attempt + 1}/{attempts} failed for {team_name}: "
-                    f"{getattr(last_resp, 'status_code', None)}"
-                )
-            return last_resp
-
-        resp = _send_with_retry(
-            lambda: bot_api.text_message(
-                f"👋 VaptFix bot is here for the **{team_name}** team! "
-                f"Mention me (@VaptFix) anytime to see your team's dashboard, fix vulnerabilities and more."
-            ),
-            "welcome text",
-        )
-        if resp is not None and resp.status_code < 300:
-            mark_sub_channel_welcomed(team_id, channel_id)
-            logger.info(f"[TeamsChannels] Sent sub-channel welcome for team_id={team_id} channel={team_name}")
-        else:
-            # Real bug report: this still failed on EVERY one of the 3
-            # synchronous retries above for a genuinely brand-new team —
-            # confirmed via real data that Teams' own propagation delay
-            # for a just-created channel can outlast that whole ~3s
-            # window. Rather than stretch the synchronous window (this
-            # runs inside the actual login HTTP request — admin_id x 4
-            # channels x a much longer wait risks the login itself timing
-            # out), hand off to a background thread that keeps trying for
-            # up to a few more minutes, well outside the login response.
-            # Still safe to call is_sub_channel_welcomed/mark_sub_channel_
-            # welcomed from a thread — MongoContext opens its own
-            # connection per call, no shared request-scoped state.
-            logger.warning(f"[TeamsChannels] sub-channel welcome exhausted sync retries for {team_name} — backgrounding further attempts")
-            threading.Thread(
-                target=_background_retry_sub_channel_welcome,
-                args=(team_id, channel_id, team_name, service_url),
-                daemon=True,
-            ).start()
-            continue
-
-        # Immediately follow the plain welcome text with the real Home nav
-        # card — no one specific member is known yet at backfill time, but
-        # Home is genuinely team-scoped (any member of this team sees the
-        # same data), so this doesn't need to wait for someone to actually
-        # @mention the bot first (confirmed real request: the welcome text
-        # alone left the channel with no visible way to open a card without
-        # already knowing to type something).
         try:
-            from teams_bot import user_home_tab
-            from teams_bot.conversation_store import set_sub_channel_active_message_id
-            home_body = user_home_tab.home_tab_body(team_id, team_name)
-            card = user_home_tab.nav_buttons_card(team_name, active_action_id="unav_home", extra_body=home_body)
-            card_resp = _send_with_retry(lambda: bot_api.card_message(card), "initial Home card")
-            card_message_id = card_resp.json().get("id") if card_resp is not None and card_resp.status_code < 300 else None
-            if card_message_id:
-                set_sub_channel_active_message_id(team_id, channel_id, card_message_id)
+            _ensure_one_sub_channel_welcomed(team_id, channel_id, team_name, service_url)
         except Exception:
-            logger.exception(f"[TeamsChannels] initial Home card send failed for {team_name}")
+            logger.exception(f"[TeamsChannels] _ensure_one_sub_channel_welcomed failed for {team_name}")
 
 
 def _get_admin_aad_object_id(access_token):

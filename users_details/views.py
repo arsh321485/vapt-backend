@@ -365,6 +365,27 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
             # looking up, falling back to the raw role for any custom/renamed
             # channel that table doesn't know about.
             from users.views import TEAMS_CHANNEL_DISPLAY_NAMES
+
+            # Real bug report: a member added via the admin-dashboard bot's
+            # own "Add User" button landed in their new channel correctly
+            # (the welcome email's Teams deep link works) but saw Teams'
+            # own generic empty-channel placeholder — no bot welcome/Home
+            # card at all. That first card only ever got sent from the
+            # admin's OWN OAuth login (_backfill_sub_channel_bot_presence),
+            # never from this "add a member" flow, so a channel with no
+            # admin login since it was created stayed empty indefinitely.
+            # Resolve the service_url once (same team-wide reference
+            # _backfill_sub_channel_bot_presence itself reads) so each
+            # matched channel below can be welcomed/reset right now instead
+            # of waiting on the admin's next login.
+            sub_channel_service_url = None
+            try:
+                from teams_bot.conversation_store import get_team_channel_reference, save_sub_channel_team
+                _ref = get_team_channel_reference(team_id)
+                sub_channel_service_url = _ref.get("service_url") if _ref else None
+            except Exception:
+                logger.warning("[TeamsSync] Could not resolve service_url for sub-channel welcome", exc_info=True)
+
             for role in member_roles:
                 display_name = TEAMS_CHANNEL_DISPLAY_NAMES.get(role, role)
                 matching_channel = channel_map_display.get(display_name) or channel_map_display.get(role)
@@ -376,6 +397,14 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
                 logger.info(
                     f"[TeamsSync] role={role} channel_id={matching_channel.get('id')} membershipType={membership_type}"
                 )
+
+                if sub_channel_service_url:
+                    try:
+                        save_sub_channel_team(team_id, matching_channel['id'], role)
+                        from users.views import _ensure_one_sub_channel_welcomed
+                        _ensure_one_sub_channel_welcomed(team_id, matching_channel['id'], role, sub_channel_service_url)
+                    except Exception:
+                        logger.exception(f"[TeamsSync] _ensure_one_sub_channel_welcomed failed for role={role}")
                 if membership_type == 'standard':
                     # Standard channels: user gets access via team membership
                     results.append({"channel": role, "status": "auto_access_via_team_membership"})
