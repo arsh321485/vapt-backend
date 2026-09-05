@@ -127,7 +127,17 @@ def _bucket_deadline_rows(rows, rc_days):
             buckets["today"].append(row_out)
         elif 1 <= remaining_days <= 6:
             buckets["thisweek"].append(row_out)
-        elif 7 <= remaining_days <= 13:
+        else:
+            # Real bug report: this was `elif 7 <= remaining_days <= 13`,
+            # capping Next Week at 13 days. Real risk-criteria data has a
+            # Medium SLA of "2 Weeks" (14 days) and Low of "4 Weeks" (28
+            # days) — on a freshly-uploaded report (elapsed=0) those give
+            # remaining_days=14/28, both OUTSIDE every bucket's range
+            # (This Week 1-6, Next Week 7-13), so the vulnerability
+            # vanished from all 4 tabs entirely until enough days had
+            # passed to bring it under 14. Next Week is meant to be
+            # everything not-yet-due beyond This Week — open-ended catches
+            # any remaining_days >= 7 instead of only 7-13.
             buckets["nextweek"].append(row_out)
     return buckets
 
