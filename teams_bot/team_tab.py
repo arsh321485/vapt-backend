@@ -195,21 +195,67 @@ def _member_detail_id(m):
 
 # ── Add User ───────────────────────────────────────────────────────────
 
-def normalize_adduser_form_data(value):
+def normalize_adduser_form_data(value, admin=None):
     """The raw click `value` Teams echoes back has au_team/au_assets/
     au_vulns/au_pick_member under REV-SUFFIXED ids (au_team_3, not
     au_team — see add_user_form_body's docstring on why those ids change
     every render). Every actions.py dispatch handler for this flow calls
     this first so add_user_form_body/_apply_select_all/submit_add_user
     only ever have to deal with the plain, unsuffixed keys — this is the
-    one place that knows about the suffix scheme."""
+    one place that knows about the suffix scheme.
+
+    Real bug report: "Select All Vulnerabilities" correctly selected all
+    10, and page 1 showed all 5 of its own rows checked — but clicking
+    Next to page 2 showed NONE of ITS 5 checked, even though they were
+    part of the same "select all". Root cause: a paginated Input.
+    ChoiceSet's "choices" only ever lists the CURRENT page's ids, so
+    when Teams echoes the ChoiceSet's value back on the next click, it
+    silently drops any selected id that isn't one of THIS page's own
+    choices — i.e. every other page's selections. Blindly overwriting
+    au_assets/au_vulns with that echo (the old behavior) meant every
+    Next/Prev click quietly truncated the "full" selection down to just
+    whatever page happened to be on screen at that moment.
+
+    Fixed by tracking the TRUE full selection in a separate, always-
+    present hidden field (_au_assets_sel/_au_vulns_sel — see
+    _assets_vulns_picker_blocks) that every render carries forward
+    untouched, and reconciling it against just the CURRENT page's own
+    echoed choices: drop only the ids that were actually options on this
+    page (an id from a DIFFERENT page can't have been touched by this
+    page's checkboxes at all, so it's left alone), then add back
+    whichever of this page's own ids are checked right now."""
     value = value or {}
     rev = value.get("_rev") or "0"
     normalized = dict(value)
-    for field in ("au_team", "au_assets", "au_vulns", "au_pick_member"):
+    for field in ("au_team", "au_pick_member"):
         suffixed = value.get(f"{field}_{rev}")
         if suffixed is not None:
             normalized[field] = suffixed
+
+    team_codes = [c.strip() for c in (normalized.get("au_team") or "").split(",") if c.strip()]
+    team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes if c in TEAM_CODE_TO_NAME]
+    assets, vulns = _fetch_team_assets_vulns(admin, team_names) if (admin and team_names) else ([], [])
+
+    for which, field, items in (("assets", "au_assets", assets), ("vulns", "au_vulns", vulns)):
+        prev_full = {x.strip() for x in (value.get(f"_au_{which}_sel") or "").split(",") if x.strip()}
+        echoed = value.get(f"{field}_{rev}")
+        if echoed is None:
+            # This ChoiceSet wasn't even on the card for this click (e.g.
+            # no team picked yet, or the click came from a button that
+            # doesn't include it) — nothing to reconcile, carry the
+            # previously-accumulated selection forward unchanged.
+            normalized[field] = ",".join(sorted(prev_full))
+            continue
+        offset_key = f"_au_{which}_offset_shown"
+        prev_offset = 0
+        try:
+            prev_offset = max(0, int(value.get(offset_key) or 0))
+        except (TypeError, ValueError):
+            pass
+        page_ids = {it["id"] for it in items[prev_offset:prev_offset + PAGE_SIZE]}
+        echoed_ids = {x.strip() for x in echoed.split(",") if x.strip()}
+        new_full = (prev_full - page_ids) | (echoed_ids & page_ids)
+        normalized[field] = ",".join(sorted(new_full))
     return normalized
 
 
@@ -440,6 +486,19 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
             return 0
     a_offset = _int_offset("au_assets_offset")
     v_offset = _int_offset("au_vulns_offset")
+
+    # Real bug report — see normalize_adduser_form_data's own docstring:
+    # these 2 pairs are what let the NEXT click reconcile a paginated
+    # ChoiceSet's own (necessarily page-local) echoed value against the
+    # TRUE full selection instead of one silently truncating the other.
+    # _au_*_sel always carries the complete, accumulated selection
+    # forward; _au_*_offset_shown records which page THIS render's
+    # ChoiceSet (if any) is showing, so normalize_ knows which ids it
+    # could possibly have just changed.
+    body.append({"type": "Input.Text", "id": "_au_assets_sel", "value": ",".join(sel_assets), "isVisible": False})
+    body.append({"type": "Input.Text", "id": "_au_vulns_sel", "value": ",".join(sel_vulns), "isVisible": False})
+    body.append({"type": "Input.Text", "id": "_au_assets_offset_shown", "value": str(a_offset), "isVisible": False})
+    body.append({"type": "Input.Text", "id": "_au_vulns_offset_shown", "value": str(v_offset), "isVisible": False})
 
     if assets:
         a_total = len(assets)

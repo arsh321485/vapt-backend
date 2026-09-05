@@ -676,7 +676,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
     # au_vulns first for the Select All/Clear buttons.
     if action_id in ("team_adduser_refresh", "team_adduser_assets_all", "team_adduser_assets_none", "team_adduser_vulns_all", "team_adduser_vulns_none"):
         try:
-            form_data = team_tab.normalize_adduser_form_data(value)
+            form_data = team_tab.normalize_adduser_form_data(value, admin)
             if action_id == "team_adduser_assets_all":
                 form_data = team_tab._apply_select_all(admin, form_data, "assets", select=True)
             elif action_id == "team_adduser_assets_none":
@@ -693,7 +693,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
 
     if action_id == "team_adduser_submit":
         try:
-            form_data = team_tab.normalize_adduser_form_data(value)
+            form_data = team_tab.normalize_adduser_form_data(value, admin)
             ok, message = team_tab.submit_add_user(admin, form_data)
             body = [team_tab.team_subnav_columnset("team_sub_adduser")]
             body.append(cards._header("✅ User Added" if ok else "❌ Could not add user"))
