@@ -577,19 +577,54 @@ class UserDetailCreateView(generics.CreateAPIView):
 
         from urllib.parse import quote
 
+        # Real request: the email's own button should open the SPECIFIC
+        # Microsoft Teams channel this role was added to — not the
+        # website — so clicking it drops the member straight into (and
+        # highlights, via Teams' own selected-channel state) that channel.
+        # Same deep-link mechanism users.views._build_teams_tab_urls
+        # already builds for admin login; resolved once per admin here
+        # (not per role) since it only depends on the admin's own team.
+        admin_ms_team_id = None
+        admin_tenant_id = None
+        if admin_email:
+            try:
+                admin_user = User.objects.filter(email=admin_email).first()
+                if admin_user and getattr(admin_user, "ms_team_id", None):
+                    admin_ms_team_id = admin_user.ms_team_id
+                    if getattr(admin_user, "ms_access_token", None):
+                        from users.views import _decode_jwt_tid
+                        admin_tenant_id = _decode_jwt_tid(admin_user.ms_access_token)
+            except Exception:
+                logger.warning("[Email] Could not resolve admin's ms_team_id for Teams deep link", exc_info=True)
+
         for role in roles_list:
             team_info = TEAM_EMAIL_CONTENT.get(role)
             if not team_info:
                 continue
 
-            # Real request: clicking this link should land the member on
-            # (and highlight) the SPECIFIC team they were just added to,
-            # not just a generic sign-in page they'd have to find their own
-            # way from. `team` here is the same canonical VaptFix team name
-            # ("Configuration Management", etc.) this email's own content
-            # was picked for — frontend reads it after sign-in to select/
-            # highlight that team.
+            # Fall back to the plain website sign-in link (still carrying
+            # &team= for whenever the frontend-side highlight lands too)
+            # whenever the Teams channel itself can't be resolved yet —
+            # e.g. the admin hasn't connected Teams, or this specific
+            # sub-channel hasn't been welcomed/recorded yet.
             dashboard_link = f"https://vaptfix.ai/home?signin=user&tab=signIn&team={quote(role)}"
+            dashboard_link_label = "Go to Dashboard"
+            if admin_ms_team_id:
+                try:
+                    from teams_bot.conversation_store import get_sub_channel_id
+                    from users.views import _build_teams_tab_urls, TEAMS_CHANNEL_DISPLAY_NAMES
+                    sub_channel_id = get_sub_channel_id(admin_ms_team_id, role)
+                    if sub_channel_id:
+                        urls = _build_teams_tab_urls(
+                            admin_ms_team_id, tenant_id=admin_tenant_id,
+                            channel_id=sub_channel_id,
+                            channel_name=TEAMS_CHANNEL_DISPLAY_NAMES.get(role, role),
+                        )
+                        if urls.get("channel_web_url"):
+                            dashboard_link = urls["channel_web_url"]
+                            dashboard_link_label = "Open in Microsoft Teams"
+                except Exception:
+                    logger.warning(f"[Email] Could not build Teams channel deep link for role={role}", exc_info=True)
 
             html_content = f"""<!DOCTYPE html>
 <html>
@@ -644,7 +679,7 @@ class UserDetailCreateView(generics.CreateAPIView):
                  style="background-color:#1e1b4b;color:#ffffff;padding:12px 24px;
                         text-decoration:none;border-radius:30px;font-size:14px;
                         font-weight:bold;display:inline-block;">
-                Go to Dashboard &rarr;
+                {dashboard_link_label} &rarr;
               </a>
             </div>
           </td>
