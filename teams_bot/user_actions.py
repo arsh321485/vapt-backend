@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 _FIX_ACTION_IDS = {
     "unav_fix", "ufix_sub_assets", "ufix_sub_vulns", "ufix_sub_common",
     "ufix_asset_pg", "ufix_vuln_pg", "ufix_common_vuln_pg",
+    "ufix_asset_sev", "ufix_asset_st", "ufix_vuln_sev", "ufix_vuln_st",
+    "ufix_common_vuln_sev", "ufix_common_vuln_st",
     "ufix_asset_view", "ufix_asset_back",
     "ufix_asset_vuln_view", "ufix_asset_vuln_back",
     "ufix_vuln_view", "ufix_vuln_back",
@@ -157,17 +159,19 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
 
 def _render_fix(member_user, admin, team_id, team_name, action_id, value):
     offset = _as_int(value.get("offset")) or 0
+    sev = value.get("sev") or "all"
+    st = value.get("st") or "all"
 
     if action_id == "ufix_sub_vulns":
         return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_vulns")
     if action_id == "ufix_sub_common":
         return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_common")
-    if action_id == "ufix_vuln_pg":
-        return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_vulns", offset=offset)
-    if action_id == "ufix_asset_pg":
-        return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets", offset=offset)
-    if action_id == "ufix_common_vuln_pg":
-        return [fix._fix_subnav_columnset("ufix_sub_common")] + fix._common_vulns_for_team(admin, team_name, offset=offset)
+    if action_id in ("ufix_vuln_pg", "ufix_vuln_sev", "ufix_vuln_st"):
+        return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_vulns", offset=offset, sev=sev, st=st)
+    if action_id in ("ufix_asset_pg", "ufix_asset_sev", "ufix_asset_st"):
+        return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets", offset=offset, sev=sev, st=st)
+    if action_id in ("ufix_common_vuln_pg", "ufix_common_vuln_sev", "ufix_common_vuln_st"):
+        return [fix._fix_subnav_columnset("ufix_sub_common")] + fix._common_vulns_for_team(admin, team_name, sev=sev, st=st, offset=offset)
 
     if action_id == "ufix_asset_view":
         return fix.asset_detail_body(member_user, team_name, value.get("host"), back_offset=offset)

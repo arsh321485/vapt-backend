@@ -24,6 +24,8 @@ from .fix_tab import (
     _SEV_ICON, cached_fetch, _group_assets, PAGE_SIZE,
     _vuln_facts_body, _automation_fix_body,
     common_vulns_list_body, common_vuln_detail_body,
+    _match_sev, _match_status, _status_counts,
+    _sev_filter_columnset, _status_filter_columnset,
 )
 from . import cards as _cards_mod  # for COMMON_VULNS_TEAMS
 
@@ -61,15 +63,20 @@ def _fetch_team_rows(member_user, team_name):
     return _fetch_team_data(member_user, team_name).get("rows") or []
 
 
-def assets_list_body(member_user, team_name, offset=0):
+def assets_list_body(member_user, team_name, sev="all", st="all", offset=0):
     rows = _fetch_team_rows(member_user, team_name)
-    assets = _group_assets(rows)
+    sev_base = [r for r in rows if _match_sev(r, sev)]
+    st_counts = _status_counts(sev_base)
+    filtered_rows = [r for r in sev_base if _match_status(r, st)]
+    assets = _group_assets(filtered_rows)
     total = len(assets)
     page = assets[offset:offset + PAGE_SIZE]
 
     body = [
         {"type": "TextBlock", "text": "💻 All Assets", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": f"Assets assigned to {team_name}. Tap View to see its vulnerabilities.", "size": "Small", "isSubtle": True, "wrap": True},
+        _sev_filter_columnset("ufix_asset", sev, st),
+        _status_filter_columnset("ufix_asset", sev, st, st_counts),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No assets found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
@@ -77,7 +84,7 @@ def assets_list_body(member_user, team_name, offset=0):
     for a in page:
         subtitle = f"{a['total']} Vulns   ·   {_status_label(a['status'])}\n{_sev_dots_text(a['counts'])}"
         body.append(_row(f"🖥 {a['host']}", subtitle, "ufix_asset_view", {"host": a["host"], "offset": offset}))
-    body.extend(_pagination_body(offset, total, "ufix_asset_pg"))
+    body.extend(_pagination_body(offset, total, "ufix_asset_pg", {"sev": sev, "st": st}))
     return body
 
 
@@ -104,28 +111,33 @@ def asset_detail_body(member_user, team_name, host, back_offset=0):
     return body
 
 
-def vulns_list_body(member_user, team_name, offset=0):
+def vulns_list_body(member_user, team_name, sev="all", st="all", offset=0):
     rows = _fetch_team_rows(member_user, team_name)
-    total = len(rows)
-    page = rows[offset:offset + PAGE_SIZE]
+    sev_base = [(i, r) for i, r in enumerate(rows) if _match_sev(r, sev)]
+    st_counts = _status_counts([r for _, r in sev_base])
+    filtered = [(i, r) for i, r in sev_base if _match_status(r, st)]
+    total = len(filtered)
+    page = filtered[offset:offset + PAGE_SIZE]
 
     body = [
         {"type": "TextBlock", "text": "📋 All Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": f"Every vulnerability assigned to {team_name}.", "size": "Small", "isSubtle": True, "wrap": True},
+        _sev_filter_columnset("ufix_vuln", sev, st),
+        _status_filter_columnset("ufix_vuln", sev, st, st_counts),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No vulnerabilities found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
-    for i, r in enumerate(page):
+    for idx, r in page:
         name = r.get("vul_name") or "Unnamed vulnerability"
-        sev = (r.get("severity") or "medium").strip().lower()
-        if sev not in _SEV_ICON:
-            sev = "medium"
+        rsev = (r.get("severity") or "medium").strip().lower()
+        if rsev not in _SEV_ICON:
+            rsev = "medium"
         host = r.get("asset") or "—"
         status = r.get("status") or "open"
         subtitle = f"{host}   ·   {_status_label(status)}"
-        body.append(_row(f"{_SEV_ICON[sev]} {name}", subtitle, "ufix_vuln_view", {"idx": offset + i, "offset": offset}))
-    body.extend(_pagination_body(offset, total, "ufix_vuln_pg"))
+        body.append(_row(f"{_SEV_ICON[rsev]} {name}", subtitle, "ufix_vuln_view", {"idx": idx, "offset": offset}))
+    body.extend(_pagination_body(offset, total, "ufix_vuln_pg", {"sev": sev, "st": st}))
     return body
 
 
@@ -494,17 +506,17 @@ def submit_extension_request(member_user, r):
     return True, None
 
 
-def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets", offset=0):
+def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets", offset=0, sev="all", st="all"):
     """`admin` is only used for the Common Vulns sub-tab (admin-scoped
     data source, see _common_vulns_for_team) — every other sub-tab is
     genuinely member-scoped and ignores it."""
     body = [_fix_subnav_columnset(sub_action_id)]
     if sub_action_id == "ufix_sub_vulns":
-        body.extend(vulns_list_body(member_user, team_name, offset=offset))
+        body.extend(vulns_list_body(member_user, team_name, sev=sev, st=st, offset=offset))
     elif sub_action_id == "ufix_sub_common":
-        body.extend(_common_vulns_for_team(admin, team_name, offset=offset))
+        body.extend(_common_vulns_for_team(admin, team_name, sev=sev, st=st, offset=offset))
     else:
-        body.extend(assets_list_body(member_user, team_name, offset=offset))
+        body.extend(assets_list_body(member_user, team_name, sev=sev, st=st, offset=offset))
     return body
 
 
@@ -516,11 +528,16 @@ def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets",
 # `admin` is threaded in from teams_bot.actions.handle_card_action's own
 # already-resolved admin — see user_actions.py's call site).
 
-def _common_vulns_for_team(admin, team_name, offset=0):
+def _common_vulns_for_team(admin, team_name, sev="all", st="all", offset=0):
     team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
-    return common_vulns_list_body(admin, team_key=team_key, offset=offset)
+    # prefix="ufix_common" — real bug fixed alongside this: without it,
+    # this reused admin's own "fix_common_*" action ids on a MEMBER's
+    # card, which user_actions.py's _FIX_ACTION_IDS never recognized (only
+    # the "ufix_"-prefixed family), so every pagination/View click on a
+    # member's Common Vulns list silently fell through unrecognized.
+    return common_vulns_list_body(admin, team_key=team_key, sev=sev, st=st, offset=offset, prefix="ufix_common")
 
 
 def common_vuln_detail_for_team(admin, team_name, idx, back_offset=0):
     team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
-    return common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset)
+    return common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset, prefix="ufix_common")

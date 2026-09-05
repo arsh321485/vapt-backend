@@ -39,6 +39,69 @@ def _sev_dots_text(counts):
     return "   ".join(parts) if parts else "No open vulnerabilities"
 
 
+# ─── Severity + status filter row (same pattern as register_tab.py's own
+# Register tab filters — requested for the Fix tab's 3 list views too:
+# All Assets, All Vulns, Common Vulns) ───────────────────────────────────
+
+SEV_FILTERS = [("all", "All"), ("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")]
+STATUS_FILTERS = [("all", "All"), ("open", "Open"), ("closed", "Closed"), ("in_progress", "In Progress")]
+
+
+def _norm_sev(r):
+    return (r.get("severity") or "").strip().lower()
+
+
+def _norm_status(r):
+    return (r.get("status") or "open").strip().lower()
+
+
+def _match_sev(r, sev):
+    return sev == "all" or _norm_sev(r) == sev
+
+
+def _match_status(r, st):
+    s = _norm_status(r)
+    if st == "all":
+        return True
+    if st == "in_progress":
+        return "progress" in s
+    if st == "open":
+        return s == "open" or s.startswith("open/")
+    if st == "closed":
+        return s == "closed"
+    return s == st
+
+
+def _status_counts(rows):
+    return {
+        "all": len(rows),
+        "open": sum(1 for r in rows if _norm_status(r) == "open" or _norm_status(r).startswith("open/")),
+        "closed": sum(1 for r in rows if _norm_status(r) == "closed"),
+        "in_progress": sum(1 for r in rows if "progress" in _norm_status(r)),
+    }
+
+
+def _sev_filter_columnset(prefix, active_sev, active_st, extra_value=None):
+    """`prefix` is this list's own action-id root — e.g. "fix_asset" ->
+    clicking a severity pill fires action_id "fix_asset_sev". `extra_value`
+    carries any context a click needs to preserve beyond sev/st/offset —
+    e.g. Common Vulns' currently-selected `team`."""
+    extra_value = extra_value or {}
+    return cards.pill_columnset(
+        SEV_FILTERS, active_sev,
+        lambda k: {"action_id": f"{prefix}_sev", "sev": k, "st": active_st, "offset": 0, **extra_value},
+    )
+
+
+def _status_filter_columnset(prefix, active_sev, active_st, counts, extra_value=None):
+    extra_value = extra_value or {}
+    options = [(k, f"{label} {counts.get(k, 0)}") for k, label in STATUS_FILTERS]
+    return cards.pill_columnset(
+        options, active_st,
+        lambda k: {"action_id": f"{prefix}_st", "sev": active_sev, "st": k, "offset": 0, **extra_value},
+    )
+
+
 def _row(title_text, subtitle_text, action_id, value):
     """One clickable list row — title/subtitle on the left, a real 'View'
     button on the right (matches Slack's section+accessory-button rows)."""
@@ -167,15 +230,20 @@ def _group_assets(rows):
 
 # ─── All Assets ─────────────────────────────────────────────────────────
 
-def assets_list_body(admin, offset=0):
+def assets_list_body(admin, sev="all", st="all", offset=0):
     rows = _fetch_register_rows(admin)
-    assets = _group_assets(rows)
+    sev_base = [r for r in rows if _match_sev(r, sev)]
+    st_counts = _status_counts(sev_base)
+    filtered_rows = [r for r in sev_base if _match_status(r, st)]
+    assets = _group_assets(filtered_rows)
     total = len(assets)
     page = assets[offset:offset + PAGE_SIZE]
 
     body = [
         {"type": "TextBlock", "text": "💻 All Assets", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": "Every asset in your latest report. Tap View to see its vulnerabilities.", "size": "Small", "isSubtle": True, "wrap": True},
+        _sev_filter_columnset("fix_asset", sev, st),
+        _status_filter_columnset("fix_asset", sev, st, st_counts),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No assets found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
@@ -183,7 +251,7 @@ def assets_list_body(admin, offset=0):
     for a in page:
         subtitle = f"{a['total']} Vulns   ·   {_status_label(a['status'])}\n{_sev_dots_text(a['counts'])}"
         body.append(_row(f"🖥 {a['host']}", subtitle, "fix_asset_view", {"host": a["host"], "offset": offset}))
-    body.extend(_pagination_body(offset, total, "fix_asset_pg"))
+    body.extend(_pagination_body(offset, total, "fix_asset_pg", {"sev": sev, "st": st}))
     return body
 
 
@@ -216,28 +284,36 @@ def asset_detail_body(admin, host, back_offset=0):
 
 # ─── All Vulns (flat list) ──────────────────────────────────────────────
 
-def vulns_list_body(admin, offset=0):
+def vulns_list_body(admin, sev="all", st="all", offset=0):
     rows = _fetch_register_rows(admin)
-    total = len(rows)
-    page = rows[offset:offset + PAGE_SIZE]
+    # Keep the index into the FULL unfiltered list — "View" hands back an
+    # idx the shared vuln-detail body resolves against that same full list
+    # (same reasoning as asset_detail_body's own host_rows indices).
+    sev_base = [(i, r) for i, r in enumerate(rows) if _match_sev(r, sev)]
+    st_counts = _status_counts([r for _, r in sev_base])
+    filtered = [(i, r) for i, r in sev_base if _match_status(r, st)]
+    total = len(filtered)
+    page = filtered[offset:offset + PAGE_SIZE]
 
     body = [
         {"type": "TextBlock", "text": "📋 All Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": "Every vulnerability in your latest report.", "size": "Small", "isSubtle": True, "wrap": True},
+        _sev_filter_columnset("fix_vuln", sev, st),
+        _status_filter_columnset("fix_vuln", sev, st, st_counts),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No vulnerabilities found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
-    for i, r in enumerate(page):
+    for idx, r in page:
         name = r.get("vul_name") or "Unnamed vulnerability"
-        sev = (r.get("severity") or "medium").strip().lower()
-        if sev not in _SEV_ICON:
-            sev = "medium"
+        rsev = (r.get("severity") or "medium").strip().lower()
+        if rsev not in _SEV_ICON:
+            rsev = "medium"
         host = r.get("asset") or "—"
         status = r.get("status") or "open"
         subtitle = f"{host}   ·   {_status_label(status)}"
-        body.append(_row(f"{_SEV_ICON[sev]} {name}", subtitle, "fix_vuln_view", {"idx": offset + i, "offset": offset}))
-    body.extend(_pagination_body(offset, total, "fix_vuln_pg"))
+        body.append(_row(f"{_SEV_ICON[rsev]} {name}", subtitle, "fix_vuln_view", {"idx": idx, "offset": offset}))
+    body.extend(_pagination_body(offset, total, "fix_vuln_pg", {"sev": sev, "st": st}))
     return body
 
 
@@ -630,45 +706,77 @@ def _fetch_common_vulns_grouped(admin):
     return SlackSlashCommandView()._group_common_vulns_by_team(data)
 
 
-def common_vulns_list_body(admin, team_key="config", offset=0):
+def common_vulns_list_body(admin, team_key="config", sev="all", st="all", offset=0, prefix="fix_common"):
+    """`prefix` lets the user (member) side reuse this exact function with
+    its own "ufix_common_*" action-id family instead of admin's "fix_common_*"
+    — the member-side dispatcher (user_actions.py's _FIX_ACTION_IDS) only
+    recognizes the "ufix_"-prefixed ones, so passing admin's default here
+    for a member card would leave every pagination/filter click on it
+    unrecognized."""
     grouped = _fetch_common_vulns_grouped(admin)
     team = grouped.get(team_key) or {"display_name": dict(cards.COMMON_VULNS_TEAMS).get(team_key, team_key), "severity": {}, "vulns": []}
-    vulns = team.get("vulns") or []
-    sev = team.get("severity") or {}
-    total = len(vulns)
-    page = vulns[offset:offset + PAGE_SIZE]
+    all_vulns = team.get("vulns") or []
+    sev_summary = team.get("severity") or {}
+
+    # Common-vuln rows don't carry a `status` field of their own (each is
+    # an aggregate across N assets, not a single vuln instance) — the
+    # status filter here is applied per-ASSET within a vuln instead: a
+    # vuln "matches" a status filter if at least one of its affected
+    # assets is in that state, same spirit as the severity filter still
+    # matching on the vuln's own aggregate severity.
+    def _vuln_matches_status(v, target_st):
+        if target_st == "all":
+            return True
+        assets = v.get("assets") or []
+        return any(_match_status(a, target_st) for a in assets)
+
+    # Keep each vuln's index into the FULL (unfiltered) team vulns list —
+    # common_vuln_detail_body indexes back into that same full list, same
+    # reasoning as vulns_list_body's own idx handling above.
+    sev_base = [(i, v) for i, v in enumerate(all_vulns) if _match_sev(v, sev)]
+    st_counts = {
+        "all": len(sev_base),
+        "open": sum(1 for _, v in sev_base if _vuln_matches_status(v, "open")),
+        "closed": sum(1 for _, v in sev_base if _vuln_matches_status(v, "closed")),
+        "in_progress": sum(1 for _, v in sev_base if _vuln_matches_status(v, "in_progress")),
+    }
+    indexed_vulns = [(i, v) for i, v in sev_base if _vuln_matches_status(v, st)]
+    total = len(indexed_vulns)
+    page = indexed_vulns[offset:offset + PAGE_SIZE]
 
     body = [
         {"type": "TextBlock", "text": "🧩 Common Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
         {"type": "TextBlock", "text": "Vulnerabilities appearing on 4+ assets, by team.", "size": "Small", "isSubtle": True, "wrap": True},
         {
             "type": "TextBlock",
-            "text": (f"{team.get('display_name', team_key)}  ·  Total Vulns: {total}\n"
-                     f"🔴 Critical: {sev.get('critical', 0)}   🟠 High: {sev.get('high', 0)}   "
-                     f"🟡 Medium: {sev.get('medium', 0)}   🟢 Low: {sev.get('low', 0)}"),
+            "text": (f"{team.get('display_name', team_key)}  ·  Total Vulns: {len(all_vulns)}\n"
+                     f"🔴 Critical: {sev_summary.get('critical', 0)}   🟠 High: {sev_summary.get('high', 0)}   "
+                     f"🟡 Medium: {sev_summary.get('medium', 0)}   🟢 Low: {sev_summary.get('low', 0)}"),
             "size": "Small", "weight": "Bolder", "wrap": True, "spacing": "Small",
         },
+        _sev_filter_columnset(f"{prefix}_vuln", sev, st, extra_value={"team": team_key}),
+        _status_filter_columnset(f"{prefix}_vuln", sev, st, st_counts, extra_value={"team": team_key}),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No common vulnerabilities for this team. Nothing appears on 4+ assets yet.", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
         return body
-    for i, v in enumerate(page):
+    for idx, v in page:
         vsev = (v.get("severity") or "medium").strip().lower()
         if vsev not in _SEV_ICON:
             vsev = "medium"
         asset_count = v.get("asset_count") or len(v.get("assets") or [])
         subtitle = f"💻 {asset_count} assets   ·   {_SEV_ICON[vsev]} {vsev.title()}"
-        body.append(_row(v.get("name") or "Unnamed vulnerability", subtitle, "fix_common_vuln_view", {"team": team_key, "idx": offset + i, "offset": offset}))
-    body.extend(_pagination_body(offset, total, "fix_common_vuln_pg", {"team": team_key}))
+        body.append(_row(v.get("name") or "Unnamed vulnerability", subtitle, f"{prefix}_vuln_view", {"team": team_key, "idx": idx, "offset": offset}))
+    body.extend(_pagination_body(offset, total, f"{prefix}_vuln_pg", {"team": team_key, "sev": sev, "st": st}))
     return body
 
 
-def common_vuln_detail_body(admin, team_key, idx, back_offset=0):
+def common_vuln_detail_body(admin, team_key, idx, back_offset=0, prefix="fix_common"):
     grouped = _fetch_common_vulns_grouped(admin)
     team = grouped.get(team_key) or {"vulns": []}
     vulns = team.get("vulns") or []
 
-    body = [_back_action("← Back to Common Vulns", "fix_common_vuln_back", {"team": team_key, "offset": back_offset})]
+    body = [_back_action("← Back to Common Vulns", f"{prefix}_vuln_back", {"team": team_key, "offset": back_offset})]
     if idx is None or idx < 0 or idx >= len(vulns):
         body.append({"type": "TextBlock", "text": "This vulnerability could not be found — the report may have changed. Go back and try again.", "wrap": True, "spacing": "Medium"})
         return body
@@ -692,17 +800,17 @@ def common_vuln_detail_body(admin, team_key, idx, back_offset=0):
 
 # ─── Top-level entry point ──────────────────────────────────────────────
 
-def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="config"):
+def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="config", sev="all", st="all"):
     """Sub-nav row + that sub-tab's real (clickable) content."""
     body = [cards._fix_subnav_columnset(active_sub)]
     try:
         if active_sub == "fix_sub_vulns":
-            body.extend(vulns_list_body(admin, offset=offset))
+            body.extend(vulns_list_body(admin, sev=sev, st=st, offset=offset))
         elif active_sub == "fix_sub_common":
             body.append(cards._common_vulns_team_columnset(common_team))
-            body.extend(common_vulns_list_body(admin, team_key=common_team, offset=offset))
+            body.extend(common_vulns_list_body(admin, team_key=common_team, sev=sev, st=st, offset=offset))
         else:
-            body.extend(assets_list_body(admin, offset=offset))
+            body.extend(assets_list_body(admin, sev=sev, st=st, offset=offset))
     except Exception:
         logger.exception(f"[TeamsBot] fix_tab_body failed for {active_sub}")
         body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "spacing": "Medium"})
