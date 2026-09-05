@@ -226,6 +226,28 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
                 f"raw response length={len(raw_content)} chars"
             )
     except Exception as exc:
+        # Real bug report: this always said "please try again" — misleading
+        # for an OpenAI billing/quota outage specifically ("insufficient_
+        # quota"/"credit_balance_exhausted" in the error), since retrying
+        # can NEVER succeed until someone adds credits — an admin who kept
+        # retrying (reasonably, given the wording) would just see the same
+        # failure forever and have no way to know their file was fine and
+        # the problem was on our end. Detect that one case and say so
+        # plainly instead — still without naming OpenAI/"credits" to the
+        # customer, since that's our own vendor's internal detail, not
+        # theirs to troubleshoot. Logged with a distinct, greppable tag so
+        # this is easy to tell apart from a genuinely transient failure in
+        # monitoring/alerts — this one needs a human to go add credits,
+        # not a retry.
+        exc_text = str(exc)
+        if "insufficient_quota" in exc_text or "credit_balance_exhausted" in exc_text:
+            logger.critical(f"[CustomFileValidation][QUOTA_EXHAUSTED] AI validation is down for '{filename}': {exc_text}")
+            return {
+                "valid": False,
+                "reason": "This file needs additional processing that's temporarily unavailable. "
+                          "Retrying won't help right now — please contact VaptFix support so we can "
+                          "process it once service is restored.",
+            }
         logger.error(f"[CustomFileValidation] LLM call failed for '{filename}': {exc}")
         return {"valid": False, "reason": "Could not validate this file right now — please try again."}
 
