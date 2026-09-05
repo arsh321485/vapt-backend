@@ -41,7 +41,16 @@ def _download_url(team_id, fmt):
 def download_report_body(admin, team_id):
     data = _fetch_report_summary(admin)
     vulns = data.get("vulnerabilities") or {}
-    total = sum(v for v in vulns.values() if isinstance(v, (int, float)))
+    # Real bug report: `vulns` here is the OPEN-only severity breakdown
+    # (matches the website/report's own "Findings" donut), so summing it
+    # under-counted the report's real total whenever anything had already
+    # been closed — e.g. 10 real findings, 2 closed, showed "8 total"
+    # with no mention of the 2 closed ones at all. total_fixed (same
+    # field _render_report_html's own remediation-% figure already uses)
+    # is the closed count; add it in rather than silently dropping it.
+    open_total = sum(v for v in vulns.values() if isinstance(v, (int, float)))
+    closed_total = int((data.get("vulnerabilities_fixed") or {}).get("total_fixed") or 0)
+    grand_total = open_total + closed_total
 
     body = [
         {"type": "TextBlock", "text": "📄 Download Report", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
@@ -57,7 +66,7 @@ def download_report_body(admin, team_id):
         {
             "type": "TextBlock",
             "text": (
-                f"**Findings:** {total} total — "
+                f"**Findings:** {grand_total} total ({open_total} open, {closed_total} closed) — "
                 f"🔴 {vulns.get('critical', 0)} Critical   🟠 {vulns.get('high', 0)} High   "
                 f"🟡 {vulns.get('medium', 0)} Medium   🟢 {vulns.get('low', 0)} Low"
             ),

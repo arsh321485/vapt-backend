@@ -725,7 +725,7 @@ def _combined_common_vulns_team(grouped):
     return {"display_name": "All Teams", "severity": totals, "vulns": all_vulns}
 
 
-def common_vulns_list_body(admin, team_key="config", sev="all", st="all", offset=0, prefix="fix_common"):
+def common_vulns_list_body(admin, team_key="all", sev="all", st="all", offset=0, prefix="fix_common"):
     """`prefix` lets the user (member) side reuse this exact function with
     its own "ufix_common_*" action-id family instead of admin's "fix_common_*"
     — the member-side dispatcher (user_actions.py's _FIX_ACTION_IDS) only
@@ -880,8 +880,14 @@ def common_vuln_asset_detail_body(admin, team_key, idx, host, asset_offset=0, ba
 
 # ─── Top-level entry point ──────────────────────────────────────────────
 
-def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="config", sev="all", st="all"):
-    """Sub-nav row + that sub-tab's real (clickable) content."""
+def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="all", sev="all", st="all"):
+    """Sub-nav row + that sub-tab's real (clickable) content.
+
+    Real bug report: clicking the Common Vulns nav tab landed on
+    'Configuration Management' by default (the OLD default before "All
+    Teams" existed at all) instead of showing everything — defaults to
+    "all" now, matching the newly-added All Teams option's own place at
+    the front of COMMON_VULNS_TEAMS."""
     body = [cards._fix_subnav_columnset(active_sub)]
     try:
         if active_sub == "fix_sub_vulns":

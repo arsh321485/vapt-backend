@@ -272,7 +272,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id == "fix_common_team":
-        team_key = value.get("team") or "config"
+        team_key = value.get("team") or "all"
         try:
             body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_common", common_team=team_key)
         except Exception:
@@ -382,7 +382,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
 
         if ctx == "common":
-            team_key = value.get("team") or "config"
+            team_key = value.get("team") or "all"
             cv_idx = value.get("cv_idx")
             cv_idx = int(cv_idx) if cv_idx is not None else None
             cv_offset = int(value.get("cv_offset") or 0)
@@ -442,7 +442,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             return cards.nav_buttons_card(active_action_id="nav_register", extra_body=body)
 
         if ctx == "common":
-            team_key = value.get("team") or "config"
+            team_key = value.get("team") or "all"
             cv_idx = value.get("cv_idx")
             cv_idx = int(cv_idx) if cv_idx is not None else None
             cv_offset = int(value.get("cv_offset") or 0)
@@ -584,7 +584,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id in ("fix_common_vuln_pg", "fix_common_vuln_sev", "fix_common_vuln_st"):
-        team_key = value.get("team") or "config"
+        team_key = value.get("team") or "all"
         offset = int(value.get("offset") or 0)
         sev = value.get("sev") or "all"
         st = value.get("st") or "all"
@@ -596,7 +596,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id in ("fix_common_vuln_view", "fix_common_vuln_asset_pg"):
-        team_key = value.get("team") or "config"
+        team_key = value.get("team") or "all"
         idx = value.get("idx")
         idx = int(idx) if idx is not None else None
         # "fix_common_vuln_view" arrives from the Common Vulns LIST, where
@@ -620,7 +620,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id == "fix_common_vuln_asset_view":
-        team_key = value.get("team") or "config"
+        team_key = value.get("team") or "all"
         idx = value.get("idx")
         idx = int(idx) if idx is not None else None
         host = value.get("host") or ""
@@ -636,7 +636,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id == "fix_common_vuln_asset_back":
-        team_key = value.get("team") or "config"
+        team_key = value.get("team") or "all"
         idx = value.get("cv_idx")
         idx = int(idx) if idx is not None else None
         asset_offset = int(value.get("cv_offset") or 0)
@@ -649,7 +649,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id == "fix_common_vuln_back":
-        team_key = value.get("team") or "config"
+        team_key = value.get("team") or "all"
         offset = int(value.get("offset") or 0)
         try:
             body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_common", offset=offset, common_team=team_key)
