@@ -575,10 +575,21 @@ class UserDetailCreateView(generics.CreateAPIView):
         logo_b64 = self._load_logo_b64()
         logo_html = self._logo_html(logo_b64)
 
+        from urllib.parse import quote
+
         for role in roles_list:
             team_info = TEAM_EMAIL_CONTENT.get(role)
             if not team_info:
                 continue
+
+            # Real request: clicking this link should land the member on
+            # (and highlight) the SPECIFIC team they were just added to,
+            # not just a generic sign-in page they'd have to find their own
+            # way from. `team` here is the same canonical VaptFix team name
+            # ("Configuration Management", etc.) this email's own content
+            # was picked for — frontend reads it after sign-in to select/
+            # highlight that team.
+            dashboard_link = f"https://vaptfix.ai/home?signin=user&tab=signIn&team={quote(role)}"
 
             html_content = f"""<!DOCTYPE html>
 <html>
@@ -629,7 +640,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             </table>
             <!-- Buttons -->
             <div style="margin:0 0 28px 0;">
-              <a href="https://vaptfix.ai/home?signin=user&tab=signIn"
+              <a href="{dashboard_link}"
                  style="background-color:#1e1b4b;color:#ffffff;padding:12px 24px;
                         text-decoration:none;border-radius:30px;font-size:14px;
                         font-weight:bold;display:inline-block;">
