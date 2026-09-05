@@ -58,7 +58,20 @@ def handle_user_activity(activity: dict, admin, team_id: str, value: dict):
     """
     ctx = member_resolve.resolve_member_context(activity, admin, team_id)
     if ctx["error"]:
-        return cards.access_blocked_card(ctx["error"])
+        # Real bug report: this card (e.g. "Only the admin can access this
+        # channel" when a member clicks inside the admin-dashboard channel,
+        # or "You're not part of the X team" in someone else's team
+        # channel) was returned as a normal response — which the caller
+        # then used to EDIT the shared channel card in place, showing this
+        # personal, per-clicker message to everyone in that channel,
+        # including the admin. Every ctx["error"] case here is specific to
+        # THIS clicker, never something the rest of the channel should see
+        # — flag it the same way the admin-side mirror bug was fixed, so
+        # views.py routes it to a private 1:1 reply instead and leaves the
+        # shared card alone.
+        card = cards.access_blocked_card(ctx["error"])
+        card["_is_access_blocked"] = True
+        return card
 
     team_name = ctx["team_name"]
     member_user = ctx["member_user"]
