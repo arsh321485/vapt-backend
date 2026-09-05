@@ -276,7 +276,18 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
                 continue
             plugin_name = (v.get("plugin_name") or "").strip()
             description = (v.get("description") or "").strip()
-            if not plugin_name or not description:
+            # Real bug report: VaptFix's OWN downloadable report (and any
+            # other condensed, table-only summary — name/asset/team/
+            # severity/date/status columns, no free-text description per
+            # row) never survived this — VALIDATION_PROMPT's own stated
+            # bar for a valid finding is "a name OR description" (see its
+            # point 2), but this required BOTH, so every finding in a
+            # description-less table got silently dropped here, emptying
+            # vulnerabilities_by_host and rejecting the whole file as "not
+            # vulnerability scan data" even though it clearly was. Only
+            # plugin_name is genuinely required — description empty is a
+            # legitimate, if minimal, real finding.
+            if not plugin_name:
                 continue  # doesn't meet the minimum bar — drop this one finding, not the whole file
             risk_factor = (v.get("risk_factor") or "").strip().title()
             vulns.append({
