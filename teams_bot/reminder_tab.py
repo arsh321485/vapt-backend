@@ -32,8 +32,14 @@ REMINDER_SUBTABS = [
 
 SUPPORT_STATUS_FILTERS = [("all", "All"), ("open", "Open"), ("closed", "Closed")]
 SUPPORT_TEAM_FILTERS = [
-    ("all", "All Teams"), ("patch", "Patch Management"), ("config", "Configuration Management"),
-    ("network", "Network Security"), ("arch", "Architectural Flaws"),
+    # Real bug report: full team names ("Configuration Management", etc.)
+    # overflowed the card's available width and wrapped onto a second row
+    # regardless of using two_row_pill_columnset or a single ColumnSet —
+    # same genuine width constraint already fixed for Common Vulns' own
+    # team filter (see cards.COMMON_VULNS_TEAMS) — shortened labels here
+    # too so all 5 actually fit in one row.
+    ("all", "All Teams"), ("patch", "Patch Mgmt"), ("config", "Config Mgmt"),
+    ("network", "Network Sec."), ("arch", "Arch. Flaws"),
 ]
 _SUPPORT_TEAM_MATCH = {
     "patch": "patch management", "config": "configuration management",
@@ -267,7 +273,7 @@ def support_list_body(admin, st="all", team="all", offset=0):
             [(k, f"{label} {st_counts.get(k, 0)}") for k, label in SUPPORT_STATUS_FILTERS], st,
             lambda k: {"action_id": "remind_sup_filter", "st": k, "team": team, "offset": 0},
         ),
-        cards.two_row_pill_columnset(
+        cards.pill_columnset(
             SUPPORT_TEAM_FILTERS, team,
             lambda k: {"action_id": "remind_sup_filter", "st": st, "team": k, "offset": 0},
         ),
