@@ -667,11 +667,20 @@ def _fix_subnav_columnset(active_sub):
 
 
 # Common Vulns' own team-filter row — matches Microsoft -Admin/commonvuln.html's tabs.
+# Real bug report: even as a single ColumnSet (see _common_vulns_team_
+# columnset below), "Configuration Management" (25 chars) alongside the
+# other 3 full team names still overflowed Teams' available card width
+# and got auto-wrapped onto a second row anyway — confirmed via real
+# testing AFTER switching to pill_columnset, so this is a genuine width
+# constraint, not a two_row_pill_columnset-vs-pill_columnset difference.
+# Shortened labels (same pattern as "Timeline Ext."/"Reminder" elsewhere)
+# — only the DISPLAY text changes, the key ("config", etc.) driving all
+# actual data lookups is untouched.
 COMMON_VULNS_TEAMS = [
-    ("patch", "Patch Management"),
-    ("config", "Configuration Management"),
-    ("network", "Network Security"),
-    ("arch", "Architectural Flaws"),
+    ("patch", "Patch Mgmt"),
+    ("config", "Config Mgmt"),
+    ("network", "Network Sec."),
+    ("arch", "Arch. Flaws"),
 ]
 
 
