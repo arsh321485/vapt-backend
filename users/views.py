@@ -1317,6 +1317,48 @@ ADMIN_DASHBOARD_CHANNEL_ENABLED = True
 TEAMS_DEEPLINK_HOST = "https://teams.microsoft.com"
 
 
+def _normalize_teams_deeplink(url):
+    """Force the documented deep-link host so the /l/... router runs.
+
+    Graph sometimes returns teams.cloud.microsoft (the post-load web host).
+    Opening that as a deep link makes New Teams ignore the path and restore
+    the last-open tab — usually Chat / VaptFix personal chat.
+    """
+    if not url or not isinstance(url, str):
+        return ""
+    url = url.strip()
+    if not url:
+        return ""
+    # Address-bar / Graph cloud host → documented deep-link entry host.
+    url = url.replace("https://teams.cloud.microsoft/", f"{TEAMS_DEEPLINK_HOST}/")
+    url = url.replace("http://teams.cloud.microsoft/", f"{TEAMS_DEEPLINK_HOST}/")
+    # Only channel (or team) deep links are valid navigation targets.
+    if "/l/channel/" not in url and "/_#/l/channel/" not in url:
+        if "/l/team/" not in url and "/_#/l/team/" not in url:
+            return ""
+    return url
+
+
+def _pick_channel_deep_link(channels, team_id, tenant_id, channel_id, channel_name):
+    """Prefer Graph's own channel webUrl; fall back to our builder.
+
+    Graph webUrl is Microsoft's official deep link to that channel (Teams
+    tab + Posts). Hand-built URLs are second choice.
+    """
+    graph_url = ""
+    for ch in channels or []:
+        cid = ch.get("channelId") or ch.get("id")
+        if cid and channel_id and str(cid) == str(channel_id):
+            graph_url = _normalize_teams_deeplink(ch.get("webUrl") or "")
+            break
+    if graph_url and "/l/channel/" in graph_url:
+        return graph_url
+    urls = _build_teams_tab_urls(
+        team_id, tenant_id=tenant_id, channel_id=channel_id, channel_name=channel_name,
+    )
+    return _normalize_teams_deeplink(urls.get("deep_link") or "") or (urls.get("deep_link") or "")
+
+
 _graph_app_token_cache = {"token": None, "expires_at": 0}
 
 
@@ -2023,7 +2065,7 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
     general_desktop_url = general_web_url.replace("https://", "msteams://")
     channel_desktop_url = channel_web_url.replace("https://", "msteams://") if channel_web_url else None
     # Only a resolved channel URL is safe to open after login.
-    deep_link = channel_web_url
+    deep_link = _normalize_teams_deeplink(channel_web_url) or channel_web_url
     return {
         "web_url": web_url,
         "web_url_alt": web_url_alt,
@@ -2270,11 +2312,13 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
                         "General",
                     )
                     urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
-                    # Channel deep link only — team/bare fallbacks restore Chat.
-                    deep_link = urls.get("deep_link") or ""
+                    # Prefer Graph channel webUrl (official Teams-tab deep link).
+                    deep_link = _pick_channel_deep_link(
+                        channels_result, team_id, tenant_id, preferred_channel_id, preferred_channel_name,
+                    )
                     logger.info(
                         "[TeamsDeepLink] already_exists team_id=%s channel_id=%s channel_name=%s url=%s",
-                        team_id, urls.get("channel_id"), urls.get("channel_name"), deep_link or "(empty)",
+                        team_id, preferred_channel_id, preferred_channel_name, deep_link or "(empty)",
                     )
                     return {
                         "team_id": team_id,
@@ -2293,8 +2337,8 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
                         "teams_tab_url": deep_link,
                         "teams_tab_url_alt": urls.get("channel_web_url_alt") or "",
                         "teams_desktop_url": urls.get("channel_desktop_url") or "",
-                        "teams_channel_id": urls.get("channel_id"),
-                        "teams_channel_name": urls.get("channel_name"),
+                        "teams_channel_id": preferred_channel_id,
+                        "teams_channel_name": preferred_channel_name,
                         "channels": channels_result
                     }
     except Exception as e:
@@ -2386,10 +2430,14 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
             "General",
         )
         urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
-        deep_link = urls.get("deep_link") or ""
+        deep_link = _pick_channel_deep_link(
+            all_channels, team_id, tenant_id, preferred_channel_id, preferred_channel_name,
+        ) or _pick_channel_deep_link(
+            channels_result, team_id, tenant_id, preferred_channel_id, preferred_channel_name,
+        )
         logger.info(
             "[TeamsDeepLink] created team_id=%s channel_id=%s channel_name=%s url=%s",
-            team_id, urls.get("channel_id"), urls.get("channel_name"), deep_link or "(empty)",
+            team_id, preferred_channel_id, preferred_channel_name, deep_link or "(empty)",
         )
 
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
@@ -2405,8 +2453,8 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
             "teams_tab_url": deep_link,
             "teams_tab_url_alt": urls.get("channel_web_url_alt") or "",
             "teams_desktop_url": urls.get("channel_desktop_url") or "",
-            "teams_channel_id": urls.get("channel_id"),
-            "teams_channel_name": urls.get("channel_name"),
+            "teams_channel_id": preferred_channel_id,
+            "teams_channel_name": preferred_channel_name,
             "channels": channels_result
         }
 
@@ -2676,7 +2724,7 @@ class MicrosoftTeamsCallbackView(APIView):
             # HTML response: postMessage to opener + navigate to server-built
             # channel deep link only. Never rebuild URLs in JS and never fall
             # back to a bare Teams host (that restores Chat).
-            deep_link = (vaptfix_team or {}).get("teams_tab_url") or ""
+            deep_link = _normalize_teams_deeplink((vaptfix_team or {}).get("teams_tab_url") or "")
             teams_desktop_url = (vaptfix_team or {}).get("teams_desktop_url") or ""
             callback_status = "ready" if deep_link else "provisioning"
             html = f"""
@@ -2829,7 +2877,7 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                 # teams_tab_url, so the navigate gate never fired and they
                 # opened Teams by hand → last-open Chat tab.
                 team_status = (vaptfix_team or {}).get("status") or ""
-                tab = (vaptfix_team or {}).get("teams_tab_url") or ""
+                tab = _normalize_teams_deeplink((vaptfix_team or {}).get("teams_tab_url") or "")
                 if team_status in ("already_exists", "created", "provisioning"):
                     top_status = "ready" if tab else "provisioning"
                 elif team_status in ("creation_failed", "error"):
@@ -2922,10 +2970,12 @@ class MicrosoftTeamsLoginStatusView(APIView):
                 "General",
             )
             urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
-            deep_link = urls.get("deep_link") or ""
+            deep_link = _pick_channel_deep_link(
+                channels_result, team_id, tenant_id, preferred_channel_id, preferred_channel_name,
+            )
             logger.info(
                 "[TeamsDeepLink] login-status team_id=%s channel_id=%s channel_name=%s url=%s",
-                team_id, urls.get("channel_id"), urls.get("channel_name"), deep_link or "(empty)",
+                team_id, preferred_channel_id, preferred_channel_name, deep_link or "(empty)",
             )
             if not deep_link:
                 empty["vaptfix_team"]["channels"] = channels_result
@@ -2935,8 +2985,8 @@ class MicrosoftTeamsLoginStatusView(APIView):
                 "teams_tab_url": deep_link,
                 "teams_tab_url_alt": urls.get("channel_web_url_alt") or "",
                 "teams_desktop_url": urls.get("channel_desktop_url") or "",
-                "teams_channel_id": urls.get("channel_id"),
-                "teams_channel_name": urls.get("channel_name"),
+                "teams_channel_id": preferred_channel_id,
+                "teams_channel_name": preferred_channel_name,
                 "vaptfix_team": {
                     "id": team_id, "team_id": team_id, "groupId": team_id, "group_id": team_id,
                     "displayName": "Vaptfix", "channels": channels_result,
@@ -9031,13 +9081,16 @@ class TeamsMemberLoginView(APIView):
                         "General",
                     )
                     urls = _build_teams_tab_urls(admin.ms_team_id, tenant_id=admin_tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
-                    # Channel deep link only — never team/bare fallback (Chat restore).
-                    teams_tab_url = urls.get("deep_link") or ""
+                    # Prefer Graph channel webUrl — lands on Teams tab, not Chat.
+                    teams_tab_url = _pick_channel_deep_link(
+                        channels_result, admin.ms_team_id, admin_tenant_id,
+                        preferred_channel_id, preferred_channel_name,
+                    )
                     teams_tab_url_alt = urls.get("channel_web_url_alt") or ""
                     teams_desktop_url = urls.get("channel_desktop_url") or ""
                     logger.info(
                         "[TeamsDeepLink] member-login team_id=%s channel_id=%s channel_name=%s url=%s",
-                        admin.ms_team_id, urls.get("channel_id"), urls.get("channel_name"), teams_tab_url or "(empty)",
+                        admin.ms_team_id, preferred_channel_id, preferred_channel_name, teams_tab_url or "(empty)",
                     )
             except Exception:
                 logger.warning("[TeamsMemberLogin] failed to resolve admin-dashboard channel link", exc_info=True)
