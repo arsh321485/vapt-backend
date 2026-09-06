@@ -1309,105 +1309,6 @@ TEAMS_CHANNEL_DISPLAY_NAMES = {
 ADMIN_DASHBOARD_CHANNEL_NAME = "vaptfix admin dashboard"
 ADMIN_DASHBOARD_CHANNEL_ENABLED = True
 
-# Deep links MUST use teams.microsoft.com — Microsoft docs require
-# https://teams.microsoft.com/l/... as the entry host. teams.cloud.microsoft
-# is the post-load web address only; using it as a deep-link host makes the
-# new Teams client ignore the /l/... path and restore the last-open tab
-# (usually Chat). Do not "modernise" this to teams.cloud.microsoft.
-TEAMS_DEEPLINK_HOST = "https://teams.microsoft.com"
-
-
-def _normalize_teams_deeplink(url):
-    """Force the documented deep-link host so the /l/... router runs.
-
-    Graph sometimes returns teams.cloud.microsoft (the post-load web host).
-    Opening that as a deep link makes New Teams ignore the path and restore
-    the last-open tab — usually Chat / VaptFix personal chat.
-    """
-    if not url or not isinstance(url, str):
-        return ""
-    url = url.strip()
-    if not url:
-        return ""
-    # Address-bar / Graph cloud host → documented deep-link entry host.
-    url = url.replace("https://teams.cloud.microsoft/", f"{TEAMS_DEEPLINK_HOST}/")
-    url = url.replace("http://teams.cloud.microsoft/", f"{TEAMS_DEEPLINK_HOST}/")
-    # Only channel / message / team deep links are valid navigation targets.
-    if not any(x in url for x in ("/l/channel/", "/_#/l/channel/", "/l/message/", "/_#/l/message/", "/l/team/", "/_#/l/team/")):
-        return ""
-    return url
-
-
-def _build_channel_message_deep_link(channel_id, message_id, group_id, tenant_id=None,
-                                     team_name="Vaptfix", channel_name=None):
-    """Deep link to a specific channel post — forces Teams tab + that channel.
-
-    Format (Microsoft docs):
-      https://teams.microsoft.com/l/message/{channelId}/{messageId}
-        ?tenantId=&groupId=&parentMessageId=&teamName=&channelName=
-    Stronger than a plain /l/channel/ link: New Teams cannot "restore Chat"
-    when the URL targets a concrete channel message.
-    """
-    if not channel_id or not message_id or not group_id:
-        return ""
-    channel_name = channel_name or ADMIN_DASHBOARD_CHANNEL_NAME
-    safe_channel = quote(str(channel_id), safe="")
-    safe_msg = quote(str(message_id), safe="")
-    url = (
-        f"{TEAMS_DEEPLINK_HOST}/l/message/{safe_channel}/{safe_msg}"
-        f"?groupId={group_id}"
-        f"&parentMessageId={quote(str(message_id), safe='')}"
-        f"&teamName={quote(team_name or 'Vaptfix')}"
-        f"&channelName={quote(channel_name)}"
-    )
-    if tenant_id:
-        url = f"{url}&tenantId={tenant_id}"
-    return url
-
-
-def _pick_channel_deep_link(channels, team_id, tenant_id, channel_id, channel_name):
-    """Resolve the URL admin login must open (never Chat / bot 1:1).
-
-    Priority:
-      1. Message deep link to the live admin-dashboard card (strongest)
-      2. Graph channel webUrl (normalized to teams.microsoft.com)
-      3. Hand-built /l/channel/ deep link
-    """
-    channel_name = channel_name or ADMIN_DASHBOARD_CHANNEL_NAME
-
-    # 1) Message-level link from the bot's last admin-dashboard card.
-    try:
-        from teams_bot.conversation_store import get_team_channel_reference
-        ref = get_team_channel_reference(team_id) or {}
-        msg_id = ref.get("active_message_id")
-        ref_channel = ref.get("channel_id") or channel_id
-        if msg_id and ref_channel:
-            msg_link = _build_channel_message_deep_link(
-                ref_channel, msg_id, team_id, tenant_id=tenant_id,
-                team_name="Vaptfix", channel_name=channel_name,
-            )
-            if msg_link:
-                logger.info("[TeamsDeepLink] using message deep link message_id=%s", msg_id)
-                return msg_link
-    except Exception:
-        logger.warning("[TeamsDeepLink] active_message_id lookup failed", exc_info=True)
-
-    # 2) Graph's own channel webUrl.
-    graph_url = ""
-    for ch in channels or []:
-        cid = ch.get("channelId") or ch.get("id")
-        if cid and channel_id and str(cid) == str(channel_id):
-            graph_url = _normalize_teams_deeplink(ch.get("webUrl") or "")
-            break
-    if graph_url and "/l/channel/" in graph_url:
-        return graph_url
-
-    # 3) Hand-built channel deep link.
-    urls = _build_teams_tab_urls(
-        team_id, tenant_id=tenant_id, channel_id=channel_id, channel_name=channel_name,
-    )
-    return _normalize_teams_deeplink(urls.get("deep_link") or "") or (urls.get("deep_link") or "")
-
 
 _graph_app_token_cache = {"token": None, "expires_at": 0}
 
@@ -2064,14 +1965,19 @@ def _decode_jwt_tid(token):
 def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name="General"):
     """Build stable deep links that open the Teams tab (not chat).
 
-    Login navigation must use `deep_link` (channel URL on TEAMS_DEEPLINK_HOST)
-    or nothing — never a bare Teams host or a team-only fallback, both of
-    which restore the last-open Chat tab in the new Teams client.
-
-    Contract (all required for channel deep links to resolve):
-      1. Host MUST be teams.microsoft.com (not teams.cloud.microsoft).
-      2. Channel thread id percent-encoded (":" / "@" break path parsing).
-      3. `groupId`, `tenantId`, and `ctx=channel` on the query string.
+    Real bug report (frontend spec, matches the "stuck on teams.microsoft.com,
+    never lands on VaptFix" symptom seen live): this was missing THREE things
+    Teams' own deep-link contract requires to reliably open the CHANNEL Posts
+    view instead of falling back to the last-open Chat tab —
+      1. `ctx=channel` — undocumented but confirmed-mandatory; without it
+         Teams silently restores whatever was last open (Chat, home, ...).
+      2. The channel thread id (format "19:...@thread.tacv2") was interpolated
+         RAW into the URL path instead of percent-encoded — the literal ":"
+         and "@" in an unencoded path segment breaks Teams' own client-side
+         router parsing.
+      3. `tenantId` was an accepted parameter that neither call site below
+         ever actually passed, so it was silently never on any URL this
+         function has ever produced.
     """
     if not team_id:
         return {
@@ -2081,42 +1987,57 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
             "general_web_url": None,
             "general_web_url_alt": None,
             "general_desktop_url": None,
-            "channel_web_url": None,
-            "channel_web_url_alt": None,
-            "channel_desktop_url": None,
-            "deep_link": None,
-            "channel_id": None,
-            "channel_name": None,
         }
-    host = TEAMS_DEEPLINK_HOST
-    # MS docs: /l/team/{channelThreadId}/conversations?groupId={aadGuid}
-    # — path must be a channel thread id (19:...), NOT the AAD group GUID.
-    team_path_id = channel_id or team_id
-    web_url = f"{host}/l/team/{quote(str(team_path_id), safe='')}/conversations?groupId={team_id}"
+    # Graph guarantees a Team's General channel thread id IS the team id
+    # itself (see _ensure_admin_dashboard_channel's own comment on this) —
+    # so this /l/team/.../conversations link is structurally a CHANNEL
+    # link (General's) wearing a different prefix/suffix, and needs the
+    # same mandatory ctx=channel this function's channel_web_url below
+    # already carries. Missing it here specifically (while channel_web_url
+    # had it) was still enough to reproduce the "lands on last-open Chat"
+    # symptom live whenever no OTHER channel_id was available and this was
+    # the URL actually used — real bug report, not the channel_web_url
+    # path this function's docstring above already covers.
+    web_url = f"https://teams.cloud.microsoft/l/team/{quote(str(team_id), safe='')}/conversations?groupId={team_id}"
     if tenant_id:
         web_url = f"{web_url}&tenantId={tenant_id}"
     web_url = f"{web_url}&ctx=channel"
-    web_url_alt = web_url.replace(f"{host}/l/team/", f"{host}/_#/l/team/")
+    web_url_alt = web_url.replace("https://teams.cloud.microsoft/l/team/", "https://teams.cloud.microsoft/_#/l/team/")
     channel_web_url = None
     channel_web_url_alt = None
     if channel_id:
         safe_name = quote(channel_name or "General")
         safe_channel_id = quote(str(channel_id), safe="")
-        channel_web_url = f"{host}/l/channel/{safe_channel_id}/{safe_name}?groupId={team_id}"
+        channel_web_url = f"https://teams.cloud.microsoft/l/channel/{safe_channel_id}/{safe_name}?groupId={team_id}"
         if tenant_id:
             channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
+        # Mandatory — see docstring. Appended last, after groupId/tenantId,
+        # matching the spec's exact example URL ordering.
         channel_web_url = f"{channel_web_url}&ctx=channel"
-        channel_web_url_alt = channel_web_url.replace(f"{host}/l/channel/", f"{host}/_#/l/channel/")
+        channel_web_url_alt = channel_web_url.replace("https://teams.cloud.microsoft/l/channel/", "https://teams.cloud.microsoft/_#/l/channel/")
+    # general_web_url/general_web_url_alt/general_desktop_url are what
+    # their name says — the General channel specifically, only equal to
+    # channel_web_url when channel_name really is "General" — NOT a
+    # generic "preferred URL" fallback. Callers that want "whichever
+    # channel we actually resolved, defaulting to the team view" should
+    # prefer channel_web_url over these, same as the "teams_url" field
+    # already does — confirmed via real testing this distinction matters:
+    # an earlier version of this function always left channel_name at its
+    # default "General" regardless of which channel channel_id actually
+    # pointed at, which made general_web_url silently equal channel_web_url
+    # every time — accidentally "working" for non-General channels, but
+    # for the wrong reason, and callers that didn't ALSO prefer
+    # channel_web_url (like teams_tab_url below) got a plain team link
+    # instead of the intended channel once that accidental case stopped
+    # applying.
     general_web_url = channel_web_url if ((channel_name or "").strip().lower() == "general" and channel_web_url) else web_url
     if "/l/channel/" in general_web_url:
-        general_web_url_alt = general_web_url.replace(f"{host}/l/channel/", f"{host}/_#/l/channel/")
+        general_web_url_alt = general_web_url.replace("https://teams.cloud.microsoft/l/channel/", "https://teams.cloud.microsoft/_#/l/channel/")
     else:
-        general_web_url_alt = general_web_url.replace(f"{host}/l/team/", f"{host}/_#/l/team/")
+        general_web_url_alt = general_web_url.replace("https://teams.cloud.microsoft/l/team/", "https://teams.cloud.microsoft/_#/l/team/")
     desktop_url = web_url.replace("https://", "msteams://")
     general_desktop_url = general_web_url.replace("https://", "msteams://")
     channel_desktop_url = channel_web_url.replace("https://", "msteams://") if channel_web_url else None
-    # Only a resolved channel URL is safe to open after login.
-    deep_link = _normalize_teams_deeplink(channel_web_url) or channel_web_url
     return {
         "web_url": web_url,
         "web_url_alt": web_url_alt,
@@ -2127,9 +2048,6 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
         "channel_web_url": channel_web_url,
         "channel_web_url_alt": channel_web_url_alt,
         "channel_desktop_url": channel_desktop_url,
-        "deep_link": deep_link,
-        "channel_id": channel_id or None,
-        "channel_name": channel_name if channel_id else None,
     }
 
 
@@ -2363,14 +2281,6 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
                         "General",
                     )
                     urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
-                    # Prefer Graph channel webUrl (official Teams-tab deep link).
-                    deep_link = _pick_channel_deep_link(
-                        channels_result, team_id, tenant_id, preferred_channel_id, preferred_channel_name,
-                    )
-                    logger.info(
-                        "[TeamsDeepLink] already_exists team_id=%s channel_id=%s channel_name=%s url=%s",
-                        team_id, preferred_channel_id, preferred_channel_name, deep_link or "(empty)",
-                    )
                     return {
                         "team_id": team_id,
                         "team_name": "Vaptfix",
@@ -2384,12 +2294,10 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
                         "groupId": team_id,
                         "group_id": team_id,
                         "displayName": "Vaptfix",
-                        "teams_url": deep_link,
-                        "teams_tab_url": deep_link,
-                        "teams_tab_url_alt": urls.get("channel_web_url_alt") or "",
-                        "teams_desktop_url": urls.get("channel_desktop_url") or "",
-                        "teams_channel_id": preferred_channel_id,
-                        "teams_channel_name": preferred_channel_name,
+                        "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+                        "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+                        "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+                        "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
                         "channels": channels_result
                     }
     except Exception as e:
@@ -2481,15 +2389,6 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
             "General",
         )
         urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
-        deep_link = _pick_channel_deep_link(
-            all_channels, team_id, tenant_id, preferred_channel_id, preferred_channel_name,
-        ) or _pick_channel_deep_link(
-            channels_result, team_id, tenant_id, preferred_channel_id, preferred_channel_name,
-        )
-        logger.info(
-            "[TeamsDeepLink] created team_id=%s channel_id=%s channel_name=%s url=%s",
-            team_id, preferred_channel_id, preferred_channel_name, deep_link or "(empty)",
-        )
 
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
         return {
@@ -2500,12 +2399,10 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
             "groupId": team_id,
             "group_id": team_id,
             "displayName": "Vaptfix",
-            "teams_url": deep_link,
-            "teams_tab_url": deep_link,
-            "teams_tab_url_alt": urls.get("channel_web_url_alt") or "",
-            "teams_desktop_url": urls.get("channel_desktop_url") or "",
-            "teams_channel_id": preferred_channel_id,
-            "teams_channel_name": preferred_channel_name,
+            "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+            "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+            "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+            "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
             "channels": channels_result
         }
 
@@ -2772,85 +2669,86 @@ class MicrosoftTeamsCallbackView(APIView):
             except Exception:
                 logger.warning("Failed to persist ms_team_id after Microsoft Teams OAuth", exc_info=True)
 
-            # HTML response: postMessage to opener + navigate to server-built
-            # channel deep link only. Never rebuild URLs in JS and never fall
-            # back to a bare Teams host (that restores Chat).
-            deep_link = _normalize_teams_deeplink((vaptfix_team or {}).get("teams_tab_url") or "")
-            teams_desktop_url = (vaptfix_team or {}).get("teams_desktop_url") or ""
-            callback_status = "ready" if deep_link else "provisioning"
-            # Escape & in meta-refresh URL so HTML stays valid.
-            meta_refresh = ""
-            if deep_link:
-                from html import escape as _esc_html
-                meta_refresh = f'<meta http-equiv="refresh" content="0;url={_esc_html(deep_link, quote=True)}">'
+            # HTML response: log access token to console and redirect immediately to MS Teams
             html = f"""
             <html>
-            <head>
-                <title>Opening VaptFix admin dashboard…</title>
-                {meta_refresh}
-            </head>
+            <head><title>Redirecting...</title></head>
             <body>
-                <p id="msg">Opening your VaptFix admin dashboard in Teams…</p>
-                <p id="linkWrap" style="{'display:block' if deep_link else 'display:none'};">
-                    <a id="teamsLink" href="#">Open vaptfix admin dashboard</a>
-                    &nbsp;|&nbsp;
-                    <a id="appLink" href="#">Back to VaptFix</a>
-                </p>
                 <script>
+                    console.log("=== Microsoft Teams Access Token ===");
+                    console.log("{token_data.get('access_token', '')}");
                     console.log("=== User Data ===");
                     console.log({json.dumps(user_data)});
                     console.log("=== VAPTFIX Team ===");
                     console.log({json.dumps(vaptfix_team)});
 
-                    // Server-built message/channel deep link only — never bare Teams host.
-                    var deepLink = {json.dumps(deep_link)};
-                    var teamsDesktopUrl = {json.dumps(teams_desktop_url or None)};
-                    var callbackStatus = {json.dumps(callback_status)};
+                    // Prefer explicit Teams tab links so app opens Team view, not Chat.
+                    var teamId = {json.dumps(vaptfix_team.get('team_id') if vaptfix_team else None)};
+                    var tenantId = "{tenant_id}";
+                    var teamsWebUrl = {json.dumps(vaptfix_team.get('teams_tab_url') if vaptfix_team else None)};
+                    var teamsWebUrlAlt = {json.dumps(vaptfix_team.get('teams_tab_url_alt') if vaptfix_team else None)};
+                    var teamsDesktopUrl = {json.dumps(vaptfix_team.get('teams_desktop_url') if vaptfix_team else None)};
+                    // Same real bug as _build_teams_tab_urls's own web_url (see its
+                    // docstring/comment) — this is a duplicate of that exact
+                    // fallback construction, done client-side for whenever
+                    // vaptfix_team.teams_tab_url itself came back empty, and it
+                    // was missing the same mandatory ctx=channel.
+                    if (!teamsWebUrl && teamId) {{
+                        teamsWebUrl = "https://teams.cloud.microsoft/l/team/" + encodeURIComponent(teamId) + "/conversations?groupId=" + teamId;
+                    }}
+                    if (teamsWebUrl && tenantId && teamsWebUrl.indexOf("tenantId=") === -1) {{
+                        teamsWebUrl = teamsWebUrl + "&tenantId=" + tenantId;
+                    }}
+                    if (teamsWebUrl && teamsWebUrl.indexOf("ctx=channel") === -1) {{
+                        teamsWebUrl = teamsWebUrl + "&ctx=channel";
+                    }}
+                    if (teamsWebUrlAlt && tenantId && teamsWebUrlAlt.indexOf("tenantId=") === -1) {{
+                        teamsWebUrlAlt = teamsWebUrlAlt + "&tenantId=" + tenantId;
+                    }}
+                    var webUrl = teamsWebUrl || "https://teams.cloud.microsoft";
+
+                    var targetUrl = teamsWebUrl || webUrl;
                     var frontendUrl = {json.dumps(frontend_redirect)};
                     var frontendOrigin = frontendUrl;
                     try {{
                         frontendOrigin = new URL(frontendUrl).origin;
                     }} catch (e) {{}}
-                    document.getElementById("appLink").href = frontendUrl;
-                    if (deepLink) {{
-                        document.getElementById("teamsLink").href = deepLink;
-                    }}
-
-                    var payload = {{
-                        type: "TEAMS_CONNECTED",
-                        success: true,
-                        user: {json.dumps(user_data)},
-                        tokens: {{...{json.dumps(token_data)}, tenant_id: "{tenant_id}"}},
-                        django_access_token: "{django_access_token}",
-                        django_refresh_token: "{django_refresh_token}",
-                        django_tokens: {{access: "{django_access_token}", refresh: "{django_refresh_token}"}},
-                        vaptfix_team: {json.dumps(vaptfix_team)},
-                        status: callbackStatus,
-                        redirect_target: deepLink ? "team_tab" : "provisioning",
-                        teams_target_url: deepLink || null,
-                        teams_tab_url: deepLink || null,
-                        teams_desktop_url: teamsDesktopUrl || null
-                    }};
-
                     if (window.opener) {{
-                        try {{ window.opener.postMessage(payload, frontendOrigin); }} catch (e) {{}}
-                        if (deepLink) {{
-                            // Force Teams tab + admin-dashboard channel (or its live card).
-                            window.location.replace(deepLink);
-                            setTimeout(function() {{
-                                try {{ window.close(); }} catch (e) {{}}
-                            }}, 3000);
-                        }} else {{
-                            document.getElementById("msg").textContent = "Setting up your VaptFix workspace… returning to the app.";
-                            setTimeout(function() {{
-                                try {{ window.close(); }} catch (e) {{}}
-                                window.location.replace(frontendUrl);
-                            }}, 1500);
-                        }}
-                    }} else if (deepLink) {{
-                        document.getElementById("msg").textContent = "Opening your VaptFix admin dashboard in Teams…";
-                        window.location.replace(deepLink);
+                        window.opener.postMessage({{
+                            type: "TEAMS_CONNECTED",
+                            success: true,
+                            user: {json.dumps(user_data)},
+                            // "tokens" here is Microsoft's own OAuth response
+                            // (access_token/refresh_token/expires_in — MS
+                            // Graph naming), not our Django JWT. Real bug
+                            // report: a frontend reading tokens.access/
+                            // tokens.refresh (the shape every OTHER auth
+                            // endpoint in this app uses — see
+                            // AdminSignupVerifyOTPView) would find those keys
+                            // absent here and save null, even though the
+                            // Django tokens WERE generated — just under the
+                            // differently-named flat django_access_token/
+                            // django_refresh_token keys below. django_tokens
+                            // gives the same {{access, refresh}} shape as
+                            // every other login/signup response so either
+                            // reading convention picks up a real value.
+                            tokens: {{...{json.dumps(token_data)}, tenant_id: "{tenant_id}"}},
+                            django_access_token: "{django_access_token}",
+                            django_refresh_token: "{django_refresh_token}",
+                            django_tokens: {{access: "{django_access_token}", refresh: "{django_refresh_token}"}},
+                            vaptfix_team: {json.dumps(vaptfix_team)},
+                            redirect_target: "team_tab",
+                            teams_target_url: targetUrl,
+                            teams_desktop_url: teamsDesktopUrl || null
+                        }}, frontendOrigin);
+                        // This callback already runs in a separate OAuth tab.
+                        // Open Teams in this same tab so VAPTFIX parent tab stays untouched.
+                        window.location.replace(targetUrl);
+                        setTimeout(function() {{
+                            try {{ window.close(); }} catch (e) {{}}
+                        }}, 3000);
                     }} else {{
+                        // Same-tab callback: never auto-open Teams, just return user to VAPTFIX app.
                         window.location.replace(frontendUrl);
                     }}
                 </script>
@@ -2913,19 +2811,6 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                     except Exception:
                         logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Teams OAuth)")
 
-                # Frontend navigates on status === "ready". Returning admins
-                # used to get status "already_exists" with a filled
-                # teams_tab_url, so the navigate gate never fired and they
-                # opened Teams by hand → last-open Chat tab.
-                team_status = (vaptfix_team or {}).get("status") or ""
-                tab = _normalize_teams_deeplink((vaptfix_team or {}).get("teams_tab_url") or "")
-                if team_status in ("already_exists", "created", "provisioning"):
-                    top_status = "ready" if tab else "provisioning"
-                elif team_status in ("creation_failed", "error"):
-                    top_status = team_status
-                else:
-                    top_status = "ready" if tab else (team_status or "ready")
-
                 return Response({
                     "message": "Microsoft Teams login successful",
                     "user": UserProfileSerializer(user).data,
@@ -2941,14 +2826,11 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                     "django_refresh_token": str(refresh),
                     "access_token": str(access_token),
                     "is_new_user": is_new_user,
-                    "status": top_status,
-                    "team_status": team_status,
+                    "status": (vaptfix_team or {}).get("status") or "ready",
                     # Top-level per the frontend spec — "frontend reads
                     # teams_tab_url + vaptfix_team.channels from response"
                     # (also present nested in vaptfix_team for compat).
-                    "teams_tab_url": tab,
-                    "teams_tab_url_alt": (vaptfix_team or {}).get("teams_tab_url_alt") or "",
-                    "teams_desktop_url": (vaptfix_team or {}).get("teams_desktop_url") or "",
+                    "teams_tab_url": (vaptfix_team or {}).get("teams_tab_url") or "",
                     "vaptfix_team": vaptfix_team
                 }, status=status.HTTP_200_OK)
                 
@@ -3011,23 +2893,11 @@ class MicrosoftTeamsLoginStatusView(APIView):
                 "General",
             )
             urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
-            deep_link = _pick_channel_deep_link(
-                channels_result, team_id, tenant_id, preferred_channel_id, preferred_channel_name,
-            )
-            logger.info(
-                "[TeamsDeepLink] login-status team_id=%s channel_id=%s channel_name=%s url=%s",
-                team_id, preferred_channel_id, preferred_channel_name, deep_link or "(empty)",
-            )
-            if not deep_link:
-                empty["vaptfix_team"]["channels"] = channels_result
-                return Response(empty, status=status.HTTP_200_OK)
             return Response({
                 "status": "ready",
-                "teams_tab_url": deep_link,
-                "teams_tab_url_alt": urls.get("channel_web_url_alt") or "",
-                "teams_desktop_url": urls.get("channel_desktop_url") or "",
-                "teams_channel_id": preferred_channel_id,
-                "teams_channel_name": preferred_channel_name,
+                "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+                "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+                "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
                 "vaptfix_team": {
                     "id": team_id, "team_id": team_id, "groupId": team_id, "group_id": team_id,
                     "displayName": "Vaptfix", "channels": channels_result,
@@ -9122,17 +8992,9 @@ class TeamsMemberLoginView(APIView):
                         "General",
                     )
                     urls = _build_teams_tab_urls(admin.ms_team_id, tenant_id=admin_tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
-                    # Prefer Graph channel webUrl — lands on Teams tab, not Chat.
-                    teams_tab_url = _pick_channel_deep_link(
-                        channels_result, admin.ms_team_id, admin_tenant_id,
-                        preferred_channel_id, preferred_channel_name,
-                    )
-                    teams_tab_url_alt = urls.get("channel_web_url_alt") or ""
-                    teams_desktop_url = urls.get("channel_desktop_url") or ""
-                    logger.info(
-                        "[TeamsDeepLink] member-login team_id=%s channel_id=%s channel_name=%s url=%s",
-                        admin.ms_team_id, preferred_channel_id, preferred_channel_name, teams_tab_url or "(empty)",
-                    )
+                    teams_tab_url = urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url") or ""
+                    teams_tab_url_alt = urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt") or ""
+                    teams_desktop_url = urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url") or ""
             except Exception:
                 logger.warning("[TeamsMemberLogin] failed to resolve admin-dashboard channel link", exc_info=True)
 

@@ -192,21 +192,8 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         from . import conversation_store
         member_team_name = conversation_store.get_team_name_for_channel(team_id, channel_id)
         if member_team_name:
-            deep_link = None
-            try:
-                from users.views import _pick_channel_deep_link, ADMIN_DASHBOARD_CHANNEL_NAME
-                ref = conversation_store.get_team_channel_reference(team_id) or {}
-                dash_channel_id = ref.get("channel_id")
-                tenant_id = ref.get("tenant_id")
-                if dash_channel_id:
-                    deep_link = _pick_channel_deep_link(
-                        [], team_id, tenant_id, dash_channel_id, ADMIN_DASHBOARD_CHANNEL_NAME,
-                    ) or None
-            except Exception:
-                deep_link = None
             return cards.access_blocked_card(
                 f"Only {member_team_name} team members can access this channel. Please use the vaptfix admin dashboard channel instead.",
-                deep_link=deep_link,
             )
 
     if action_id == "open_provide_scope":
