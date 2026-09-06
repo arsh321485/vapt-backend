@@ -1332,19 +1332,67 @@ def _normalize_teams_deeplink(url):
     # Address-bar / Graph cloud host → documented deep-link entry host.
     url = url.replace("https://teams.cloud.microsoft/", f"{TEAMS_DEEPLINK_HOST}/")
     url = url.replace("http://teams.cloud.microsoft/", f"{TEAMS_DEEPLINK_HOST}/")
-    # Only channel (or team) deep links are valid navigation targets.
-    if "/l/channel/" not in url and "/_#/l/channel/" not in url:
-        if "/l/team/" not in url and "/_#/l/team/" not in url:
-            return ""
+    # Only channel / message / team deep links are valid navigation targets.
+    if not any(x in url for x in ("/l/channel/", "/_#/l/channel/", "/l/message/", "/_#/l/message/", "/l/team/", "/_#/l/team/")):
+        return ""
+    return url
+
+
+def _build_channel_message_deep_link(channel_id, message_id, group_id, tenant_id=None,
+                                     team_name="Vaptfix", channel_name=None):
+    """Deep link to a specific channel post — forces Teams tab + that channel.
+
+    Format (Microsoft docs):
+      https://teams.microsoft.com/l/message/{channelId}/{messageId}
+        ?tenantId=&groupId=&parentMessageId=&teamName=&channelName=
+    Stronger than a plain /l/channel/ link: New Teams cannot "restore Chat"
+    when the URL targets a concrete channel message.
+    """
+    if not channel_id or not message_id or not group_id:
+        return ""
+    channel_name = channel_name or ADMIN_DASHBOARD_CHANNEL_NAME
+    safe_channel = quote(str(channel_id), safe="")
+    safe_msg = quote(str(message_id), safe="")
+    url = (
+        f"{TEAMS_DEEPLINK_HOST}/l/message/{safe_channel}/{safe_msg}"
+        f"?groupId={group_id}"
+        f"&parentMessageId={quote(str(message_id), safe='')}"
+        f"&teamName={quote(team_name or 'Vaptfix')}"
+        f"&channelName={quote(channel_name)}"
+    )
+    if tenant_id:
+        url = f"{url}&tenantId={tenant_id}"
     return url
 
 
 def _pick_channel_deep_link(channels, team_id, tenant_id, channel_id, channel_name):
-    """Prefer Graph's own channel webUrl; fall back to our builder.
+    """Resolve the URL admin login must open (never Chat / bot 1:1).
 
-    Graph webUrl is Microsoft's official deep link to that channel (Teams
-    tab + Posts). Hand-built URLs are second choice.
+    Priority:
+      1. Message deep link to the live admin-dashboard card (strongest)
+      2. Graph channel webUrl (normalized to teams.microsoft.com)
+      3. Hand-built /l/channel/ deep link
     """
+    channel_name = channel_name or ADMIN_DASHBOARD_CHANNEL_NAME
+
+    # 1) Message-level link from the bot's last admin-dashboard card.
+    try:
+        from teams_bot.conversation_store import get_team_channel_reference
+        ref = get_team_channel_reference(team_id) or {}
+        msg_id = ref.get("active_message_id")
+        ref_channel = ref.get("channel_id") or channel_id
+        if msg_id and ref_channel:
+            msg_link = _build_channel_message_deep_link(
+                ref_channel, msg_id, team_id, tenant_id=tenant_id,
+                team_name="Vaptfix", channel_name=channel_name,
+            )
+            if msg_link:
+                logger.info("[TeamsDeepLink] using message deep link message_id=%s", msg_id)
+                return msg_link
+    except Exception:
+        logger.warning("[TeamsDeepLink] active_message_id lookup failed", exc_info=True)
+
+    # 2) Graph's own channel webUrl.
     graph_url = ""
     for ch in channels or []:
         cid = ch.get("channelId") or ch.get("id")
@@ -1353,6 +1401,8 @@ def _pick_channel_deep_link(channels, team_id, tenant_id, channel_id, channel_na
             break
     if graph_url and "/l/channel/" in graph_url:
         return graph_url
+
+    # 3) Hand-built channel deep link.
     urls = _build_teams_tab_urls(
         team_id, tenant_id=tenant_id, channel_id=channel_id, channel_name=channel_name,
     )
@@ -2039,9 +2089,10 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
             "channel_name": None,
         }
     host = TEAMS_DEEPLINK_HOST
-    # Kept for response-shape compat only — NOT a login navigation target.
-    # /l/team/{aad-guid}/conversations is not a reliable channel deep link.
-    web_url = f"{host}/l/team/{quote(str(team_id), safe='')}/conversations?groupId={team_id}"
+    # MS docs: /l/team/{channelThreadId}/conversations?groupId={aadGuid}
+    # — path must be a channel thread id (19:...), NOT the AAD group GUID.
+    team_path_id = channel_id or team_id
+    web_url = f"{host}/l/team/{quote(str(team_path_id), safe='')}/conversations?groupId={team_id}"
     if tenant_id:
         web_url = f"{web_url}&tenantId={tenant_id}"
     web_url = f"{web_url}&ctx=channel"
@@ -2727,13 +2778,21 @@ class MicrosoftTeamsCallbackView(APIView):
             deep_link = _normalize_teams_deeplink((vaptfix_team or {}).get("teams_tab_url") or "")
             teams_desktop_url = (vaptfix_team or {}).get("teams_desktop_url") or ""
             callback_status = "ready" if deep_link else "provisioning"
+            # Escape & in meta-refresh URL so HTML stays valid.
+            meta_refresh = ""
+            if deep_link:
+                from html import escape as _esc_html
+                meta_refresh = f'<meta http-equiv="refresh" content="0;url={_esc_html(deep_link, quote=True)}">'
             html = f"""
             <html>
-            <head><title>Redirecting...</title></head>
+            <head>
+                <title>Opening VaptFix admin dashboard…</title>
+                {meta_refresh}
+            </head>
             <body>
-                <p id="msg">Signing you in…</p>
-                <p id="linkWrap" style="display:none;">
-                    <a id="teamsLink" href="#">Open VaptFix admin dashboard in Teams</a>
+                <p id="msg">Opening your VaptFix admin dashboard in Teams…</p>
+                <p id="linkWrap" style="{'display:block' if deep_link else 'display:none'};">
+                    <a id="teamsLink" href="#">Open vaptfix admin dashboard</a>
                     &nbsp;|&nbsp;
                     <a id="appLink" href="#">Back to VaptFix</a>
                 </p>
@@ -2743,8 +2802,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     console.log("=== VAPTFIX Team ===");
                     console.log({json.dumps(vaptfix_team)});
 
-                    // Server-built channel deep link only — do not rebuild or
-                    // fall back to a bare teams.cloud.microsoft / teams.microsoft.com host.
+                    // Server-built message/channel deep link only — never bare Teams host.
                     var deepLink = {json.dumps(deep_link)};
                     var teamsDesktopUrl = {json.dumps(teams_desktop_url or None)};
                     var callbackStatus = {json.dumps(callback_status)};
@@ -2754,25 +2812,14 @@ class MicrosoftTeamsCallbackView(APIView):
                         frontendOrigin = new URL(frontendUrl).origin;
                     }} catch (e) {{}}
                     document.getElementById("appLink").href = frontendUrl;
+                    if (deepLink) {{
+                        document.getElementById("teamsLink").href = deepLink;
+                    }}
 
                     var payload = {{
                         type: "TEAMS_CONNECTED",
                         success: true,
                         user: {json.dumps(user_data)},
-                        // "tokens" here is Microsoft's own OAuth response
-                        // (access_token/refresh_token/expires_in — MS
-                        // Graph naming), not our Django JWT. Real bug
-                        // report: a frontend reading tokens.access/
-                        // tokens.refresh (the shape every OTHER auth
-                        // endpoint in this app uses — see
-                        // AdminSignupVerifyOTPView) would find those keys
-                        // absent here and save null, even though the
-                        // Django tokens WERE generated — just under the
-                        // differently-named flat django_access_token/
-                        // django_refresh_token keys below. django_tokens
-                        // gives the same {{access, refresh}} shape as
-                        // every other login/signup response so either
-                        // reading convention picks up a real value.
                         tokens: {{...{json.dumps(token_data)}, tenant_id: "{tenant_id}"}},
                         django_access_token: "{django_access_token}",
                         django_refresh_token: "{django_refresh_token}",
@@ -2781,18 +2828,19 @@ class MicrosoftTeamsCallbackView(APIView):
                         status: callbackStatus,
                         redirect_target: deepLink ? "team_tab" : "provisioning",
                         teams_target_url: deepLink || null,
+                        teams_tab_url: deepLink || null,
                         teams_desktop_url: teamsDesktopUrl || null
                     }};
 
                     if (window.opener) {{
-                        window.opener.postMessage(payload, frontendOrigin);
+                        try {{ window.opener.postMessage(payload, frontendOrigin); }} catch (e) {{}}
                         if (deepLink) {{
+                            // Force Teams tab + admin-dashboard channel (or its live card).
                             window.location.replace(deepLink);
                             setTimeout(function() {{
                                 try {{ window.close(); }} catch (e) {{}}
                             }}, 3000);
                         }} else {{
-                            // No channel link yet — let parent poll login-status/.
                             document.getElementById("msg").textContent = "Setting up your VaptFix workspace… returning to the app.";
                             setTimeout(function() {{
                                 try {{ window.close(); }} catch (e) {{}}
@@ -2800,16 +2848,9 @@ class MicrosoftTeamsCallbackView(APIView):
                             }}, 1500);
                         }}
                     }} else if (deepLink) {{
-                        // Same-tab OAuth: open the admin-dashboard channel here.
                         document.getElementById("msg").textContent = "Opening your VaptFix admin dashboard in Teams…";
-                        var a = document.getElementById("teamsLink");
-                        a.href = deepLink;
-                        document.getElementById("linkWrap").style.display = "block";
-                        setTimeout(function() {{
-                            window.location.replace(deepLink);
-                        }}, 400);
+                        window.location.replace(deepLink);
                     }} else {{
-                        // Same-tab, still provisioning — return to app for polling.
                         window.location.replace(frontendUrl);
                     }}
                 </script>
