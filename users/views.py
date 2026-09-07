@@ -2344,24 +2344,90 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
             match = re.search(r"teams\('([^']+)'\)", team_location)
             if match:
                 team_id = match.group(1)
-            # Team provisioning is async — create channels in background to avoid blocking
-            if team_id:
-                def _bg_create_channels(token, tid, hdrs, bg_admin):
-                    for attempt in range(5):
-                        time.sleep(10)
-                        try:
-                            check = _http_get(
-                                f"https://graph.microsoft.com/v1.0/teams/{tid}",
-                                headers=hdrs, timeout=10
-                            )
-                            if check.status_code == 200:
-                                break
-                        except Exception as e:
-                            logger.warning("Suppressed error: %s", e)
-                        logger.info(f"VAPTFIX team not ready, retry {attempt + 1}/5")
-                    _create_vaptfix_channels(tid, hdrs, access_token=token, admin=bg_admin)
-                    _set_vaptfix_team_icon(tid, token)
 
+            def _bg_create_channels(token, tid, hdrs, bg_admin):
+                for attempt in range(5):
+                    time.sleep(10)
+                    try:
+                        check = _http_get(
+                            f"https://graph.microsoft.com/v1.0/teams/{tid}",
+                            headers=hdrs, timeout=10
+                        )
+                        if check.status_code == 200:
+                            break
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
+                    logger.info(f"VAPTFIX team not ready, retry {attempt + 1}/5")
+                _create_vaptfix_channels(tid, hdrs, access_token=token, admin=bg_admin)
+                _set_vaptfix_team_icon(tid, token)
+
+            # Real bug report: a brand-new admin's FIRST Teams login always
+            # landed on Teams' generic Chat tab instead of the right
+            # channel — never on later logins. Root cause: Microsoft's own
+            # Team-from-template creation is asynchronous (this 202), so
+            # this branch used to unconditionally background the whole
+            # channel-creation step and return an empty teams_tab_url right
+            # away — correct only if the frontend then polls login-status/
+            # until a real link is ready, which in practice it wasn't
+            # reliably doing. Async doesn't mean SLOW, though — try a short,
+            # bounded synchronous wait first (max ~12s) so the common case
+            # (team ready quickly) can return a real, ready teams_tab_url
+            # on this very first response, with no polling required at all.
+            # Only the genuinely slow remainder falls through to the
+            # original background+"provisioning" path below (still
+            # correct, just needs the frontend's existing poll).
+            team_ready = False
+            if team_id:
+                for _ in range(4):
+                    time.sleep(3)
+                    try:
+                        check = _http_get(
+                            f"https://graph.microsoft.com/v1.0/teams/{team_id}",
+                            headers=headers, timeout=10
+                        )
+                        if check.status_code == 200:
+                            team_ready = True
+                            break
+                    except Exception as e:
+                        logger.warning("Suppressed error: %s", e)
+
+            if team_ready:
+                channels_result = _create_vaptfix_channels(team_id, headers, access_token=access_token, admin=admin)
+                _set_vaptfix_team_icon(team_id, access_token)
+                all_channels = _get_team_channels(team_id, headers)
+                preferred_channel_id = (
+                    _pick_admin_dashboard_channel_id(all_channels)
+                    or _pick_general_channel_id(all_channels)
+                    or _pick_general_channel_id(channels_result)
+                )
+                if not preferred_channel_id and channels_result:
+                    preferred_channel_id = channels_result[0].get("channelId")
+                preferred_channel_name = next(
+                    (c.get("displayName") for c in all_channels if c.get("id") == preferred_channel_id),
+                    "General",
+                )
+                urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+                logger.info(f"VAPTFIX team created (after short sync wait): {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
+                return {
+                    "team_id": team_id,
+                    "team_name": "Vaptfix",
+                    "status": "created",
+                    "id": team_id,
+                    "groupId": team_id,
+                    "group_id": team_id,
+                    "displayName": "Vaptfix",
+                    "teams_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+                    "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
+                    "teams_tab_url_alt": urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt"),
+                    "teams_desktop_url": urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url"),
+                    "channels": channels_result
+                }
+
+            # Still not ready after the short synchronous wait — fall back
+            # to the original async path: background thread keeps trying
+            # with its own longer budget, frontend polls login-status/
+            # until ready.
+            if team_id:
                 t = threading.Thread(target=_bg_create_channels, args=(access_token, team_id, headers, admin), daemon=True)
                 t.start()
             return {
