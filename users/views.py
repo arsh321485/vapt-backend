@@ -1261,6 +1261,23 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 f"&response_mode=query"
                 f"&scope={scope_param}"
                 f"&state={state}"
+                # Real bug report: MS Teams login hung forever on Microsoft's
+                # own "Trying to sign you in" screen in Incognito/Private
+                # windows, but worked fine in a normal window. Without an
+                # explicit `prompt`, Microsoft's login page first attempts a
+                # SILENT SSO check via a hidden iframe (is there already a
+                # session in this browser?) before ever showing the
+                # interactive form — that check depends on third-party
+                # cookies, which Chrome's Incognito blocks by default (even
+                # when a normal window's cookie settings allow them), so it
+                # never resolves and the page just hangs. `select_account`
+                # skips straight to the interactive account-picker/login
+                # form — no silent iframe check at all — so it works
+                # identically in Incognito and a normal window, and as a
+                # bonus always lets the admin pick which Microsoft account
+                # to use instead of silently reusing whatever was last
+                # signed in.
+                f"&prompt=select_account"
             )
 
             print("🔗 Auth URL:", auth_url)
