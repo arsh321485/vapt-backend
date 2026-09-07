@@ -2588,13 +2588,17 @@ class MicrosoftTeamsCallbackView(APIView):
                 except Exception as e:
                     logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
 
-            # First-time signup, no password yet — send the set-password
-            # email (not forgot-password). Never blocks the flow.
-            if created and user and not user.has_usable_password() and user.email:
-                try:
-                    send_set_password_email(user, "Microsoft Teams")
-                except Exception:
-                    logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Teams callback)")
+            # Real request: this automatic "set your password" email is
+            # DISABLED for now — Teams/Slack sign-ins don't need a password
+            # at all, and this proactive email was confusing users. The
+            # manual resend endpoint (SendSetPasswordEmailView, Settings ->
+            # "Set Password") is untouched for whoever still wants this
+            # later. Re-enable by uncommenting the call below.
+            # if created and user and not user.has_usable_password() and user.email:
+            #     try:
+            #         send_set_password_email(user, "Microsoft Teams")
+            #     except Exception:
+            #         logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Teams callback)")
 
             if user:
                 logger.info(f"[TeamsOAuth] Processing user: id={user.id} email={user.email} login_provider={user.login_provider}")
@@ -2820,13 +2824,14 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
 
                 logger.info(f"Microsoft Teams OAuth login successful: {user.email}")
 
-                # First-time signup, no password yet — send the set-password
-                # email (not forgot-password). Never blocks the response.
-                if is_new_user and not user.has_usable_password() and user.email:
-                    try:
-                        send_set_password_email(user, "Microsoft Teams")
-                    except Exception:
-                        logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Teams OAuth)")
+                # Real request: this automatic "set your password" email is
+                # DISABLED for now — see the matching comment on the Teams
+                # callback's own send_set_password_email call above.
+                # if is_new_user and not user.has_usable_password() and user.email:
+                #     try:
+                #         send_set_password_email(user, "Microsoft Teams")
+                #     except Exception:
+                #         logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Teams OAuth)")
 
                 return Response({
                     "message": "Microsoft Teams login successful",
@@ -5686,13 +5691,14 @@ class SlackOAuthCallbackView(APIView):
                 except Exception as e:
                     logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
 
-            # First-time signup, no password yet — send the set-password
-            # email (not forgot-password). Never blocks the flow.
-            if newly_created and not user.has_usable_password() and user.email:
-                try:
-                    send_set_password_email(user, "Slack")
-                except Exception:
-                    logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Slack callback)")
+            # Real request: this automatic "set your password" email is
+            # DISABLED for now — see the matching comment on the Teams
+            # callback's own send_set_password_email call.
+            # if newly_created and not user.has_usable_password() and user.email:
+            #     try:
+            #         send_set_password_email(user, "Slack")
+            #     except Exception:
+            #         logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Slack callback)")
 
             # Email-provider admins are allowed to also connect Slack (additive
             # login — they keep their password AND gain Slack login). Only the
@@ -6013,13 +6019,14 @@ class SlackLoginView(APIView):
             except Exception:
                 logger.warning("ensure_vaptfix_channels failed in login", exc_info=True)
 
-            # First-time signup, no password yet — send the set-password
-            # email (not forgot-password). Never blocks the response.
-            if created and not user.has_usable_password() and user.email:
-                try:
-                    send_set_password_email(user, "Slack")
-                except Exception:
-                    logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Slack login)")
+            # Real request: this automatic "set your password" email is
+            # DISABLED for now — see the matching comment on the Teams
+            # callback's own send_set_password_email call.
+            # if created and not user.has_usable_password() and user.email:
+            #     try:
+            #         send_set_password_email(user, "Slack")
+            #     except Exception:
+            #         logger.exception(f"[SetPasswordEmail] Failed for {user.email} (Slack login)")
 
             # 4. PERFECT RESPONSE FORMAT
             return Response({
