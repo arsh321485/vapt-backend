@@ -2369,17 +2369,30 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
             # channel-creation step and return an empty teams_tab_url right
             # away — correct only if the frontend then polls login-status/
             # until a real link is ready, which in practice it wasn't
-            # reliably doing. Async doesn't mean SLOW, though — try a short,
-            # bounded synchronous wait first (max ~12s) so the common case
-            # (team ready quickly) can return a real, ready teams_tab_url
-            # on this very first response, with no polling required at all.
-            # Only the genuinely slow remainder falls through to the
-            # original background+"provisioning" path below (still
-            # correct, just needs the frontend's existing poll).
+            # reliably doing. Async doesn't mean SLOW, though — try a
+            # bounded synchronous wait first so the common case (team
+            # eventually ready within this request) can return a real,
+            # ready teams_tab_url on this very first response, with no
+            # polling required at all. Only the genuinely slow remainder
+            # falls through to the original background+"provisioning" path
+            # below (still correct, just needs the frontend's existing
+            # poll — confirmed via real testing that the frontend doesn't
+            # reliably do that poll, so a first login that hits this
+            # fallback visibly lands on the wrong place; a manual retry a
+            # while later then works, since by then the background thread
+            # has already finished).
+            #
+            # Real bug report: the original ~12s budget here (4 tries, 3s
+            # apart) was NOT enough — real Microsoft Team-from-template
+            # provisioning regularly took noticeably longer than that in
+            # practice. Widened to ~80s (20 tries, 4s apart), safely inside
+            # gunicorn's own 120s worker timeout (see the systemd unit's
+            # ExecStart --timeout 120) with room left over for the actual
+            # channel-creation calls that follow once the team is ready.
             team_ready = False
             if team_id:
-                for _ in range(4):
-                    time.sleep(3)
+                for _ in range(20):
+                    time.sleep(4)
                     try:
                         check = _http_get(
                             f"https://graph.microsoft.com/v1.0/teams/{team_id}",
