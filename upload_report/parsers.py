@@ -1178,6 +1178,22 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
             break
     
     def _filter_hosts_by_severity(hosts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # Real bug report: a host whose ONLY findings were Nessus's own
+        # "None"/informational risk factor (e.g. "Service Detection", "OS
+        # Identification", "Nessus Scan Information" — real findings, just
+        # not Critical/High/Medium/Low) ended up with an empty
+        # filtered_vulns list here, and was then dropped from the report
+        # ENTIRELY — not "asset with 0 vulnerabilities", just gone. On a
+        # real 18-host file, 9 hosts were exactly this case (clean/low-risk
+        # targets with only informational Nessus housekeeping findings) and
+        # vanished from every asset count in the app, even though they're
+        # genuine scanned targets straight out of the file's own Table of
+        # Contents. Every host reaching this function already passed the
+        # "has vulnerabilities or host_information" gate above (see
+        # vulnerabilities_by_host.append), so it's a real, scanned asset —
+        # keep it (with whatever's left of its vulnerabilities, possibly
+        # none) rather than silently erasing it because none of its
+        # findings happened to be risk-rated.
         allowed = {"critical", "high", "medium", "low"}
         filtered_hosts: List[Dict[str, Any]] = []
         for host in hosts:
@@ -1187,13 +1203,12 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                 if risk and risk not in allowed:
                     continue
                 filtered_vulns.append(vuln)
-            if filtered_vulns:
-                new_host = {
-                    "host_name": host.get("host_name"),
-                    "host_information": host.get("host_information", {}),
-                    "vulnerabilities": filtered_vulns
-                }
-                filtered_hosts.append(new_host)
+            new_host = {
+                "host_name": host.get("host_name"),
+                "host_information": host.get("host_information", {}),
+                "vulnerabilities": filtered_vulns
+            }
+            filtered_hosts.append(new_host)
         return filtered_hosts
 
     filtered_hosts = _filter_hosts_by_severity(vulnerabilities_by_host)
@@ -1297,14 +1312,21 @@ def _strip_non_risk_findings(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(hosts, list):
         return parsed_data
 
+    # Real bug report: "not kept -> continue" (drop the whole host) was
+    # wrong on a real 18-asset file — 9 of the 18 hosts had ONLY Info/None-
+    # severity findings (real Nessus housekeeping findings like "Service
+    # Detection"/"OS Identification", not actual vulnerabilities) and
+    # vanished from the report entirely, even though every one of them is
+    # a genuine scanned target listed in the file's own Table of Contents.
+    # A host with zero Critical/High/Medium/Low findings is a real asset
+    # with a clean bill of health, not a non-asset — keep it, just with an
+    # empty (or shorter) vulnerabilities list.
     new_hosts = []
     for host in hosts:
         kept = [
             v for v in (host.get("vulnerabilities") or [])
             if str(v.get("risk_factor") or "").strip().lower() not in _NON_RISK_SEVERITIES
         ]
-        if not kept:
-            continue  # host had only Info/blank findings — not a real asset
         new_host = dict(host)
         new_host["vulnerabilities"] = kept
         new_hosts.append(new_host)
