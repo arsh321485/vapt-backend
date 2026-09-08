@@ -2015,23 +2015,23 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
     # symptom live whenever no OTHER channel_id was available and this was
     # the URL actually used — real bug report, not the channel_web_url
     # path this function's docstring above already covers.
-    web_url = f"https://teams.cloud.microsoft/l/team/{quote(str(team_id), safe='')}/conversations?groupId={team_id}"
+    web_url = f"https://teams.microsoft.com/l/team/{quote(str(team_id), safe='')}/conversations?groupId={team_id}"
     if tenant_id:
         web_url = f"{web_url}&tenantId={tenant_id}"
     web_url = f"{web_url}&ctx=channel"
-    web_url_alt = web_url.replace("https://teams.cloud.microsoft/l/team/", "https://teams.cloud.microsoft/_#/l/team/")
+    web_url_alt = web_url.replace("https://teams.microsoft.com/l/team/", "https://teams.microsoft.com/_#/l/team/")
     channel_web_url = None
     channel_web_url_alt = None
     if channel_id:
         safe_name = quote(channel_name or "General")
         safe_channel_id = quote(str(channel_id), safe="")
-        channel_web_url = f"https://teams.cloud.microsoft/l/channel/{safe_channel_id}/{safe_name}?groupId={team_id}"
+        channel_web_url = f"https://teams.microsoft.com/l/channel/{safe_channel_id}/{safe_name}?groupId={team_id}"
         if tenant_id:
             channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
         # Mandatory — see docstring. Appended last, after groupId/tenantId,
         # matching the spec's exact example URL ordering.
         channel_web_url = f"{channel_web_url}&ctx=channel"
-        channel_web_url_alt = channel_web_url.replace("https://teams.cloud.microsoft/l/channel/", "https://teams.cloud.microsoft/_#/l/channel/")
+        channel_web_url_alt = channel_web_url.replace("https://teams.microsoft.com/l/channel/", "https://teams.microsoft.com/_#/l/channel/")
     # general_web_url/general_web_url_alt/general_desktop_url are what
     # their name says — the General channel specifically, only equal to
     # channel_web_url when channel_name really is "General" — NOT a
@@ -2049,9 +2049,9 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
     # applying.
     general_web_url = channel_web_url if ((channel_name or "").strip().lower() == "general" and channel_web_url) else web_url
     if "/l/channel/" in general_web_url:
-        general_web_url_alt = general_web_url.replace("https://teams.cloud.microsoft/l/channel/", "https://teams.cloud.microsoft/_#/l/channel/")
+        general_web_url_alt = general_web_url.replace("https://teams.microsoft.com/l/channel/", "https://teams.microsoft.com/_#/l/channel/")
     else:
-        general_web_url_alt = general_web_url.replace("https://teams.cloud.microsoft/l/team/", "https://teams.cloud.microsoft/_#/l/team/")
+        general_web_url_alt = general_web_url.replace("https://teams.microsoft.com/l/team/", "https://teams.microsoft.com/_#/l/team/")
     desktop_url = web_url.replace("https://", "msteams://")
     general_desktop_url = general_web_url.replace("https://", "msteams://")
     channel_desktop_url = channel_web_url.replace("https://", "msteams://") if channel_web_url else None
@@ -2794,7 +2794,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     // vaptfix_team.teams_tab_url itself came back empty, and it
                     // was missing the same mandatory ctx=channel.
                     if (!teamsWebUrl && teamId) {{
-                        teamsWebUrl = "https://teams.cloud.microsoft/l/team/" + encodeURIComponent(teamId) + "/conversations?groupId=" + teamId;
+                        teamsWebUrl = "https://teams.microsoft.com/l/team/" + encodeURIComponent(teamId) + "/conversations?groupId=" + teamId;
                     }}
                     if (teamsWebUrl && tenantId && teamsWebUrl.indexOf("tenantId=") === -1) {{
                         teamsWebUrl = teamsWebUrl + "&tenantId=" + tenantId;
@@ -2805,7 +2805,7 @@ class MicrosoftTeamsCallbackView(APIView):
                     if (teamsWebUrlAlt && tenantId && teamsWebUrlAlt.indexOf("tenantId=") === -1) {{
                         teamsWebUrlAlt = teamsWebUrlAlt + "&tenantId=" + tenantId;
                     }}
-                    var webUrl = teamsWebUrl || "https://teams.cloud.microsoft";
+                    var webUrl = teamsWebUrl || "https://teams.microsoft.com";
 
                     var targetUrl = teamsWebUrl || webUrl;
                     var frontendUrl = {json.dumps(frontend_redirect)};
