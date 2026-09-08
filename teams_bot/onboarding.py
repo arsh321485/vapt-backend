@@ -118,7 +118,16 @@ def post_onboarding_step(admin, team_id=None, force_state=None):
     if new_message_id:
         mark_state_posted(team_id, state)
     logger.info(f"[TeamsOnboarding] Posted state={state} card into team_id={team_id} (new_message_id={new_message_id})")
-    return state
+    # Real bug report: this used to return `state` unconditionally, even
+    # when replace_active_card came back None (no stored channel reference
+    # yet, a concurrent post already claimed the slot, or the send itself
+    # failed) — every caller checking "did this actually post?" (see
+    # _handle_message's `if not posted:` fallback, and the admin-dashboard
+    # retry below) saw a truthy value regardless, so a genuinely failed
+    # post was indistinguishable from a real one. Only return `state` when
+    # something was actually confirmed live in the channel (either just
+    # now, or — was_state_recently_posted above — moments ago).
+    return state if new_message_id else None
 
 
 def build_state_card(admin, team_id, state):

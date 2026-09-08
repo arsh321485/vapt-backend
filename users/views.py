@@ -1546,6 +1546,29 @@ def _background_retry_sub_channel_welcome(team_id, channel_id, team_name, servic
     logger.warning(f"[TeamsChannels] background welcome retry exhausted every attempt for {team_name} — will retry on next login instead")
 
 
+def _background_retry_admin_dashboard_onboarding(admin, team_id):
+    """
+    Same idea as _background_retry_sub_channel_welcome, for the ONE
+    channel that never had an equivalent — see the real bug report in
+    _ensure_admin_dashboard_channel's _repoint_and_post for why this
+    channel needs it too. Runs outside the login request entirely; gives
+    up quietly after the last attempt (self-heals on the admin's next
+    login regardless, same as the sub-channel version)."""
+    from teams_bot.onboarding import post_onboarding_step
+
+    for delay_seconds in (10, 20, 40, 60):
+        time.sleep(delay_seconds)
+        try:
+            posted = post_onboarding_step(admin, team_id=team_id)
+        except Exception:
+            logger.exception(f"[TeamsChannels] admin-dashboard background retry raised for team_id={team_id}")
+            continue
+        if posted:
+            logger.info(f"[TeamsChannels] admin-dashboard background retry succeeded for team_id={team_id}")
+            return
+    logger.warning(f"[TeamsChannels] admin-dashboard background retry exhausted every attempt for team_id={team_id} — will retry on next login instead")
+
+
 def _reset_sub_channel_to_home(team_id, channel_id, team_name, service_url):
     """
     Real bug report: unlike the admin-dashboard channel (which gets its
@@ -1842,9 +1865,28 @@ def _ensure_admin_dashboard_channel(team_id, access_token, headers=None, admin=N
         if pointed and admin is not None:
             try:
                 from teams_bot.onboarding import post_onboarding_step
-                post_onboarding_step(admin, team_id=team_id)
+                posted = post_onboarding_step(admin, team_id=team_id)
             except Exception:
                 logger.warning("[TeamsChannels] post_onboarding_step after channel repoint failed", exc_info=True)
+                posted = None
+            if not posted:
+                # Real bug report: unlike the 4 real team channels (see
+                # _backfill_sub_channel_bot_presence /
+                # _background_retry_sub_channel_welcome — added specifically
+                # because a brand-new channel isn't always immediately
+                # addressable via Bot Framework right after Graph creates
+                # it), this one-shot post had NO retry at all — a single
+                # failure here (propagation delay, a transient send error,
+                # ...) left "vaptfix admin dashboard" permanently silent,
+                # since nothing else ever proactively posts into it again
+                # until the admin's NEXT login re-runs this same function.
+                # Give it the same resilience the sub-channels already have.
+                logger.warning(f"[TeamsChannels] post_onboarding_step did not confirm a post for team_id={team_id} channel_id={cid} — starting background retry")
+                t = threading.Thread(
+                    target=_background_retry_admin_dashboard_onboarding,
+                    args=(admin, team_id), daemon=True,
+                )
+                t.start()
 
     try:
         existing = _get_team_channels(team_id, headers)
