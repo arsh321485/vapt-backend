@@ -400,7 +400,9 @@ class UserAvgScoreAPIView(APIView):
                             for matched in matched_teams:
                                 by_team[matched].add(h_name)
 
-                avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else None
+                # "0, not null" when there's no scored vulnerability data —
+                # same fix as admindashboard's AdminAvgScoreAPIView.
+                avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else 0
                 by_team_count = {t: len(hosts) for t, hosts in by_team.items()}
                 all_hosts = set().union(*by_team.values()) if by_team else set()
 

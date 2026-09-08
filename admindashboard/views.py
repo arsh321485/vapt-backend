@@ -207,7 +207,8 @@ class ReportAvgScoreAPIView(APIView):
                         num = safe_float_from(cv_raw)
                         if num is not None:
                             cvss_vals.append(num)
-                avg = round(sum(cvss_vals)/len(cvss_vals), 2) if cvss_vals else None
+                # Same "0, not null" fix as AdminAvgScoreAPIView below.
+                avg = round(sum(cvss_vals)/len(cvss_vals), 2) if cvss_vals else 0
                 return Response(AvgScoreSerializer({"avg_score": avg}).data)
         except RuntimeError as rte:
             return Response({"detail": str(rte)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -1160,7 +1161,13 @@ class AdminAvgScoreAPIView(APIView):
                         if num is not None:
                             cvss_vals.append(num)
 
-                avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else None
+                # Real request: an asset/report with no scored vulnerabilities
+                # (e.g. every finding closed/held/deleted, or none carried a
+                # numeric CVSS value at all) was showing avg_score: null on
+                # the dashboard instead of 0 — "no data" and "zero risk" read
+                # the same to the frontend either way, so show 0 rather than
+                # a blank/null card.
+                avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else 0
 
                 data = {"avg_score": avg, "report_id": report_id}
                 cache.set(cache_key, data, 300)
