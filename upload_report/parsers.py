@@ -95,8 +95,19 @@ def _html_table_to_map(table) -> Dict[str, Any]:
 
 
 def _shape_dataframe_payload(df: pd.DataFrame) -> Dict[str, Any]:
-    """Create a lightweight representation of dataframe for API."""
-    preview_rows = df.head(50).fillna("").to_dict(orient="records")
+    """
+    Lightweight representation of a dataframe for the "custom file" GPT
+    validation/extraction path (upload_report/custom_report_ai.py).
+
+    Real bug report: "preview" used to be hardcoded to df.head(50) — the
+    first 50 rows only, no matter how large the file. A 1853-row CSV had
+    1803 of its rows (97%) silently discarded before the model ever saw
+    them, so only the handful of hosts covered by the first 50 rows were
+    ever extracted. Every row is included now — custom_report_ai.py's
+    chunking (see its own _iter_row_chunks) is what actually keeps any
+    single GPT call within a safe size, not a row cap here.
+    """
+    preview_rows = df.fillna("").to_dict(orient="records")
     return {
         "columns": df.columns.tolist(),
         "rows": len(df.index),
@@ -629,6 +640,138 @@ def parse_aws_inspector_csv(file_path: str) -> Dict[str, Any]:
     return {
         "type": "aws",
         "scan_info": {"source": "AWS Inspector", "parser": "aws_inspector_csv"},
+        "total_hosts": total_hosts,
+        "total_vulnerabilities": total_vulns,
+        "vulnerabilities_by_host": vulnerabilities_by_host,
+    }
+
+
+# ==================== TENABLE VULNERABILITY-EXPORT CSV PARSER ==================== #
+#
+# Real bug report: a Tenable.io/Tenable.sc "Vulnerabilities Export" CSV
+# (asset.*/definition.*-prefixed columns — a real 1853-row/206-host file
+# confirmed this) wasn't recognized by anything here at all — it fell all
+# the way through to the generic parse_csv() (type="csv", not structured),
+# which the upload flow then treats as an unrecognized "custom" file and
+# hands to the GPT validation/extraction path. That path's own CSV/Excel
+# text extraction only ever looks at _shape_dataframe_payload's `preview`
+# (a hardcoded df.head(50) — the first 50 rows only, see that function's
+# own docstring), so 1803 of the file's 1853 rows were silently discarded
+# before the model ever saw them — this file's first 50 rows only span 9
+# distinct hosts, exactly matching the reported "only 9 assets" symptom.
+# A native, structured parser (same idea as parse_aws_inspector_csv above)
+# fixes this properly: no row cap, no GPT involved, every row processed.
+
+TENABLE_VULN_EXPORT_SNIFF_COLUMNS = {
+    "asset.id", "asset.display_ipv4_address", "definition.id", "definition.name", "severity",
+}
+
+
+def _sniff_is_tenable_vuln_export_csv(file_path: str) -> bool:
+    """Peek at the header row to detect a Tenable.io/Tenable.sc vulnerability export."""
+    try:
+        with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as fp:
+            header_line = fp.readline()
+        columns = {c.strip().strip('"') for c in header_line.split(",")}
+        return TENABLE_VULN_EXPORT_SNIFF_COLUMNS.issubset(columns)
+    except Exception:
+        return False
+
+
+def parse_tenable_vuln_export_csv(file_path: str) -> Dict[str, Any]:
+    """
+    Parse a Tenable.io/Tenable.sc "Vulnerabilities Export" CSV into the same
+    vulnerabilities_by_host shape the Nessus/AWS parsers produce. One host
+    entry per distinct asset.id (grouping key — the stable identifier
+    Tenable itself uses; asset.display_ipv4_address is used as the
+    displayed host_name, matching every other parser's IP-as-host_name
+    convention, with asset.host_name/asset.name as fallbacks for the rare
+    row missing an IP). One vulnerability entry per finding row.
+    """
+    try:
+        df = pd.read_csv(file_path, dtype=str, keep_default_na=False)
+    except Exception as exc:
+        return {"error": f"Tenable vulnerability export CSV parse error: {exc}"}
+
+    missing = [c for c in TENABLE_VULN_EXPORT_SNIFF_COLUMNS if c not in df.columns]
+    if missing:
+        return {"error": f"Not a recognized Tenable vulnerability export — missing columns: {', '.join(missing)}"}
+
+    def _get(row, col: str) -> str:
+        val = row.get(col, "")
+        if val is None:
+            return ""
+        val = str(val).strip()
+        return "" if val.lower() == "nan" else val
+
+    host_map: Dict[str, Dict[str, Any]] = {}
+    vulnerabilities_by_host: List[Dict[str, Any]] = []
+    total_vulns = 0
+
+    for _, row in df.iterrows():
+        finding_name = _get(row, "definition.name")
+        if not finding_name:
+            continue  # skip rows without a usable finding
+
+        asset_id = _get(row, "asset.id") or "unknown-asset"
+
+        host_entry = host_map.get(asset_id)
+        if not host_entry:
+            display_ip = _get(row, "asset.display_ipv4_address")
+            host_name = display_ip or _get(row, "asset.host_name") or _get(row, "asset.name") or asset_id
+            host_info = {}
+            if display_ip:
+                host_info["IP"] = display_ip
+            asset_host_name = _get(row, "asset.host_name")
+            if asset_host_name:
+                host_info["DNS Name"] = asset_host_name
+            asset_name = _get(row, "asset.name")
+            if asset_name:
+                host_info["asset_name"] = asset_name
+            os_val = _get(row, "asset.operating_system") or _get(row, "asset.operating_systems")
+            if os_val:
+                host_info["operating-system"] = os_val
+            host_entry = {
+                "host_name": host_name,
+                "host_information": host_info,
+                "vulnerabilities": [],
+            }
+            host_map[asset_id] = host_entry
+            vulnerabilities_by_host.append(host_entry)
+
+        severity = _get(row, "severity")
+        risk_factor = severity.title() if severity else ""
+        cvss_score = _get(row, "definition.cvss3.base_score") or _get(row, "definition.cvss2.base_score")
+        port = _get(row, "port")
+        protocol = _get(row, "protocol")
+        port_str = f"{protocol.lower()}/{port}" if protocol and port else (port or "")
+        description = _get(row, "definition.description")
+        cve = _get(row, "definition.cve")
+
+        vuln = {
+            "plugin_id": _get(row, "definition.id") or None,
+            "plugin_name": finding_name,
+            "synopsis": "",
+            "description": description,
+            "description_points": _split_text_to_points(description),
+            "solution": "",
+            "see_also": [],
+            "risk_factor": risk_factor,
+            "cvss_v3_base_score": cvss_score,
+            "plugin_information": "",
+            "plugin_output": _get(row, "output"),
+            "plugin_output_url": None,
+            "port": port_str,
+            "cve_id": cve,
+            "state": _get(row, "state"),
+        }
+        host_entry["vulnerabilities"].append(vuln)
+        total_vulns += 1
+
+    total_hosts = len(vulnerabilities_by_host)
+    return {
+        "type": "nessus",
+        "scan_info": {"source": "Tenable Vulnerability Export", "parser": "tenable_vuln_export_csv"},
         "total_hosts": total_hosts,
         "total_vulnerabilities": total_vulns,
         "vulnerabilities_by_host": vulnerabilities_by_host,
@@ -1361,7 +1504,8 @@ def dispatch_parse(file_path: str, filename: str) -> Dict[str, Any]:
     if ext == '.doc':
         return parse_doc(file_path)
 
-    # CSV files — check for AWS Inspector export first, fall back to generic CSV
+    # CSV files — check for AWS Inspector / Tenable vulnerability-export
+    # first, fall back to generic CSV
     if ext == '.csv':
         if _sniff_is_aws_inspector_csv(file_path):
             result = parse_aws_inspector_csv(file_path)
@@ -1374,6 +1518,12 @@ def dispatch_parse(file_path: str, filename: str) -> Dict[str, Any]:
                 # (see upload_report/views.py's UploadReportView.post).
                 return _strip_non_risk_findings(result)
             # Sniffed as AWS Inspector but structured parse failed — fall
+            # back to generic CSV rather than losing the upload entirely.
+        if _sniff_is_tenable_vuln_export_csv(file_path):
+            result = parse_tenable_vuln_export_csv(file_path)
+            if "error" not in result:
+                return _strip_non_risk_findings(result)
+            # Sniffed as a Tenable export but structured parse failed — fall
             # back to generic CSV rather than losing the upload entirely.
         return parse_csv(file_path)
 

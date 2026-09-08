@@ -163,53 +163,56 @@ def _strip_json_fences(raw: str) -> str:
     return raw.strip()
 
 
-def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: str = "") -> Dict[str, Any]:
+def _iter_row_chunks(columns, rows, max_chars: int = MAX_INPUT_CHARS):
     """
-    Validate an unrecognized ("custom") uploaded file and, if it genuinely
-    contains vulnerability-scan data, extract it into the same
-    vulnerabilities_by_host shape the Nessus/AWS parsers produce.
+    Splits a large CSV/Excel row set into several self-contained text
+    chunks, each under max_chars and each carrying its own copy of the
+    column header line, so every chunk can be validated/extracted by the
+    model independently (each row is a standalone record — unlike prose,
+    there's no cross-row context a chunk boundary could break).
 
-    Returns either:
+    Real bug report: rows used to be capped to the first 50
+    (_shape_dataframe_payload) and then truncated again at MAX_INPUT_CHARS
+    in a single call — between the two, a 1853-row file only ever had
+    ~50 rows (9 hosts) actually reach the model. Chunking instead of
+    capping means every row gets processed, however large the file is —
+    just as more (sequential) model calls rather than one.
+    """
+    header = ", ".join(str(c) for c in columns)
+    budget = max(max_chars - len(header) - 1, 1000)  # leave room for the header line itself
+
+    chunk_lines = []
+    chunk_len = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        line = ", ".join(str(row.get(c, "")) for c in columns)
+        # +1 for the newline that will join this line into the chunk
+        if chunk_lines and chunk_len + len(line) + 1 > budget:
+            yield header + "\n" + "\n".join(chunk_lines)
+            chunk_lines = []
+            chunk_len = 0
+        chunk_lines.append(line)
+        chunk_len += len(line) + 1
+
+    if chunk_lines:
+        yield header + "\n" + "\n".join(chunk_lines)
+
+
+def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: str = "") -> Dict[str, Any]:
+    """
+    One single GPT call: validate + extract a single already-sized-to-fit
+    block of document text. Returns
         {"valid": False, "reason": "..."}
-    or:
-        {
-            "valid": True,
-            "type": "custom",
-            "scan_info": {...},
-            "total_hosts": N,
-            "total_vulnerabilities": M,
-            "vulnerabilities_by_host": [...]
-        }
+    or
+        {"valid": True, "reason": "...", "vulnerabilities_by_host": [...], "total_vulnerabilities": N}
+    Never raises — every failure mode (model error, unparseable response,
+    empty/invalid result) is caught and returned as {"valid": False, ...}.
     """
-    document_text = (_extract_document_text(parsed_data) or "").strip()
-
-    if not document_text:
-        return {"valid": False, "reason": "Could not extract any readable text from this file."}
-
-    truncated = document_text[:MAX_INPUT_CHARS]
-    # Always visible — not just on truncation — so a run that comes back
-    # with fewer hosts than expected can be diagnosed from the logs alone:
-    # was the input text short to begin with (an extraction-quality problem
-    # in parsers.py, e.g. PyPDF2 missing text on some pages) or did it get
-    # cut off here.
-    logger.info(
-        f"[CustomFileValidation] '{filename}' extracted text length={len(document_text)} chars "
-        f"(sending {len(truncated)} chars to the model)"
-    )
-    if len(document_text) > MAX_INPUT_CHARS:
-        # Confirmed real: this silently dropping data (some hosts/findings
-        # past the cutoff never reaching the model at all) is exactly what
-        # made a 13-host report save with only 2 — now at least visible in
-        # the logs instead of looking like a clean, complete extraction.
-        logger.warning(
-            f"[CustomFileValidation] '{filename}' text is {len(document_text)} chars, "
-            f"truncated to {MAX_INPUT_CHARS} before sending to the model — some "
-            f"findings past this point may not be extracted."
-        )
-
+    label = f"'{filename}'{chunk_label}"
     try:
         llm = _get_validation_llm()
-        prompt = VALIDATION_PROMPT.format(document_text=truncated)
+        prompt = VALIDATION_PROMPT.format(document_text=document_text)
         response = llm.invoke(prompt)
         raw_content = getattr(response, "content", "") or ""
         finish_reason = (
@@ -221,7 +224,7 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
             # mid-generation (ran out of output tokens) — the parse below
             # will very likely fail or silently yield a partial host list.
             logger.warning(
-                f"[CustomFileValidation] '{filename}' LLM response finish_reason="
+                f"[CustomFileValidation] {label} LLM response finish_reason="
                 f"'{finish_reason}' (not 'stop') — output may be truncated, "
                 f"raw response length={len(raw_content)} chars"
             )
@@ -241,14 +244,14 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         # not a retry.
         exc_text = str(exc)
         if "insufficient_quota" in exc_text or "credit_balance_exhausted" in exc_text:
-            logger.critical(f"[CustomFileValidation][QUOTA_EXHAUSTED] AI validation is down for '{filename}': {exc_text}")
+            logger.critical(f"[CustomFileValidation][QUOTA_EXHAUSTED] AI validation is down for {label}: {exc_text}")
             return {
                 "valid": False,
                 "reason": "This file needs additional processing that's temporarily unavailable. "
                           "Retrying won't help right now — please contact VaptFix support so we can "
                           "process it once service is restored.",
             }
-        logger.error(f"[CustomFileValidation] LLM call failed for '{filename}': {exc}")
+        logger.error(f"[CustomFileValidation] LLM call failed for {label}: {exc}")
         return {"valid": False, "reason": "Could not validate this file right now — please try again."}
 
     try:
@@ -256,15 +259,15 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         result = json.loads(cleaned)
     except Exception as exc:
         logger.error(
-            f"[CustomFileValidation] Could not parse LLM response for '{filename}': {exc} "
+            f"[CustomFileValidation] Could not parse LLM response for {label}: {exc} "
             f"— raw response length={len(raw_content)} chars, tail={raw_content[-200:]!r}"
         )
         return {"valid": False, "reason": "Could not validate this file's contents — please try again."}
 
     logger.info(
-        f"[CustomFileValidation] '{filename}' model returned {len(result.get('hosts') or [])} host(s)"
+        f"[CustomFileValidation] {label} model returned {len(result.get('hosts') or [])} host(s)"
         if isinstance(result, dict) else
-        f"[CustomFileValidation] '{filename}' model returned a non-dict result"
+        f"[CustomFileValidation] {label} model returned a non-dict result"
     )
 
     if not isinstance(result, dict) or not result.get("valid"):
@@ -344,9 +347,137 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
 
     return {
         "valid": True,
+        "reason": (result or {}).get("reason") or "",
+        "vulnerabilities_by_host": vulnerabilities_by_host,
+        "total_vulnerabilities": total_vulnerabilities,
+    }
+
+
+def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: str = "") -> Dict[str, Any]:
+    """
+    Validate an unrecognized ("custom") uploaded file and, if it genuinely
+    contains vulnerability-scan data, extract it into the same
+    vulnerabilities_by_host shape the Nessus/AWS parsers produce.
+
+    Returns either:
+        {"valid": False, "reason": "..."}
+    or:
+        {
+            "valid": True,
+            "type": "custom",
+            "scan_info": {...},
+            "total_hosts": N,
+            "total_vulnerabilities": M,
+            "vulnerabilities_by_host": [...]
+        }
+
+    CSV/Excel goes through _iter_row_chunks — one _validate_and_extract_chunk
+    call per chunk, however many chunks a large file needs, then merged —
+    so a file's row count no longer caps how much of it actually gets
+    processed (see _iter_row_chunks' own docstring for the bug this fixes).
+    PDF/DOCX/DOC/HTML stay single-shot (unchanged): those are prose, where
+    a finding's own text can span far more context than one row, so
+    splitting them the same mechanical way risks cutting a finding's
+    write-up in half — MAX_INPUT_CHARS truncation (with the existing
+    logged warning) is the safer tradeoff there.
+    """
+    report_type = parsed_data.get("type")
+
+    if report_type in ("csv", "excel"):
+        columns = parsed_data.get("columns") or []
+        rows = parsed_data.get("preview") or []
+        if not columns or not rows:
+            return {"valid": False, "reason": "Could not extract any readable rows from this file."}
+
+        chunks = list(_iter_row_chunks(columns, rows))
+        logger.info(
+            f"[CustomFileValidation] '{filename}' {len(rows)} row(s) split into "
+            f"{len(chunks)} chunk(s) for extraction"
+        )
+
+        merged_hosts: Dict[str, Dict[str, Any]] = {}
+        any_valid = False
+        first_invalid_reason = None
+        for idx, chunk_text in enumerate(chunks):
+            chunk_result = _validate_and_extract_chunk(
+                chunk_text, filename, chunk_label=f" (chunk {idx + 1}/{len(chunks)})"
+            )
+            if not chunk_result.get("valid"):
+                if first_invalid_reason is None:
+                    first_invalid_reason = chunk_result.get("reason")
+                continue
+            any_valid = True
+            for h in chunk_result.get("vulnerabilities_by_host") or []:
+                host_name = h.get("host_name")
+                if not host_name:
+                    continue
+                existing = merged_hosts.get(host_name)
+                if existing:
+                    existing["vulnerabilities"].extend(h.get("vulnerabilities") or [])
+                    if not existing.get("host_information") and h.get("host_information"):
+                        existing["host_information"] = h["host_information"]
+                else:
+                    merged_hosts[host_name] = {
+                        "host_name": host_name,
+                        "host_information": h.get("host_information") or {},
+                        "vulnerabilities": list(h.get("vulnerabilities") or []),
+                    }
+
+        if not any_valid or not merged_hosts:
+            return {
+                "valid": False,
+                "reason": first_invalid_reason
+                or "No vulnerability findings with asset, severity, and description could be identified in this file.",
+            }
+
+        vulnerabilities_by_host = list(merged_hosts.values())
+        total_vulnerabilities = sum(len(h["vulnerabilities"]) for h in vulnerabilities_by_host)
+        return {
+            "valid": True,
+            "type": "custom",
+            "scan_info": {"source": "Custom file", "validated_by": "gpt-4o-mini"},
+            "total_hosts": len(vulnerabilities_by_host),
+            "total_vulnerabilities": total_vulnerabilities,
+            "vulnerabilities_by_host": vulnerabilities_by_host,
+        }
+
+    # Prose documents (pdf/docx/doc/html) — unchanged single-shot path.
+    document_text = (_extract_document_text(parsed_data) or "").strip()
+
+    if not document_text:
+        return {"valid": False, "reason": "Could not extract any readable text from this file."}
+
+    truncated = document_text[:MAX_INPUT_CHARS]
+    # Always visible — not just on truncation — so a run that comes back
+    # with fewer hosts than expected can be diagnosed from the logs alone:
+    # was the input text short to begin with (an extraction-quality problem
+    # in parsers.py, e.g. PyPDF2 missing text on some pages) or did it get
+    # cut off here.
+    logger.info(
+        f"[CustomFileValidation] '{filename}' extracted text length={len(document_text)} chars "
+        f"(sending {len(truncated)} chars to the model)"
+    )
+    if len(document_text) > MAX_INPUT_CHARS:
+        # Confirmed real: this silently dropping data (some hosts/findings
+        # past the cutoff never reaching the model at all) is exactly what
+        # made a 13-host report save with only 2 — now at least visible in
+        # the logs instead of looking like a clean, complete extraction.
+        logger.warning(
+            f"[CustomFileValidation] '{filename}' text is {len(document_text)} chars, "
+            f"truncated to {MAX_INPUT_CHARS} before sending to the model — some "
+            f"findings past this point may not be extracted."
+        )
+
+    chunk_result = _validate_and_extract_chunk(truncated, filename)
+    if not chunk_result.get("valid"):
+        return chunk_result
+
+    vulnerabilities_by_host = chunk_result.get("vulnerabilities_by_host") or []
+    return {
+        "valid": True,
         "type": "custom",
         "scan_info": {"source": "Custom file", "validated_by": "gpt-4o-mini"},
         "total_hosts": len(vulnerabilities_by_host),
-        "total_vulnerabilities": total_vulnerabilities,
+        "total_vulnerabilities": chunk_result.get("total_vulnerabilities") or 0,
         "vulnerabilities_by_host": vulnerabilities_by_host,
     }
