@@ -274,6 +274,76 @@ class PremiumCheckoutView(APIView):
         return Response(result, status=status.HTTP_201_CREATED)
 
 
+class PremiumCheckoutConfirmView(APIView):
+    """
+    GET /api/admin/billing/checkout/confirm/?session_id=cs_test_...
+
+    Fallback for the /billing/success page — verifies and finalizes a
+    Stripe Checkout Session directly against Stripe's API, independent of
+    whether the checkout.session.completed webhook has (yet, or ever)
+    been delivered.
+
+    Real bug this fixes: marking a Subscription "active" and unlocking
+    any Freemium-trimmed assets (see stripe_service._on_checkout_completed
+    / upload_report.views.unlock_freemium_hosts_for_admin) previously
+    happened ONLY inside that one webhook handler — nothing else ever
+    called it. A webhook is inherently best-effort: delayed delivery, a
+    signing-secret mismatch between Stripe's test and live modes (an easy
+    misconfiguration during exactly the kind of test-mode checkout this
+    was reported against — session ids starting "cs_test_"), a firewall
+    blip, or the endpoint briefly returning non-2xx all leave the
+    Subscription row stuck at status="incomplete" indefinitely — Stripe
+    does retry failed webhooks, but not forever, and there was no OTHER
+    path to recover. From the admin's side this looked exactly like "I
+    paid, Stripe redirected me to success, but my dashboard still shows
+    the Freemium-limited 5 assets" — because is_freemium()/the asset
+    trim genuinely never got told the subscription is active.
+
+    Reuses stripe_service._on_checkout_completed's exact logic — it's
+    idempotent (looks the Subscription up by stripe_checkout_session_id,
+    same key the webhook uses, and unlock_freemium_hosts_for_admin is
+    itself a safe no-op once locked_hosts is already empty) — so calling
+    this after the webhook already succeeded just confirms the same
+    state again rather than double-processing anything.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        session_id = request.query_params.get("session_id")
+        if not session_id:
+            return Response({"detail": "session_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        sub = Subscription.objects.filter(stripe_checkout_session_id=session_id, admin=request.user).first()
+        if not sub:
+            return Response({"detail": "No subscription found for this checkout session."}, status=status.HTTP_404_NOT_FOUND)
+
+        if sub.status != "active":
+            try:
+                import stripe
+                stripe_session = stripe.checkout.Session.retrieve(session_id)
+                session_dict = stripe_session.to_dict() if hasattr(stripe_session, "to_dict") else dict(stripe_session)
+            except Exception as e:
+                logger.warning(f"[Billing] checkout confirm: could not retrieve session {session_id} from Stripe: {e}")
+                return Response({"detail": "Could not verify this session with Stripe yet — please try again shortly."}, status=status.HTTP_502_BAD_GATEWAY)
+
+            # payment_status=="paid" is the reliable signal for a
+            # subscription-mode Checkout Session (status=="complete" can
+            # also mean "no payment required", not relevant here since
+            # every plan this app sells is a paid subscription).
+            if session_dict.get("payment_status") == "paid":
+                stripe_service._on_checkout_completed(session_dict)
+                sub.refresh_from_db()
+            else:
+                logger.info(f"[Billing] checkout confirm: session {session_id} not yet paid (payment_status={session_dict.get('payment_status')})")
+
+        invoices = sub.invoices.order_by("-created_at")[:20]
+        return Response({
+            "subscription": SubscriptionSerializer(sub).data,
+            "invoices": InvoiceSerializer(invoices, many=True).data,
+            **get_admin_asset_breakdown_counts(str(request.user.id)),
+        })
+
+
 class CustomLeadView(APIView):
     """Step 3 for Custom — no payment, just captures the lead and notifies sales."""
     permission_classes = [IsAuthenticated]
