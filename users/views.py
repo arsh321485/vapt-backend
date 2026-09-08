@@ -2008,17 +2008,21 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
     # Graph guarantees a Team's General channel thread id IS the team id
     # itself (see _ensure_admin_dashboard_channel's own comment on this) —
     # so this /l/team/.../conversations link is structurally a CHANNEL
-    # link (General's) wearing a different prefix/suffix, and needs the
-    # same mandatory ctx=channel this function's channel_web_url below
-    # already carries. Missing it here specifically (while channel_web_url
-    # had it) was still enough to reproduce the "lands on last-open Chat"
-    # symptom live whenever no OTHER channel_id was available and this was
-    # the URL actually used — real bug report, not the channel_web_url
-    # path this function's docstring above already covers.
+    # link (General's) wearing a different prefix/suffix.
+    #
+    # Real bug report (still landing on Chat/a stale "VaptFix" conversation
+    # after both the domain fix AND this ctx=channel param): a previous
+    # pass here added "&ctx=channel" believing it "confirmed-mandatory" —
+    # but Microsoft's own published deep-link spec for both of these
+    # (https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/
+    # build-and-test/deep-link-teams) documents ONLY groupId and tenantId
+    # as query params; ctx is not part of the contract at all. An
+    # unrecognized query param on a Teams deep link isn't guaranteed to be
+    # silently ignored — the safer, spec-exact choice is to build EXACTLY
+    # what Microsoft documents and nothing else, so removed here.
     web_url = f"https://teams.microsoft.com/l/team/{quote(str(team_id), safe='')}/conversations?groupId={team_id}"
     if tenant_id:
         web_url = f"{web_url}&tenantId={tenant_id}"
-    web_url = f"{web_url}&ctx=channel"
     web_url_alt = web_url.replace("https://teams.microsoft.com/l/team/", "https://teams.microsoft.com/_#/l/team/")
     channel_web_url = None
     channel_web_url_alt = None
@@ -2028,9 +2032,6 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
         channel_web_url = f"https://teams.microsoft.com/l/channel/{safe_channel_id}/{safe_name}?groupId={team_id}"
         if tenant_id:
             channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
-        # Mandatory — see docstring. Appended last, after groupId/tenantId,
-        # matching the spec's exact example URL ordering.
-        channel_web_url = f"{channel_web_url}&ctx=channel"
         channel_web_url_alt = channel_web_url.replace("https://teams.microsoft.com/l/channel/", "https://teams.microsoft.com/_#/l/channel/")
     # general_web_url/general_web_url_alt/general_desktop_url are what
     # their name says — the General channel specifically, only equal to
@@ -2788,19 +2789,17 @@ class MicrosoftTeamsCallbackView(APIView):
                     var teamsWebUrl = {json.dumps(vaptfix_team.get('teams_tab_url') if vaptfix_team else None)};
                     var teamsWebUrlAlt = {json.dumps(vaptfix_team.get('teams_tab_url_alt') if vaptfix_team else None)};
                     var teamsDesktopUrl = {json.dumps(vaptfix_team.get('teams_desktop_url') if vaptfix_team else None)};
-                    // Same real bug as _build_teams_tab_urls's own web_url (see its
-                    // docstring/comment) — this is a duplicate of that exact
-                    // fallback construction, done client-side for whenever
-                    // vaptfix_team.teams_tab_url itself came back empty, and it
-                    // was missing the same mandatory ctx=channel.
+                    // Same real fallback as _build_teams_tab_urls's own web_url
+                    // (see its docstring/comment) — duplicated client-side for
+                    // whenever vaptfix_team.teams_tab_url itself came back
+                    // empty. No ctx=channel here either — see that function's
+                    // comment on why (not part of Microsoft's documented
+                    // deep-link contract, only groupId/tenantId are).
                     if (!teamsWebUrl && teamId) {{
                         teamsWebUrl = "https://teams.microsoft.com/l/team/" + encodeURIComponent(teamId) + "/conversations?groupId=" + teamId;
                     }}
                     if (teamsWebUrl && tenantId && teamsWebUrl.indexOf("tenantId=") === -1) {{
                         teamsWebUrl = teamsWebUrl + "&tenantId=" + tenantId;
-                    }}
-                    if (teamsWebUrl && teamsWebUrl.indexOf("ctx=channel") === -1) {{
-                        teamsWebUrl = teamsWebUrl + "&ctx=channel";
                     }}
                     if (teamsWebUrlAlt && tenantId && teamsWebUrlAlt.indexOf("tenantId=") === -1) {{
                         teamsWebUrlAlt = teamsWebUrlAlt + "&tenantId=" + tenantId;
