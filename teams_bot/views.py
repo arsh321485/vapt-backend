@@ -16,7 +16,10 @@ from rest_framework import status
 from .auth import verify_bot_framework_request, BotAuthError
 from . import bot_api, cards, actions
 from . import member_resolve, user_actions
-from .conversation_store import save_conversation_reference, save_team_channel_reference, resolve_team_id_from_thread_id, is_admin_dashboard_channel
+from .conversation_store import (
+    save_conversation_reference, save_team_channel_reference, resolve_team_id_from_thread_id,
+    is_admin_dashboard_channel, get_team_name_for_channel,
+)
 from .onboarding import post_onboarding_step
 
 logger = logging.getLogger(__name__)
@@ -792,6 +795,39 @@ class TeamsBotMessagesView(APIView):
         team = (activity.get("channelData") or {}).get("team") or {}
         thread_id = team.get("id")
         if not thread_id:
+            return
+
+        # Real bug report: the welcome/onboarding card intermittently never
+        # showed up in "vaptfix admin dashboard" — traced to this handler
+        # firing for EVERY channel's own bot-added conversationUpdate, not
+        # just the team-scope/General one. save_team_channel_reference keys
+        # on team_id ALONE (one row per team), so the bot being added to
+        # any of the 4 member sub-channels (Configuration Management,
+        # Network Security, Architectural Flaws, Patch Management) —
+        # something that happens on every login, well after the admin
+        # already has a working admin-dashboard reference — silently
+        # overwrote it with THAT channel's conversation_id. The repoint
+        # below normally corrects this back within the same request, but
+        # only when _get_graph_app_token()/the Graph channel lookup
+        # happens to succeed at that exact moment — a single transient
+        # failure there left the reference stuck pointing at a member
+        # channel until another conversationUpdate happened to fire and
+        # succeed, which could be a long time (or never) after initial
+        # setup. Sub-channel bot presence/welcome is already handled on
+        # its own dedicated path (_backfill_sub_channel_bot_presence) —
+        # this generic handler has no business touching the admin-
+        # dashboard-channel reference for one, so skip entirely once we
+        # can tell (via the same team_id/channel_id -> team_name mapping
+        # save_sub_channel_team already records at channel-creation time)
+        # that this conversationUpdate is for one of those 4 channels.
+        team_id_direct = team.get("aadGroupId") or thread_id
+        incoming_channel_id = member_resolve._extract_channel_id(activity)
+        if incoming_channel_id and get_team_name_for_channel(team_id_direct, incoming_channel_id):
+            logger.info(
+                f"[TeamsBot] conversationUpdate for known member sub-channel "
+                f"channel_id={incoming_channel_id} team_id={team_id_direct} — "
+                f"leaving the admin-dashboard channel reference untouched"
+            )
             return
 
         try:

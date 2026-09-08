@@ -2843,10 +2843,26 @@ class MicrosoftTeamsCallbackView(APIView):
                         }}, frontendOrigin);
                         // This callback already runs in a separate OAuth tab.
                         // Open Teams in this same tab so VAPTFIX parent tab stays untouched.
+                        //
+                        // Real bug report (matches "MS Teams login lands me on
+                        // the Chat tab / a 'VaptFix' chat, not the admin
+                        // dashboard channel"): this used to auto-close this tab
+                        // 3s after location.replace(targetUrl). teams.cloud.
+                        // microsoft is a heavy cross-origin SPA — it commonly
+                        // takes noticeably longer than 3s to finish its own
+                        // load/SSO handshake and client-side routing to the
+                        // specific channel (?ctx=channel&...). Whatever it was
+                        // still rendering at the 3s mark (its default landing
+                        // view, i.e. Chat) is what the user was left seeing
+                        // right before the tab vanished out from under them —
+                        // the deep link was working, it just never got the
+                        // chance to finish resolving. No cross-origin signal
+                        // exists to detect "Teams finished loading" from here,
+                        // so a longer timeout only shrinks the race instead of
+                        // closing it — removed entirely; the tab now stays
+                        // open on the correct channel like any other "Open in
+                        // Teams" link, and the user closes it themselves.
                         window.location.replace(targetUrl);
-                        setTimeout(function() {{
-                            try {{ window.close(); }} catch (e) {{}}
-                        }}, 3000);
                     }} else {{
                         // Same-tab callback: never auto-open Teams, just return user to VAPTFIX app.
                         window.location.replace(frontendUrl);
