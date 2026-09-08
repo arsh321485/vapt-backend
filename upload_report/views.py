@@ -1014,6 +1014,21 @@ class UploadReportView(APIView):
                             t.start()
                             logger.info(f"[AutoGenCards] Background thread started for report_id={report_id}")
                             print(f"[AutoGenCards] Background thread started for report_id={report_id}", flush=True)
+
+                            # Real request: classify assets (Server/Firewall/
+                            # Web App/Other) right at upload time instead of
+                            # waiting for the first Assets-page view to pay
+                            # the GPT latency — see asset_classification.
+                            # classify_report_assets_background's own
+                            # docstring. Runs after the freemium trim above,
+                            # so it sees the final vulnerabilities_by_host/
+                            # locked_hosts split for this report.
+                            from upload_report.asset_classification import classify_report_assets_background
+                            threading.Thread(
+                                target=classify_report_assets_background,
+                                args=(report_id,),
+                                daemon=True,
+                            ).start()
                         else:
                             print(f"[AutoGenCards] Thread NOT started — condition failed", flush=True)
 

@@ -26,7 +26,7 @@ def _clear_dashboard_cache(user_id):
         cache.delete(key)
 
 from .serializers import AdminAssetSerializer,AssetHostVulnSerializer,HoldAssetSerializer,HoldAssetListSerializer
-from upload_report.asset_classification import classify_asset_type
+from upload_report.asset_classification import classify_asset_type, get_asset_type_map_for_report
 # Import User for organisation_name lookup
 try:
     from users.models import User
@@ -207,6 +207,15 @@ class ReportAssetsAPIView(APIView):
                         elif risk.startswith("low"):
                             entry["severity_counts"]["low"] += 1
 
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": a["asset"], "host_information": a["host_information"],
+                         "vulnerabilities": a["_vulns_for_classification"]}
+                        for a in assets.values()
+                    ],
+                )
+
                 final = []
                 for a in assets.values():
                     final.append({
@@ -217,9 +226,7 @@ class ReportAssetsAPIView(APIView):
                         "total_vulnerabilities": a["total_vulnerabilities"],
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
-                        "asset_type": classify_asset_type(
-                            a["asset"], a["host_information"], a["_vulns_for_classification"]
-                        ),
+                        "asset_type": asset_type_map.get(a["asset"], "other"),
                     })
 
                 serializer = AdminAssetSerializer(final, many=True)
@@ -975,6 +982,15 @@ class AdminAssetsAPIView(APIView):
                         elif risk.startswith("low"):
                             entry["severity_counts"]["low"] += 1
 
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": a["asset"], "host_information": a["host_information"],
+                         "vulnerabilities": a["_vulns_for_classification"]}
+                        for a in assets.values()
+                    ],
+                )
+
                 final = []
                 for a in assets.values():
                     final.append({
@@ -985,9 +1001,7 @@ class AdminAssetsAPIView(APIView):
                         "total_vulnerabilities": a["total_vulnerabilities"],
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
-                        "asset_type": classify_asset_type(
-                            a["asset"], a["host_information"], a["_vulns_for_classification"]
-                        ),
+                        "asset_type": asset_type_map.get(a["asset"], "other"),
                     })
 
                 serializer = AdminAssetSerializer(final, many=True)
@@ -1251,6 +1265,21 @@ class AllVulnerabilitiesAPIView(APIView):
                     for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
                 }
 
+                # One batched call for every host in this report — was
+                # previously recomputed per (vulnerability, host) pair
+                # inside the loop below (redone from scratch for the same
+                # host across every one of its findings).
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 vuln_map = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -1287,9 +1316,7 @@ class AllVulnerabilitiesAPIView(APIView):
                             entry["held_count"] += 1
                         else:
                             entry["open_count"] += 1
-                        asset_type = classify_asset_type(
-                            host_name, host.get("host_information"), host.get("vulnerabilities")
-                        )
+                        asset_type = asset_type_map.get(host_name, "other")
                         entry["asset_type_counts"][asset_type] += 1
 
                 return Response({
@@ -1345,6 +1372,17 @@ class VulnAssetListAPIView(APIView):
                     if _hn not in _fix_status:
                         _fix_status[_hn] = fdoc.get("status", "open")
 
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 assets = []
                 seen_hosts = set()
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -1367,9 +1405,7 @@ class VulnAssetListAPIView(APIView):
                             "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
                             "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
                             "status": vuln_status,
-                            "asset_type": classify_asset_type(
-                                host_name, host.get("host_information"), host.get("vulnerabilities")
-                            ),
+                            "asset_type": asset_type_map.get(host_name, "other"),
                         })
                         break
 

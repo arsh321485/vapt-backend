@@ -40,7 +40,7 @@ def _clear_user_dashboard_cache(user_id, teams):
 
 from .serializers import UserAssetSerializer, UserAssetVulnSerializer
 from vaptfix.mongo_client import MongoContext
-from upload_report.asset_classification import classify_asset_type
+from upload_report.asset_classification import classify_asset_type, get_asset_type_map_for_report
 
 NESSUS_COLLECTION          = "nessus_reports"
 VULN_CARD_COLLECTION       = "vulnerability_cards"
@@ -281,6 +281,21 @@ class UserAssetsAPIView(APIView):
                     for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
                 }
 
+                # One batched call for every host in this report — same
+                # shared, persisted classification adminasset's own views
+                # use, so asset_type always agrees with what the admin sees
+                # regardless of which team is viewing it.
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 assets = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -317,9 +332,7 @@ class UserAssetsAPIView(APIView):
                             # AdminAssetsAPIView — asset_type is a property of
                             # the asset itself, so it must match admin exactly
                             # regardless of which team is viewing it.
-                            "asset_type": classify_asset_type(
-                                host_name, host.get("host_information") or {}, host.get("vulnerabilities", [])
-                            ),
+                            "asset_type": asset_type_map.get(host_name, "other"),
                         }
 
                     entry = assets[host_name]
@@ -493,6 +506,17 @@ class UserReportAssetsAPIView(APIView):
                     for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
                 }
 
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 assets = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -522,9 +546,7 @@ class UserReportAssetsAPIView(APIView):
                             # Classified from ALL of this host's vulnerabilities
                             # (not just this team's) so it matches adminasset's
                             # AdminAssetsAPIView exactly — see UserAssetsAPIView.
-                            "asset_type": classify_asset_type(
-                                host_name, host.get("host_information") or {}, host.get("vulnerabilities", [])
-                            ),
+                            "asset_type": asset_type_map.get(host_name, "other"),
                         }
 
                     entry = assets[host_name]
@@ -1401,6 +1423,17 @@ class UserAllVulnerabilitiesAPIView(APIView):
                     for d in db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)})
                 }
 
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 vuln_map = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -1435,9 +1468,7 @@ class UserAllVulnerabilitiesAPIView(APIView):
                             entry["held_count"] += 1
                         else:
                             entry["open_count"] += 1
-                        asset_type = classify_asset_type(
-                            host_name, host.get("host_information"), host.get("vulnerabilities")
-                        )
+                        asset_type = asset_type_map.get(host_name, "other")
                         entry["asset_type_counts"][asset_type] += 1
 
                 return Response({
@@ -1513,6 +1544,17 @@ class UserVulnAssetListAPIView(APIView):
                     if _hn not in _fix_status:
                         _fix_status[_hn] = fdoc.get("status", "open")
 
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 assets = []
                 seen_hosts = set()
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -1535,9 +1577,7 @@ class UserVulnAssetListAPIView(APIView):
                             "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
                             "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
                             "status": vuln_status,
-                            "asset_type": classify_asset_type(
-                                host_name, host.get("host_information"), host.get("vulnerabilities")
-                            ),
+                            "asset_type": asset_type_map.get(host_name, "other"),
                         })
                         break
 

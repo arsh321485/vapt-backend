@@ -1,15 +1,24 @@
 """
-Best-effort classification of an uploaded-report host into one of the "All
-Assets" page's tabs: "web_app" | "firewall" | "server" | "other" (the
-generic "Assets" tab — bare IPs and anything else we can't confidently place
-land here). Keyword/pattern based, no extra LLM call — good enough to route
-the common, recognizable cases (vendor firewall names, URL-shaped web
-targets, OS-bearing hosts); anything ambiguous safely falls back to "other"
-rather than guessing wrong.
+Classification of an uploaded-report host into one of the "All Assets" page's
+tabs: "web_app" | "firewall" | "server" | "other" (the generic "Assets" tab —
+bare IPs and anything else we can't confidently place land here).
 
-Order matters: firewall is checked first since a firewall's own findings
-often mention generic web/crypto terms too (e.g. "TLS 1.0 Enabled on VPN
-Portal") that would otherwise misroute it into "web_app".
+Two layers:
+  1. classify_asset_type() below — the original keyword/pattern-based
+     classifier. Still used as a fast, no-API-call SAFETY FALLBACK (see
+     get_asset_type_map_for_report) for whenever the GPT layer can't be
+     reached, and for the "web_app" case, which is decided locally (a
+     URL-shaped host name) rather than sent to the model at all.
+  2. classify_hosts_via_gpt() / get_asset_type_map_for_report() (bottom of
+     this file) — real request: classification should be GPT-driven and
+     based on the host's OS/platform, not on matching keywords against
+     vulnerability names. One batched GPT call per report (never per host —
+     a 50+ host report would otherwise mean 50+ API calls on every
+     classification), result persisted onto the report doc so it only ever
+     runs ONCE per report, not on every Assets-page load. Applies uniformly
+     to every report type (Nessus, Nessus HTML, AWS, custom) since all of
+     them normalize into the same vulnerabilities_by_host shape this
+     operates on.
 """
 import re
 
@@ -176,3 +185,232 @@ def classify_asset_type(host_name: str, host_information: dict = None, vulnerabi
 
     # Bare IP or anything else with no stronger signal -> generic "Assets" tab
     return "other"
+
+
+# ── GPT-driven classification (OS/platform based, not vuln-name based) ─────
+
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+_OS_FIELD_KEYS = ("operating-system", "os", "OS", "operating_system", "system-type")
+
+_CLASSIFY_PROMPT = """You are classifying network scan hosts into device categories based on their OS/platform.
+
+For each host below, pick exactly ONE category:
+- "firewall" — the OS/platform indicates a firewall, VPN gateway, or network security appliance (examples: FortiOS, PAN-OS, Cisco ASA, SonicOS, pfSense, Check Point GAiA, Cisco Meraki MX)
+- "server" — the OS/platform indicates a general-purpose server/workstation OS (examples: Windows Server, Windows 10/11, Ubuntu, Red Hat/RHEL, CentOS, Debian, macOS, ESXi, Solaris)
+- "other" — the OS/platform is unknown, unclear, or doesn't clearly match either category above — never guess
+
+Each host's "signal" is either a structured OS string, or (when no OS field was detected) a list of that host's vulnerability finding TITLES — infer the likely OS/platform from those titles when you reasonably can (e.g. a title mentioning "OpenSSH" or "Ubuntu" implies Linux; "Microsoft Windows Unsupported Version Detection" implies Windows). If the signal gives you nothing usable, classify as "other".
+
+Hosts:
+{hosts_json}
+
+Respond with ONLY this exact JSON shape, nothing else, no markdown fences:
+{{"classifications": [{{"host_name": "...", "asset_type": "server"}}, ...]}}
+"""
+
+
+def _get_classification_llm():
+    """Same construction pattern as custom_report_ai._get_validation_llm —
+    reuses the same OPENAI_API_KEY/OPENAI_MODEL settings already configured
+    for this project."""
+    from langchain_openai import ChatOpenAI
+    from django.conf import settings
+
+    api_key = getattr(settings, "OPENAI_API_KEY", None)
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is not configured in Django settings.")
+    model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
+    return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=4096)
+
+
+def _strip_json_fences(raw: str) -> str:
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    return raw.strip()
+
+
+def _os_signal_for_host(host_information: dict, vulnerabilities: list) -> str:
+    """Structured OS field if present; otherwise up to 15 vulnerability
+    finding TITLES (never full descriptions — same discipline as
+    classify_asset_type's title_text, to avoid free-text false positives)
+    as an inference signal for the model."""
+    host_information = host_information or {}
+    for key in _OS_FIELD_KEYS:
+        val = (host_information.get(key) or "").strip()
+        if val:
+            return val
+
+    titles = []
+    for v in (vulnerabilities or [])[:15]:
+        name = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
+        if name:
+            titles.append(name)
+    return "; ".join(titles)
+
+
+def classify_hosts_via_gpt(hosts: list) -> dict:
+    """
+    hosts: list of {"host_name", "host_information", "vulnerabilities"}
+    dicts — already filtered to exclude URL-shaped (web_app) hosts by the
+    caller, since that case is decided locally, never sent to the model.
+
+    Returns {host_name: "server"|"firewall"|"other"} for whichever hosts
+    the model actually returned a valid classification for — a host
+    missing from the result (model error, malformed response, or it just
+    didn't answer for that one) is the caller's responsibility to fall
+    back on (see get_asset_type_map_for_report). Never raises — any
+    failure talking to the model or parsing its response just yields an
+    empty/partial dict.
+    """
+    entries = []
+    for h in hosts:
+        name = (h.get("host_name") or "").strip()
+        if not name:
+            continue
+        entries.append({
+            "host_name": name,
+            "signal": _os_signal_for_host(h.get("host_information"), h.get("vulnerabilities")),
+        })
+    if not entries:
+        return {}
+
+    try:
+        llm = _get_classification_llm()
+        prompt = _CLASSIFY_PROMPT.format(hosts_json=json.dumps(entries))
+        response = llm.invoke(prompt)
+        raw_content = getattr(response, "content", "") or ""
+        parsed = json.loads(_strip_json_fences(raw_content))
+    except Exception:
+        logger.exception(f"[AssetClassification] GPT batch classification failed for {len(entries)} host(s)")
+        return {}
+
+    result = {}
+    for row in (parsed.get("classifications") or []):
+        if not isinstance(row, dict):
+            continue
+        name = (row.get("host_name") or "").strip()
+        atype = (row.get("asset_type") or "").strip().lower()
+        if name and atype in ("server", "firewall", "other"):
+            result[name] = atype
+    return result
+
+
+def get_asset_type_map_for_report(db, report_id: str, hosts: list) -> dict:
+    """
+    The main entry point every read call site should use instead of calling
+    classify_asset_type() per host in a loop.
+
+    hosts: list of {"host_name", "host_information", "vulnerabilities"}
+    dicts for every host currently shown for this report (already deduped
+    by host_name by the caller).
+
+    Returns {host_name: asset_type} covering every host passed in.
+    Persists newly-computed classifications back onto the nessus_reports
+    doc (field "asset_type_map", stored as a [{"host_name","asset_type"}]
+    list — NOT a dict keyed by host_name, since host names are IPs/FQDNs
+    containing dots, and Mongo update-operator paths treat "." as a nested-
+    field separator; a list sidesteps that entirely) so the GPT call only
+    ever runs once per report — every subsequent read for the same report,
+    from any of the several call sites across admin/user asset views, is a
+    plain Mongo lookup, no API call.
+    """
+    report_id = str(report_id)
+    doc = db["nessus_reports"].find_one({"report_id": report_id}, {"asset_type_map": 1})
+    stored = {
+        row.get("host_name"): row.get("asset_type")
+        for row in ((doc or {}).get("asset_type_map") or [])
+        if row.get("host_name")
+    }
+
+    result = {}
+    to_classify = []
+    for h in hosts:
+        name = (h.get("host_name") or "").strip()
+        if not name:
+            continue
+        if name.lower().startswith(("http://", "https://")):
+            # Decided locally, never sent to the model — a web app doesn't
+            # have a meaningful "OS" the way this classifier reasons about.
+            result[name] = "web_app"
+            continue
+        if name in stored:
+            result[name] = stored[name]
+            continue
+        to_classify.append(h)
+
+    if to_classify:
+        gpt_result = classify_hosts_via_gpt(to_classify)
+        newly_stored = {}
+        for h in to_classify:
+            name = (h.get("host_name") or "").strip()
+            atype = gpt_result.get(name)
+            if not atype:
+                # GPT unreachable, malformed response, or this specific host
+                # missing from it — fall back to the fast, no-API-call
+                # keyword classifier rather than leaving the page without an
+                # answer. NOT persisted as a final answer (see below) so a
+                # later successful GPT run can still improve it.
+                atype = classify_asset_type(name, h.get("host_information"), h.get("vulnerabilities"))
+                result[name] = atype
+                continue
+            result[name] = atype
+            newly_stored[name] = atype
+
+        if newly_stored:
+            try:
+                merged = dict(stored)
+                merged.update(newly_stored)
+                db["nessus_reports"].update_one(
+                    {"report_id": report_id},
+                    {"$set": {"asset_type_map": [
+                        {"host_name": k, "asset_type": v} for k, v in merged.items()
+                    ]}},
+                )
+            except Exception:
+                logger.exception(f"[AssetClassification] failed to persist asset_type_map for report_id={report_id}")
+
+    return result
+
+
+def classify_report_assets_background(report_id: str):
+    """
+    Real request: run classification proactively right after upload,
+    instead of only lazily the first time someone opens the Assets page
+    (which made THAT first page-load carry the GPT latency). Meant to be
+    started as a daemon thread from the upload flow — see
+    upload_report/views.py's _auto_generate_cards_bg call site, same
+    pattern. By the time anyone actually opens the Assets page, this has
+    very likely already finished, so it just reads the persisted result —
+    the lazy path in get_asset_type_map_for_report is still there as a
+    fallback/self-heal for reports uploaded before this existed, or if
+    this background run hasn't finished (or failed) yet.
+
+    Classifies BOTH currently-visible hosts and any Freemium-trimmed
+    locked_hosts — so a later upgrade-unlock (upload_report/views.py's
+    unlock_freemium_hosts_for_admin) doesn't need to trigger its own GPT
+    run; the classification is already sitting there waiting for it.
+    """
+    from vaptfix.mongo_client import MongoContext
+
+    report_id = str(report_id)
+    try:
+        with MongoContext() as db:
+            doc = db["nessus_reports"].find_one(
+                {"report_id": report_id},
+                {"vulnerabilities_by_host": 1, "locked_hosts": 1},
+            )
+            if not doc:
+                return
+            all_hosts = list(doc.get("vulnerabilities_by_host") or []) + list(doc.get("locked_hosts") or [])
+            if not all_hosts:
+                return
+            get_asset_type_map_for_report(db, report_id, all_hosts)
+            logger.info(f"[AssetClassification] background classification finished for report_id={report_id} ({len(all_hosts)} host(s))")
+    except Exception:
+        logger.exception(f"[AssetClassification] background classification failed for report_id={report_id}")
