@@ -2700,7 +2700,12 @@ class UserSupportRequestsByReportAPIView(APIView):
                 "severity":              severity,
                 "assigned_team":         doc.get("assigned_team"),
                 "assigned_team_members": doc.get("assigned_team_members", []),
-                "step_requested":        doc.get("step_requested"),
+                # Real bug report: "step_requested" was never actually
+                # written anywhere — the create endpoint
+                # (UserRaiseSupportRequestAPIView) stores the step the user
+                # raised support for as "step_number", so this always read
+                # back null. Same field, just the correct key.
+                "step_requested":        doc.get("step_number"),
                 "description":           doc.get("description"),
                 "status":                effective_status,
                 "requested_by":          requester_name,

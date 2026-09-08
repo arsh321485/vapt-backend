@@ -922,7 +922,10 @@ class UserSupportRequestByHostAPIView(APIView):
                     "vul_name": doc.get("vul_name"),
                     "host_name": doc.get("host_name"),
                     "assigned_team": doc.get("assigned_team"),
-                    "step_requested": doc.get("step_requested"),
+                    # Real bug report: "step_requested" was never actually
+                    # written — the create endpoint only ever sets
+                    # "step_number" — so this always read back null.
+                    "step_requested": doc.get("step_number"),
                     "description": doc.get("description"),
                     "status": doc.get("status"),
                     "requested_at": doc.get("requested_at"),

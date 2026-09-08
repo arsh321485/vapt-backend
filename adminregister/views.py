@@ -2868,7 +2868,10 @@ class RaiseSupportRequestAPIView(APIView):
                     "assigned_team":         doc.get("assigned_team"),
                     "assigned_team_members": doc.get("assigned_team_members", []),
                     "step_number":           doc.get("step_number"),
-                    "step_requested":        doc.get("step_requested"),
+                    # Real bug report: "step_requested" was never actually
+                    # written — the create endpoint only ever sets
+                    # "step_number" — so this always read back null.
+                    "step_requested":        doc.get("step_number"),
                     "description":           doc.get("description"),
                     "status":                doc.get("status"),
                     "requested_by":          _resolve_requester(doc),
@@ -3129,7 +3132,10 @@ class SupportRequestByReportAPIView(APIView):
                     "assigned_team": doc.get("assigned_team"),
                     "assigned_team_members": doc.get("assigned_team_members", []),
                     # "steps": doc.get("steps", []),
-                    "step_requested": doc.get("step_requested"),
+                    # Real bug report: "step_requested" was never actually
+                    # written — the create endpoint only ever sets
+                    # "step_number" — so this always read back null.
+                    "step_requested": doc.get("step_number"),
                     "description": doc.get("description"),
                     "status": effective_status,
                     "requested_by": _resolve_requester(doc),
@@ -3284,7 +3290,10 @@ class SupportRequestByHostNameAPIView(APIView):
                     "host_name": doc.get("host_name"),
                     "assigned_team": doc.get("assigned_team"),
                     "assigned_team_members": doc.get("assigned_team_members", []),
-                    "step_requested": doc.get("step_requested"),
+                    # Real bug report: "step_requested" was never actually
+                    # written — the create endpoint only ever sets
+                    # "step_number" — so this always read back null.
+                    "step_requested": doc.get("step_number"),
                     "description": doc.get("description"),
                     "status": doc.get("status"),
                     "requested_by": _resolve_requester(doc),
