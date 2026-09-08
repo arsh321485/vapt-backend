@@ -56,11 +56,11 @@ def get_admin_asset_count(admin_id: str) -> int:
 
 def get_admin_billable_asset_count(admin_id: str) -> int:
     """
-    Same host-name-matching as get_admin_asset_count, but counts the UNION
-    of vulnerabilities_by_host (currently visible) AND locked_hosts (kept
-    aside, not discarded, by billing.enforcement.select_freemium_active_
-    hosts when a Freemium upload has more assets than the plan shows) —
-    this is the real, original size of the uploaded file.
+    Counts the UNION of vulnerabilities_by_host (currently visible) AND
+    locked_hosts (kept aside, not discarded, by billing.enforcement.
+    select_freemium_active_hosts when a Freemium upload has more assets
+    than the plan shows) — this is the real, original size of the
+    uploaded file.
 
     Real bug this fixes: a Freemium admin uploads a 15-IP file, sees 5 (the
     other 10 saved as locked_hosts), then upgrades to Premium — estimate/
@@ -71,6 +71,19 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
     already has all 15 unlocked (no locked_hosts anywhere, e.g. Premium
     from day one) gets an identical number from both functions, so this is
     a pure superset, never an undercount risk the other way.
+
+    Real product decision (explicit): this counts RAW host entries — same
+    definition as the Assets page's own "host_count" field (upload_report/
+    host_ip_utils.py's counts_from_report_doc) — not deduplicated by
+    host_name and not collapsed to unique IPs (that's unique_ip_count, a
+    DIFFERENT, smaller number used only for the "This report has X IPs"
+    display, never for billing). Whatever entries the uploaded file
+    produced in vulnerabilities_by_host/locked_hosts is what gets billed,
+    matching the file's own host_count 1:1 — confirmed via real feedback
+    that pricing disagreeing with the file's own displayed host_count
+    ("upload karte hain to jitne bhi asset hai sare ko count karna hai")
+    was the actual complaint, not the host_name-based total this used to
+    return.
     """
     try:
         conditions = [{"admin_id": str(admin_id)}]
@@ -87,18 +100,15 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
             pipeline = [
                 {"$match": {"$or": conditions}},
                 {"$project": {
-                    "hosts": {"$concatArrays": [
-                        {"$ifNull": ["$vulnerabilities_by_host", []]},
-                        {"$ifNull": ["$locked_hosts", []]},
+                    "count": {"$add": [
+                        {"$size": {"$ifNull": ["$vulnerabilities_by_host", []]}},
+                        {"$size": {"$ifNull": ["$locked_hosts", []]}},
                     ]},
                 }},
-                {"$unwind": "$hosts"},
-                {"$match": {"hosts.host_name": {"$nin": [None, ""]}}},
-                {"$group": {"_id": "$hosts.host_name"}},
-                {"$count": "unique_hosts"},
+                {"$group": {"_id": None, "total": {"$sum": "$count"}}},
             ]
             result = list(db[NESSUS_COLLECTION].aggregate(pipeline))
-            return result[0]["unique_hosts"] if result else 0
+            return int(result[0]["total"]) if result else 0
     except Exception as e:
         logger.error(f"[Billing] billable asset count aggregation failed for admin_id={admin_id}: {e}")
         return 0
