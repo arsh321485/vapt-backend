@@ -2021,7 +2021,7 @@ def _decode_jwt_tid(token):
         return ""
 
 
-def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name="General"):
+def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name="General", graph_web_url=None):
     """Build stable deep links that open the Teams tab (not chat).
 
     Real bug report (frontend spec, matches the "stuck on teams.microsoft.com,
@@ -2075,6 +2075,18 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
         if tenant_id:
             channel_web_url = f"{channel_web_url}&tenantId={tenant_id}"
         channel_web_url_alt = channel_web_url.replace("https://teams.microsoft.com/l/channel/", "https://teams.microsoft.com/_#/l/channel/")
+    # Real bug report: every hand-built link above kept landing on Chat
+    # despite matching Microsoft's documented format exactly — meanwhile
+    # Graph's OWN channel object already carries a ready-made "webUrl" for
+    # this exact channel (fetched into channels_result/all_channels at
+    # every call site, just never used for teams_tab_url). That link is
+    # generated and maintained by Microsoft itself, so it's immune to
+    # whatever this function might still be getting subtly wrong (domain,
+    # param set, encoding) — prefer it outright over the hand-built
+    # version whenever the caller has it on hand.
+    if graph_web_url:
+        channel_web_url = graph_web_url
+        channel_web_url_alt = graph_web_url
     # general_web_url/general_web_url_alt/general_desktop_url are what
     # their name says — the General channel specifically, only equal to
     # channel_web_url when channel_name really is "General" — NOT a
@@ -2340,7 +2352,11 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
                         (c.get("channelName") for c in channels_result if c.get("channelId") == preferred_channel_id),
                         "General",
                     )
-                    urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+                    preferred_channel_web_url = next(
+                        (c.get("webUrl") for c in channels_result if c.get("channelId") == preferred_channel_id),
+                        None,
+                    )
+                    urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url)
                     return {
                         "team_id": team_id,
                         "team_name": "Vaptfix",
@@ -2462,7 +2478,11 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
                     (c.get("displayName") for c in all_channels if c.get("id") == preferred_channel_id),
                     "General",
                 )
-                urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+                preferred_channel_web_url = next(
+                    (c.get("webUrl") for c in all_channels if c.get("id") == preferred_channel_id),
+                    None,
+                )
+                urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url)
                 logger.info(f"VAPTFIX team created (after short sync wait): {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
                 return {
                     "team_id": team_id,
@@ -2527,7 +2547,11 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
             (c.get("displayName") for c in all_channels if c.get("id") == preferred_channel_id),
             "General",
         )
-        urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+        preferred_channel_web_url = next(
+            (c.get("webUrl") for c in all_channels if c.get("id") == preferred_channel_id),
+            None,
+        )
+        urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url)
 
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
         return {
@@ -3050,7 +3074,11 @@ class MicrosoftTeamsLoginStatusView(APIView):
                 (c.get("channelName") for c in channels_result if c.get("channelId") == preferred_channel_id),
                 "General",
             )
-            urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+            preferred_channel_web_url = next(
+                (c.get("webUrl") for c in channels_result if c.get("channelId") == preferred_channel_id),
+                None,
+            )
+            urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url)
             return Response({
                 "status": "ready",
                 "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
