@@ -224,17 +224,62 @@ class UploadReportAdmin(admin.ModelAdmin):
 
         from users.invite_utils import create_invite, INVITE_TTL_SECONDS
 
-        report_ids = [str(r._id) for r in owned]
+        # Real bug report: a client who signed up through a claim link
+        # while its report's vulnerability cards were still generating in
+        # the background (a large report — 1000+ findings — can take an
+        # hour+, see _auto_generate_cards_bg) landed on an empty/incomplete
+        # dashboard, since the client-facing views read from
+        # vulnerability_cards, not the raw upload. The link itself is only
+        # good for INVITE_TTL_SECONDS (15 min, kept short on purpose for
+        # security) — nowhere near long enough for card generation to
+        # finish on a report that size, so a link handed out too early was
+        # essentially guaranteed to be broken by the time anyone used it.
+        # Synchronous generation isn't an option here (an hour+ inside one
+        # admin POST would just time out the request) — so instead, refuse
+        # to mint a link for any report whose cards aren't done yet. The
+        # "Cards Status" column already on this list (get_cards_status)
+        # tells the Super Admin when it's safe to retry.
+        from vaptfix.mongo_client import MongoContext
+
+        report_ids_all = [str(r._id) for r in owned]
+        with MongoContext() as db:
+            complete_ids = {
+                doc.get("report_id")
+                for doc in db["nessus_reports"].find(
+                    {"report_id": {"$in": report_ids_all}},
+                    {"report_id": 1, "cards_generation_complete": 1},
+                )
+                if doc.get("cards_generation_complete")
+            }
+        report_ids = [rid for rid in report_ids_all if rid in complete_ids]
+        not_ready = [r for r in owned if str(r._id) not in complete_ids]
+
+        if not report_ids:
+            self.message_user(
+                request,
+                "None of the selected report(s) have finished generating vulnerability "
+                "cards yet — a claim link handed out now would show the client an empty "
+                "dashboard. Check the \"Cards Status\" column and try again once it shows "
+                "complete.",
+                level=messages.ERROR,
+            )
+            return
+
         token = create_invite(report_ids, request.user.id)
         frontend_base = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
         invite_url = f"{frontend_base}/signup?invite={token}"
 
         msg = (
             f"Claim link (expires in {INVITE_TTL_SECONDS // 60} minutes) for "
-            f"{len(owned)} report(s): {invite_url}"
+            f"{len(report_ids)} report(s): {invite_url}"
         )
         if not_owned:
             msg += f"  ({not_owned} selected report(s) skipped — not owned by you.)"
+        if not_ready:
+            msg += (
+                f"  ({len(not_ready)} selected report(s) skipped — cards still generating, "
+                f"not included in this link.)"
+            )
         self.message_user(request, msg, level=messages.SUCCESS)
     generate_claim_link.short_description = "Generate claim link (magic link) for selected report(s)"
 
