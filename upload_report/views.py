@@ -1626,6 +1626,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
     time.sleep(2)
 
     client = None
+    lock_acquired = False
     try:
         client, db = _get_mongo_client_and_db()
         print(f"[AutoGenCards] MongoDB connected for report_id={report_id}", flush=True)
@@ -1637,9 +1638,22 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             upsert=True,
         )
         if existing_lock is not None:
-            # Lock already existed — another process/thread is handling this
+            # Lock already existed — another process/thread is handling this.
+            # Real bug, confirmed live: the `finally` block below used to
+            # delete this lock UNCONDITIONALLY on the way out, including
+            # right here — so a second caller that saw "already locked" and
+            # skipped would still rip the lock out from under whichever
+            # process/thread genuinely holds it, the moment IT returns.
+            # A report already known to be running (or even genuinely
+            # hung) would then have its lock deleted by every OTHER
+            # caller that happened to check on it (a retry run, another
+            # upload, ...), letting yet another duplicate thread start
+            # concurrently. lock_acquired stays False here specifically so
+            # the finally block never touches a lock this call didn't
+            # create.
             print(f"[AutoGenCards] Lock already held by another process for report_id={report_id}, skipping", flush=True)
             return
+        lock_acquired = True
 
         # Store agent start time so UploadStatusView can compute accurate elapsed
         db[NESSUS_COLLECTION].update_one(
@@ -1956,11 +1970,15 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         logger.error(f"[AutoGenCards] Background generation failed for report_id={report_id}: {str(e)}", exc_info=True)
         print(f"[AutoGenCards] EXCEPTION for report_id={report_id}: {str(e)}", flush=True)
     finally:
-        try:
-            _, _db = _get_mongo_client_and_db()
-            _db["card_gen_locks"].delete_one({"report_id": report_id})
-        except Exception as e:
-            logger.warning("Suppressed error: %s", e)
+        # Only release the lock if THIS call actually created it — see the
+        # comment above lock_acquired's assignment for the real bug this
+        # guards against.
+        if lock_acquired:
+            try:
+                _, _db = _get_mongo_client_and_db()
+                _db["card_gen_locks"].delete_one({"report_id": report_id})
+            except Exception as e:
+                logger.warning("Suppressed error: %s", e)
         with _running_card_jobs_lock:
             _running_card_jobs.discard(report_id)
 
