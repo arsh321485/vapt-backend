@@ -4014,6 +4014,29 @@ def _risk_rating_label(critical, high, medium, low):
     return "No Findings"
 
 
+# Real follow-up request: "Sensitivity me severity ke according color do" —
+# the Sensitivity box showed the same plain gray .score-box styling
+# regardless of whether it read "Critical Risk" or "Low Risk". Maps a
+# _risk_rating_label(...) value (or any custom data['risk_rating'] text
+# that still uses that vocabulary) to the same critical/high/medium/low
+# colors already used everywhere else on the report.
+_SENSITIVITY_RATING_TO_SEVERITY = {
+    "critical risk": "critical",
+    "high risk": "high",
+    "medium risk": "medium",
+    "low risk": "low",
+}
+
+
+def _sensitivity_colors(rating_label):
+    severity = _SENSITIVITY_RATING_TO_SEVERITY.get((rating_label or "").strip().lower())
+    if severity:
+        return _REPORT_SEVERITY_BG_COLORS[severity], _REPORT_SEVERITY_COLORS[severity]
+    # "No Findings" (or anything unrecognized) — neutral, same as the
+    # rest of the report's default gray .score-box.
+    return "#f4f5f8", "#1f2a42"
+
+
 def _build_executive_summary(critical, high, medium, low, total, total_assets, risk_score):
     """
     Real bug report: the "Vul management program Report" page's Executive
@@ -4223,6 +4246,8 @@ def _render_report_html(data):
         data["vulnerabilities"]["medium"], data["vulnerabilities"]["low"],
     )
     asset_class = data.get("asset_classification") or {}
+    risk_rating_value = data.get("risk_rating") or _risk_rating_label(crit, high, med, low)
+    _sensitivity_bg, _sensitivity_fg = _sensitivity_colors(risk_rating_value)
 
     # Same running-percentage conic-gradient formula the Vue page uses for
     # its severity donut — kept identical so this looks the same as the
@@ -4427,7 +4452,7 @@ def _render_report_html(data):
         <p>{esc(data.get('executive_summary') or f"The security assessment identified a total of {total} distinct security findings across {data['total_assets']} assets.")}</p>
         <div class="score-grid">
           <div class="score-box"><span>Risk Score</span><strong>{data['risk_score']}/100</strong></div>
-          <div class="score-box"><span>Sensitivity</span><strong>{esc(data.get('risk_rating') or _risk_rating_label(crit, high, med, low)).upper()}</strong></div>
+          <div class="score-box" style="background:{_sensitivity_bg};"><span>Sensitivity</span><strong style="color:{_sensitivity_fg};">{esc(risk_rating_value).upper()}</strong></div>
         </div>
         <p class="mini-meta" style="margin-top:14px;">Asset Classification</p>
         <div class="scope-mini-grid">
