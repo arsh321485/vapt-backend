@@ -330,6 +330,33 @@ def risk_criteria_prompt_card():
     )
 
 
+def plan_prompt_card(admin=None):
+    """
+    Real request: the "needs_risk_criteria" step (above) was showing right
+    after the first report landed regardless of whether the admin had
+    actually picked a plan yet (Freemium or Premium) — on the website,
+    plan selection is its own gated step before Risk Criteria; Teams was
+    skipping straight past it. Shown instead of risk_criteria_prompt_card
+    whenever a report exists but no Subscription row does yet (see
+    onboarding._admin_has_selected_plan) — Set Risk Criteria only appears
+    once a plan is actually on file, same order the website enforces.
+    Plan selection itself isn't something Teams can do inline (no Stripe
+    checkout UI here) — same handoff every other "do this on the website"
+    action already uses (Upload Report, Enter Scope), just landing on the
+    pricing page instead.
+    """
+    return _card(
+        body=[
+            _header("📊 Your first report is in!"),
+            _body_text(
+                "Before you can set risk criteria and open your dashboard, choose a "
+                "plan — Freemium (free, limited) or Premium (full report, all assets)."
+            ),
+        ],
+        actions=[_open_url_action("💳 Choose Your Plan", pricing_url(admin), style="positive")],
+    )
+
+
 # Same tab set + order as SlackSlashCommandView._NAV_ITEMS, and the same
 # internal action_id spelling (nav_home, nav_fix, ...) so any shared
 # downstream data-formatting code keys off one consistent name across both

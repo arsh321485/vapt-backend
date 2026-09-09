@@ -1022,23 +1022,38 @@ class UserDetailCreateView(generics.CreateAPIView):
             _roles = list(roles) if roles else []
             _set_password_url = set_password_url
             _admin_email = admin_email
+            # Real request: a member added by a Teams admin shouldn't get a
+            # "set your password" email — same reasoning already applied to
+            # the ADMIN's own signup (see users/views.py's disabled
+            # send_set_password_email call on the Teams OAuth callback):
+            # a Teams-provisioned account signs in through Teams SSO, not a
+            # website password, so this link/email is meaningless (and
+            # confusing) for them. user_detail.platform was just auto-set
+            # above from the admin's own login_provider — reused here
+            # rather than plumbing a separate "source" flag through
+            # team_tab.py's submit_add_user, since that's exactly what it
+            # already answers ("is this admin's account a Teams one").
+            _skip_set_password_email = (user_detail.platform == "microsoft_teams")
 
             def _send_emails():
-                try:
-                    # Set-password email is most critical — send first
-                    ok, err = _view.send_welcome_email(
-                        email=_email,
-                        first_name=_first,
-                        last_name=_last,
-                        roles=_roles,
-                        set_password_url=_set_password_url,
-                    )
-                    if ok:
-                        logger.info(f"[Email] Set-password email sent to {_email}")
-                    else:
-                        logger.error(f"[Email] Set-password email FAILED for {_email}: {err}")
-                except Exception:
-                    logger.exception(f"[Email] Set-password email raised exception for {_email}")
+                if _skip_set_password_email:
+                    logger.info(f"[Email] Set-password email skipped for {_email} — added by a Teams admin")
+                else:
+                    try:
+                        # Set-password email is most critical — send first
+                        ok, err = _view.send_welcome_email(
+                            email=_email,
+                            first_name=_first,
+                            last_name=_last,
+                            roles=_roles,
+                            set_password_url=_set_password_url,
+                        )
+                        if ok:
+                            logger.info(f"[Email] Set-password email sent to {_email}")
+                        else:
+                            logger.error(f"[Email] Set-password email FAILED for {_email}: {err}")
+                    except Exception:
+                        logger.exception(f"[Email] Set-password email raised exception for {_email}")
 
                 try:
                     _view.send_platform_access_email(

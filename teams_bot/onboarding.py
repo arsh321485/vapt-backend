@@ -25,6 +25,20 @@ def _resolve_admin_by_team_id(team_id):
     return User.objects.filter(ms_team_id=team_id).first()
 
 
+def _admin_has_selected_plan(admin) -> bool:
+    """
+    True once this admin has picked a plan at all — Freemium (activated
+    via FreemiumActivateView, which creates a Subscription with
+    status="trialing") or Premium (status="active" after Stripe checkout,
+    or "past_due" — still a plan on file, just needs a payment fix, not
+    "never chose one"). No Subscription row at all, in any of these
+    statuses, means the admin has uploaded a report but never actually
+    gone through plan selection yet.
+    """
+    from billing.models import Subscription
+    return Subscription.objects.filter(admin=admin, status__in=["trialing", "active", "past_due"]).exists()
+
+
 def replace_active_card(team_id, card):
     """
     Deletes the previously-tracked "live" card for this team's
@@ -108,6 +122,17 @@ def post_onboarding_step(admin, team_id=None, force_state=None):
     else:
         from users.views import _get_admin_onboarding_state
         state = _get_admin_onboarding_state(admin)
+        # Real request: Teams was showing "Set Risk Criteria" right after
+        # the first report landed, same as the website's own flow — except
+        # the website actually gates Risk Criteria behind plan selection
+        # first (Freemium or Premium must be chosen before it), and Teams
+        # was skipping straight past that step. Only overrides the
+        # "needs_risk_criteria" case (a report genuinely exists) — Teams-
+        # local, does not touch _get_admin_onboarding_state itself, so
+        # Slack/website (which already enforce this their own way) are
+        # unaffected.
+        if state == "needs_risk_criteria" and not _admin_has_selected_plan(admin):
+            state = "needs_plan"
 
     if was_state_recently_posted(team_id, state):
         logger.info(f"[TeamsOnboarding] state={state} was already posted for team_id={team_id} moments ago — skipping duplicate")
@@ -144,6 +169,8 @@ def build_state_card(admin, team_id, state):
     update it, so it looked stuck."""
     if state == "no_report":
         return cards.welcome_card()
+    if state == "needs_plan":
+        return cards.plan_prompt_card(admin)
     if state == "needs_risk_criteria":
         return cards.risk_criteria_prompt_card()
     # Home tab's real content, not just the bare nav bar — confirmed via

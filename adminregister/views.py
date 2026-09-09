@@ -8,9 +8,16 @@ from django.utils.timezone import is_naive, make_aware, utc
 import pymongo
 import uuid
 import re
+import logging
 from rest_framework.parsers import JSONParser
 from bson import ObjectId
 from rest_framework.permissions import IsAuthenticated
+
+# Real bug: `logger` was referenced in 9 places across this file already
+# (all silently dead — every one would raise NameError if it were ever
+# actually hit) with no import/definition anywhere. Same standard setup
+# every other app in this project already has.
+logger = logging.getLogger(__name__)
 
 from .serializers import AdminRegisterSimpleVulnSerializer,FixVulnerabilityCreateSerializer,RaiseSupportRequestSerializer,CreateTicketSerializer
 SUPPORT_REQUEST_COLLECTION = "support_requests"
@@ -3942,17 +3949,36 @@ class VulnerabilityTimelineAPIView(APIView):
 # (team-pill-network/patch/configuration/architectural) so the server-
 # rendered team-distribution donut looks consistent with the dashboard.
 _REPORT_TEAM_COLORS = {
-    "Network Security":         "#0f696e",
-    "Patch Management":         "#c98a1f",
-    "Configuration Management": "#0f696e",
-    "Architectural Flaws":      "#7c3aed",
+    "Network Security":         "#3b82f6",
+    "Patch Management":         "#5b21b6",
+    "Configuration Management": "#06b6d4",
+    "Architectural Flaws":      "#c026d3",
     "Unassigned":               "#9ca3af",
 }
+# Same light-tint pattern as _REPORT_TEAM_COLORS above, for the team-pill
+# badges in the vulnerability table — matches the website's own report
+# view's --team-*-bg custom properties exactly.
+_REPORT_TEAM_BG_COLORS = {
+    "Network Security":         "#eff6ff",
+    "Patch Management":         "#f5f3ff",
+    "Configuration Management": "#ecfeff",
+    "Architectural Flaws":      "#fdf4ff",
+    "Unassigned":               "#f3f4f6",
+}
+# Real request: match the website's own report view's exact palette
+# (--sev-critical-bar/-text/-bg etc.) — this file's colors had drifted
+# from it (e.g. "low" used to be teal, not green).
 _REPORT_SEVERITY_COLORS = {
-    "critical": "#b91c1c",
-    "high":     "#f2994a",
-    "medium":   "#e3b124",
-    "low":      "#0f696e",
+    "critical": "#b42318",
+    "high":     "#dc2626",
+    "medium":   "#f59e0b",
+    "low":      "#10b981",
+}
+_REPORT_SEVERITY_BG_COLORS = {
+    "critical": "#f8dede",
+    "high":     "#fee2e2",
+    "medium":   "#fef3c7",
+    "low":      "#d1fae5",
 }
 
 
@@ -4105,9 +4131,10 @@ def _build_report_data(request):
     _generated_date = (_generated_iso or "")[:10] if _generated_iso else "—"
 
     _total_assets = (summary.get("total_assets") or {}).get("total_assets", 0)
+    _report_id_for_classification = str(latest_upload.get("report_id") or latest_doc.get("report_id", ""))
 
     return {
-        "report_id": str(latest_upload.get("report_id") or latest_doc.get("report_id", "")),
+        "report_id": _report_id_for_classification,
         "report_generated_on": _generated_date,
         "vul_management_program": latest_upload.get("file_name") or latest_doc.get("file_name") or "—",
         "total_assets": _total_assets,
@@ -4126,7 +4153,52 @@ def _build_report_data(request):
         "executive_summary": _build_executive_summary(
             critical, high, medium, low, total, _total_assets, risk_score
         ),
+        # "Asset Classification" box row (renamed from "Assets in Scope" —
+        # explicit request) — reuses the same GPT-driven Server/Firewall/
+        # Web App/Other classification already used on the Assets page
+        # (upload_report.asset_classification), so this agrees with what
+        # the admin sees there instead of being its own separate count.
+        "asset_classification": _get_asset_classification_counts(_report_id_for_classification),
     }
+
+
+def _get_asset_classification_counts(report_id):
+    """
+    {"assets": total, "web_app": N, "firewall": N, "server": N} for the
+    report's own "Asset Classification" box row — same classification
+    upload_report.asset_classification.get_asset_type_map_for_report
+    already computes/persists for the Assets page, read here rather than
+    reclassified from scratch (a report already viewed once already has
+    this cached on the report doc).
+    """
+    if not report_id:
+        return {"assets": 0, "web_app": 0, "firewall": 0, "server": 0}
+    try:
+        from upload_report.asset_classification import get_asset_type_map_for_report
+        with MongoContext() as db:
+            doc = db[NESSUS_COLLECTION].find_one(
+                {"report_id": report_id},
+                {"vulnerabilities_by_host": 1, "locked_hosts": 1},
+            )
+            if not doc:
+                return {"assets": 0, "web_app": 0, "firewall": 0, "server": 0}
+            hosts = list(doc.get("vulnerabilities_by_host") or []) + list(doc.get("locked_hosts") or [])
+            asset_type_map = get_asset_type_map_for_report(db, report_id, [
+                {"host_name": (h.get("host_name") or "").strip(),
+                 "host_information": h.get("host_information"),
+                 "vulnerabilities": h.get("vulnerabilities")}
+                for h in hosts
+                if (h.get("host_name") or "").strip()
+            ])
+        counts = {"web_app": 0, "firewall": 0, "server": 0}
+        for asset_type in asset_type_map.values():
+            if asset_type in counts:
+                counts[asset_type] += 1
+        counts["assets"] = len(asset_type_map)
+        return counts
+    except Exception:
+        logger.exception(f"[Report] asset classification counts failed for report_id={report_id}")
+        return {"assets": 0, "web_app": 0, "firewall": 0, "server": 0}
 
 
 class AdminReportDownloadDataAPIView(APIView):
@@ -4150,6 +4222,7 @@ def _render_report_html(data):
         data["vulnerabilities"]["critical"], data["vulnerabilities"]["high"],
         data["vulnerabilities"]["medium"], data["vulnerabilities"]["low"],
     )
+    asset_class = data.get("asset_classification") or {}
 
     # Same running-percentage conic-gradient formula the Vue page uses for
     # its severity donut — kept identical so this looks the same as the
@@ -4275,10 +4348,12 @@ def _render_report_html(data):
   .stat-card span {{ font-size: 10px; color: #8b95a7; text-transform: uppercase; font-weight: 800; letter-spacing: .07em; }}
   .stat-card strong {{ font-size: 36px; font-weight: 800; line-height: 1; }}
   .stat-card small {{ color: #8b95a7; font-size: 11px; }}
-  .stat-card.critical {{ border-bottom: 3px solid #b91c1c; }} .stat-card.critical strong {{ color: #b91c1c; }}
-  .stat-card.high strong {{ color: #d97706; }}
-  .stat-card.medium strong {{ color: #ca8a04; }}
-  .stat-card.low {{ border-bottom: 3px solid #0f696e; }} .stat-card.low strong {{ color: #0f696e; }}
+  .stat-card.critical {{ border-bottom: 3px solid {_REPORT_SEVERITY_COLORS['critical']}; }} .stat-card.critical strong {{ color: {_REPORT_SEVERITY_COLORS['critical']}; }}
+  .stat-card.high {{ border-bottom: 3px solid {_REPORT_SEVERITY_COLORS['high']}; }} .stat-card.high strong {{ color: {_REPORT_SEVERITY_COLORS['high']}; }}
+  .stat-card.medium {{ border-bottom: 3px solid {_REPORT_SEVERITY_COLORS['medium']}; }} .stat-card.medium strong {{ color: {_REPORT_SEVERITY_COLORS['medium']}; }}
+  .stat-card.low {{ border-bottom: 3px solid {_REPORT_SEVERITY_COLORS['low']}; }} .stat-card.low strong {{ color: {_REPORT_SEVERITY_COLORS['low']}; }}
+  .scope-mini-grid {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }}
+  .scope-mini-grid .score-box {{ flex: 1 1 0; }}
   .chart-grid {{ display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }}
   .chart-grid .card {{ flex: 1 1 300px; }}
   .mini-meta {{ margin: -4px 0 10px; font-size: 11px; color: #8b95a7; }}
@@ -4299,15 +4374,17 @@ def _render_report_html(data):
   td {{ border-bottom: 1px solid #edf0f4; padding: 12px 10px; color: #2d3748; font-size: 13px; }}
   .vname {{ font-weight: 600; color: #1f2a42; }}
   .sev-pill, .status-pill {{ font-size: 10px; font-weight: 800; border-radius: 6px; padding: 4px 8px; text-transform: uppercase; }}
-  .sev-critical {{ background: #fee2e2; color: #b91c1c; }} .sev-high {{ background: #ffedd5; color: #c2410c; }}
-  .sev-medium {{ background: #fef3c7; color: #a16207; }} .sev-low {{ background: #ccfbf1; color: #0f766e; }}
-  .status-pill {{ font-weight: 700; }} .status-open {{ color: #b91c1c; }} .status-closed {{ color: #0f766e; }}
-  .status-in_progress, .status-open-review {{ color: #a16207; }}
+  .sev-critical {{ background: {_REPORT_SEVERITY_BG_COLORS['critical']}; color: {_REPORT_SEVERITY_COLORS['critical']}; }}
+  .sev-high {{ background: {_REPORT_SEVERITY_BG_COLORS['high']}; color: {_REPORT_SEVERITY_COLORS['high']}; }}
+  .sev-medium {{ background: {_REPORT_SEVERITY_BG_COLORS['medium']}; color: {_REPORT_SEVERITY_COLORS['medium']}; }}
+  .sev-low {{ background: {_REPORT_SEVERITY_BG_COLORS['low']}; color: {_REPORT_SEVERITY_COLORS['low']}; }}
+  .status-pill {{ font-weight: 700; }} .status-open {{ color: {_REPORT_SEVERITY_COLORS['critical']}; }} .status-closed {{ color: {_REPORT_SEVERITY_COLORS['low']}; }}
+  .status-in_progress, .status-open-review {{ color: {_REPORT_SEVERITY_COLORS['medium']}; }}
   .team-pill {{ font-size: 12px; font-weight: 700; border-radius: 999px; padding: 4px 10px; border: 1px solid transparent; display: inline-block; }}
-  .team-pill-network {{ color: #0f696e; background: #e6f7f8; border-color: #8dd9dd; }}
-  .team-pill-patch {{ color: #8a4f00; background: #fff3dd; border-color: #ffd089; }}
-  .team-pill-configuration {{ color: #0f696e; background: #e6f7f8; border-color: #8dd9dd; }}
-  .team-pill-architectural {{ color: #6b21a8; background: #f3e8ff; border-color: #d8b4fe; }}
+  .team-pill-network {{ color: {_REPORT_TEAM_COLORS['Network Security']}; background: {_REPORT_TEAM_BG_COLORS['Network Security']}; border-color: {_REPORT_TEAM_COLORS['Network Security']}44; }}
+  .team-pill-patch {{ color: {_REPORT_TEAM_COLORS['Patch Management']}; background: {_REPORT_TEAM_BG_COLORS['Patch Management']}; border-color: {_REPORT_TEAM_COLORS['Patch Management']}44; }}
+  .team-pill-configuration {{ color: {_REPORT_TEAM_COLORS['Configuration Management']}; background: {_REPORT_TEAM_BG_COLORS['Configuration Management']}; border-color: {_REPORT_TEAM_COLORS['Configuration Management']}44; }}
+  .team-pill-architectural {{ color: {_REPORT_TEAM_COLORS['Architectural Flaws']}; background: {_REPORT_TEAM_BG_COLORS['Architectural Flaws']}; border-color: {_REPORT_TEAM_COLORS['Architectural Flaws']}44; }}
   @media (max-width: 900px) {{ .top-grid, .chart-grid, .severity-stats-grid {{ flex-direction: column; }} }}
   @media print {{
     .wrap {{ padding: 20px; max-width: none; }}
@@ -4351,6 +4428,13 @@ def _render_report_html(data):
         <div class="score-grid">
           <div class="score-box"><span>Risk Score</span><strong>{data['risk_score']}/100</strong></div>
           <div class="score-box"><span>Sensitivity</span><strong>{esc(data.get('risk_rating') or _risk_rating_label(crit, high, med, low)).upper()}</strong></div>
+        </div>
+        <p class="mini-meta" style="margin-top:14px;">Asset Classification</p>
+        <div class="scope-mini-grid">
+          <div class="score-box"><span>Assets</span><strong>{asset_class.get('assets', 0)}</strong></div>
+          <div class="score-box"><span>Web App</span><strong>{asset_class.get('web_app', 0)}</strong></div>
+          <div class="score-box"><span>Firewall</span><strong>{asset_class.get('firewall', 0)}</strong></div>
+          <div class="score-box"><span>Server</span><strong>{asset_class.get('server', 0)}</strong></div>
         </div>
       </div>
       <div class="card dark-card">
