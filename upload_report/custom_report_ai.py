@@ -130,7 +130,12 @@ def _get_validation_llm():
     # mid-generation, which then fails json.loads() and silently drops
     # everything the model hadn't finished writing yet. gpt-4o-mini
     # supports up to 16384 output tokens; give it the full budget.
-    return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=16384)
+    # Real bug report (same gap found in mitigation_tool._get_crewai_llm):
+    # no timeout meant a hung call here could block forever — and unlike
+    # the background card-generation path, THIS one runs synchronously
+    # inside the upload HTTP request itself, so a hang ties up a gunicorn
+    # worker indefinitely instead of just delaying a background thread.
+    return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=16384, timeout=90, max_retries=1)
 
 
 def _extract_document_text(parsed_data: Dict[str, Any]) -> str:

@@ -224,7 +224,9 @@ def _get_classification_llm():
     if not api_key:
         raise ValueError("OPENAI_API_KEY is not configured in Django settings.")
     model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=4096)
+    # Same "no timeout -> can hang forever" gap found and fixed in
+    # mitigation_tool._get_crewai_llm / custom_report_ai._get_validation_llm.
+    return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=4096, timeout=60, max_retries=1)
 
 
 def _strip_json_fences(raw: str) -> str:
@@ -254,19 +256,37 @@ def _os_signal_for_host(host_information: dict, vulnerabilities: list) -> str:
     return "; ".join(titles)
 
 
+
+# Real question raised after adding a timeout to this LLM call ("badi file
+# aayi to problem to nahi hoga?"): classify_hosts_via_gpt used to send
+# EVERY host in the report in one single call — fine for the ~200-host
+# file this was built against, but a report with many more hosts would
+# make that one prompt grow without bound, and a 60s timeout is NOT
+# guaranteed to be enough for an arbitrarily large single call. Same fix
+# as custom_report_ai.py's row-chunking: cap how many hosts go into any
+# one call, so a bigger report just means more (still-bounded, still-fast)
+# sequential calls instead of one unbounded one.
+CLASSIFY_BATCH_SIZE = 100
+
+
 def classify_hosts_via_gpt(hosts: list) -> dict:
     """
     hosts: list of {"host_name", "host_information", "vulnerabilities"}
     dicts — already filtered to exclude URL-shaped (web_app) hosts by the
     caller, since that case is decided locally, never sent to the model.
 
+    Splits into batches of CLASSIFY_BATCH_SIZE hosts so a large report
+    (many hosts) can never make a single call's prompt grow unbounded —
+    however many hosts there are, each individual call stays the same
+    safe size; a bigger report just means more sequential calls.
+
     Returns {host_name: "server"|"firewall"|"other"} for whichever hosts
     the model actually returned a valid classification for — a host
     missing from the result (model error, malformed response, or it just
     didn't answer for that one) is the caller's responsibility to fall
     back on (see get_asset_type_map_for_report). Never raises — any
-    failure talking to the model or parsing its response just yields an
-    empty/partial dict.
+    failure talking to the model or parsing its response for a given
+    batch just leaves that batch's hosts out of the result.
     """
     entries = []
     for h in hosts:
@@ -280,24 +300,30 @@ def classify_hosts_via_gpt(hosts: list) -> dict:
     if not entries:
         return {}
 
-    try:
-        llm = _get_classification_llm()
-        prompt = _CLASSIFY_PROMPT.format(hosts_json=json.dumps(entries))
-        response = llm.invoke(prompt)
-        raw_content = getattr(response, "content", "") or ""
-        parsed = json.loads(_strip_json_fences(raw_content))
-    except Exception:
-        logger.exception(f"[AssetClassification] GPT batch classification failed for {len(entries)} host(s)")
-        return {}
-
     result = {}
-    for row in (parsed.get("classifications") or []):
-        if not isinstance(row, dict):
+    for start in range(0, len(entries), CLASSIFY_BATCH_SIZE):
+        batch = entries[start:start + CLASSIFY_BATCH_SIZE]
+        try:
+            llm = _get_classification_llm()
+            prompt = _CLASSIFY_PROMPT.format(hosts_json=json.dumps(batch))
+            response = llm.invoke(prompt)
+            raw_content = getattr(response, "content", "") or ""
+            parsed = json.loads(_strip_json_fences(raw_content))
+        except Exception:
+            logger.exception(
+                f"[AssetClassification] GPT batch classification failed for hosts "
+                f"{start + 1}-{start + len(batch)} of {len(entries)}"
+            )
             continue
-        name = (row.get("host_name") or "").strip()
-        atype = (row.get("asset_type") or "").strip().lower()
-        if name and atype in ("server", "firewall", "other"):
-            result[name] = atype
+
+        for row in (parsed.get("classifications") or []):
+            if not isinstance(row, dict):
+                continue
+            name = (row.get("host_name") or "").strip()
+            atype = (row.get("asset_type") or "").strip().lower()
+            if name and atype in ("server", "firewall", "other"):
+                result[name] = atype
+
     return result
 
 

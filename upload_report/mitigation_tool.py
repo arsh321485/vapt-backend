@@ -29,7 +29,18 @@ def _get_crewai_llm():
         raise ValueError("OPENAI_API_KEY is not configured in Django settings.")
 
     model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model, temperature=0.3, api_key=api_key)
+    # Real bug report: a report's card generation got stuck at 0/N and
+    # never recovered — no timeout was set here, so a single slow/hung
+    # OpenAI call inside _auto_generate_cards_bg's per-vulnerability loop
+    # (1483 calls, sequential, one card at a time) could block that ONE
+    # background thread indefinitely. Nothing past that point ever runs
+    # again (cards_generated_count/cards_generation_complete only get
+    # written once, after the WHOLE loop finishes), and no timeout meant
+    # nothing ever forced that one stuck call to fail and move on. An
+    # explicit timeout turns "stuck forever" into "this one card errors
+    # out after 60s and the loop continues" — the per-vuln try/except
+    # already in place then does its job.
+    return ChatOpenAI(model=model, temperature=0.3, api_key=api_key, timeout=60, max_retries=1)
 
 
 def _detect_os(operating_system: str) -> str:
