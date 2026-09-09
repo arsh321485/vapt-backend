@@ -243,24 +243,49 @@ class UploadReportAdmin(admin.ModelAdmin):
 
         report_ids_all = [str(r._id) for r in owned]
         with MongoContext() as db:
-            complete_ids = {
-                doc.get("report_id")
+            progress_docs = {
+                doc.get("report_id"): doc
                 for doc in db["nessus_reports"].find(
                     {"report_id": {"$in": report_ids_all}},
-                    {"report_id": 1, "cards_generation_complete": 1},
+                    {"report_id": 1, "cards_generation_complete": 1, "cards_generated_count": 1,
+                     "cards_expected_count": 1, "cards_generation_started_at": 1},
                 )
-                if doc.get("cards_generation_complete")
             }
+        complete_ids = {rid for rid, doc in progress_docs.items() if doc.get("cards_generation_complete")}
         report_ids = [rid for rid in report_ids_all if rid in complete_ids]
         not_ready = [r for r in owned if str(r._id) not in complete_ids]
 
+        # Real request: the block above was correct but unhelpful — it told
+        # the Super Admin cards weren't ready without saying HOW FAR ALONG
+        # or how much longer to wait, forcing a separate trip to check the
+        # "Cards Status" column. Surface both, per not-ready report, right
+        # in the message itself: current progress and a live ETA based on
+        # the actual rate seen so far (generated_count / elapsed_so_far) —
+        # not the upfront estimate shown at upload time, which is just a
+        # rough guess before generation has even started and drifts further
+        # off the longer a report has actually been running.
+        def _progress_line(report_id):
+            doc = progress_docs.get(report_id) or {}
+            expected = int(doc.get("cards_expected_count") or 0)
+            generated = int(doc.get("cards_generated_count") or 0)
+            started_at = doc.get("cards_generation_started_at")
+            eta_text = "estimating…"
+            if started_at:
+                elapsed = (datetime.datetime.utcnow() - started_at).total_seconds()
+                if generated > 0 and elapsed > 0:
+                    rate = generated / elapsed
+                    remaining = max(expected - generated, 0)
+                    eta_text = f"~{self._seconds_to_text(remaining / rate)} remaining" if rate > 0 else "estimating…"
+            return f"{report_id} ({generated}/{expected} cards, {eta_text})"
+
         if not report_ids:
+            progress_lines = "; ".join(_progress_line(str(r._id)) for r in not_ready)
             self.message_user(
                 request,
                 "None of the selected report(s) have finished generating vulnerability "
                 "cards yet — a claim link handed out now would show the client an empty "
-                "dashboard. Check the \"Cards Status\" column and try again once it shows "
-                "complete.",
+                f"dashboard. Progress: {progress_lines}. Try again once \"Cards Status\" "
+                "shows complete.",
                 level=messages.ERROR,
             )
             return
@@ -276,9 +301,10 @@ class UploadReportAdmin(admin.ModelAdmin):
         if not_owned:
             msg += f"  ({not_owned} selected report(s) skipped — not owned by you.)"
         if not_ready:
+            progress_lines = "; ".join(_progress_line(str(r._id)) for r in not_ready)
             msg += (
                 f"  ({len(not_ready)} selected report(s) skipped — cards still generating, "
-                f"not included in this link.)"
+                f"not included in this link. Progress: {progress_lines}.)"
             )
         self.message_user(request, msg, level=messages.SUCCESS)
     generate_claim_link.short_description = "Generate claim link (magic link) for selected report(s)"
