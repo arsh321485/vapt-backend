@@ -183,13 +183,30 @@ def detect_entry_type(value: str) -> Tuple[str, bool, Optional[str]]:
         entry_type = "mobile_url" if is_mobile else "web_url"
         return (entry_type, False, None)
 
-    # Default to external IP if nothing matches (will be validated later)
+    # Nothing matched a recognizable IP/subnet/URL shape — still accepted
+    # as a target (see validate_entry: only truly-blank values are
+    # rejected now), just filed under this generic category so it's not
+    # silently dropped or mis-tagged as a subnet.
     return ("external_ip", False, None)
 
 
 def validate_entry(value: str, entry_type: str) -> Tuple[bool, str]:
     """
     Validate an entry value against its type.
+
+    Real requirement: a manual/file scope entry can be ANY target format the
+    admin provides — an IP, a subnet, a URL, a bare hostname with no dot, an
+    asset name, whatever — there is no fixed format to enforce. This used to
+    reject anything that didn't match a strict IP/CIDR/URL shape (e.g. a
+    zero-padded IP like "192.168.001.001" — Python's ipaddress module
+    rejects leading zeros — or a stray trailing comma/semicolon from a CSV
+    export), which meant a real, legitimate-looking file could come back
+    with "No valid targets found in the uploaded file" even though every
+    row had genuine text in it. The only real requirement left is that the
+    value isn't blank. entry_type (from detect_entry_type()) still decides
+    display categorization and whether subnet expansion applies — it's
+    already only assigned "subnet" when the value genuinely parsed as a
+    valid CIDR, so expansion is unaffected by this.
 
     Returns:
         Tuple of (is_valid, error_message)
@@ -199,22 +216,7 @@ def validate_entry(value: str, entry_type: str) -> Tuple[bool, str]:
     if not value:
         return (False, "Value cannot be empty")
 
-    if entry_type in ("internal_ip", "external_ip"):
-        if not is_valid_ip(value):
-            return (False, f"Invalid IP address: {value}")
-        return (True, "")
-
-    if entry_type == "subnet":
-        if not is_valid_subnet(value):
-            return (False, f"Invalid subnet format: {value}")
-        return (True, "")
-
-    if entry_type in ("web_url", "mobile_url"):
-        if not is_valid_url(value):
-            return (False, f"Invalid URL format: {value}")
-        return (True, "")
-
-    return (False, f"Unknown entry type: {entry_type}")
+    return (True, "")
 
 
 def parse_file_content(file_obj, filename: str) -> List[str]:
