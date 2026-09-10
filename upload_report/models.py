@@ -73,8 +73,8 @@ class MagicPinUpload(UploadReport):
     class Meta:
         proxy = True
         app_label = 'upload_report'
-        verbose_name = 'Magic Pin Upload'
-        verbose_name_plural = 'Magic Pin Upload'
+        verbose_name = 'Magic Link'
+        verbose_name_plural = 'Magic Link'
 
 
 class FixVulnVerification(models.Model):
