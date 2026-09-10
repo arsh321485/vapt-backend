@@ -219,6 +219,32 @@ def validate_entry(value: str, entry_type: str) -> Tuple[bool, str]:
     return (True, "")
 
 
+def _extract_cell_values(df) -> List[str]:
+    """
+    Flatten every non-empty cell of a DataFrame (one Excel sheet, or a CSV)
+    into a list of candidate target strings.
+
+    Real bug report: a single "Management / Target IP" cell in a real
+    asset-list workbook held a PRIVATE ip AND several PUBLIC ips together,
+    newline-separated inside one cell (e.g. "172.16.2.250\\n\\nPublic IP:\\n
+    203.177.12.162\\n203.177.12.163"). Treating the whole cell as one value
+    turned 5 real targets into a single unusable blob. Splitting on
+    newlines within each cell — same as the plain .txt path already does
+    for the whole file — recovers every individual target instead.
+    """
+    out = []
+    for col in df.columns:
+        for val in df[col].dropna():
+            str_val = str(val).strip()
+            if not str_val:
+                continue
+            for sub_line in str_val.splitlines():
+                sub_val = sub_line.strip()
+                if sub_val:
+                    out.append(sub_val)
+    return out
+
+
 def parse_file_content(file_obj, filename: str) -> List[str]:
     """
     Parse file content to extract values.
@@ -232,25 +258,28 @@ def parse_file_content(file_obj, filename: str) -> List[str]:
 
     try:
         if filename_lower.endswith((".xlsx", ".xls")):
-            # Excel file
+            # Excel file — read ALL sheets, not just the first. Real bug
+            # report: pd.read_excel() with no sheet_name= defaults to
+            # sheet 0 ONLY — a real-world scope workbook routinely spreads
+            # a cover/summary sheet, the actual asset list, and a
+            # network-diagram sheet across separate tabs (confirmed on an
+            # actual upload: sheet 1 was a text summary with zero IPs,
+            # sheet 2 "Asset list" held all the real targets). Reading only
+            # sheet 0 silently missed every target on the other sheets —
+            # exactly what produced "No valid targets found in the
+            # uploaded file" even though the workbook clearly had targets
+            # in it.
             import pandas as pd
-            df = pd.read_excel(BytesIO(file_obj.read()), header=None)
-            for col in df.columns:
-                for val in df[col].dropna():
-                    str_val = str(val).strip()
-                    if str_val:
-                        values.append(str_val)
+            sheets = pd.read_excel(BytesIO(file_obj.read()), header=None, sheet_name=None)
+            for _sheet_name, df in sheets.items():
+                values.extend(_extract_cell_values(df))
 
         elif filename_lower.endswith(".csv"):
             # CSV file
             import pandas as pd
             file_obj.seek(0)
             df = pd.read_csv(BytesIO(file_obj.read()), header=None)
-            for col in df.columns:
-                for val in df[col].dropna():
-                    str_val = str(val).strip()
-                    if str_val:
-                        values.append(str_val)
+            values.extend(_extract_cell_values(df))
 
         elif filename_lower.endswith(".txt"):
             # Text file - one value per line

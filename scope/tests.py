@@ -8,9 +8,24 @@ uploaded file" because validate_entry() rejected anything that didn't
 match a strict IP/CIDR/URL shape. Fixed to accept any non-empty target —
 these tests lock that in.
 """
+import io
 import unittest
 
-from scope.utils import process_entries, validate_entry
+from scope.utils import parse_file_content, process_entries, validate_entry
+
+
+class _FakeUploadedFile:
+    """Minimal stand-in for Django's UploadedFile — parse_file_content only
+    ever calls .read() and .seek() on it."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self):
+        return self._data
+
+    def seek(self, pos):
+        pass
 
 
 class ValidateEntryAcceptsAnyNonEmptyTargetTests(unittest.TestCase):
@@ -82,3 +97,74 @@ class ProcessEntriesRealisticFileTests(unittest.TestCase):
         self.assertEqual(len(processed), 254)
         self.assertTrue(all(p["is_valid"] for p in processed))
         self.assertTrue(all(p["expanded_from"] == "10.0.0.0/24" for p in processed))
+
+
+class ParseFileContentExcelMultiSheetTests(unittest.TestCase):
+    """
+    Real bug report: a real scope workbook ("AEC VAPT scope.xlsx") spread
+    its content across 4 tabs — a text-only cover/summary sheet first,
+    then the actual "Asset list" sheet with every real target, then two
+    near-empty sheets. pd.read_excel() with no sheet_name= reads ONLY the
+    first sheet by default, so every real target on the other sheets was
+    silently dropped — the summary sheet alone has zero IP-shaped content,
+    which is exactly what produced "No valid targets found in the
+    uploaded file" even though the workbook clearly had 20 real assets in
+    it. Also covers a single cell holding multiple newline-separated IPs
+    (a real "Management / Target IP" cell listing a private IP plus
+    several public IPs on one cell, confirmed in that same file).
+    """
+
+    def _build_workbook(self) -> bytes:
+        openpyxl = _import_openpyxl_or_skip()
+        wb = openpyxl.Workbook()
+
+        cover = wb.active
+        cover.title = "Scope"
+        cover["B2"] = "For quick reference, here is our agreed baseline scope:"
+        cover["B4"] = "Target Assets (2 Total): 1 Firewall and 1 Server"
+
+        assets = wb.create_sheet("Asset list")
+        assets.append(["Asset #", "Asset Category", "Management / Target IP"])
+        # One cell holding multiple newline-separated targets — private IP
+        # plus a "Public IP:" label line plus two public IPs, exactly the
+        # real-world shape found in the actual uploaded file.
+        assets["C2"] = "FW-01"
+        assets["A2"] = "FW-01"
+        assets["B2"] = "Firewall"
+        assets["C2"] = "172.16.2.250\n\nPublic IP:\n203.177.12.162\n203.177.12.163"
+        assets.append(["PS-01", "Physical Server", "172.16.1.222"])
+
+        wb.create_sheet("network diagram")  # empty sheet, like the real file
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_targets_on_a_later_sheet_are_not_dropped(self):
+        data = self._build_workbook()
+        values = parse_file_content(_FakeUploadedFile(data), "scope.xlsx")
+
+        # Every real IP from the SECOND sheet must be present — this is
+        # exactly what used to be silently missed.
+        for expected_ip in ("172.16.2.250", "203.177.12.162", "203.177.12.163", "172.16.1.222"):
+            self.assertIn(expected_ip, values, f"{expected_ip} missing — sheet 2 was not read")
+
+    def test_multiline_cell_is_split_into_separate_targets(self):
+        data = self._build_workbook()
+        values = parse_file_content(_FakeUploadedFile(data), "scope.xlsx")
+        # The "Public IP:" label line inside that same cell should also
+        # come through as its own line (harmless — validate_entry accepts
+        # it as generic text), but the 3 real IPs must each be their own
+        # separate, independently-usable entry rather than one blob.
+        self.assertNotIn(
+            "172.16.2.250\n\nPublic IP:\n203.177.12.162\n203.177.12.163",
+            values,
+        )
+
+
+def _import_openpyxl_or_skip():
+    try:
+        import openpyxl
+        return openpyxl
+    except ImportError:
+        raise unittest.SkipTest("openpyxl not installed")
