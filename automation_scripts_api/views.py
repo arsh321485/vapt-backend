@@ -2,7 +2,7 @@ import datetime
 import re
 from pathlib import Path
 
-from django.http import FileResponse
+from django.http import FileResponse, HttpResponse
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -17,6 +17,12 @@ except Exception:
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 NESSUS_COLLECTION = "nessus_reports"
+# AI-generated automation feasibility/script, one embedded sub-document per
+# card — see upload_report/mitigation_tool.py's Automation Engineer output
+# and upload_report/crew_agent/{agents,tasks}.py. Separate from
+# "automation_scripts" (the small, human-curated Google-Sheet-driven library
+# above) — this lives on every vulnerability_cards document instead.
+VULN_CARD_COLLECTION = "vulnerability_cards"
 
 _SLUG_TO_TEAM = {
     "patch-management":         "Patch Management",
@@ -1081,3 +1087,123 @@ def user_get_feedback(request, plugin_id):
         "my_feedback":    my_feedback,
         **summary,
     })
+
+
+# ── AI-GENERATED AUTOMATION (per vulnerability_cards document) ─────────────
+#
+# Separate from everything above: the ~63-plugin "automation_scripts"
+# library is a small, human-curated, Google-Sheet-synced reference set.
+# Every vulnerability_cards document (ANY finding, in ANY report — not just
+# those 63) now also carries its OWN "automation_card" sub-document, written
+# once by the Automation Engineer agent (see upload_report/mitigation_tool.py
+# / upload_report/crew_agent/{agents,tasks}.py) and reused from then on for
+# the same (vulnerability_name, description, os_category) — same caching
+# already used for the manual mitigation card itself.
+
+def _find_vuln_card(card_id, admin_id):
+    with MongoContext() as db:
+        return db[VULN_CARD_COLLECTION].find_one(
+            {"card_id": card_id, "admin_id": str(admin_id)}, {"_id": 0}
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def admin_view_ai_automation(request, card_id):
+    """
+    Admin read-only view of the AI automation-feasibility result for one
+    vulnerability card. Same "admins cannot download, read-only only"
+    convention as the curated library, and same Freemium lock on the actual
+    script content (fix_script/verify_script stripped out; everything else
+    — status, what can/can't be automated, considerations — stays visible).
+    """
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"error": "Admin access only."}, status=403)
+
+    admin_id = str(request.user.id)
+    card = _find_vuln_card(card_id, admin_id)
+    if not card:
+        return Response({"error": "Vulnerability card not found or access denied"}, status=404)
+
+    automation = card.get("automation_card") or {}
+    if not automation:
+        return Response({"matched": False, "message": "No automation analysis available for this card yet."}, status=404)
+
+    premium_required, message = _premium_required_message(admin_id)
+    safe = {k: v for k, v in automation.items() if k not in ("fix_script", "verify_script")}
+    return Response({
+        "matched": True,
+        "card_id": card_id,
+        "premium_required": premium_required,
+        "message": message if premium_required else None,
+        **safe,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_download_ai_automation_script(request, card_id):
+    """
+    Member-side download of the AI-generated fix/verify script attached to
+    one vulnerability card. Same plan gate (assert_can_use_automation_scripts),
+    same "admins cannot download" rule, and same download_count bookkeeping
+    convention as user_download_script already applies to the curated
+    library — just sourced from vulnerability_cards.automation_card (a
+    string in Mongo) instead of a file on disk.
+
+    ?type=fix|verify — defaults to "fix".
+    """
+    if request.user.is_staff or request.user.is_superuser:
+        return Response(
+            {"error": "Admins cannot download scripts. Read-only access only."},
+            status=403,
+        )
+
+    from billing.enforcement import assert_can_use_automation_scripts, PlanLimitExceeded
+    admin_id, _admin_email, _teams = _resolve_admin_and_teams(request)
+    if not admin_id:
+        return Response({"error": "You are not linked to any admin account."}, status=403)
+    try:
+        assert_can_use_automation_scripts(admin_id)
+    except PlanLimitExceeded as e:
+        return Response({"error": str(e)}, status=403)
+
+    card = _find_vuln_card(card_id, admin_id)
+    if not card:
+        return Response({"error": "Vulnerability card not found."}, status=404)
+
+    automation = card.get("automation_card") or {}
+    if not automation or automation.get("automation_status") == "not_possible":
+        return Response(
+            {
+                "error": (automation.get("reason_not_possible") if automation else None)
+                or "Automation not possible for this vulnerability — manual remediation required.",
+            },
+            status=404,
+        )
+
+    script_type = (request.query_params.get("type") or "fix").strip().lower()
+    if script_type not in ("fix", "verify"):
+        return Response({"error": "type must be 'fix' or 'verify'."}, status=400)
+
+    content = (automation.get(f"{script_type}_script") or "").strip()
+    if not content:
+        return Response(
+            {"error": f"No {script_type} script available for this vulnerability."},
+            status=404,
+        )
+    filename = automation.get(f"{script_type}_script_filename") or f"{card_id}_{script_type}.txt"
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with MongoContext() as db:
+        db[VULN_CARD_COLLECTION].update_one(
+            {"card_id": card_id},
+            {
+                "$inc": {"automation_card.download_count": 1},
+                "$set": {"automation_card.last_downloaded_at": now},
+            },
+        )
+
+    response = HttpResponse(content, content_type="text/plain; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response

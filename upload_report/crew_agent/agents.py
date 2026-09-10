@@ -226,10 +226,73 @@ def build_agents(llm) -> dict:
         allow_delegation=False,
     )
 
+    # ── 6. Automation Engineer (parallel track) ──────────────────────────
+    # Real feature request: an agent that looks at the manual mitigation
+    # steps (Task 4's output) and decides whether the fix can be scripted —
+    # fully, partially, or not at all — and if so, writes the actual
+    # fix/verify script. Runs on its own parallel track exactly like
+    # backup_engineer, off task_remediate's output, so it never changes
+    # what task_format (the crew's final/last task) produces.
+    automation_engineer = Agent(
+        role="Automation Feasibility Analyst and Script Engineer",
+        goal=(
+            "Read the manual mitigation plan produced for this finding and "
+            "decide, honestly, whether it can be turned into an automated "
+            "fix script — Yes (fully), Partial, or No — then, if Yes or "
+            "Partial, write a real, safe, copy-run-able fix script plus a "
+            "matching verify script in the target OS's own scripting "
+            "language. If No, explain exactly why (e.g. GUI-only step, "
+            "vendor-portal action, human judgement call) instead of forcing "
+            "a fake script."
+        ),
+        backstory=(
+            "Senior automation engineer who has turned thousands of manual "
+            "remediation runbooks into safe operational scripts across "
+            "Linux, Windows, and network/security appliances.\n\n"
+            "Your working rules:\n"
+            "  1. Base your script STRICTLY on the manual mitigation plan "
+            "and OS profile you were given — same paradigm, same commands, "
+            "same vocabulary. Never introduce a fix the manual plan didn't "
+            "describe.\n"
+            "  2. HONESTY OVER COVERAGE. If a step needs a GUI click, a "
+            "vendor support ticket, a business decision, or human judgement "
+            "that cannot be scripted, say so plainly in "
+            "what_must_remain_manual and lower automation_possible to "
+            "'Partial' or 'No' rather than inventing a script for it.\n"
+            "  3. SAFE BY DEFAULT — the fix script checks current state "
+            "before changing it where practical, uses real, tested command "
+            "syntax (no pseudocode, no placeholders without a worked "
+            "example), and never silently overwrites something without a "
+            "check. It does not need to include its own backup logic — a "
+            "separate Backup Engineer already covers that on its own card "
+            "— but it should note if backups are strongly recommended "
+            "first, in considerations_before.\n"
+            "  4. The verify script must independently confirm the fix "
+            "worked (not just replay the fix commands) — same spirit as "
+            "the manual plan's own VERIFY field.\n"
+            "  5. Language matches the OS paradigm — Bash/Python for "
+            "Linux, PowerShell for Windows, the vendor's own CLI script "
+            "format for network/security appliances (or 'No' if that "
+            "vendor's CLI cannot be scripted unattended).\n"
+            "  6. OS FIDELITY and PRODUCT FIDELITY — same strict gates as "
+            "the rest of the crew. No terms or syntax from a different OS "
+            "or vendor product.\n"
+            "  7. NO LITERAL IPs OR HOSTNAMES — use <target_ip> / "
+            "<target_host> placeholders, same as the manual plan.\n"
+            "  8. You are not human-tested. Never claim the script has "
+            "been manually verified — that field always reflects that it "
+            "is AI-generated and not yet human-tested."
+        ),
+        llm=llm,
+        verbose=True,
+        allow_delegation=False,
+    )
+
     return {
         "vulnerability_analyst": vulnerability_analyst,
         "os_profiler":           os_profiler,
         "remediation_engineer":  remediation_engineer,
         "card_formatter":        card_formatter,
         "backup_engineer":       backup_engineer,
+        "automation_engineer":   automation_engineer,
     }

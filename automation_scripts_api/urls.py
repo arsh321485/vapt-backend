@@ -8,6 +8,10 @@ admin_urlpatterns = [
     path("match/bulk/", views.admin_match_scripts_bulk, name="admin_automation_bulk"),
     path("match/by-name/", views.admin_match_scripts_by_name, name="admin_automation_match_by_name"),
     path("match/<int:plugin_id>/", views.admin_match_script, name="admin_automation_match"),
+    # AI-generated per-vulnerability-card automation (separate from the
+    # curated plugin_id library above) — read-only, same as the rest of
+    # this admin_urlpatterns list.
+    path("ai/<str:card_id>/", views.admin_view_ai_automation, name="admin_ai_automation_view"),
     path("", views.admin_list_scripts, name="admin_automation_list"),
 ]
 
@@ -19,5 +23,8 @@ user_urlpatterns = [
     path("match/bulk/", views.user_match_scripts_bulk, name="user_automation_bulk"),
     path("match/by-name/", views.user_match_scripts_by_name, name="user_automation_match_by_name"),
     path("match/<int:plugin_id>/", views.user_match_script, name="user_automation_match"),
+    # AI-generated per-vulnerability-card automation — real download,
+    # same plan gate + download_count bookkeeping as download/<plugin_id>/.
+    path("ai/<str:card_id>/download/", views.user_download_ai_automation_script, name="user_ai_automation_download"),
     path("", views.user_list_scripts, name="user_automation_list"),
 ]

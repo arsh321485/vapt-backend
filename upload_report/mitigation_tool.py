@@ -660,6 +660,121 @@ def _parse_backup_card(raw_text: str) -> dict:
     return {"raw_backup_output": raw_text}
 
 
+def _normalize_automation_status(automation_possible: str) -> str:
+    """Map the agent's 'Yes/Partial/No' to the stored automation_status enum."""
+    v = (automation_possible or "").strip().lower()
+    if v == "yes":
+        return "full"
+    if v == "partial":
+        return "partial"
+    return "not_possible"
+
+
+def _parse_automation_card(raw_text: str) -> dict:
+    """
+    Parse the Automation Engineer's JSON output (AUTOMATION_CARD_SCHEMA) into
+    the flat dict stored as vulnerability_cards.automation_card. Same
+    best-effort JSON extraction as _parse_backup_card — plain JSON, then
+    ```json fences, then a bare {...} scan.
+    """
+    empty = {}
+    if not raw_text or not raw_text.strip():
+        return empty
+    text = raw_text.strip()
+
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+        if m:
+            try:
+                parsed = json.loads(m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+        if parsed is None:
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group(0))
+                except (json.JSONDecodeError, ValueError):
+                    parsed = None
+
+    if not isinstance(parsed, dict):
+        logger.warning("[MitigationCrew] Could not parse automation card JSON output")
+        return empty
+
+    automation = parsed.get("automation", parsed) or {}
+    if not isinstance(automation, dict):
+        return empty
+
+    automation_possible = (automation.get("automation_possible") or "").strip() or "No"
+    status = automation.get("automation_status") or _normalize_automation_status(automation_possible)
+
+    # Safety net: never let a "No" carry script content, regardless of what
+    # the LLM actually returned — matches the hard rule given in the task.
+    fix_script = automation.get("fix_script") or ""
+    verify_script = automation.get("verify_script") or ""
+    if status == "not_possible":
+        fix_script = ""
+        verify_script = ""
+
+    return {
+        "vulnerability":              automation.get("vulnerability", ""),
+        "os":                         automation.get("os", ""),
+        "severity":                   automation.get("severity", ""),
+        "port":                       automation.get("port", ""),
+        "description":                automation.get("description", ""),
+        "automation_status":          status,
+        "automation_possible":        automation_possible,
+        "reason_not_possible":        automation.get("reason_not_possible", "") if status == "not_possible" else "",
+        "script_name":                automation.get("script_name", ""),
+        "script_description":         automation.get("script_description", ""),
+        "what_can_be_automated":      automation.get("what_can_be_automated", ""),
+        "what_must_remain_manual":    automation.get("what_must_remain_manual", ""),
+        "recommended_approach":       automation.get("recommended_approach", ""),
+        "considerations_before":      automation.get("considerations_before", ""),
+        "considerations_after":       automation.get("considerations_after", ""),
+        "language":                   automation.get("language", ""),
+        "libraries":                  automation.get("libraries", ""),
+        "command_download_libraries": automation.get("command_download_libraries", ""),
+        "command_run_script":         automation.get("command_run_script", ""),
+        "fix_script":                 fix_script,
+        "fix_script_filename":        _automation_script_filename(automation, fix_script, "fix"),
+        "verify_script":              verify_script,
+        "verify_script_filename":     _automation_script_filename(automation, verify_script, "verify"),
+        "tested_manually":            "No — AI-generated, not yet human-tested",
+        "download_count":             0,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+def _automation_script_extension(language: str) -> str:
+    lang = (language or "").strip().lower()
+    if "powershell" in lang:
+        return "ps1"
+    if "python" in lang:
+        return "py"
+    if "bash" in lang or "shell" in lang or "sh" == lang:
+        return "sh"
+    return "txt"
+
+
+def _automation_script_filename(automation: dict, script_content: str, kind: str) -> str:
+    """Build a stable filename for the fix/verify script download — no
+    plugin_id available for AI-generated cards (custom/AWS reports never
+    have one), so this is derived from the vulnerability name + OS instead.
+    Takes the ALREADY-resolved script_content (post "not_possible" safety
+    net in _parse_automation_card), not the raw LLM field, so a forced-empty
+    script never ends up with a filename pointing at nothing."""
+    if not (script_content or "").strip():
+        return ""
+    vuln = re.sub(r"[^a-zA-Z0-9]+", "_", (automation.get("vulnerability") or "vulnerability")).strip("_")[:60]
+    os_part = re.sub(r"[^a-zA-Z0-9]+", "_", (automation.get("os") or "os")).strip("_")[:20]
+    ext = _automation_script_extension(automation.get("language", ""))
+    return f"{vuln}_{os_part}_{kind}.{ext}"
+
+
 def _parse_vaptcode_response(raw_text: str) -> dict:
     """
     Parse vaptcode_integrated 4-agent JSON output into mitigation_tool format.
@@ -1019,6 +1134,12 @@ class MitigationGenerationTool:
             backup_raw  = _task_raw_output(tasks[2])
             backup_card = _parse_backup_card(backup_raw)
 
+            # tasks[4] is the async automation-feasibility task (parallel
+            # track, fans out from task_remediate same as backup does from
+            # task_profile) — see build_tasks()'s return-list comment.
+            automation_raw  = _task_raw_output(tasks[4])
+            automation_card = _parse_automation_card(automation_raw)
+
             parsed = _parse_vaptcode_response(raw_text)
 
             # Agent-driven team classification using analysis.category
@@ -1050,6 +1171,7 @@ class MitigationGenerationTool:
                 "vaptcode_analysis":     parsed.get("vaptcode_analysis", {}),
                 "vaptcode_summary":      parsed.get("vaptcode_summary", {}),
                 "backup_card":           backup_card,
+                "automation_card":       automation_card,
                 "error":                 None,
             }
 

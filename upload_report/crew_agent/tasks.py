@@ -185,6 +185,35 @@ BACKUP_CARD_SCHEMA = """\
 }"""
 
 
+AUTOMATION_CARD_SCHEMA = """\
+{
+  "automation": {
+    "vulnerability":             "<finding.vuln_name>",
+    "os":                        "<profile.display_name>",
+    "severity":                  "<Critical | High | Medium | Low | Informational>",
+    "port":                      "<finding.port>",
+    "description":               "<one or two sentence restatement of the finding>",
+    "automation_status":         "<full | partial | not_possible>",
+    "automation_possible":       "<Yes | Partial | No>",
+    "reason_not_possible":       "<required and specific if automation_possible is 'No'; '' otherwise>",
+    "script_name":               "<short descriptive script name, or ''>",
+    "script_description":        "<what the script does, or ''>",
+    "what_can_be_automated":     "<what the script actually covers>",
+    "what_must_remain_manual":   "<what still needs a human, even for Partial>",
+    "recommended_approach":      "<one short paragraph>",
+    "considerations_before":     "<pre-run warnings, e.g. take a backup first>",
+    "considerations_after":      "<post-run checks/warnings>",
+    "language":                  "<bash | powershell | python | vendor_cli | ''>",
+    "libraries":                 "<required packages/modules, or ''>",
+    "command_download_libraries":"<exact command(s) to install them, or ''>",
+    "command_run_script":        "<exact command to execute the fix script, or ''>",
+    "fix_script":                "<full fix script source code; '' if automation_possible is 'No'>",
+    "verify_script":             "<full verify script source code; '' if automation_possible is 'No'>",
+    "tested_manually":           "No — AI-generated, not yet human-tested"
+  }
+}"""
+
+
 def build_tasks(agents: dict, finding: dict) -> list:
 
     ip          = finding.get("ip",           "unknown")
@@ -396,6 +425,88 @@ Produce 4 to 10 steps. Each step targets {assigned_to}.
         context=[task_analyse, task_profile],
     )
 
+    # ── Task 6: Automation Feasibility + Script (ASYNC — parallel track) ─
+    # Real feature request: look at the manual remediation plan (Task 4's
+    # raw output) and decide if it can be scripted — fully, partially, or
+    # not at all — writing the actual fix/verify script when it can. Runs
+    # in parallel with task_format (both fan out from task_remediate), so
+    # this NEVER changes what task_format — the crew's last, non-async
+    # task — produces as the crew's own final result.
+    task_automation = Task(
+        description=f"""
+Decide whether the manual mitigation plan just produced for this finding can
+be automated, and if so, write the actual script(s).
+
+FINDING:
+  Affected hosts : {hosts_label}
+  OS (reported)  : {os_name}
+  Port / Service : {port}
+  Vulnerability  : {vuln_name}
+  Assigned To    : {assigned_to}
+
+Use the OS profile (Task 2) as your single source of truth for vocabulary,
+paths, and command syntax — same rule the remediation plan itself followed.
+Base your script on the manual plan's own steps; do not invent a different
+fix.
+
+DECISION RULES:
+  1. automation_possible = "Yes"     → every step in the manual plan can be
+     safely scripted end-to-end. automation_status = "full".
+  2. automation_possible = "Partial" → some steps can be scripted (the
+     mechanical, deterministic ones), but at least one step genuinely needs
+     a human (approval, GUI-only action, vendor portal, judgement call).
+     automation_status = "partial". List exactly what remains manual in
+     what_must_remain_manual.
+  3. automation_possible = "No"      → nothing here can be safely scripted
+     unattended (e.g. it is entirely a GUI/vendor-portal/manual-judgement
+     fix). automation_status = "not_possible". fix_script and verify_script
+     MUST both be "" (empty string) in this case, and reason_not_possible
+     MUST explain why, specifically for this finding — never a generic
+     answer.
+
+WHEN Yes OR Partial:
+  • fix_script must be REAL, complete, copy-run-able source code in the
+    chosen `language` — not pseudocode, not a fragment. Include basic
+    error handling and a pre-check of current state where practical.
+  • verify_script must INDEPENDENTLY confirm the fix is in effect (not
+    just re-run the fix commands).
+  • No literal IPs or hostnames inside the scripts — use placeholders
+    (e.g. <target_ip>) exactly like the manual plan does.
+  • Language must match the OS paradigm from the OS profile (Bash/Python
+    for Linux, PowerShell for Windows, the vendor's own CLI/script format
+    for network or security appliances — or fall back to "No" if that
+    vendor's CLI genuinely cannot be scripted unattended).
+  • considerations_before should mention taking a backup first when the
+    change is not trivially reversible (a separate Backup Engineer already
+    produces the actual backup card — you are only flagging that it
+    should be run first).
+  • tested_manually is always exactly:
+    "No — AI-generated, not yet human-tested" — never claim otherwise.
+
+STRICT GATES (same as the rest of the crew):
+  • OS FIDELITY      — no terms/commands from a different OS.
+  • PRODUCT FIDELITY — no syntax from a different vendor product.
+
+OUTPUT — return ONLY this JSON object, no markdown fences, no commentary:
+
+{AUTOMATION_CARD_SCHEMA}
+
+Escape backslashes and newlines correctly so the whole object is valid,
+parseable JSON (script source goes in as a normal JSON string with \\n for
+line breaks).
+""",
+        expected_output=(
+            "A single valid JSON object matching AUTOMATION_CARD_SCHEMA: "
+            "automation_status/automation_possible honestly assessed from "
+            "the manual plan, and — only when automation is Yes or Partial "
+            "— real, OS-correct, copy-run-able fix_script and verify_script "
+            "source. Parseable with json.loads()."
+        ),
+        agent=agents["automation_engineer"],
+        context=[task_analyse, task_profile, task_remediate],
+        async_execution=True,
+    )
+
     # ── Task 5: Card Formatter + QA ─────────────────────────────────────
     task_format = Task(
         description=f"""
@@ -456,5 +567,10 @@ Escape backslashes in any path strings as \\\\ inside JSON.
     )
 
     # Order matters: task_backup is async — it kicks off before task_remediate
-    # runs and executes in parallel. task_format (sync, last) waits for both tracks.
-    return [task_analyse, task_profile, task_backup, task_remediate, task_format]
+    # runs and executes in parallel. task_automation is also async — it needs
+    # task_remediate's output, so it's listed right after it, and then runs in
+    # parallel with task_format (both fan out from task_remediate). task_format
+    # stays the LAST task in this list either way — Process.sequential (see
+    # mitigation_tool.py) treats the last task's output as the crew's own
+    # final result, and nothing here should change what that already is.
+    return [task_analyse, task_profile, task_backup, task_remediate, task_automation, task_format]

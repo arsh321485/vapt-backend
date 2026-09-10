@@ -1836,6 +1836,12 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "generated_at":       cached_card.get("generated_at"),
                     "created_at":         datetime.datetime.utcnow(),
                     "cached_from_card_id": str(cached_card.get("card_id", "")),
+                    # Same automation feasibility/script for the same
+                    # vulnerability+OS should never need re-generating —
+                    # forward it from the cached card exactly like every
+                    # other cached field above ("next time same vuln → same
+                    # automation script" — no new GPT call).
+                    "automation_card":    cached_card.get("automation_card", {}),
                 }
             else:
                 # ── Step 3: No cache — call GPT-4o to generate new card ──
@@ -1892,6 +1898,8 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "vaptcode_os_profile": result.get("vaptcode_os_profile", {}),
                     "vaptcode_analysis":   result.get("vaptcode_analysis", {}),
                     "vaptcode_summary":    result.get("vaptcode_summary", {}),
+                    "backup_card":        result.get("backup_card", {}),
+                    "automation_card":    result.get("automation_card", {}),
                 }
 
             try:
@@ -2681,6 +2689,7 @@ class RunMitigationView(APIView):
             "vaptcode_analysis":   result.get("vaptcode_analysis", {}),
             "vaptcode_summary":    result.get("vaptcode_summary", {}),
             "backup_card":         result.get("backup_card", {}),
+            "automation_card":     result.get("automation_card", {}),
         }
 
         db[VULN_CARD_COLLECTION].update_one(
@@ -2695,12 +2704,13 @@ class RunMitigationView(APIView):
 
         return Response(
             {
-                "success":             True,
-                "card_id":             card_id,
-                "vulnerability_name":  plugin_name,
-                "host_name":           found_host,
-                "mitigation_steps":    len(mitigation_table_arr),
-                "backup_card_present": bool(result.get("backup_card")),
+                "success":                 True,
+                "card_id":                 card_id,
+                "vulnerability_name":      plugin_name,
+                "host_name":               found_host,
+                "mitigation_steps":        len(mitigation_table_arr),
+                "backup_card_present":     bool(result.get("backup_card")),
+                "automation_status":       (result.get("automation_card") or {}).get("automation_status"),
             },
             status=201,
         )
