@@ -1793,11 +1793,24 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 continue
 
             # ── Step 2: Check if any card for this plugin_name + description + OS exists in DB ──
+            # Real bug report: this used to match ANY prior card regardless
+            # of whether it had an automation_card — cards generated before
+            # the Automation Engineer agent existed never have one, so any
+            # vulnerability+OS signature that was already cached BEFORE that
+            # feature shipped kept forwarding an empty automation_card
+            # forever (this exact query always finds that same old card
+            # again as "most recent"), no matter how many times a report
+            # got re-uploaded. Requiring automation_card to actually be
+            # present makes a stale, feature-less card ineligible as a
+            # cache source — falls through to a fresh tool._run() instead,
+            # which creates a new card WITH automation_card; every later
+            # upload of that same signature then cache-hits on THAT one.
             cached_card = db[VULN_CARD_COLLECTION].find_one(
                 {
                     "vulnerability_name": vuln_plugin_name,
                     "description": vuln.get("description", ""),
                     "os_category": vuln_os_category,
+                    "automation_card": {"$exists": True, "$nin": [{}, None]},
                 },
                 sort=[("created_at", -1)],
             )
