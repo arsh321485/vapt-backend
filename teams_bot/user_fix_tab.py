@@ -22,7 +22,7 @@ from . import fix_tab
 from .fix_tab import (
     _row, _pagination_body, _back_action, _sev_dots_text, _status_label,
     _SEV_ICON, cached_fetch, _group_assets, PAGE_SIZE,
-    _vuln_facts_body, _automation_fix_body,
+    _vuln_facts_body, _automation_fix_body, _fetch_automation_from_card,
     common_vulns_list_body, common_vuln_detail_body,
     _match_sev, _match_status, _status_counts,
     _sev_filter_columnset, _status_filter_columnset,
@@ -180,41 +180,6 @@ def _fetch_fix_steps(member_user, fix_vuln_id):
     if status_code >= 300 or not isinstance(data, dict):
         return None
     return data
-
-
-def _fetch_automation_match(member_user, r):
-    from automation_scripts_api import views as auto_views
-    from .actions import _call_view_in_process
-
-    os_param = r.get("operating_system")
-    plugin_id = r.get("plugin_id")
-    if plugin_id not in (None, ""):
-        try:
-            pid = int(plugin_id)
-        except (TypeError, ValueError):
-            pid = None
-        if pid is not None:
-            status_code, data = _call_view_in_process(
-                auto_views.user_match_script, member_user, method="get",
-                url_kwargs={"plugin_id": pid},
-                data={"os": os_param} if os_param else None,
-            )
-            if status_code < 300 and isinstance(data, dict):
-                return data
-
-    name = r.get("vul_name")
-    if not name:
-        return {"matched": False, "message": "No automated fix available for this vulnerability."}
-    body = {"vulnerability_names": [name]}
-    if os_param:
-        body["os"] = os_param
-    status_code, data = _call_view_in_process(
-        auto_views.user_match_scripts_by_name, member_user, method="post", data=body, request_format="json",
-    )
-    if status_code < 300 and isinstance(data, dict):
-        results = data.get("results") or []
-        return results[0] if results else {"matched": False, "message": "No automated fix available for this vulnerability."}
-    return {"matched": False, "message": "No automated fix available for this vulnerability."}
 
 
 def mark_mitigated(member_user, r, report_id):
@@ -456,18 +421,25 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
 
     try:
         if sub == "automation":
-            automation = _fetch_automation_match(member_user, r)
+            automation = _fetch_automation_from_card(member_user, r, report_id, as_member=True)
             body.extend(_automation_fix_body(automation, admin=admin))
-            plugin_id = automation.get("plugin_id") or r.get("plugin_id")
-            # Don't offer a Download button the actual download endpoint
-            # (user_download_script, called in-process by
-            # TeamsScriptDownloadView) will just reject anyway — a visible
-            # but broken button is worse than no button. Matches
-            # _automation_fix_body's own content-hiding above.
-            if automation.get("matched") and not automation.get("premium_required") and plugin_id and team_id:
+            card_id = automation.get("card_id")
+            # Don't offer a Download button when the actual download
+            # endpoint (user_download_ai_automation_script, called
+            # in-process by TeamsAIScriptDownloadView) will just reject
+            # anyway — a visible but broken button is worse than no
+            # button. Matches _automation_fix_body's own content-hiding
+            # above (premium lock / not-possible both fall through here
+            # with no card_id or automation_possible != "Yes"/"Partial").
+            if (
+                automation.get("matched")
+                and not automation.get("premium_required")
+                and automation.get("automation_possible") in ("Yes", "Partial")
+                and card_id and team_id
+            ):
                 body.append({
                     "type": "ActionSet", "spacing": "Small",
-                    "actions": [{"type": "Action.OpenUrl", "title": "📥 Download Script", "url": fix_tab.script_download_url(team_id, team_name, plugin_id)}],
+                    "actions": [{"type": "Action.OpenUrl", "title": "📥 Download Fix Script", "url": fix_tab.script_download_url_ai(team_id, team_name, card_id, "fix")}],
                 })
         else:
             fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)

@@ -574,6 +574,18 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = [cards._header("🤖 Automations"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_automation", extra_body=body)
 
+    if action_id == "auto_card_view":
+        card_id = value.get("card_id") or ""
+        category = value.get("category") or "full"
+        sev = value.get("sev") or "all"
+        offset = int(value.get("offset") or 0)
+        try:
+            body = automations_tab.automation_card_detail_body(admin, card_id, category=category, sev=sev, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] auto_card_view failed")
+            body = [cards._header("🤖 Automations"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_automation", extra_body=body)
+
     if action_id == "fix_vuln_back":
         offset = int(value.get("offset") or 0)
         try:

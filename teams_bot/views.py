@@ -230,6 +230,64 @@ class TeamsScriptDownloadView(APIView):
         return response
 
 
+class TeamsAIScriptDownloadView(APIView):
+    """
+    GET /api/admin/users/teams/ai-script-download/?token=...&team=...&card_id=...&type=fix|verify
+
+    AI-generated automation counterpart to TeamsScriptDownloadView — same
+    signed-token/representative-member pattern, but resolves against a
+    vulnerability_cards.automation_card by card_id (via
+    user_download_ai_automation_script) instead of the curated
+    automation_scripts library by plugin_id. Needed because the AI card
+    system covers vulnerabilities the curated ~63-plugin library never
+    did, and its script content lives inline in Mongo, not a file on disk
+    keyed by plugin_id — the old view can't serve it at all.
+    """
+    permission_classes = []
+    authentication_classes = []
+
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from users.views import _dashboard_image_signer
+        from users_details.models import UserDetail
+        from automation_scripts_api import views as auto_views
+
+        token = request.query_params.get("token", "")
+        try:
+            team_id = _dashboard_image_signer().unsign(token, max_age=600)
+        except Exception:
+            return HttpResponse(status=403)
+
+        User = get_user_model()
+        admin = User.objects.filter(ms_team_id=team_id).first()
+        if not admin:
+            return HttpResponse(status=404)
+
+        vapt_team = (request.query_params.get("team") or "").strip()
+        card_id = (request.query_params.get("card_id") or "").strip()
+        script_type = (request.query_params.get("type") or "fix").strip().lower()
+        if not card_id:
+            return HttpResponse(status=400)
+
+        detail = UserDetail.objects.filter(admin=admin, Member_role__contains=vapt_team).first() if vapt_team else None
+        member_user = User.objects.filter(email=detail.email).first() if detail else None
+        if not member_user:
+            return HttpResponse(status=404)
+
+        try:
+            factory = APIRequestFactory()
+            inner_request = factory.get("/internal/", {"type": script_type})
+            force_authenticate(inner_request, user=member_user)
+            response = auto_views.user_download_ai_automation_script(inner_request, card_id)
+            if hasattr(response, "render"):
+                response.render()
+        except Exception:
+            logger.exception(f"[TeamsAIScriptDownload] failed for team_id={team_id} card_id={card_id}")
+            return HttpResponse(status=500)
+        return response
+
+
 class TeamsBotMessagesView(APIView):
     """POST /api/admin/users/teams/bot/messages/ — set as the Messaging
     endpoint on the Azure Bot resource."""

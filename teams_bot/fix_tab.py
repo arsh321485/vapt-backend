@@ -165,6 +165,25 @@ def script_download_url(team_id, team_name, plugin_id):
     )
 
 
+def script_download_url_ai(team_id, team_name, card_id, script_type="fix"):
+    """Signed-URL download link for an AI-generated automation_card's
+    fix/verify script — same signing/backend convention as
+    script_download_url above, routed to TeamsAIScriptDownloadView (which
+    reads vulnerability_cards.automation_card by card_id) instead of the
+    curated automation_scripts library by plugin_id."""
+    import time
+    from urllib.parse import quote
+    from django.conf import settings
+    from users.views import _dashboard_image_signer
+
+    token = _dashboard_image_signer().sign(team_id)
+    backend = getattr(settings, "VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
+    return (
+        f"{backend}/api/admin/users/teams/ai-script-download/?token={quote(token)}"
+        f"&team={quote(team_name)}&card_id={quote(card_id)}&type={quote(script_type)}&t={int(time.time())}"
+    )
+
+
 def cached_fetch(cache_key, ttl, fetch_fn):
     """
     Small shared helper (used by fix_tab/register_tab/automations_tab/
@@ -338,55 +357,152 @@ def _vuln_facts_body(r):
 # ─── Manual Fix / Automated Fix (matches Microsoft -Admin/vulndetail.html,
 # real data instead of that mockup's hardcoded sample) ───────────────────
 # Mirrors users.views.SlackSlashCommandView._allvuln_detail_blocks — same
-# two real data sources, same read-only-for-admin behaviour (no run/mark-
-# complete actions here, matching the website's admin-is-read-only rule).
+# vulnerability_cards.automation_card data source, same read-only-for-admin
+# behaviour (no run/mark-complete actions here, matching the website's
+# admin-is-read-only rule).
 
-def _fetch_automation_match(admin, r):
-    from automation_scripts_api import views as auto_views
-    from .actions import _call_view_in_process
+def _fetch_automation_cards_for_report(caller, report_id, as_member=False):
+    """
+    Every vulnerability_cards document for this report_id, via
+    VulnerabilityCardListView (admin caller) — same source automations_tab.py
+    already reads for the report-wide Full/Partial tab — or
+    UserVulnerabilityCardListAPIView (as_member=True) when `caller` is a
+    team member, not the admin.
 
-    os_param = r.get("operating_system")
-    plugin_id = r.get("plugin_id")
-    if plugin_id not in (None, ""):
-        try:
-            pid = int(plugin_id)
-        except (TypeError, ValueError):
-            pid = None
-        if pid is not None:
+    Real gotcha: VulnerabilityCardListView filters by
+    admin_email == request.user's OWN email — calling it in-process AS a
+    team member (a different email than the report's owning admin) would
+    silently match zero cards every time, not raise an error, so this
+    would have looked like "automation just never generated" for every
+    single member-side Automation Fix click. UserVulnerabilityCardListAPIView
+    resolves the member's own admin internally instead (same as every
+    other user_* endpoint), so member callers must go through that one.
+    Cached per-caller, same convention as _fetch_register_data above.
+    """
+    def _fetch():
+        from .actions import _call_view_in_process
+        if as_member:
+            from upload_report.views import UserVulnerabilityCardListAPIView
             status_code, data = _call_view_in_process(
-                auto_views.admin_match_script, admin, method="get",
-                url_kwargs={"plugin_id": pid},
-                data={"os": os_param} if os_param else None,
+                UserVulnerabilityCardListAPIView, caller, data={"report_id": report_id}, method="get",
             )
-            if status_code < 300 and isinstance(data, dict):
-                return data
+        else:
+            from upload_report.views import VulnerabilityCardListView
+            status_code, data = _call_view_in_process(
+                VulnerabilityCardListView, caller, data={"report_id": report_id}, method="get",
+            )
+        if status_code >= 300 or not isinstance(data, dict):
+            return []
+        return data.get("cards") or []
+    return cached_fetch(f"automation_cards:{caller.id}:{'member' if as_member else 'admin'}", 20, _fetch)
 
-    name = r.get("vul_name")
-    if not name:
+
+def _fetch_automation_from_card(admin, r, report_id, as_member=False):
+    """
+    Automation Fix button's real data source — matches this exact
+    (vulnerability, host) instance against the admin's own
+    vulnerability_cards for this report and returns its AI-generated
+    automation_card, reshaped into the same dict shape _automation_fix_body
+    already expects (matched/premium_required/message/severity/os/
+    language/automation_possible/script_description/... — the OLD curated-
+    library response shape), so _automation_fix_body itself needs no
+    changes.
+
+    Real bug report: the Automation Fix button only ever checked the
+    curated ~63-plugin automation_scripts library (the old
+    _fetch_automation_match, matched by plugin_id) — any vulnerability
+    outside that fixed set (the vast majority of a real report) always
+    showed "Automation script not ready for this vulnerability" even when
+    the AI Automation Engineer had already generated a real automation_card
+    for it (confirmed live: SNMP plugin_id=41028 — in the curated library —
+    showed full detail, HP LaserJet RCE — not in it — showed "not ready"
+    even though its own automation_card existed). Reads from the same
+    source automations_tab.py / the website Script tab now use.
+
+    as_member=True (passed by user_fix_tab.py) — `admin` here is actually
+    the calling TEAM MEMBER, not the admin; see
+    _fetch_automation_cards_for_report's own docstring for why this can't
+    just reuse the admin call path.
+    """
+    if not report_id:
         return {"matched": False, "message": "No automated fix available for this vulnerability."}
-    body = {"vulnerability_names": [name]}
-    if os_param:
-        body["os"] = os_param
-    status_code, data = _call_view_in_process(
-        auto_views.admin_match_scripts_by_name, admin, method="post", data=body, request_format="json",
-    )
-    if status_code < 300 and isinstance(data, dict):
-        results = data.get("results") or []
-        return results[0] if results else {"matched": False, "message": "No automated fix available for this vulnerability."}
-    return {"matched": False, "message": "No automated fix available for this vulnerability."}
+    host_name = (r.get("asset") or "").strip()
+    vuln_name = (r.get("vul_name") or "").strip()
+    if not vuln_name:
+        return {"matched": False, "message": "No automated fix available for this vulnerability."}
+
+    cards_list = _fetch_automation_cards_for_report(admin, report_id, as_member=as_member)
+    card = None
+    for c in cards_list:
+        if (c.get("vulnerability_name") or "").strip().lower() != vuln_name.lower():
+            continue
+        if host_name and (c.get("host_name") or "").strip() != host_name:
+            continue
+        card = c
+        break
+    if not card:
+        return {"matched": False, "message": "No automated fix available for this vulnerability."}
+    return shape_automation_detail(card)
+
+
+def shape_automation_detail(card):
+    """
+    Reshapes ONE vulnerability_cards document's automation_card into the
+    dict shape _automation_fix_body expects (matched/premium_required/
+    message/severity/os/language/automation_possible/script_description/
+    ... — the OLD curated-library response shape) — shared by
+    _fetch_automation_from_card (matches by vuln+host first) and
+    automations_tab.py's own View-button detail drill-down (already has
+    the exact card via card_id, no matching needed).
+    """
+    automation = card.get("automation_card") or {}
+    if not automation or automation.get("automation_status") is None:
+        if automation.get("premium_required"):
+            return {
+                "matched": True, "premium_required": True,
+                "message": automation.get("message") or "Automation scripts are a Premium/Custom feature — upgrade your plan to generate one for this vulnerability.",
+            }
+        return {"matched": False, "message": "Automation analysis for this vulnerability is still being generated — check back shortly."}
+
+    if automation.get("automation_status") == "not_possible":
+        return {
+            "matched": True,
+            "automation_possible": "No",
+            "severity": automation.get("severity"),
+            "os": automation.get("os"),
+            "reason_not_possible": automation.get("reason_not_possible"),
+        }
+
+    return {
+        "matched": True,
+        "premium_required": bool(automation.get("premium_required")),
+        "message": automation.get("message"),
+        "card_id": card.get("card_id"),
+        "severity": automation.get("severity"),
+        "os": automation.get("os"),
+        "language": automation.get("language"),
+        "automation_possible": automation.get("automation_possible"),
+        "script_description": automation.get("script_description"),
+        "recommended_approach": automation.get("recommended_approach"),
+        "what_can_be_automated": automation.get("what_can_be_automated"),
+        "what_must_remain_manual": automation.get("what_must_remain_manual"),
+        "libraries": automation.get("libraries"),
+        "command_download_libraries": automation.get("command_download_libraries"),
+        "considerations_before": automation.get("considerations_before"),
+        "fix_script_name": automation.get("script_name") or "automation_fix",
+    }
 
 
 def _automation_fix_body(automation, admin=None):
     if not automation.get("matched"):
         return [{"type": "TextBlock", "text": "Automation script not ready for this vulnerability.", "wrap": True, "isSubtle": True, "spacing": "Medium"}]
 
-    # Plan gate — automation_scripts_api.views' admin_match_script/
-    # user_match_script (fetched in-process by _fetch_automation_match in
-    # this file and user_fix_tab.py) already strips the actual script
-    # content and adds premium_required/message when the plan doesn't
-    # allow automation scripts (see _script_response there) — show that
-    # lock notice explicitly here instead of silently rendering a
-    # near-empty FactSet with none of the "What this does"/etc. sections.
+    # Plan gate — _fetch_automation_from_card (in this file and
+    # user_fix_tab.py) already strips the actual script content and adds
+    # premium_required/message when the plan doesn't allow automation
+    # scripts (mirroring VulnerabilityCardListView's own Freemium lock) —
+    # show that lock notice explicitly here instead of silently rendering
+    # a near-empty FactSet with none of the "What this does"/etc. sections.
     # Matches the same fix already applied to Slack.
     if automation.get("premium_required"):
         # Real bug report: this stopped at the text notice — Slack's
@@ -414,6 +530,31 @@ def _automation_fix_body(automation, admin=None):
                 }],
             },
         ]
+
+    # AI-assessed as genuinely not automatable (automation_status ==
+    # "not_possible") — say so plainly with the AI's own reason, rather
+    # than falling into the generic FactSet below with every content
+    # section empty (which used to read as "an automation exists but
+    # nothing was said about it", not "this can't be automated").
+    if automation.get("automation_possible") == "No":
+        body = [
+            {
+                "type": "FactSet",
+                "facts": [
+                    {"title": "Severity", "value": str(automation.get("severity") or "—")},
+                    {"title": "OS", "value": str(automation.get("os") or "—")},
+                ],
+            },
+            {
+                "type": "TextBlock",
+                "text": "🚫 Automation is not possible for this vulnerability — manual remediation required.",
+                "wrap": True, "weight": "Bolder", "spacing": "Medium",
+            },
+        ]
+        reason = automation.get("reason_not_possible")
+        if reason:
+            body.append({"type": "TextBlock", "text": str(reason)[:800], "wrap": True, "size": "Small", "isSubtle": True})
+        return body
 
     body = [{
         "type": "FactSet",
@@ -671,7 +812,7 @@ def _vuln_detail_full_body(admin, idx, sub="manual", ctx="vulns", host=None, off
 
     try:
         if sub == "automation":
-            automation = _fetch_automation_match(admin, r)
+            automation = _fetch_automation_from_card(admin, r, data.get("report_id"))
             body.extend(_automation_fix_body(automation, admin=admin))
         else:
             fix_vuln_id = _get_or_create_fix_vuln_id(admin, r, data.get("report_id"))

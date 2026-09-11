@@ -123,14 +123,49 @@ def automation_list_body(admin, category="full", sev="all", offset=0):
         team = (c.get("assigned_team") or "").strip() or "—"
         host = (c.get("host_name") or "").strip()
         subtitle = f"{host + '   ·   ' if host else ''}Team: {team}   ·   {badge}"
-        body.append({
-            "type": "Container", "spacing": "Medium", "separator": True,
-            "items": [
-                {"type": "TextBlock", "text": f"{_SEV_ICON[sn]} {name}", "weight": "Bolder", "size": "Small", "wrap": True},
-                {"type": "TextBlock", "text": subtitle, "size": "Small", "isSubtle": True, "spacing": "None"},
-            ],
-        })
+        # Real gap: rows here were plain read-only text, unlike every other
+        # list in the bot (Fix/Register/Common Vulns) which pairs each row
+        # with a "View ›" button opening its own detail page — this tab
+        # had automation_card data one click away with no way to actually
+        # open it. fix_tab._row gives the same row+button layout those
+        # other tabs already use; card_id + the current category/sev/
+        # offset ride along in the button's value so Back can return to
+        # this exact page (see auto_card_view/auto_list_pg in actions.py).
+        body.append(fix_tab._row(
+            f"{_SEV_ICON[sn]} {name}", subtitle, "auto_card_view",
+            {"card_id": c.get("card_id"), "category": category, "sev": sev, "offset": offset},
+        ))
     body.extend(fix_tab._pagination_body(offset, total, "auto_list_pg", {"category": category, "sev": sev}))
+    return body
+
+
+def automation_card_detail_body(admin, card_id, category="full", sev="all", offset=0):
+    """One card's own full Automation Fix detail — reached via the 'View ›'
+    button on automation_list_body's rows. Read-only for admin, same as
+    every other admin drill-down (fix_tab._vuln_detail_full_body)."""
+    back_value = {"category": category, "sev": sev, "offset": offset}
+    body = [fix_tab._back_action("← Back to list", "auto_list_pg", back_value)]
+
+    all_cards = _fetch_automation_cards(admin)
+    card = next((c for c in all_cards if c.get("card_id") == card_id), None)
+    if not card:
+        body.append({"type": "TextBlock", "text": "This vulnerability could not be found — the report may have refreshed. Go back and try again.", "wrap": True, "spacing": "Medium"})
+        return body
+
+    name = card.get("vulnerability_name") or "Unknown"
+    team = (card.get("assigned_team") or "").strip() or "—"
+    host = (card.get("host_name") or "").strip() or "—"
+    body.append({"type": "TextBlock", "text": name, "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
+    body.append({
+        "type": "FactSet",
+        "facts": [
+            {"title": "Asset", "value": host},
+            {"title": "Team", "value": team},
+        ],
+    })
+
+    automation = fix_tab.shape_automation_detail(card)
+    body.extend(fix_tab._automation_fix_body(automation, admin=admin))
     return body
 
 
