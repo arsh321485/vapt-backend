@@ -205,7 +205,7 @@ AUTOMATION_CARD_SCHEMA = """\
     "recommended_approach":      "<one short paragraph>",
     "considerations_before":     "<pre-run warnings, e.g. take a backup first>",
     "considerations_after":      "<post-run checks/warnings>",
-    "language":                  "<bash | powershell | python | vendor_cli | ''>",
+    "language":                  "python",
     "libraries":                 "<required packages/modules, or ''>",
     "command_download_libraries":"<exact command(s) to install them, or ''>",
     "command_run_script":        "<exact command to execute the fix script, or ''>",
@@ -502,17 +502,30 @@ DECISION RULES:
      answer.
 
 WHEN Yes OR Partial:
-  • fix_script must be REAL, complete, copy-run-able source code in the
-    chosen `language` — not pseudocode, not a fragment. Include basic
-    error handling and a pre-check of current state where practical.
+  • fix_script must be REAL, complete, copy-run-able source code — not
+    pseudocode, not a fragment. Include basic error handling and a
+    pre-check of current state where practical.
   • verify_script must INDEPENDENTLY confirm the fix is in effect (not
     just re-run the fix commands).
   • No literal IPs or hostnames inside the scripts — use placeholders
     (e.g. <target_ip>) exactly like the manual plan does.
-  • Language must match the OS paradigm from the OS profile (Bash/Python
-    for Linux, PowerShell for Windows, the vendor's own CLI/script format
-    for network or security appliances — or fall back to "No" if that
-    vendor's CLI genuinely cannot be scripted unattended).
+  • `language` is ALWAYS "python" — explicit product requirement,
+    regardless of the target OS/vendor. Every fix_script/verify_script is
+    a Python script that PERFORMS the OS-correct action, never a raw
+    PowerShell/Bash/vendor-CLI file. Use whatever the OS paradigm actually
+    needs from inside Python:
+      - Linux/Windows local commands → Python's subprocess module calling
+        the OS-native command (apt/systemctl on Linux, the exact
+        PowerShell cmdlet via `subprocess.run(["powershell", "-Command", ...])`
+        on Windows) — the SCRIPT is .py, the command it shells out to is
+        still the OS-correct one from the OS profile.
+      - Remote network/security appliances (Cisco IOS, FortiGate, etc.) →
+        Python with netmiko/paramiko (same convention already used for
+        SNMP/network-device fixes) to send the vendor-exact CLI commands
+        over SSH — never a device-native script file.
+      - Only fall back to "No" when NOTHING here can make the fix
+        unattended even via Python (GUI-only, vendor portal, human
+        judgement) — never because the target OS "isn't Python's OS".
   • considerations_before should mention taking a backup first when the
     change is not trivially reversible (a separate Backup Engineer already
     produces the actual backup card — you are only flagging that it
@@ -521,7 +534,10 @@ WHEN Yes OR Partial:
     "No — AI-generated, not yet human-tested" — never claim otherwise.
 
 STRICT GATES (same as the rest of the crew):
-  • OS FIDELITY      — no terms/commands from a different OS.
+  • OS FIDELITY      — the COMMANDS/cmdlets the Python script shells out
+    to (or the netmiko/paramiko payload it sends) must match the target
+    OS/vendor paradigm — no terms/commands from a different OS. The
+    wrapper language itself is always Python regardless of OS.
   • PRODUCT FIDELITY — no syntax from a different vendor product.
 
 OUTPUT — return ONLY this JSON object, no markdown fences, no commentary:
@@ -536,8 +552,9 @@ line breaks).
             "A single valid JSON object matching AUTOMATION_CARD_SCHEMA: "
             "automation_status/automation_possible honestly assessed from "
             "the manual plan, and — only when automation is Yes or Partial "
-            "— real, OS-correct, copy-run-able fix_script and verify_script "
-            "source. Parseable with json.loads()."
+            "— real, copy-run-able Python fix_script and verify_script "
+            "source (language is always \"python\") that performs the "
+            "OS-correct action. Parseable with json.loads()."
         ),
         agent=agents["automation_engineer"],
         context=[task_analyse, task_profile, task_remediate],
@@ -723,18 +740,26 @@ DECISION RULES:
      reason_not_possible MUST explain why, specifically for this finding.
 
 WHEN Yes OR Partial:
-  • fix_script must be REAL, complete, copy-run-able source code in the
-    chosen `language` — not pseudocode, not a fragment.
+  • fix_script must be REAL, complete, copy-run-able source code — not
+    pseudocode, not a fragment.
   • verify_script must INDEPENDENTLY confirm the fix is in effect.
   • No literal IPs or hostnames — use <target_ip> / <target_host>.
-  • Language matches the OS paradigm from the OS profile above.
+  • `language` is ALWAYS "python" — explicit product requirement,
+    regardless of the target OS/vendor above. fix_script/verify_script are
+    always Python scripts that PERFORM the OS-correct action (subprocess
+    calling the OS-native command/PowerShell cmdlet locally, or
+    netmiko/paramiko over SSH for network/security appliances) — never a
+    raw PowerShell/Bash/vendor-CLI file. Only fall back to "No" when
+    nothing here can be made unattended even via Python.
   • considerations_before should mention taking a backup first when the
     change is not trivially reversible.
   • tested_manually is always exactly:
     "No — AI-generated, not yet human-tested"
 
-STRICT GATES: OS FIDELITY (no terms/commands from a different OS) and
-PRODUCT FIDELITY (no syntax from a different vendor product).
+STRICT GATES: OS FIDELITY (the commands/cmdlets the Python script shells
+out to must match the target OS paradigm above — the wrapper language is
+always Python regardless of OS) and PRODUCT FIDELITY (no syntax from a
+different vendor product).
 
 OUTPUT — return ONLY this JSON object, no markdown fences, no commentary:
 
@@ -747,8 +772,9 @@ parseable JSON.
             "A single valid JSON object matching AUTOMATION_CARD_SCHEMA: "
             "automation_status/automation_possible honestly assessed from "
             "the manual plan above, and — only when automation is Yes or "
-            "Partial — real, OS-correct, copy-run-able fix_script and "
-            "verify_script source. Parseable with json.loads()."
+            "Partial — real, copy-run-able Python fix_script and "
+            "verify_script source (language is always \"python\") that "
+            "performs the OS-correct action. Parseable with json.loads()."
         ),
         agent=agent,
     )

@@ -1,4 +1,5 @@
 import datetime
+import logging
 import re
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from vaptfix.mongo_client import MongoContext
+
+logger = logging.getLogger(__name__)
 
 try:
     from users_details.models import UserDetail
@@ -856,7 +859,9 @@ def user_download_script(request, plugin_id):
     Download fix script. Increments download_count. Admins cannot download.
     ?os=Windows|Linux|Cisco — optional; omit to get any available variant.
     """
+    user_email = getattr(request.user, "email", "")
     if request.user.is_staff or request.user.is_superuser:
+        logger.warning(f"[ScriptDownload] blocked — admin/superuser tried to download plugin_id={plugin_id} (email={user_email})")
         return Response(
             {"error": "Admins cannot download scripts. Read-only access only."},
             status=403
@@ -868,19 +873,29 @@ def user_download_script(request, plugin_id):
     try:
         assert_can_use_automation_scripts(admin_id)
     except PlanLimitExceeded as e:
+        logger.info(f"[ScriptDownload] plan-blocked — plugin_id={plugin_id} email={user_email} admin_id={admin_id}: {e}")
         return Response({"error": str(e)}, status=403)
 
     os_param = request.query_params.get("os")
     doc, available_os = _fetch_script(plugin_id, os=os_param)
     if not doc:
+        # Real bug candidate: no logging existed anywhere in this view
+        # before, so a silent 404 here (e.g. ?os= not matching any variant
+        # this plugin_id actually has) was completely untraceable — looked
+        # to the user like "I downloaded it" (whatever the frontend does
+        # on a non-200) while download_count/script_user_downloads never
+        # got touched at all.
+        logger.warning(f"[ScriptDownload] no matching script — plugin_id={plugin_id} os_param={os_param!r} available_os={available_os} email={user_email}")
         return Response(_not_found_response(plugin_id), status=404)
 
     fix_script_path = doc.get("fix_script_path")
     if not fix_script_path:
+        logger.warning(f"[ScriptDownload] doc has no fix_script_path — plugin_id={plugin_id} os={doc.get('os')} email={user_email}")
         return Response({"error": "Script file not available for this vulnerability."}, status=404)
 
     full_path = BASE_DIR / fix_script_path
     if not full_path.exists():
+        logger.warning(f"[ScriptDownload] file missing on disk — plugin_id={plugin_id} os={doc.get('os')} path={full_path} email={user_email}")
         return Response({"error": f"Script file not found on server: {fix_script_path}"}, status=404)
 
     # Explicit UTC offset (not just .isoformat() on a naive value) so any
@@ -894,8 +909,8 @@ def user_download_script(request, plugin_id):
         )
         # Per-user download record — lets user_download_stats show what THIS
         # user downloaded, separate from the global (all-users) counter above.
-        db["script_user_downloads"].update_one(
-            {"plugin_id": int(plugin_id), "os": doc.get("os"), "user_email": request.user.email},
+        result = db["script_user_downloads"].update_one(
+            {"plugin_id": int(plugin_id), "os": doc.get("os"), "user_email": user_email},
             {
                 "$inc": {"download_count": 1},
                 "$set": {"last_downloaded_at": now},
@@ -903,6 +918,10 @@ def user_download_script(request, plugin_id):
             },
             upsert=True,
         )
+    logger.info(
+        f"[ScriptDownload] OK — plugin_id={plugin_id} os={doc.get('os')} email={user_email} "
+        f"matched={result.matched_count} modified={result.modified_count} upserted_id={result.upserted_id}"
+    )
 
     return FileResponse(
         open(full_path, "rb"),
@@ -981,6 +1000,10 @@ def user_download_stats(request):
             ):
                 key = (row["plugin_id"], (row.get("os") or "").strip().lower())
                 own_count_by_key[key] = own_count_by_key.get(key, 0) + row.get("download_count", 0)
+    logger.info(
+        f"[ScriptStats:user] email={member_emails} plugin_ids={all_plugin_ids} "
+        f"own_download_rows_matched={len(own_count_by_key)} keys={list(own_count_by_key.keys())}"
+    )
 
     # Replace the global counter with just THIS member's own count before
     # formatting, matched by (plugin_id, os) since a plugin_id can have
@@ -1206,7 +1229,21 @@ def user_download_ai_automation_script(request, card_id):
             {"error": f"No {script_type} script available for this vulnerability."},
             status=404,
         )
-    filename = automation.get(f"{script_type}_script_filename") or f"{card_id}_{script_type}.txt"
+    # automation_card.language is always "python" (see AUTOMATION_CARD_SCHEMA/
+    # crew_agent/tasks.py's Automation Engineer prompt) — real bug report:
+    # AUTOMATION_CARD_SCHEMA has never actually included a
+    # *_script_filename field, so this fell back to a bare
+    # "<card_id>_fix.txt" on every real card, which read as "not actually
+    # a script" even when the content was a complete, real Python file.
+    # Still honor an explicit *_script_filename if one is ever present
+    # (forward-compatible), but build a real .py name from the AI's own
+    # script_name otherwise.
+    explicit_name = automation.get(f"{script_type}_script_filename")
+    if explicit_name:
+        filename = explicit_name
+    else:
+        base_name = re.sub(r"[^A-Za-z0-9_-]+", "_", automation.get("script_name") or card_id).strip("_") or card_id
+        filename = f"{base_name}_{script_type}.py"
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with MongoContext() as db:
@@ -1218,6 +1255,6 @@ def user_download_ai_automation_script(request, card_id):
             },
         )
 
-    response = HttpResponse(content, content_type="text/plain; charset=utf-8")
+    response = HttpResponse(content, content_type="text/x-python; charset=utf-8")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
