@@ -2222,6 +2222,11 @@ class UploadCardsStatusAPIView(APIView):
                 "unique_ip_count": 0,
                 "visible_asset_count": 0,
                 "locked_asset_count": 0,
+                "automation_full": 0,
+                "automation_partial": 0,
+                "automation_not_possible": 0,
+                "automation_done": 0,
+                "automation_pending": 0,
             }, status=200)
 
         # cards_expected_count (set by _auto_generate_cards_bg once it knows which
@@ -2275,6 +2280,25 @@ class UploadCardsStatusAPIView(APIView):
         from upload_report.host_ip_utils import counts_from_report_doc
         counts = counts_from_report_doc(nessus_doc)
 
+        # Real feature request: surface automation-script progress the same
+        # way manual-mitigation-card progress is already surfaced above —
+        # "cards_generated" alone only ever counted the manual side (a card
+        # can exist with an empty/missing automation_card, e.g. the async
+        # automation task failed to parse this one time). Broken down by
+        # automation_status so the frontend can show "X full, Y partial, Z
+        # not possible, W still pending" instead of one opaque number.
+        automation_full = db[VULN_CARD_COLLECTION].count_documents({
+            "report_id": str(report_id), "automation_card.automation_status": "full",
+        })
+        automation_partial = db[VULN_CARD_COLLECTION].count_documents({
+            "report_id": str(report_id), "automation_card.automation_status": "partial",
+        })
+        automation_not_possible = db[VULN_CARD_COLLECTION].count_documents({
+            "report_id": str(report_id), "automation_card.automation_status": "not_possible",
+        })
+        automation_done = automation_full + automation_partial + automation_not_possible
+        automation_pending = max(0, cards_generated - automation_done)
+
         return Response({
             "report_id": str(report_id),
             "cards_generation_complete": complete,
@@ -2286,6 +2310,11 @@ class UploadCardsStatusAPIView(APIView):
             "estimated_total_text": _fmt_seconds_for_status(estimated_total_seconds),
             "remaining_seconds": remaining_seconds,
             "remaining_time_text": _fmt_seconds_for_status(remaining_seconds),
+            "automation_full": automation_full,
+            "automation_partial": automation_partial,
+            "automation_not_possible": automation_not_possible,
+            "automation_done": automation_done,
+            "automation_pending": automation_pending,
             **counts,
         }, status=200)
 
@@ -2768,10 +2797,35 @@ class VulnerabilityCardListView(APIView):
             ).sort("created_at", -1)
 
             cards = list(cursor)
+
+            # Same Freemium script-content lock as VulnerabilityCardDetailView
+            # — every card in one report_id belongs to the same admin, so
+            # this is resolved once rather than per card.
+            premium_required = False
+            if cards:
+                try:
+                    from billing.enforcement import is_freemium, _is_unlimited_admin
+                    owning_admin_id = (
+                        request.user.id if not request.user.is_superuser
+                        else (cards[0].get("admin_id") or request.user.id)
+                    )
+                    premium_required = is_freemium(owning_admin_id) and not _is_unlimited_admin(owning_admin_id)
+                except Exception:
+                    premium_required = False
+
             for card in cards:
                 # Ensure datetime objects are serializable
                 if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
                     card["created_at"] = _su_normalize_iso(card["created_at"])
+
+                automation = card.get("automation_card")
+                if automation:
+                    card["automation_card"] = {
+                        **{k: v for k, v in automation.items() if k not in ("fix_script", "verify_script")},
+                        "fix_script": "" if premium_required else automation.get("fix_script", ""),
+                        "verify_script": "" if premium_required else automation.get("verify_script", ""),
+                        "premium_required": premium_required,
+                    }
 
             return Response(
                 {
@@ -2821,6 +2875,32 @@ class VulnerabilityCardDetailView(APIView):
             if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
                 card["created_at"] = card["created_at"].isoformat()
             card["mitigation_table"] = _ensure_where_to_run_fields(card.get("mitigation_table", []))
+
+            # Real requirement: automation_card is embedded on this SAME
+            # document (frontend reads it straight from here — same
+            # response, same card_id field, that already carries
+            # mitigation_table — no separate lookup needed). But this view
+            # returns the raw document with no plan check at all, unlike
+            # every other automation-scripts read path (_script_response,
+            # admin_view_ai_automation) — a Freemium admin/superuser
+            # viewing another admin's card would otherwise see the full
+            # fix_script/verify_script text with no lock, breaking the
+            # "Freemium never gets script content" rule enforced
+            # everywhere else. Strip it here the same way.
+            automation = card.get("automation_card")
+            if automation:
+                try:
+                    from billing.enforcement import is_freemium, _is_unlimited_admin
+                    owning_admin_id = card.get("admin_id") or request.user.id
+                    premium_required = is_freemium(owning_admin_id) and not _is_unlimited_admin(owning_admin_id)
+                except Exception:
+                    premium_required = False
+                card["automation_card"] = {
+                    **{k: v for k, v in automation.items() if k not in ("fix_script", "verify_script")},
+                    "fix_script": "" if premium_required else automation.get("fix_script", ""),
+                    "verify_script": "" if premium_required else automation.get("verify_script", ""),
+                    "premium_required": premium_required,
+                }
 
             return Response(
                 {
