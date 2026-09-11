@@ -2204,6 +2204,19 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
         if not locked_hosts:
             continue
 
+        # Real bug report: the same vulnerability started appearing TWICE
+        # on the same asset in the Register list right after a Freemium ->
+        # Premium upgrade — this naive concatenation is why. Unlike
+        # merge_service.merge_hosts_into_report (same-day re-upload merge,
+        # which correctly dedupes by plugin_name), this just appended
+        # locked_hosts' vulnerabilities onto vulnerabilities_by_host's
+        # existing list unconditionally — any finding present in BOTH
+        # (e.g. select_freemium_active_hosts splitting the same plugin
+        # onto a host that's already partially active, or this function
+        # firing more than once before locked_hosts: [] committed — a
+        # Stripe webhook retry race) produced a literal duplicate
+        # (host_name, plugin_name) row. Same dedupe-by-plugin_name-per-host
+        # rule now applies here too.
         by_name = {}
         for h in (report.get("vulnerabilities_by_host") or []):
             by_name[h.get("host_name")] = h
@@ -2211,7 +2224,13 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
             name = h.get("host_name")
             if name in by_name:
                 existing = by_name[name]
-                existing["vulnerabilities"] = (existing.get("vulnerabilities") or []) + (h.get("vulnerabilities") or [])
+                existing_plugin_names = {
+                    v.get("plugin_name") for v in (existing.get("vulnerabilities") or []) if v.get("plugin_name")
+                }
+                for vuln in (h.get("vulnerabilities") or []):
+                    if vuln.get("plugin_name") not in existing_plugin_names:
+                        existing.setdefault("vulnerabilities", []).append(vuln)
+                        existing_plugin_names.add(vuln.get("plugin_name"))
             else:
                 by_name[name] = h
 
