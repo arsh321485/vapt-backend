@@ -1105,103 +1105,21 @@ import json
 # accident. The real implementation (with invite_token support — see the
 # magic-link contract in MAGIC_LINK_FRONTEND_INTEGRATION.md) is the
 # MicrosoftTeamsOAuthUrlView defined further below.
+#
+# Same story for MicrosoftTeamsCallbackView — a first, older copy used to
+# be defined here too (plain get_or_create with no admin_id/invite_token
+# binding, no Django JWT issuance, no VAPTFIX team auto-create, and no
+# admin-dashboard-channel deep-link resolution at all — it just bounced
+# straight to "{frontend}/teams-callback"). urls.py's
+# `from users.views import MicrosoftTeamsCallbackView` always bound to
+# whichever definition ran LAST at module load, so this one never actually
+# served a single request — confirmed via `grep -rn` finding urls.py
+# imports the name exactly once. Removed for the same reason: real
+# investigation into "Teams still lands on General" kept nearly landing on
+# this dead copy by name-search alone. The live implementation (JWT
+# issuance, auto_create_vaptfix_team, admin-dashboard-channel resolution
+# via _pick_admin_dashboard_channel_id) is defined further below.
 
-        
-class MicrosoftTeamsCallbackView(APIView):
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        try:
-            code = request.GET.get("code")
-            state = request.GET.get("state")
-
-            if not code:
-                return JsonResponse({"error": "Missing code"}, status=400)
-            if not state:
-                return JsonResponse({"error": "Missing state"}, status=400)
-
-            # ✅ Decode state (get frontend redirect URL)
-            try:
-                decoded = base64.urlsafe_b64decode(state + "==").decode()
-                state_data = json.loads(decoded)
-                frontend_redirect = state_data.get("redirect_uri")
-                print("🌐 Decoded frontend redirect:", frontend_redirect)
-            except Exception as decode_error:
-                logger.error(f"State decode failed: {decode_error}")
-                frontend_redirect = None
-
-            # ✅ Exchange authorization code for access token
-            token_payload = {
-                "grant_type": "authorization_code",
-                "client_id": settings.MICROSOFT_CLIENT_ID,
-                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": settings.MICROSOFT_REDIRECT_URI,  # must match App Registration
-            }
-            headers = {"Content-Type": "application/x-www-form-urlencoded"}
-
-            token_response = _http_post(settings.MICROSOFT_TOKEN_URL, data=token_payload, headers=headers, timeout=15)
-            token_data = token_response.json()
-
-            # Extract tenant_id from id_token JWT (tid claim)
-            tenant_id = ""
-            id_token = token_data.get("id_token", "")
-            if id_token:
-                try:
-                    payload_part = id_token.split(".")[1]
-                    payload_part += "=" * (4 - len(payload_part) % 4)
-                    jwt_payload = json.loads(base64.urlsafe_b64decode(payload_part))
-                    tenant_id = jwt_payload.get("tid", "")
-                except Exception as e:
-                    logger.warning("Suppressed error: %s", e)
-
-            if token_response.status_code != 200:
-                logger.error(f"Token exchange failed: {token_data}")
-                return JsonResponse({"error": "Token exchange failed", "details": token_data},
-                                    status=token_response.status_code)
-
-            access_token = token_data.get("access_token")
-            if not access_token:
-                return JsonResponse({"error": "No access token returned"}, status=400)
-
-            # ✅ Fetch Microsoft user info
-            user_info = _http_get(
-                "https://graph.microsoft.com/v1.0/me",
-                headers={"Authorization": f"Bearer {access_token}"}, timeout=15
-            ).json()
-            print("👤 Microsoft user info:", user_info)
-
-            # ✅ Save user to DB
-            email = user_info.get("mail") or user_info.get("userPrincipalName")
-            full_name = user_info.get("displayName", "")
-            first_name, last_name = (full_name.split(" ", 1) + [""])[:2]
-
-            if email:
-                user, created = User.objects.get_or_create(
-                    email=email,
-                    defaults={
-                        "first_name": first_name,
-                        "last_name": last_name,
-                        "password": make_password(None)
-                    }
-                )
-                logger.info(f"✅ Microsoft user {'created' if created else 'exists'}: {email}")
-            else:
-                logger.warning("⚠️ Microsoft user missing email — skipped saving")
-
-            # ✅ Redirect popup to frontend callback
-            if frontend_redirect:
-                redirect_url = f"{frontend_redirect}/teams-callback?code={code}&state={state}"
-                print("🔁 Redirecting to:", redirect_url)
-                return redirect(redirect_url)
-
-            return JsonResponse({"message": "Login successful, but no redirect found."})
-
-        except Exception as e:
-            logger.error(f"Microsoft callback error: {str(e)}", exc_info=True)
-            return JsonResponse({"error": str(e)}, status=500)
-        
-       
 
 class MicrosoftTeamsOAuthUrlView(APIView):
     permission_classes = [AllowAny]

@@ -6,6 +6,7 @@ everything through one endpoint instead of separate slash-command and
 interactivity URLs.
 """
 import logging
+import threading
 
 import requests
 from django.http import HttpResponse
@@ -849,14 +850,47 @@ class TeamsBotMessagesView(APIView):
             return
 
         try:
-            self._repoint_to_admin_dashboard_channel_if_exists(admin, resolved_team_id)
+            repointed = self._repoint_to_admin_dashboard_channel_if_exists(admin, resolved_team_id)
         except Exception:
             logger.exception("[TeamsBot] admin-dashboard-channel repoint-on-install failed")
+            repointed = False
 
         try:
             post_onboarding_step(admin, team_id=resolved_team_id or thread_id)
         except Exception:
             logger.exception("[TeamsBot] post_onboarding_step on team add failed")
+
+        if not repointed:
+            # Real bug report: this webhook always lands on General first
+            # (Teams' own team-scope-install semantics — see this method's
+            # own docstring above), and the dedicated admin-dashboard
+            # channel this repoint needs is created by a SEPARATE, only
+            # loosely-concurrent request (users.views.
+            # _ensure_admin_dashboard_channel, synchronous during the same
+            # website login) — if Graph hasn't finished creating/
+            # propagating that channel by the exact instant THIS webhook
+            # fires, the repoint above silently finds nothing, and the
+            # post_onboarding_step call just above posts the very first
+            # card — and every one after it, until the admin's NEXT
+            # website login happens to re-trigger the synchronous repoint
+            # — straight into General instead of "vaptfix admin
+            # dashboard". Retry the REPOINT itself with backoff (not just
+            # the post, which is all _background_retry_admin_dashboard_
+            # onboarding in users/views.py already covers — that one
+            # assumes the reference is already correct and only the post
+            # failed to confirm, a different failure mode from this one),
+            # so a one-off timing race self-heals within about a minute
+            # instead of needing a second login.
+            logger.warning(
+                f"[TeamsBot] admin-dashboard channel not found yet at bot-install time for "
+                f"team_id={resolved_team_id or thread_id} — starting background repoint retry"
+            )
+            t = threading.Thread(
+                target=self._background_retry_conversation_update_repoint,
+                args=(admin, resolved_team_id or thread_id),
+                daemon=True,
+            )
+            t.start()
 
     def _repoint_to_admin_dashboard_channel_if_exists(self, admin, team_id):
         """
@@ -870,18 +904,56 @@ class TeamsBotMessagesView(APIView):
         token (already confirmed to carry Channel.ReadBasic.All) rather
         than the admin's own delegated token, so this doesn't depend on
         exactly which scopes that login happened to request.
+
+        Returns True if the channel was found and the reference repointed
+        to it, False otherwise — callers use this to decide whether a
+        background retry is needed (see
+        _background_retry_conversation_update_repoint).
         """
         from users.views import _get_team_channels, _pick_admin_dashboard_channel_id, _get_graph_app_token
         from .conversation_store import save_admin_dashboard_channel_reference
 
         graph_team_id = getattr(admin, "ms_team_id", None) or team_id
         if not graph_team_id:
-            return
+            return False
         app_token = _get_graph_app_token()
         if not app_token:
-            return
+            return False
         headers = {"Authorization": f"Bearer {app_token}"}
         channels = _get_team_channels(graph_team_id, headers)
         channel_id = _pick_admin_dashboard_channel_id(channels)
-        if channel_id:
-            save_admin_dashboard_channel_reference(graph_team_id, channel_id)
+        if not channel_id:
+            return False
+        return save_admin_dashboard_channel_reference(graph_team_id, channel_id)
+
+    def _background_retry_conversation_update_repoint(self, admin, team_id):
+        """
+        Retries _repoint_to_admin_dashboard_channel_if_exists itself (not
+        just the onboarding post — see _handle_conversation_update's own
+        comment on why that's a different failure mode) until the
+        admin-dashboard channel Graph was still creating at bot-install
+        time actually shows up, then re-posts the correct onboarding step
+        into it — correcting a first card that landed in General back to
+        "vaptfix admin dashboard" within about a minute, without needing a
+        second login. Runs outside the webhook request entirely; gives up
+        quietly after the last attempt (self-heals on the admin's next
+        website login regardless, same as every other retry helper in this
+        area).
+        """
+        import time as _time
+
+        for delay_seconds in (5, 10, 20, 40):
+            _time.sleep(delay_seconds)
+            try:
+                repointed = self._repoint_to_admin_dashboard_channel_if_exists(admin, team_id)
+            except Exception:
+                logger.exception(f"[TeamsBot] admin-dashboard repoint retry raised for team_id={team_id}")
+                continue
+            if repointed:
+                try:
+                    post_onboarding_step(admin, team_id=team_id)
+                except Exception:
+                    logger.exception(f"[TeamsBot] post_onboarding_step after repoint retry failed for team_id={team_id}")
+                logger.info(f"[TeamsBot] admin-dashboard repoint retry succeeded for team_id={team_id}")
+                return
+        logger.warning(f"[TeamsBot] admin-dashboard repoint retry exhausted every attempt for team_id={team_id} — will retry on next login instead")
