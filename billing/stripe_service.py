@@ -289,6 +289,22 @@ def _on_checkout_completed(session: dict):
         except Exception:
             logger.exception(f"[Billing] Automation backfill failed for {sub.admin.email} after checkout.session.completed")
 
+    # Real bug report: after successfully choosing/paying for a plan on the
+    # WEBSITE, the Teams admin-dashboard channel kept showing the stale
+    # "Choose Your Plan" card indefinitely — nothing ever told Teams the
+    # plan had changed. post_onboarding_step only ever fires from Teams-
+    # side events (a button click, a new report, a login) — this Stripe
+    # webhook never triggered it. Call it here so the SAME "needs_plan"
+    # card gets replaced with the real next step (Set Risk Criteria, since
+    # _admin_has_selected_plan(admin) now resolves True) within seconds of
+    # payment completing, matching what the website itself shows
+    # immediately. No-ops quietly if this admin never connected Teams.
+    try:
+        from teams_bot.onboarding import post_onboarding_step
+        post_onboarding_step(sub.admin)
+    except Exception:
+        logger.exception(f"[Billing] Teams onboarding-card refresh failed for {sub.admin.email} after checkout.session.completed")
+
 
 def _on_invoice_paid(invoice: dict):
     _upsert_invoice(invoice, status="paid")
