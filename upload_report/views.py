@@ -2277,8 +2277,8 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
             f"admin_asset_list_{admin_id_str}",
         ):
             _cache.delete(_ck)
-    except Exception:
-        logger.warning(f"[FreemiumUnlock] cache invalidation failed for admin_id={admin.id}")
+    except Exception as exc:
+        logger.warning(f"[FreemiumUnlock] cache invalidation failed for admin_id={admin.id}: {exc!r}")
 
     return unlocked_count
 

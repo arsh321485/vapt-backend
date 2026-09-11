@@ -107,8 +107,8 @@ class Command(BaseCommand):
                             f"mitigation_by_team_v2_{admin_id}",
                         ):
                             _cache.delete(_ck)
-                    except Exception:
-                        self.stdout.write(self.style.WARNING(f"cache invalidation failed for admin_id={admin_id}"))
+                    except Exception as exc:
+                        self.stdout.write(self.style.WARNING(f"cache invalidation failed for admin_id={admin_id}: {exc!r}"))
 
         if reports_fixed == 0:
             self.stdout.write(self.style.SUCCESS(f"Checked {reports_checked} report(s) — no duplicates found."))
