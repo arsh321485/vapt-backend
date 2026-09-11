@@ -846,9 +846,44 @@ class TeamsBotMessagesView(APIView):
         # exact path while wiring up the new private admin-dashboard channel.
         admin, resolved_team_id = self._resolve_admin(activity)
         if not admin:
-            logger.info(f"[TeamsBot] bot added to team_id={thread_id} but no admin has this ms_team_id yet")
+            # Real bug report, confirmed live in prod logs on EVERY brand-
+            # new team ("bot added to team_id=... but no admin has this
+            # ms_team_id yet") — this webhook fires the moment
+            # _install_teams_bot() (called from inside
+            # users.views._create_vaptfix_channels, itself called from
+            # auto_create_vaptfix_team) installs the app on the team,
+            # which happens BEFORE that same still-in-flight website-login
+            # request finishes and saves user.ms_team_id — so _resolve_admin
+            # above finds nothing yet, no matter how fast this handler
+            # runs. Previously this just logged and gave up — meaning a
+            # first-ever team's FIRST (and often only, since nothing else
+            # re-triggers this exact webhook) chance to post the welcome
+            # card into "vaptfix admin dashboard" was always lost, leaving
+            # that channel permanently empty for any admin whose team was
+            # newly created (not "already existed") at login time. Retry
+            # admin resolution itself with backoff — same pattern as the
+            # repoint retry below — so it succeeds once the website
+            # request catches up and saves ms_team_id, typically within
+            # seconds.
+            logger.info(f"[TeamsBot] bot added to team_id={thread_id} but no admin has this ms_team_id yet — starting background admin-resolution retry")
+            t = threading.Thread(
+                target=self._background_retry_conversation_update_admin_resolution,
+                args=(activity, thread_id),
+                daemon=True,
+            )
+            t.start()
             return
 
+        self._complete_conversation_update_onboarding(admin, resolved_team_id, thread_id)
+
+    def _complete_conversation_update_onboarding(self, admin, resolved_team_id, thread_id):
+        """
+        Repoint the admin-dashboard-channel reference (if that channel
+        already exists) and post the current onboarding step — shared by
+        _handle_conversation_update's immediate path and both of its
+        background retries (admin-resolution and repoint), so all three
+        end up doing the exact same completion once they have an admin.
+        """
         try:
             repointed = self._repoint_to_admin_dashboard_channel_if_exists(admin, resolved_team_id)
         except Exception:
@@ -891,6 +926,32 @@ class TeamsBotMessagesView(APIView):
                 daemon=True,
             )
             t.start()
+
+    def _background_retry_conversation_update_admin_resolution(self, activity, thread_id):
+        """
+        Retries _resolve_admin(activity) with backoff until the website
+        login request that installed this bot catches up and saves
+        user.ms_team_id — see the real bug report above
+        _background_retry_conversation_update_admin_resolution's call site.
+        Once an admin is found, finishes the exact same repoint+post
+        _handle_conversation_update itself would have done immediately.
+        Self-heals on the admin's next login regardless if every attempt
+        here fails (same guarantee every other retry in this area gives).
+        """
+        import time as _time
+
+        for delay_seconds in (3, 5, 10, 20, 40):
+            _time.sleep(delay_seconds)
+            try:
+                admin, resolved_team_id = self._resolve_admin(activity)
+            except Exception:
+                logger.exception(f"[TeamsBot] admin-resolution retry raised for thread_id={thread_id}")
+                continue
+            if admin:
+                logger.info(f"[TeamsBot] admin-resolution retry succeeded for thread_id={thread_id} — admin={getattr(admin, 'email', admin.id)}")
+                self._complete_conversation_update_onboarding(admin, resolved_team_id, thread_id)
+                return
+        logger.warning(f"[TeamsBot] admin-resolution retry exhausted every attempt for thread_id={thread_id} — will retry on next login instead")
 
     def _repoint_to_admin_dashboard_channel_if_exists(self, admin, team_id):
         """
