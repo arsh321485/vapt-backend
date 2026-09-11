@@ -1160,7 +1160,7 @@ def user_download_ai_automation_script(request, card_id):
         )
 
     from billing.enforcement import assert_can_use_automation_scripts, PlanLimitExceeded
-    admin_id, _admin_email, _teams = _resolve_admin_and_teams(request)
+    admin_id, _admin_email, teams = _resolve_admin_and_teams(request)
     if not admin_id:
         return Response({"error": "You are not linked to any admin account."}, status=403)
     try:
@@ -1171,6 +1171,20 @@ def user_download_ai_automation_script(request, card_id):
     card = _find_vuln_card(card_id, admin_id)
     if not card:
         return Response({"error": "Vulnerability card not found."}, status=404)
+
+    # Real gap found via frontend review: this only checked the card's
+    # OWNING ADMIN (organization-level) — a team member could download an
+    # automation script for a card assigned to a DIFFERENT team under the
+    # same admin. Same team-isolation every other member-scoped endpoint
+    # already enforces (e.g. userasset's UserAssetVulnerabilitiesByHostAPIView
+    # only returns vulnerabilities whose assigned_team is one of the
+    # caller's own teams) — apply it here too. teams is None for an admin/
+    # superuser caller (already blocked above), so this only ever runs for
+    # a genuine member.
+    card_team = (card.get("assigned_team") or "").strip().lower()
+    member_teams = {t.strip().lower() for t in (teams or [])}
+    if not card_team or card_team not in member_teams:
+        return Response({"error": "You do not have access to this vulnerability card."}, status=403)
 
     automation = card.get("automation_card") or {}
     if not automation or automation.get("automation_status") == "not_possible":

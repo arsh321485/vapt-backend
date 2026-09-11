@@ -11,6 +11,7 @@ from .views import (
     RunMitigationView,
     VulnerabilityCardListView,
     VulnerabilityCardDetailView,
+    UserVulnerabilityCardListAPIView,
     SuperAdminVerificationListAPIView,
     SuperAdminApproveVerificationAPIView,
     AdminLatestReportAPIView,
@@ -122,5 +123,20 @@ urlpatterns = [
         "claim-invite/validate/",
         ValidateReportClaimInviteView.as_view(),
         name="validate_report_claim_invite",
+    ),
+]
+
+# Team-member-facing counterpart — mounted SEPARATELY at api/user/upload_report/
+# (see vaptfix/urls.py), same pattern automation_scripts_api/urls.py already
+# uses for its own admin_urlpatterns/user_urlpatterns split. Kept as its own
+# list (no shared app_name with the admin urlpatterns above) — only the one
+# team-scoped endpoint belongs under /api/user/, not the whole admin surface
+# (uploads, deletes, superadmin verification, ...) this file otherwise
+# exposes at /api/admin/.
+user_urlpatterns = [
+    path(
+        "vulnerability-cards/",
+        UserVulnerabilityCardListAPIView.as_view(),
+        name="user_vulnerability_card_list",
     ),
 ]

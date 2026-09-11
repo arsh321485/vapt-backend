@@ -2874,6 +2874,110 @@ class VulnerabilityCardListView(APIView):
             )
 
 
+class UserVulnerabilityCardListAPIView(APIView):
+    """
+    GET /api/user/upload_report/vulnerability-cards/?report_id=<id>[&team=<name>]
+
+    Team-member counterpart to VulnerabilityCardListView — same response
+    shape ({success, count, report_id, cards: [...]}), same automation_card
+    Freemium script-content lock, but scoped to the calling member's own
+    assigned team(s) (via UserDetail.Member_role / team_name, same
+    resolution userasset's UserAssetVulnerabilitiesByHostAPIView already
+    uses) instead of "every card the admin owns". A card's own
+    `assigned_team` field (set at generation time — see
+    mitigation_tool.py's _resolve_assigned_team) is what's filtered
+    against here; unlike userasset's plugin_team_map lookup, no separate
+    lookup is needed since vulnerability_cards already carries it inline.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        report_id = request.query_params.get("report_id", "").strip()
+        if not report_id:
+            return Response({"error": "report_id query parameter is required"}, status=400)
+
+        try:
+            from users_details.models import UserDetail
+        except Exception:
+            return Response({"error": "User detail lookup unavailable"}, status=500)
+
+        detail = UserDetail.objects.filter(email=getattr(request.user, "email", "")).first()
+        if not detail or not detail.admin:
+            return Response({"error": "User is not linked to any team."}, status=403)
+
+        teams = detail.Member_role if isinstance(detail.Member_role, list) else []
+        if not teams and detail.team_name:
+            teams = [detail.team_name]
+        if not teams:
+            return Response({"error": "User is not linked to any team."}, status=403)
+
+        selected_team = request.query_params.get("team", "").strip()
+        active_teams = [selected_team] if selected_team and selected_team in teams else teams
+        teams_lower = {t.strip().lower() for t in active_teams}
+
+        try:
+            client, db = _get_mongo_client_and_db()
+        except RuntimeError as exc:
+            return Response({"error": str(exc)}, status=500)
+
+        try:
+            admin = detail.admin
+            # Ownership scoped to the member's OWN admin/org — same
+            # convention as every other user_* endpoint (e.g.
+            # automation_scripts_api's _find_vuln_card) — a member never
+            # sees another organization's cards regardless of team name.
+            cursor = db[VULN_CARD_COLLECTION].find(
+                {"report_id": report_id, "admin_id": str(admin.id)},
+                {"mitigation_table": 0, "contextual_analysis": 0, "raw_ai_response": 0, "_id": 0},
+            ).sort("created_at", -1)
+
+            cards = [
+                c for c in cursor
+                if (c.get("assigned_team") or "").strip().lower() in teams_lower
+            ]
+
+            # Same Freemium script-content lock as VulnerabilityCardListView
+            # — resolved once against the member's admin, not per card.
+            premium_required = False
+            if cards:
+                try:
+                    from billing.enforcement import is_freemium, _is_unlimited_admin
+                    premium_required = is_freemium(admin.id) and not _is_unlimited_admin(admin.id)
+                except Exception:
+                    premium_required = False
+
+            for card in cards:
+                if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
+                    card["created_at"] = _su_normalize_iso(card["created_at"])
+
+                automation = card.get("automation_card")
+                if automation:
+                    card["automation_card"] = {
+                        **{k: v for k, v in automation.items() if k not in ("fix_script", "verify_script")},
+                        "fix_script": "" if premium_required else automation.get("fix_script", ""),
+                        "verify_script": "" if premium_required else automation.get("verify_script", ""),
+                        "premium_required": premium_required,
+                    }
+
+            return Response(
+                {
+                    "success": True,
+                    "count": len(cards),
+                    "report_id": report_id,
+                    "teams": active_teams,
+                    "cards": cards,
+                },
+                status=200,
+            )
+
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to retrieve cards", "detail": str(exc)},
+                status=500,
+            )
+
+
 class VulnerabilityCardDetailView(APIView):
     """
     GET /api/admin/upload_report/vulnerability-cards/<card_id>/

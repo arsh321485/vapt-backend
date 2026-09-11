@@ -100,7 +100,7 @@ class AdminViewAiAutomationTests(SimpleTestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_premium_admin_sees_automation_details_without_script_bodies(self):
-        card = {"card_id": "card-1", "admin_id": "admin-1", "automation_card": dict(FULL_AUTOMATION_CARD)}
+        card = {"card_id": "card-1", "admin_id": "admin-1", "assigned_team": "Network Security", "automation_card": dict(FULL_AUTOMATION_CARD)}
         collections = {automation_views.VULN_CARD_COLLECTION: MagicMock(find_one=MagicMock(return_value=card))}
         with patch.object(automation_views, "MongoContext", _mongo_ctx_factory(collections)), \
              patch.object(automation_views, "_premium_required_message", return_value=(False, None)):
@@ -113,7 +113,7 @@ class AdminViewAiAutomationTests(SimpleTestCase):
         self.assertNotIn("verify_script", response.data)
 
     def test_freemium_admin_gets_locked_message_but_still_sees_status(self):
-        card = {"card_id": "card-1", "admin_id": "admin-1", "automation_card": dict(FULL_AUTOMATION_CARD)}
+        card = {"card_id": "card-1", "admin_id": "admin-1", "assigned_team": "Network Security", "automation_card": dict(FULL_AUTOMATION_CARD)}
         collections = {automation_views.VULN_CARD_COLLECTION: MagicMock(find_one=MagicMock(return_value=card))}
         with patch.object(automation_views, "MongoContext", _mongo_ctx_factory(collections)), \
              patch.object(automation_views, "_premium_required_message", return_value=(True, "Upgrade to Premium.")):
@@ -160,7 +160,7 @@ class UserDownloadAiAutomationScriptTests(SimpleTestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_not_possible_card_returns_reason_not_a_file(self):
-        card = {"card_id": "card-1", "admin_id": "admin-1", "automation_card": dict(NOT_POSSIBLE_CARD)}
+        card = {"card_id": "card-1", "admin_id": "admin-1", "assigned_team": "Network Security", "automation_card": dict(NOT_POSSIBLE_CARD)}
         collections = {automation_views.VULN_CARD_COLLECTION: MagicMock(find_one=MagicMock(return_value=card))}
         with patch.object(automation_views, "_resolve_admin_and_teams", return_value=("admin-1", "a@x.com", ["Network Security"])), \
              patch("billing.enforcement.assert_can_use_automation_scripts"), \
@@ -170,7 +170,7 @@ class UserDownloadAiAutomationScriptTests(SimpleTestCase):
         self.assertIn("vendor-portal", response.data["error"])
 
     def test_invalid_type_param_returns_400(self):
-        card = {"card_id": "card-1", "admin_id": "admin-1", "automation_card": dict(FULL_AUTOMATION_CARD)}
+        card = {"card_id": "card-1", "admin_id": "admin-1", "assigned_team": "Network Security", "automation_card": dict(FULL_AUTOMATION_CARD)}
         collections = {automation_views.VULN_CARD_COLLECTION: MagicMock(find_one=MagicMock(return_value=card))}
         with patch.object(automation_views, "_resolve_admin_and_teams", return_value=("admin-1", "a@x.com", ["Network Security"])), \
              patch("billing.enforcement.assert_can_use_automation_scripts"), \
@@ -179,7 +179,7 @@ class UserDownloadAiAutomationScriptTests(SimpleTestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_successful_fix_script_download(self):
-        card = {"card_id": "card-1", "admin_id": "admin-1", "automation_card": dict(FULL_AUTOMATION_CARD)}
+        card = {"card_id": "card-1", "admin_id": "admin-1", "assigned_team": "Network Security", "automation_card": dict(FULL_AUTOMATION_CARD)}
         update_one = MagicMock()
         collections = {
             automation_views.VULN_CARD_COLLECTION: MagicMock(
@@ -202,7 +202,7 @@ class UserDownloadAiAutomationScriptTests(SimpleTestCase):
         self.assertEqual(args[1]["$inc"], {"automation_card.download_count": 1})
 
     def test_successful_verify_script_download_defaults_type_to_fix_when_omitted(self):
-        card = {"card_id": "card-1", "admin_id": "admin-1", "automation_card": dict(FULL_AUTOMATION_CARD)}
+        card = {"card_id": "card-1", "admin_id": "admin-1", "assigned_team": "Network Security", "automation_card": dict(FULL_AUTOMATION_CARD)}
         collections = {
             automation_views.VULN_CARD_COLLECTION: MagicMock(
                 find_one=MagicMock(return_value=card), update_one=MagicMock()
@@ -215,11 +215,32 @@ class UserDownloadAiAutomationScriptTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content.decode(), FULL_AUTOMATION_CARD["fix_script"])
 
+    def test_card_assigned_to_a_different_team_is_blocked(self):
+        # Real gap found via frontend review: a member could previously
+        # download a script for ANY card belonging to their admin,
+        # regardless of which team it was actually assigned to.
+        card = {"card_id": "card-1", "admin_id": "admin-1", "assigned_team": "Patch Management", "automation_card": dict(FULL_AUTOMATION_CARD)}
+        collections = {automation_views.VULN_CARD_COLLECTION: MagicMock(find_one=MagicMock(return_value=card))}
+        with patch.object(automation_views, "_resolve_admin_and_teams", return_value=("admin-1", "a@x.com", ["Network Security"])), \
+             patch("billing.enforcement.assert_can_use_automation_scripts"), \
+             patch.object(automation_views, "MongoContext", _mongo_ctx_factory(collections)):
+            response = self._call(_fake_user())
+        self.assertEqual(response.status_code, 403)
+
+    def test_card_with_no_assigned_team_is_blocked(self):
+        card = {"card_id": "card-1", "admin_id": "admin-1", "automation_card": dict(FULL_AUTOMATION_CARD)}
+        collections = {automation_views.VULN_CARD_COLLECTION: MagicMock(find_one=MagicMock(return_value=card))}
+        with patch.object(automation_views, "_resolve_admin_and_teams", return_value=("admin-1", "a@x.com", ["Network Security"])), \
+             patch("billing.enforcement.assert_can_use_automation_scripts"), \
+             patch.object(automation_views, "MongoContext", _mongo_ctx_factory(collections)):
+            response = self._call(_fake_user())
+        self.assertEqual(response.status_code, 403)
+
     def test_missing_script_for_requested_type_returns_404(self):
         partial_card = dict(FULL_AUTOMATION_CARD)
         partial_card["verify_script"] = ""
         partial_card["verify_script_filename"] = ""
-        card = {"card_id": "card-1", "admin_id": "admin-1", "automation_card": partial_card}
+        card = {"card_id": "card-1", "admin_id": "admin-1", "assigned_team": "Network Security", "automation_card": partial_card}
         collections = {automation_views.VULN_CARD_COLLECTION: MagicMock(find_one=MagicMock(return_value=card))}
         with patch.object(automation_views, "_resolve_admin_and_teams", return_value=("admin-1", "a@x.com", ["Network Security"])), \
              patch("billing.enforcement.assert_can_use_automation_scripts"), \

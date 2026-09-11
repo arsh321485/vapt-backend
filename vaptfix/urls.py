@@ -19,6 +19,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from upload_report.views import serve_report_file
+from upload_report.urls import user_urlpatterns as upload_report_user_urlpatterns
 from automation_scripts_api.urls import admin_urlpatterns, user_urlpatterns
 
 urlpatterns = [
@@ -29,6 +30,7 @@ urlpatterns = [
     path("api/admin/users_details/", include("users_details.urls")),
     path("api/admin/risk_criteria/", include("risk_criteria.urls")),
     path("api/admin/upload_report/", include("upload_report.urls")),
+    path("api/user/upload_report/", include(upload_report_user_urlpatterns)),
     path("api/admin/admindashboard/", include("admindashboard.urls")),
     path("api/admin/adminregister/", include("adminregister.urls")),
     path("api/admin/adminasset/", include("adminasset.urls")),
