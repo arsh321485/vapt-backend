@@ -1992,9 +1992,20 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 errors += 1
 
         # Backfill automation onto any already-existing cards this run
-        # found missing it (collected above) — its own background thread,
-        # started only after the main loop is done, so it never delays
-        # this run's genuinely-new vulnerabilities.
+        # found missing it (collected above) — run only after the main
+        # loop is done, so it never delays this run's genuinely-new
+        # vulnerabilities.
+        #
+        # Real bug report: this used to spawn its own daemon=True thread
+        # and return immediately — fine when _auto_generate_cards_bg
+        # itself runs inside the long-lived gunicorn process (a normal
+        # upload), but retry_incomplete_card_generation (the management
+        # command) runs as its own short-lived CLI process that joins on
+        # _auto_generate_cards_bg's OUTER thread and then EXITS — killing
+        # this nested daemon thread mid-backfill along with it, often
+        # after only a card or two. Calling it directly (no nested
+        # thread) means the outer call — whichever context it's running
+        # in — doesn't return/exit until the backfill genuinely finishes.
         if existing_cards_missing_automation:
             def _run_existing_card_automation_backfill(card_docs):
                 done = 0
@@ -2028,15 +2039,11 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     f"card(s) for report_id={report_id}"
                 )
 
-            threading.Thread(
-                target=_run_existing_card_automation_backfill,
-                args=(existing_cards_missing_automation,),
-                daemon=True,
-            ).start()
             logger.info(
-                f"[AutoGenCards] Queued automation backfill for {len(existing_cards_missing_automation)} "
+                f"[AutoGenCards] Running automation backfill for {len(existing_cards_missing_automation)} "
                 f"pre-existing card(s) for report_id={report_id}"
             )
+            _run_existing_card_automation_backfill(existing_cards_missing_automation)
 
         # Verify actual count in MongoDB
         actual_count = db[VULN_CARD_COLLECTION].count_documents({"report_id": report_id})

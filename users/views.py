@@ -14467,93 +14467,63 @@ class SlackSlashCommandView(APIView):
             return self._text_block(f"❌ {vd_data.get('detail')}")
         return self._format_register_tab(vd_data, sev_filter="all", st_filter="all", offset=0)
 
-    def _classify_automation_possible(self, raw_value):
-        """
-        Maps the free-text automation_possible field to "full" | "partial" | None.
-        "Yes" / "Yes [100%]" -> full. "Partial" and conditional strings like
-        "Yes (if X unused) / Partial (if X in use)" (contain "Partial") -> partial.
-        Missing/blank -> None (unclassified, excluded from both tabs rather
-        than guessed).
-        """
-        text = (raw_value or "").strip().lower()
-        if not text:
-            return None
-        if "partial" in text:
-            return "partial"
-        if text.startswith("yes"):
-            return "full"
-        return None
-
-    def _build_automation_category_map(self, team_id, user_id):
-        """
-        Builds {plugin_id: "full"|"partial"} from the automation scripts
-        library (GET /api/admin/automation-scripts/ — unmodified, existing
-        endpoint). A plugin_id can have multiple OS-variant documents where
-        only one carries automation_possible, so this takes whichever
-        variant resolves a classification first (same sibling-fallback
-        pattern used elsewhere for severity/team).
-        """
-        try:
-            data = self._call_api(
-                "/api/admin/automation-scripts/", team_id, slack_user_id=user_id,
-            )
-        except Exception:
-            logger.exception("[automation_tab] library fetch failed")
-            return {}
-        scripts = data.get("scripts") or [] if isinstance(data, dict) else []
-        category_by_plugin = {}
-        for s in scripts:
-            pid = s.get("plugin_id")
-            if pid is None:
-                continue
-            try:
-                pid = int(pid)
-            except (TypeError, ValueError):
-                continue
-            if pid in category_by_plugin:
-                continue
-            cat = self._classify_automation_possible(s.get("automation_possible"))
-            if cat:
-                category_by_plugin[pid] = cat
-        return category_by_plugin
-
     def _automation_subnav_block(self, active_sub=None):
         """Second-level button row under the 'Automations' nav tab: Full | Partial."""
         return self._button_row_blocks(self._AUTOMATION_SUBTABS, active_action_id=active_sub)
 
+    def _fetch_automation_cards(self, team_id, user_id):
+        """
+        Every vulnerability_cards document for the admin's own latest
+        report, each carrying its own automation_card.automation_status —
+        see upload_report/mitigation_tool.py's Automation Engineer agent
+        and upload_report/views.py's VulnerabilityCardListView.
+        """
+        try:
+            latest_report = self._call_api(
+                "/api/admin/upload_report/latest-report/", team_id, slack_user_id=user_id,
+            )
+        except Exception:
+            logger.exception("[automation_tab] latest-report fetch failed")
+            return []
+        report_id = latest_report.get("report_id") if isinstance(latest_report, dict) else None
+        if not report_id:
+            return []
+        try:
+            data = self._call_api(
+                "/api/admin/upload_report/vulnerability-cards/", team_id,
+                params={"report_id": report_id}, slack_user_id=user_id,
+            )
+        except Exception:
+            logger.exception("[automation_tab] vulnerability-cards fetch failed")
+            return []
+        return data.get("cards") or [] if isinstance(data, dict) else []
+
     def _automation_subtab_blocks(self, sub_action_id, team_id, user_id, sev_filter="all", offset=0):
         """
-        Content for the 'Automations' sub-tabs. Combines two existing,
-        unmodified endpoints entirely client-side (no backend API changes):
-          - /api/admin/automation-scripts/stats/  -> latest-report-scoped
-            plugin_id + vulnerability name + severity + team
-          - /api/admin/automation-scripts/         -> automation_possible
-            per plugin_id (library-wide), classified into full/partial here
+        Content for the 'Automations' sub-tabs — reads the AI-generated
+        automation_card on every vulnerability_cards document for the
+        admin's own latest report.
+
+        Real bug report: this used to classify Full/Partial from the OLD,
+        human-curated automation_scripts library's automation_possible
+        field (matched by plugin_id — a fixed ~63-plugin reference set
+        that covers only a handful of any real report's actual findings).
+        Reads straight from automation_card.automation_status now, which
+        covers every vulnerability on the report, not just the curated 63.
         """
         category = "partial" if sub_action_id == "auto_sub_partial" else "full"
-        try:
-            stats_data = self._call_api(
-                "/api/admin/automation-scripts/stats/", team_id, slack_user_id=user_id,
-            )
-        except Exception as exc:
-            logger.exception("[automation_tab] stats fetch failed: %s", exc)
-            return self._text_block(f"❌ Could not load Automations data: `{exc}`")
-        if not isinstance(stats_data, dict):
-            return self._text_block("❌ Could not load Automations data (invalid API response).")
-        if stats_data.get("detail") and not stats_data.get("stats"):
-            return self._text_block(f"❌ {stats_data.get('detail')}")
-
-        category_by_plugin = self._build_automation_category_map(team_id, user_id)
+        all_cards = self._fetch_automation_cards(team_id, user_id)
 
         rows = []
-        for s in (stats_data.get("stats") or []):
-            pid = s.get("plugin_id")
-            try:
-                pid = int(pid)
-            except (TypeError, ValueError):
+        for c in all_cards:
+            automation = c.get("automation_card") or {}
+            if automation.get("automation_status") != category:
                 continue
-            if category_by_plugin.get(pid) == category:
-                rows.append(s)
+            rows.append({
+                "vulnerability": c.get("vulnerability_name") or "Unknown",
+                "severity": automation.get("severity") or (c.get("vaptcode_analysis") or {}).get("severity") or "",
+                "team": c.get("assigned_team") or "",
+            })
 
         return self._format_automation_tab(category, rows, sev_filter=sev_filter, offset=offset)
 

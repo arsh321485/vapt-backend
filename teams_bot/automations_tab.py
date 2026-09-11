@@ -1,16 +1,27 @@
 """
-Automations tab — Full / Partial automation coverage, classified from the
-automation-scripts library's automation_possible field, scoped to the
-plugin_ids in the admin's own report(s) (same stats source as Register's
-Script sub-tab). Mirrors users.views.SlackSlashCommandView.
-_automation_subtab_blocks / _format_automation_tab — read-only list, no
-per-row detail click (Slack doesn't have one here either).
+Automations tab — Full / Partial automation coverage for the logged-in
+admin's own latest report, scoped by report_id, read straight from the
+AI-generated automation_card on each vulnerability_cards document (see
+upload_report/mitigation_tool.py's Automation Engineer agent and
+upload_report/views.py's VulnerabilityCardListView).
+
+Real bug report: this used to classify Full/Partial from the OLD, human-
+curated automation_scripts library's automation_possible field (matched
+by plugin_id — a fixed ~63-plugin reference set that covers only a
+handful of any real report's actual findings), AND had a genuine crash —
+register_tab._fetch_script_stats(admin) returns a dict
+({"stats": [...], "premium_required": ..., "message": ...}), not the list
+this file iterated directly, so every load hit the dict's own KEYS
+("stats", "premium_required", "message") as rows and blew up on the very
+first `.get("plugin_id")` call — exactly the "Could not load this right
+now." symptom seen live. Rebuilt to read every vulnerability on the
+admin's own report via automation_card.automation_status instead, which
+covers ALL of it, not just the curated 63.
 """
 import logging
 
 from . import cards
 from . import fix_tab
-from . import register_tab
 
 logger = logging.getLogger(__name__)
 
@@ -29,46 +40,37 @@ def automation_subnav_columnset(active_sub):
     return cards.pill_columnset(AUTOMATION_SUBTABS, active_sub, lambda k: {"action_id": k})
 
 
-def _classify(raw_value):
-    """"Yes"/"Yes [100%]" -> full. Anything containing "Partial" -> partial
-    (covers conditional strings like "Yes (if X unused) / Partial (if X in
-    use)"). Missing/blank -> None, excluded from both tabs rather than
-    guessed — same rule as Slack's _classify_automation_possible."""
-    text = (raw_value or "").strip().lower()
-    if not text:
-        return None
-    if "partial" in text:
-        return "partial"
-    if text.startswith("yes"):
-        return "full"
-    return None
-
-
-def _fetch_category_by_plugin(admin):
+def _fetch_automation_cards(admin):
+    """
+    Every vulnerability_cards document for the admin's own latest report
+    (report_id resolved the same way fix_tab._fetch_register_data already
+    does for Register/Fix), each carrying its own automation_card.
+    automation_status ("full" | "partial" | "not_possible" | missing).
+    """
     def _fetch():
-        from automation_scripts_api import views as auto_views
+        report_data = fix_tab._fetch_register_data(admin)
+        report_id = report_data.get("report_id") if isinstance(report_data, dict) else None
+        if not report_id:
+            return []
+        from upload_report.views import VulnerabilityCardListView
         from .actions import _call_view_in_process
-        status_code, data = _call_view_in_process(auto_views.admin_list_scripts, admin, method="get")
+        status_code, data = _call_view_in_process(
+            VulnerabilityCardListView, admin, data={"report_id": report_id}, method="get",
+        )
         if status_code >= 300 or not isinstance(data, dict):
-            return {}
-        category_by_plugin = {}
-        for s in data.get("scripts") or []:
-            pid = s.get("plugin_id")
-            if pid is None:
-                continue
-            try:
-                pid = int(pid)
-            except (TypeError, ValueError):
-                continue
-            if pid in category_by_plugin:
-                continue
-            cat = _classify(s.get("automation_possible"))
-            if cat:
-                category_by_plugin[pid] = cat
-        return category_by_plugin
-    # Library-wide, not admin/report scoped — but keyed by admin id anyway
-    # for a simple, consistent cache-key shape with everything else here.
-    return fix_tab.cached_fetch(f"category_by_plugin:{admin.id}", 30, _fetch)
+            return []
+        return data.get("cards") or []
+    return fix_tab.cached_fetch(f"automation_cards:{admin.id}", 20, _fetch)
+
+
+def _card_severity(card):
+    automation = card.get("automation_card") or {}
+    sev_val = (
+        automation.get("severity")
+        or (card.get("vaptcode_analysis") or {}).get("severity")
+        or ""
+    )
+    return sev_val.strip().lower()
 
 
 def _sev_filter_columnset(category, active_sev, counts):
@@ -80,50 +82,47 @@ def _sev_filter_columnset(category, active_sev, counts):
 
 
 def automation_list_body(admin, category="full", sev="all", offset=0):
-    stats = register_tab._fetch_script_stats(admin)
-    category_by_plugin = _fetch_category_by_plugin(admin)
+    all_cards = _fetch_automation_cards(admin)
+    target_status = "partial" if category == "partial" else "full"
 
-    def _norm_sev(v):
-        return (v.get("severity") or "").strip().lower()
-
-    rows = []
-    for s in stats:
-        pid = s.get("plugin_id")
-        try:
-            pid = int(pid)
-        except (TypeError, ValueError):
-            continue
-        if category_by_plugin.get(pid) == category:
-            rows.append(s)
+    rows = [
+        c for c in all_cards
+        if (c.get("automation_card") or {}).get("automation_status") == target_status
+    ]
 
     sev_counts = {
         "all": len(rows),
-        "critical": sum(1 for v in rows if _norm_sev(v) == "critical"),
-        "high": sum(1 for v in rows if _norm_sev(v) == "high"),
-        "medium": sum(1 for v in rows if _norm_sev(v) == "medium"),
-        "low": sum(1 for v in rows if _norm_sev(v) == "low"),
+        "critical": sum(1 for c in rows if _card_severity(c) == "critical"),
+        "high": sum(1 for c in rows if _card_severity(c) == "high"),
+        "medium": sum(1 for c in rows if _card_severity(c) == "medium"),
+        "low": sum(1 for c in rows if _card_severity(c) == "low"),
     }
-    filtered = rows if sev == "all" else [v for v in rows if _norm_sev(v) == sev]
+    filtered = rows if sev == "all" else [c for c in rows if _card_severity(c) == sev]
     total = len(filtered)
     page = filtered[offset:offset + PAGE_SIZE]
 
     title = "✅ Fully Automated" if category == "full" else "🌓 Partially Automated"
-    badge = "✅ Full" if category == "full" else "🌓 Partial [50%]"
+    badge = "✅ Full" if category == "full" else "🌓 Partial"
     body = [
         {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": "Automation coverage by severity — classified from the automation library's Automation Possible field.", "size": "Small", "isSubtle": True, "wrap": True},
+        {
+            "type": "TextBlock",
+            "text": "Automation coverage for your latest report — from the AI-generated automation analysis on each vulnerability.",
+            "size": "Small", "isSubtle": True, "wrap": True,
+        },
         _sev_filter_columnset(category, sev, sev_counts),
     ]
     if not page:
-        body.append({"type": "TextBlock", "text": "No scripts found for this filter.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
+        body.append({"type": "TextBlock", "text": "No vulnerabilities found for this filter.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
-    for s in page:
-        sn = _norm_sev(s) or "medium"
+    for c in page:
+        sn = _card_severity(c) or "medium"
         if sn not in _SEV_ICON:
             sn = "medium"
-        name = s.get("vulnerability") or "Unknown"
-        team = (s.get("team") or "").strip() or "—"
-        subtitle = f"Team: {team}   ·   {badge}"
+        name = c.get("vulnerability_name") or "Unknown"
+        team = (c.get("assigned_team") or "").strip() or "—"
+        host = (c.get("host_name") or "").strip()
+        subtitle = f"{host + '   ·   ' if host else ''}Team: {team}   ·   {badge}"
         body.append({
             "type": "Container", "spacing": "Medium", "separator": True,
             "items": [
