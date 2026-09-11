@@ -1688,6 +1688,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         # Freemium's asset limit still fully applies everywhere else
         # (dashboard, asset list, billable-asset count) — only generation
         # itself is no longer capped.
+        vulns_to_process = []
         for host in list(nessus_doc.get("vulnerabilities_by_host", [])) + list(nessus_doc.get("locked_hosts", [])):
             host_name = (host.get("host_name") or "").strip()
             # Extract OS from host_information (used for OS-specific mitigation steps)
