@@ -1,3 +1,4 @@
+import ast
 import os
 import re
 import json
@@ -719,6 +720,35 @@ def _parse_automation_card(raw_text: str) -> dict:
         fix_script = ""
         verify_script = ""
 
+    # Real bug report: a user downloaded and got a genuinely broken script
+    # — a literal syntax error (`from datetime import import datetime`)
+    # plus a truncated class body — that had made it all the way through
+    # to automation_status="full"/"partial" and out the download endpoint.
+    # language is now always "python" (see crew_agent/tasks.py), so every
+    # fix/verify script here IS supposed to be valid, parseable Python —
+    # syntax-check it before it's ever allowed to reach a user who might
+    # run it against real infrastructure. A script that fails this check
+    # is withheld entirely (never partially-served) and the card is marked
+    # not_possible with a reason that says so, rather than silently
+    # shipping code that can't even be parsed, let alone run safely.
+    invalid_reason = None
+    if "python" in (automation.get("language") or "").strip().lower():
+        for label, src in (("fix_script", fix_script), ("verify_script", verify_script)):
+            if not src.strip():
+                continue
+            try:
+                ast.parse(src)
+            except SyntaxError as exc:
+                invalid_reason = f"AI-generated {label} failed a Python syntax check ({exc.msg} at line {exc.lineno}) and was withheld for safety."
+                logger.warning(f"[MitigationCrew] automation card {label} failed ast.parse: {exc}")
+                break
+
+    if invalid_reason:
+        status = "not_possible"
+        automation_possible = "No"
+        fix_script = ""
+        verify_script = ""
+
     return {
         "vulnerability":              automation.get("vulnerability", ""),
         "os":                         automation.get("os", ""),
@@ -727,7 +757,8 @@ def _parse_automation_card(raw_text: str) -> dict:
         "description":                automation.get("description", ""),
         "automation_status":          status,
         "automation_possible":        automation_possible,
-        "reason_not_possible":        automation.get("reason_not_possible", "") if status == "not_possible" else "",
+        "reason_not_possible":        (invalid_reason or automation.get("reason_not_possible", "")) if status == "not_possible" else "",
+        "generation_invalid":         bool(invalid_reason),
         "script_name":                automation.get("script_name", ""),
         "script_description":         automation.get("script_description", ""),
         "what_can_be_automated":      automation.get("what_can_be_automated", ""),
