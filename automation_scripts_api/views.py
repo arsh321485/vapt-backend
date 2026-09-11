@@ -541,6 +541,76 @@ def _build_stats(docs, report_id=None):
     return merged
 
 
+def _ai_automation_stats_rows(db, report_ids, download_role=None):
+    """
+    Extends admin_download_stats/user_download_stats with rows sourced
+    from the AI-generated vulnerability_cards.automation_card, merged in
+    ALONGSIDE the curated automation_scripts library rows _build_stats
+    already builds — same real gap the Teams/Slack Register->Script tabs
+    had (see teams_bot/register_tab.py's own rebuild): the curated library
+    only ever covers a fixed ~63 plugin_ids, so a real report's automation
+    coverage (which the AI generates per-vulnerability, unbounded) was
+    invisible here. Explicit product request: put this straight in the
+    existing /stats/ response so every consumer already calling it
+    (website included, which has no code in this repo to update directly)
+    picks it up with zero endpoint/URL changes on their side.
+
+    Only "full"/"partial" cards are included (a card with no automation
+    yet, or genuinely not_possible, has nothing to show/download here).
+    download_count is automation_card's own aggregate counter (incremented
+    by user_download_ai_automation_script on every download, admin or
+    member) — the curated library's separate per-member script_user_downloads
+    breakdown has no AI-automation equivalent yet, so this is a team-wide
+    total for both the admin and member view, not a per-member count.
+
+    download_role=None -> no download_url on any row (admin view, which is
+    read-only same as the curated rows here). download_role="user" ->
+    populates download_url with the actual member-facing AI download path.
+    """
+    if not report_ids:
+        return []
+    rows = []
+    for card in db[VULN_CARD_COLLECTION].find(
+        {"report_id": {"$in": list(report_ids)}, "automation_card.automation_status": {"$in": ["full", "partial"]}},
+        {"_id": 0, "card_id": 1, "vulnerability_name": 1, "assigned_team": 1, "automation_card": 1, "vaptcode_analysis": 1},
+    ):
+        automation = card.get("automation_card") or {}
+        severity = automation.get("severity") or (card.get("vaptcode_analysis") or {}).get("severity") or ""
+        row = {
+            "plugin_id": None,
+            "card_id": card.get("card_id"),
+            "vulnerability": card.get("vulnerability_name") or "Unknown",
+            "severity": severity,
+            "download_count": automation.get("download_count", 0),
+            "team": (card.get("assigned_team") or "").strip() or "Unassigned",
+            "source": "ai",
+            "automation_status": automation.get("automation_status"),
+        }
+        if download_role and card.get("card_id"):
+            row["download_url"] = f"/api/{download_role}/automation-scripts/ai/{card['card_id']}/download/?type=fix"
+        rows.append(row)
+    return rows
+
+
+def _merge_ai_and_curated_stats(curated_stats, ai_rows):
+    """
+    Prefers the AI row for any vulnerability that has one (richer, covers
+    the full report — not just the curated 63) and only keeps a curated
+    row when nothing AI-generated exists for that same vulnerability name,
+    so the same finding never lists twice under two different automation
+    sources.
+    """
+    ai_by_name = {(r["vulnerability"] or "").strip().lower(): r for r in ai_rows}
+    merged = list(ai_rows)
+    for s in curated_stats:
+        key = (s.get("vulnerability") or "").strip().lower()
+        if key in ai_by_name:
+            continue
+        s.setdefault("source", "curated")
+        merged.append(s)
+    return merged
+
+
 def _get_feedback_summary(plugin_id):
     """Return thumb_up_count, thumb_down_count, feedbacks list for a plugin_id."""
     with MongoContext() as db:
@@ -715,7 +785,10 @@ def admin_download_stats(request):
         key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
         d["download_count"] = team_count_by_key.get(key, 0)
 
-    stats = _build_stats(docs, report_id=report_ids)
+    curated_stats = _build_stats(docs, report_id=report_ids)
+    with MongoContext() as db:
+        ai_rows = _ai_automation_stats_rows(db, report_ids)
+    stats = _merge_ai_and_curated_stats(curated_stats, ai_rows)
     stats.sort(key=lambda s: s["download_count"], reverse=True)
     return Response({
         "report_id": str(report_id),
@@ -1012,7 +1085,13 @@ def user_download_stats(request):
         key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
         d["download_count"] = own_count_by_key.get(key, 0)
 
-    stats = [s for s in _build_stats(docs, report_id=report_ids) if s["team"].lower() in teams_lower]
+    curated_stats = [s for s in _build_stats(docs, report_id=report_ids) if s["team"].lower() in teams_lower]
+    with MongoContext() as db:
+        ai_rows = [
+            r for r in _ai_automation_stats_rows(db, report_ids, download_role="user")
+            if (r.get("team") or "").lower() in teams_lower
+        ]
+    stats = _merge_ai_and_curated_stats(curated_stats, ai_rows)
     stats.sort(key=lambda s: s["download_count"], reverse=True)
     return Response({
         "report_id": str(report_id),

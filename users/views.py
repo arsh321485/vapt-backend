@@ -12429,41 +12429,75 @@ class SlackSlashCommandView(APIView):
         except ValueError:
             return {"detail": "invalid_response", "status_code": resp.status_code}
 
+    def _fetch_automation_cards_as_member(self, team_id, user_id):
+        """
+        Member-side counterpart to _fetch_automation_cards (admin-only) —
+        resolves the member's own report_id via the SAME member-facing
+        endpoint _get_team_vulns already calls (team param is optional
+        there, so this works without knowing which team the caller is
+        asking on behalf of), then reads every vulnerability_cards
+        document via UserVulnerabilityCardListAPIView (auto-scoped to the
+        member's own team(s) server-side, same as _fetch_team_vulns).
+        """
+        try:
+            latest = self._call_user_api("/api/user/register/register/latest/vulns/", team_id, user_id)
+        except Exception:
+            logger.exception("[automation_match] member latest-vulns fetch failed")
+            return []
+        report_id = latest.get("report_id") if isinstance(latest, dict) else None
+        if not report_id:
+            return []
+        try:
+            data = self._call_user_api(
+                "/api/user/upload_report/vulnerability-cards/", team_id, user_id,
+                params={"report_id": report_id},
+            )
+        except Exception:
+            logger.exception("[automation_match] member vulnerability-cards fetch failed")
+            return []
+        return data.get("cards") or [] if isinstance(data, dict) else []
+
     def _resolve_automation_match(self, v, team_id, user_id=None, os_param=None, admin_side=True):
         """
-        Look up the automation-script match for a vulnerability finding —
-        tries plugin_id first (real Nessus findings), and falls back to
-        name-based matching when there's no plugin_id (AWS Inspector and
-        custom-report findings always have plugin_id=None). Mirrors the
-        website's /match/by-name/ fallback — Slack's automation views used
-        to give up entirely ("No plugin ID available") for exactly the
-        findings that DO have a script, just not a Nessus plugin_id to look
-        it up by.
+        Look up the AI-generated automation_card for a vulnerability
+        finding, matched by (vulnerability name, host) against the admin's
+        own vulnerability_cards for their latest report — same source
+        teams_bot/fix_tab.py's _fetch_automation_from_card and the
+        Automations tab (_fetch_automation_cards above) already use.
+
+        Real bug report: this used to look up ONLY the curated ~63-plugin
+        automation_scripts library (by plugin_id, falling back to name for
+        AWS/custom findings with no plugin_id) — any vulnerability outside
+        that fixed set always came back "No automated fix available" even
+        when the AI Automation Engineer had already generated a real
+        automation_card for it. Every one of this function's 6 call sites
+        (/startfix, /autofix, the Register/Common-Vulns detail views, ...)
+        keeps working unchanged — the returned dict still matches the OLD
+        curated-library shape (matched/premium_required/message/severity/
+        os/language/automation_possible/script_description/... plus a new
+        card_id key _format_vulndata_automation_detail's download button
+        now checks) via teams_bot.fix_tab.shape_automation_detail, the
+        exact same reshaping function the Teams fix uses.
         """
-        plugin_id = v.get("plugin_id")
-        role = "admin" if admin_side else "user"
-
-        if plugin_id:
-            path = f"/api/{role}/automation-scripts/match/{plugin_id}/"
-            params = {"os": os_param} if os_param else None
-            if admin_side:
-                return self._call_api(path, team_id, params=params)
-            return self._call_user_api(path, team_id, user_id, params=params)
-
-        name = v.get("vul_name") or v.get("plugin_name") or v.get("vulnerability_name")
-        if not name:
+        host_name = (v.get("host_name") or v.get("asset") or v.get("host") or "").strip()
+        vuln_name = (v.get("vul_name") or v.get("plugin_name") or v.get("vulnerability_name") or "").strip()
+        if not vuln_name:
             return {"matched": False, "message": "No automated fix available for this vulnerability."}
 
-        path = f"/api/{role}/automation-scripts/match/by-name/"
-        body = {"vulnerability_names": [name]}
-        if os_param:
-            body["os"] = os_param
-        if admin_side:
-            resp = self._call_api(path, team_id, method="post", json_body=body)
-        else:
-            resp = self._call_user_api(path, team_id, user_id, method="post", json_body=body)
-        results = resp.get("results") or []
-        return results[0] if results else {"matched": False, "message": "No automated fix available for this vulnerability."}
+        cards = self._fetch_automation_cards(team_id, user_id) if admin_side else self._fetch_automation_cards_as_member(team_id, user_id)
+        card = None
+        for c in cards:
+            if (c.get("vulnerability_name") or "").strip().lower() != vuln_name.lower():
+                continue
+            if host_name and (c.get("host_name") or "").strip() != host_name:
+                continue
+            card = c
+            break
+        if not card:
+            return {"matched": False, "message": "No automated fix available for this vulnerability."}
+
+        from teams_bot.fix_tab import shape_automation_detail
+        return shape_automation_detail(card)
 
     def _call_user_api_raw(self, path, team_id, user_id, params=None):
         """Like _call_user_api but returns the raw response (for binary file downloads)."""
@@ -17530,13 +17564,7 @@ class SlackSlashCommandView(APIView):
                 "Use `/viewassigned vulns` to see IDs."
             )
         host_os = target.get("host_os")  # "Windows" / "Linux" / "Cisco" / None
-        os_params = {"os": host_os} if host_os else None
         automation = self._resolve_automation_match(target, team_id, user_id, os_param=host_os, admin_side=False)
-        # AWS/custom findings resolve via name — the real plugin_id comes
-        # back on the match itself (the library's own Nessus ID), not from
-        # the original finding, which never had one. Needed below for the
-        # download call and the fallback filename.
-        plugin_id = automation.get("plugin_id") or target.get("plugin_id")
         if automation.get("detail") and "matched" not in automation:
             return self._text_block(f"❌ `{automation.get('detail')}`")
         if not automation.get("matched"):
@@ -17549,9 +17577,15 @@ class SlackSlashCommandView(APIView):
                 f"📭 No automated-fix script available for this vulnerability{hint}.\n"
                 f"Use `/manualfix {vuln_id}` for the step-by-step guide instead."
             )
+        # automation now always comes from the AI automation_card lookup
+        # (_resolve_automation_match) — card_id, not a real Nessus
+        # plugin_id, is what identifies it; route through the AI download
+        # endpoint, not the curated library's /download/<plugin_id>/ (which
+        # would 404 for any vulnerability outside the curated ~63 set).
+        card_id = automation.get("card_id") or ""
         script_resp = self._call_user_api_raw(
-            f"/api/user/automation-scripts/download/{plugin_id}/", team_id, user_id, params=os_params,
-        )
+            f"/api/user/automation-scripts/ai/{card_id}/download/", team_id, user_id, params={"type": "fix"},
+        ) if card_id else None
         script_text  = ""
         script_bytes = b""
         if script_resp is not None and script_resp.status_code == 200:
@@ -17574,7 +17608,7 @@ class SlackSlashCommandView(APIView):
                     filename = (
                         automation.get("fix_script_name")
                         or automation.get("script_name")
-                        or f"plugin_{plugin_id}_fix.py"
+                        or f"{card_id}_fix.py"
                     )
                     uploaded = self._upload_file_to_slack(
                         bot_token, channel_id, filename, script_bytes,
@@ -19782,7 +19816,14 @@ class SlackSlashCommandView(APIView):
                     "text": "_Automation script not ready for this vulnerability._"}},
             ]
 
-        if locked_reason:
+        # locked_reason (computed externally by the caller via
+        # assert_can_use_automation_scripts) and automation.get("premium_required")
+        # (set by teams_bot.fix_tab.shape_automation_detail from the same
+        # is_freemium check, just resolved independently) should always
+        # agree — checking both is belt-and-suspenders so a stale/missing
+        # external check never lets a Freemium team fall through to the
+        # full content below with all fields blank instead of the lock notice.
+        if locked_reason or automation.get("premium_required"):
             # Freemium (or whatever plan this is) doesn't allow automation
             # scripts at all — explicit request: don't show ANY of the
             # script's actual content (What this does / Recommended
@@ -19793,8 +19834,26 @@ class SlackSlashCommandView(APIView):
             # that's supposed to be Premium-only.
             return [
                 {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Automated Fix: {name}"[:150], "emoji": True}},
-                {"type": "section", "text": {"type": "mrkdwn", "text": f"🔒 *{locked_reason}*"}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"🔒 *{locked_reason or automation.get('message') or 'Automation scripts are not available on your plan.'}*"}},
             ]
+
+        # AI-assessed as genuinely not automatable (automation_status ==
+        # "not_possible") — say so plainly with the AI's own reason,
+        # rather than falling into the generic fields block below with
+        # every content section empty. Matches the same branch added to
+        # teams_bot/fix_tab.py's _automation_fix_body.
+        if automation.get("automation_possible") == "No":
+            blocks = [
+                {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Automated Fix: {name}"[:150], "emoji": True}},
+                {"type": "section", "fields": [
+                    {"type": "mrkdwn", "text": f"*Severity*\n{automation.get('severity') or '—'}"},
+                    {"type": "mrkdwn", "text": f"*OS*\n{automation.get('os') or '—'}"},
+                ]},
+                {"type": "section", "text": {"type": "mrkdwn", "text": "🚫 *Automation is not possible for this vulnerability — manual remediation required.*"}},
+            ]
+            if automation.get("reason_not_possible"):
+                blocks.append(self._ctx(str(automation["reason_not_possible"])[:800]))
+            return blocks
 
         libs = automation.get("libraries") or []
         libs_str = ", ".join(f"`{l}`" for l in libs) if isinstance(libs, list) else str(libs or "—")
@@ -19811,6 +19870,12 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*OS*\n{automation.get('os') or '—'}"},
                 {"type": "mrkdwn", "text": f"*Language*\n{automation.get('language') or '—'}"},
                 {"type": "mrkdwn", "text": f"*Automation Possible*\n{automation.get('automation_possible') or '—'}"},
+                # Real gap: download_count was already tracked (incremented
+                # on every download of THIS card's script, see
+                # user_download_ai_automation_script) and shown in the list
+                # views (Register->Script), but never surfaced here on the
+                # vulnerability's own detail page.
+                {"type": "mrkdwn", "text": f"*Downloaded*\n{automation.get('download_count', 0)}x"},
             ]},
             {"type": "divider"},
         ]
@@ -19834,19 +19899,18 @@ class SlackSlashCommandView(APIView):
         # locked_reason is unreachable past this point — handled by the
         # early return above, before any of this content was even built.
         if can_download:
-            # Use the MATCHED script's own plugin_id, not the original
-            # finding's — AWS/custom findings resolve by name and never had
-            # a real plugin_id to begin with, so the download button must
-            # carry the library's plugin_id (what /download/ actually needs).
-            plugin_id = automation.get("plugin_id") or v.get("plugin_id") or ""
-            host_os = v.get("host_os") or ""
+            # automation now always comes from _resolve_automation_match's
+            # AI automation_card lookup, which carries card_id (never a
+            # real Nessus plugin_id — vulnerability_cards isn't keyed by
+            # one) — route the download through the AI-specific handler.
+            card_id = automation.get("card_id") or ""
             blocks.append({
                 "type": "actions",
                 "elements": [{
                     "type": "button",
                     "text": {"type": "plain_text", "text": "⬇️ Download Script", "emoji": True},
-                    "action_id": "vulndata_autofix_download",
-                    "value": f"{plugin_id}|{sid}|{host_os}",
+                    "action_id": "vulndata_ai_autofix_download",
+                    "value": f"{card_id}|{sid}",
                     "style": "primary",
                 }],
             })
@@ -20371,6 +20435,7 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*Script*\n`{script_name}`"},
                 {"type": "mrkdwn", "text": f"*Automation Possible*\n{possible_badge}"},
                 {"type": "mrkdwn", "text": f"*Tested Manually*\n{tested_badge}"},
+                {"type": "mrkdwn", "text": f"*Downloaded*\n{automation.get('download_count', 0)}x"},
             ]},
         ]
         if len(available) > 1:
@@ -22689,6 +22754,57 @@ class SlackInteractivityView(APIView):
                     initial_comment=(
                         f"🤖 Automated fix script for `{dl_sid}` — {automation.get('vulnerability', '')}"
                     ),
+                )
+                if not uploaded:
+                    self._post_response_url(response_url, {
+                        "response_type": "ephemeral", "replace_original": False,
+                        "text": "❌ Could not upload the script file — please try again.",
+                    }, action_id)
+                return
+
+            if action_id == "vulndata_ai_autofix_download":
+                # AI-automation counterpart to vulndata_autofix_download —
+                # same "download server-side, upload straight into the
+                # channel" pattern, routed to the card_id-keyed AI endpoint
+                # (user_download_ai_automation_script) instead of the
+                # plugin_id-keyed curated one. Value format: "card_id|sid".
+                dl_parts   = value.split("|")
+                dl_card_id = dl_parts[0] if len(dl_parts) > 0 else ""
+                dl_sid     = dl_parts[1] if len(dl_parts) > 1 else ""
+                if not dl_card_id or not channel_id:
+                    self._post_response_url(response_url, {
+                        "response_type": "ephemeral", "replace_original": False,
+                        "text": "❌ Could not download script — missing card ID or channel.",
+                    }, action_id)
+                    return
+
+                script_resp = slash._call_user_api_raw(
+                    f"/api/user/automation-scripts/ai/{dl_card_id}/download/", team_id, slack_user_id,
+                    params={"type": "fix"},
+                )
+                if script_resp is None or script_resp.status_code != 200 or not script_resp.content:
+                    err_text = "Could not download the script right now — please try again."
+                    if script_resp is not None:
+                        try:
+                            err_text = script_resp.json().get("error") or err_text
+                        except Exception:
+                            pass
+                    self._post_response_url(response_url, {
+                        "response_type": "ephemeral", "replace_original": False,
+                        "text": f"❌ {err_text}",
+                    }, action_id)
+                    return
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                # Content-Disposition: attachment; filename="X_fix.py" —
+                # same header the curated download sets, parsed the same
+                # way rather than guessing a name (this one has no
+                # plugin_id to build a fallback filename from).
+                content_disp = script_resp.headers.get("Content-Disposition", "")
+                m = re.search(r'filename="([^"]+)"', content_disp)
+                filename = m.group(1) if m else f"{dl_card_id}_fix.py"
+                uploaded = bool(bot_token) and slash._upload_file_to_slack(
+                    bot_token, channel_id, filename, script_resp.content,
+                    initial_comment=f"🤖 AI-generated automated fix script for `{dl_sid}`",
                 )
                 if not uploaded:
                     self._post_response_url(response_url, {

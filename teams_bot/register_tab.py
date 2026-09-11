@@ -120,39 +120,32 @@ def register_vuln_detail_body(admin, idx, sub="manual", sev="all", st="all", off
 
 
 # ─── Script sub-tab ──────────────────────────────────────────────────────
-
-def _fetch_script_stats(admin):
-    def _fetch():
-        from automation_scripts_api import views as auto_views
-        from .actions import _call_view_in_process
-        status_code, data = _call_view_in_process(auto_views.admin_download_stats, admin, method="get")
-        if status_code >= 300 or not isinstance(data, dict):
-            raise ValueError(f"script stats fetch failed: {status_code}")
-        # premium_required/message already computed by admin_download_stats
-        # (a Freemium admin's counts stay permanently 0 — surface WHY
-        # instead of a misleading "no downloads yet" list).
-        return {
-            "stats": data.get("stats") or [],
-            "premium_required": bool(data.get("premium_required")),
-            "message": data.get("message"),
-        }
-    return fix_tab.cached_fetch(f"script_stats:{admin.id}", 20, _fetch)
-
+#
+# Same rebuild as user_register_tab.py's Scripts sub-tab — was scoped to
+# the curated ~63-plugin automation_scripts library (admin_download_stats),
+# now reads every vulnerability_cards.automation_card for the admin's own
+# report. Read-only for admin (no Download button), matching the rest of
+# this file's admin-is-read-only convention.
 
 def script_list_body(admin, offset=0):
-    result = _fetch_script_stats(admin)
-    stats = result["stats"]
-    total = len(stats)
-    page = stats[offset:offset + PAGE_SIZE]
+    report_data = fix_tab._fetch_register_data(admin)
+    report_id = report_data.get("report_id") if isinstance(report_data, dict) else None
+
+    all_cards = fix_tab._fetch_automation_cards_for_report(admin, report_id) if report_id else []
+    rows = [c for c in all_cards if (c.get("automation_card") or {}).get("automation_status") in ("full", "partial")]
+    premium_required = any((c.get("automation_card") or {}).get("premium_required") for c in all_cards)
+
+    total = len(rows)
+    page = rows[offset:offset + PAGE_SIZE]
 
     body = [
         {"type": "TextBlock", "text": "📜 Script", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": "Automation scripts library — downloads and assigned team.", "size": "Small", "isSubtle": True, "wrap": True},
+        {"type": "TextBlock", "text": "AI-generated automation scripts across your latest report.", "size": "Small", "isSubtle": True, "wrap": True},
     ]
-    if result["premium_required"]:
+    if premium_required and not rows:
         body.append({
             "type": "TextBlock",
-            "text": f"🔒 {result['message'] or 'Automation scripts are not available on your plan.'}",
+            "text": "🔒 Automation scripts are a Premium/Custom feature — upgrade your plan to generate them for your report's vulnerabilities.",
             "wrap": True, "weight": "Bolder", "color": "attention", "spacing": "Medium",
         })
         # Same parity fix as fix_tab.py's _automation_fix_body — Slack's
@@ -170,16 +163,18 @@ def script_list_body(admin, offset=0):
         })
         return body
     if not page:
-        body.append({"type": "TextBlock", "text": "No scripts found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
+        body.append({"type": "TextBlock", "text": "No automation scripts generated yet.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
-    for i, s in enumerate(page):
-        sev = (s.get("severity") or "").strip().lower() or "medium"
+    for c in page:
+        automation = c.get("automation_card") or {}
+        sev = (automation.get("severity") or (c.get("vaptcode_analysis") or {}).get("severity") or "").strip().lower() or "medium"
         if sev not in _SEV_ICON:
             sev = "medium"
-        name = s.get("vulnerability") or "Unknown"
-        downloads = s.get("download_count", 0)
-        team = (s.get("team") or "—").strip() or "—"
-        subtitle = f"Downloads: {downloads}   ·   Team: {team}"
+        name = c.get("vulnerability_name") or "Unknown"
+        downloads = automation.get("download_count", 0)
+        team = (c.get("assigned_team") or "—").strip() or "—"
+        badge = "✅ Full" if automation.get("automation_status") == "full" else "🌓 Partial"
+        subtitle = f"{badge}   ·   Downloads: {downloads}   ·   Team: {team}"
         body.append({
             "type": "Container", "spacing": "Medium", "separator": True,
             "items": [

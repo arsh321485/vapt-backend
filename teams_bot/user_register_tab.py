@@ -121,62 +121,64 @@ def register_vuln_detail_body(member_user, team_id, team_name, idx, sub="manual"
 
 
 # ─── Scripts sub-tab (real download, member-only) ───────────────────────
-
-def _fetch_script_stats(member_user):
-    def _fetch():
-        from automation_scripts_api import views as auto_views
-        from .actions import _call_view_in_process
-        status_code, data = _call_view_in_process(auto_views.user_download_stats, member_user, method="get")
-        if status_code >= 300 or not isinstance(data, dict):
-            raise ValueError(f"script stats fetch failed: {status_code}")
-        # premium_required/message are already computed by
-        # user_download_stats (billing.enforcement.is_freemium on the
-        # member's admin) — carried through here so script_list_body can
-        # hide the Download buttons instead of offering ones the actual
-        # download endpoint (user_download_script) would just reject.
-        return {
-            "stats": data.get("stats") or [],
-            "premium_required": bool(data.get("premium_required")),
-            "message": data.get("message"),
-        }
-    return fix_tab.cached_fetch(f"user_script_stats:{member_user.id}", 20, _fetch)
-
+#
+# Real bug report: this used to list ONLY the curated ~63-plugin
+# automation_scripts library (matched by plugin_id via user_download_stats)
+# — a real report's vulnerabilities are overwhelmingly OUTSIDE that fixed
+# set, so a member's own team usually saw just 1-3 scripts here no matter
+# how much automation the AI had actually generated for their vulnerabilities.
+# Rebuilt to list every vulnerability_cards.automation_card the member's
+# team owns (full or partial) — same source automations_tab.py and the Fix
+# tab's own Automation Fix button already use — with a real Download button
+# routed through TeamsAIScriptDownloadView (card_id-based), not the old
+# plugin_id-based curated download.
 
 def script_list_body(member_user, team_id, team_name, offset=0):
-    result = _fetch_script_stats(member_user)
-    stats = result["stats"]
-    total = len(stats)
-    page = stats[offset:offset + PAGE_SIZE]
+    data = fix._fetch_team_data(member_user, team_name)
+    report_id = data.get("report_id") if isinstance(data, dict) else None
+
+    all_cards = fix_tab._fetch_automation_cards_for_report(member_user, report_id, as_member=True) if report_id else []
+    rows = [c for c in all_cards if (c.get("automation_card") or {}).get("automation_status") in ("full", "partial")]
+    # A card missing automation entirely on a Freemium admin comes back
+    # from UserVulnerabilityCardListAPIView shaped like
+    # upload_report/views.py's _freemium_automation_placeholder() —
+    # {"premium_required": True, ...} — same signal used here.
+    premium_required = any((c.get("automation_card") or {}).get("premium_required") for c in all_cards)
+
+    total = len(rows)
+    page = rows[offset:offset + PAGE_SIZE]
 
     body = [
         {"type": "TextBlock", "text": "📜 Scripts", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": "Automation scripts library — download the ones for your team.", "size": "Small", "isSubtle": True, "wrap": True},
+        {"type": "TextBlock", "text": "AI-generated automation scripts for your team's vulnerabilities.", "size": "Small", "isSubtle": True, "wrap": True},
     ]
-    if result["premium_required"]:
+    if premium_required and not rows:
         body.append({
             "type": "TextBlock",
-            "text": f"🔒 {result['message'] or 'Automation scripts are not available on your plan.'}",
+            "text": "🔒 Automation scripts are a Premium/Custom feature — ask your admin to upgrade to generate them for your team's vulnerabilities.",
             "wrap": True, "weight": "Bolder", "color": "attention", "spacing": "Medium",
         })
         return body
     if not page:
-        body.append({"type": "TextBlock", "text": "No scripts found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
+        body.append({"type": "TextBlock", "text": "No automation scripts available for your team yet.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
-    for s in page:
-        sev = (s.get("severity") or "").strip().lower() or "medium"
+    for c in page:
+        automation = c.get("automation_card") or {}
+        sev = (automation.get("severity") or (c.get("vaptcode_analysis") or {}).get("severity") or "").strip().lower() or "medium"
         if sev not in _SEV_ICON:
             sev = "medium"
-        name = s.get("vulnerability") or "Unknown"
-        plugin_id = s.get("plugin_id")
-        downloads = s.get("download_count", 0)
+        name = c.get("vulnerability_name") or "Unknown"
+        card_id = c.get("card_id")
+        downloads = automation.get("download_count", 0)
+        badge = "✅ Full" if automation.get("automation_status") == "full" else "🌓 Partial"
         items = [
             {"type": "TextBlock", "text": f"{_SEV_ICON[sev]} {name}", "weight": "Bolder", "size": "Small", "wrap": True},
-            {"type": "TextBlock", "text": f"Downloads: {downloads}", "size": "Small", "isSubtle": True, "spacing": "None"},
+            {"type": "TextBlock", "text": f"{badge}   ·   Downloads: {downloads}", "size": "Small", "isSubtle": True, "spacing": "None"},
         ]
-        if plugin_id:
+        if card_id and not automation.get("premium_required"):
             items.append({
                 "type": "ActionSet", "spacing": "Small",
-                "actions": [{"type": "Action.OpenUrl", "title": "📥 Download", "url": fix_tab.script_download_url(team_id, team_name, plugin_id)}],
+                "actions": [{"type": "Action.OpenUrl", "title": "📥 Download Fix Script", "url": fix_tab.script_download_url_ai(team_id, team_name, card_id, "fix")}],
             })
         body.append({"type": "Container", "spacing": "Medium", "separator": True, "items": items})
     body.extend(fix_tab._pagination_body(offset, total, "ureg_script_pg"))

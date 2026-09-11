@@ -478,18 +478,28 @@ def shape_automation_detail(card):
         "premium_required": bool(automation.get("premium_required")),
         "message": automation.get("message"),
         "card_id": card.get("card_id"),
+        "vulnerability": card.get("vulnerability_name") or automation.get("vulnerability"),
         "severity": automation.get("severity"),
         "os": automation.get("os"),
+        "available_os": [automation.get("os")] if automation.get("os") else [],
         "language": automation.get("language"),
         "automation_possible": automation.get("automation_possible"),
+        # Real gap: this was tracked (incremented on every download) but
+        # never actually reshaped into the dict every renderer reads —
+        # every "Downloaded" fact/field below was silently always 0.
+        "download_count": automation.get("download_count", 0),
+        "script_name": automation.get("script_name"),
         "script_description": automation.get("script_description"),
         "recommended_approach": automation.get("recommended_approach"),
         "what_can_be_automated": automation.get("what_can_be_automated"),
         "what_must_remain_manual": automation.get("what_must_remain_manual"),
         "libraries": automation.get("libraries"),
         "command_download_libraries": automation.get("command_download_libraries"),
+        "command_run_script": automation.get("command_run_script"),
         "considerations_before": automation.get("considerations_before"),
-        "fix_script_name": automation.get("script_name") or "automation_fix",
+        "considerations_after": automation.get("considerations_after"),
+        "tested_manually": automation.get("tested_manually"),
+        "fix_script_name": automation.get("fix_script_filename") or automation.get("script_name") or "automation_fix",
     }
 
 
@@ -563,6 +573,13 @@ def _automation_fix_body(automation, admin=None):
             {"title": "OS", "value": str(automation.get("os") or "—")},
             {"title": "Language", "value": str(automation.get("language") or "—")},
             {"title": "Automation Possible", "value": str(automation.get("automation_possible") or "—")},
+            # Real gap: download_count was already tracked (incremented on
+            # every download of THIS card's script) and shown in the list
+            # views (Automations tab, Register->Scripts), but never
+            # surfaced on the vulnerability's own detail page — exactly
+            # where someone deciding whether to run it would look for "has
+            # anyone on my team already downloaded/tried this?".
+            {"title": "Downloaded", "value": f"{automation.get('download_count', 0)}x"},
         ],
     }]
 
@@ -585,7 +602,11 @@ def _automation_fix_body(automation, admin=None):
     if automation.get("command_download_libraries"):
         body.append({"type": "TextBlock", "text": "**Install command**", "wrap": True, "size": "Small", "spacing": "Medium"})
         body.append({"type": "TextBlock", "text": str(automation["command_download_libraries"]), "wrap": True, "size": "Small", "fontType": "Monospace"})
+    if automation.get("command_run_script"):
+        body.append({"type": "TextBlock", "text": "**Run command**", "wrap": True, "size": "Small", "spacing": "Medium"})
+        body.append({"type": "TextBlock", "text": str(automation["command_run_script"]), "wrap": True, "size": "Small", "fontType": "Monospace"})
     add("Before running", "considerations_before")
+    add("After running", "considerations_after")
 
     body.append({
         "type": "TextBlock",
