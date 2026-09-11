@@ -354,6 +354,32 @@ def _vuln_facts_body(r):
     ]
 
 
+def card_severity(card):
+    """
+    Canonical severity for one vulnerability_cards document — the
+    Vulnerability Analyst agent's own vaptcode_analysis.severity (the SAME
+    value Register/Fix/All Vulns show for this exact finding) takes
+    priority over automation_card.severity.
+
+    Real bug report: every automation-related severity read in this repo
+    (Automations tab, Register->Scripts, the AI stats API rows, Slack's
+    equivalents) used to check automation_card.severity FIRST — but that
+    field is the Automation Engineer agent's own independent restatement
+    of severity (written while deciding how to script the fix), not the
+    authoritative value. It can legitimately disagree with what Register
+    actually shows for the same finding, which is exactly the "severity
+    mismatch" a real report surfaced. vaptcode_analysis.severity (the
+    Vulnerability Analyst's assessment, task_analyse — the crew's actual
+    severity source of truth) now wins; automation_card.severity is only a
+    fallback for the rare case vaptcode_analysis itself has none.
+    """
+    return (
+        (card.get("vaptcode_analysis") or {}).get("severity")
+        or (card.get("automation_card") or {}).get("severity")
+        or ""
+    )
+
+
 # ─── Manual Fix / Automated Fix (matches Microsoft -Admin/vulndetail.html,
 # real data instead of that mockup's hardcoded sample) ───────────────────
 # Mirrors users.views.SlackSlashCommandView._allvuln_detail_blocks — same
@@ -468,7 +494,7 @@ def shape_automation_detail(card):
         return {
             "matched": True,
             "automation_possible": "No",
-            "severity": automation.get("severity"),
+            "severity": card_severity(card),
             "os": automation.get("os"),
             "reason_not_possible": automation.get("reason_not_possible"),
         }
@@ -479,7 +505,7 @@ def shape_automation_detail(card):
         "message": automation.get("message"),
         "card_id": card.get("card_id"),
         "vulnerability": card.get("vulnerability_name") or automation.get("vulnerability"),
-        "severity": automation.get("severity"),
+        "severity": card_severity(card),
         "os": automation.get("os"),
         "available_os": [automation.get("os")] if automation.get("os") else [],
         "language": automation.get("language"),

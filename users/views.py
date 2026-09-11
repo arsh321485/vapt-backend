@@ -14558,9 +14558,14 @@ class SlackSlashCommandView(APIView):
             automation = c.get("automation_card") or {}
             if automation.get("automation_status") != category:
                 continue
+            # Real bug report: automation_card.severity (the Automation
+            # Engineer agent's own restatement) was checked FIRST — it can
+            # disagree with vaptcode_analysis.severity, the Vulnerability
+            # Analyst's actual assessment (the same value Register/Fix show
+            # for this finding). vaptcode_analysis now wins.
             rows.append({
                 "vulnerability": c.get("vulnerability_name") or "Unknown",
-                "severity": automation.get("severity") or (c.get("vaptcode_analysis") or {}).get("severity") or "",
+                "severity": (c.get("vaptcode_analysis") or {}).get("severity") or automation.get("severity") or "",
                 "team": c.get("assigned_team") or "",
             })
 

@@ -64,13 +64,7 @@ def _fetch_automation_cards(admin):
 
 
 def _card_severity(card):
-    automation = card.get("automation_card") or {}
-    sev_val = (
-        automation.get("severity")
-        or (card.get("vaptcode_analysis") or {}).get("severity")
-        or ""
-    )
-    return sev_val.strip().lower()
+    return fix_tab.card_severity(card).strip().lower()
 
 
 def _sev_filter_columnset(category, active_sev, counts):

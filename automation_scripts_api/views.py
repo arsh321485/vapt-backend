@@ -575,7 +575,15 @@ def _ai_automation_stats_rows(db, report_ids, download_role=None):
         {"_id": 0, "card_id": 1, "vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "automation_card": 1, "vaptcode_analysis": 1},
     ):
         automation = card.get("automation_card") or {}
-        severity = automation.get("severity") or (card.get("vaptcode_analysis") or {}).get("severity") or ""
+        # Real bug report: automation_card.severity (the Automation
+        # Engineer agent's own independent restatement, written while
+        # deciding how to script the fix) was checked FIRST here — it can
+        # legitimately disagree with vaptcode_analysis.severity, the
+        # Vulnerability Analyst's actual assessment (the SAME value
+        # Register/Fix/All Vulns show for this exact finding), which is
+        # what surfaced as a "severity mismatch" between this API and the
+        # rest of the app. vaptcode_analysis now wins.
+        severity = (card.get("vaptcode_analysis") or {}).get("severity") or automation.get("severity") or ""
         row = {
             "plugin_id": None,
             "card_id": card.get("card_id"),

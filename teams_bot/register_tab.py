@@ -167,7 +167,7 @@ def script_list_body(admin, offset=0):
         return body
     for c in page:
         automation = c.get("automation_card") or {}
-        sev = (automation.get("severity") or (c.get("vaptcode_analysis") or {}).get("severity") or "").strip().lower() or "medium"
+        sev = fix_tab.card_severity(c).strip().lower() or "medium"
         if sev not in _SEV_ICON:
             sev = "medium"
         name = c.get("vulnerability_name") or "Unknown"
