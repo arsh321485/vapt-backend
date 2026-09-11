@@ -14558,14 +14558,16 @@ class SlackSlashCommandView(APIView):
             automation = c.get("automation_card") or {}
             if automation.get("automation_status") != category:
                 continue
-            # Real bug report: automation_card.severity (the Automation
-            # Engineer agent's own restatement) was checked FIRST — it can
-            # disagree with vaptcode_analysis.severity, the Vulnerability
-            # Analyst's actual assessment (the same value Register/Fix show
-            # for this finding). vaptcode_analysis now wins.
+            # Real bug report (round 2): vaptcode_analysis.severity (the
+            # Vulnerability Analyst agent's own reassessment) can ALSO
+            # disagree with what Register actually shows — Register's
+            # severity is the raw Nessus risk_factor, never an AI value at
+            # all. true_severity (injected by VulnerabilityCardListView,
+            # which _fetch_automation_cards above calls) is that same raw
+            # value and now wins outright.
             rows.append({
                 "vulnerability": c.get("vulnerability_name") or "Unknown",
-                "severity": (c.get("vaptcode_analysis") or {}).get("severity") or automation.get("severity") or "",
+                "severity": c.get("true_severity") or (c.get("vaptcode_analysis") or {}).get("severity") or automation.get("severity") or "",
                 "team": c.get("assigned_team") or "",
             })
 

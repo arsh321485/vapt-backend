@@ -3023,6 +3023,42 @@ def _get_locked_host_names(db, report_id) -> set:
     }
 
 
+def _true_severity_lookup(db, report_id) -> dict:
+    """
+    {(plugin_name, host_name): severity} straight from the raw Nessus scan
+    data on nessus_reports.vulnerabilities_by_host — the EXACT same
+    extraction adminregister.views.LatestSuperAdminVulnerabilityRegisterAPIView
+    uses for the Register tab's own Severity column.
+
+    Real bug report: vulnerability_cards never stores this raw scanner
+    severity anywhere — only vaptcode_analysis.severity (the Vulnerability
+    Analyst agent's own independent reassessment) and automation_card.
+    severity (the Automation Engineer's own restatement), either of which
+    can legitimately disagree with what Nessus actually reported and what
+    Register therefore shows for the exact same finding (confirmed live:
+    "SSL Certificate Chain Contains RSA Keys..." on 192.168.0.2 showed Low
+    on Register, High on the Script tab). Injecting this lookup's value as
+    each card's own "true_severity" field here — the single place
+    Teams/Slack/website's automation surfaces all ultimately read a
+    card through (in-process API calls or direct HTTP) — fixes every one
+    of them from this one spot, no per-consumer changes needed, and
+    self-corrects existing cards without any regeneration.
+    """
+    doc = db[NESSUS_COLLECTION].find_one({"report_id": str(report_id)}, {"vulnerabilities_by_host": 1})
+    if not doc:
+        return {}
+    lookup = {}
+    for host in (doc.get("vulnerabilities_by_host") or []):
+        host_name = (host.get("host_name") or host.get("host") or "").strip()
+        for v in (host.get("vulnerabilities") or []):
+            plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+            risk_raw = v.get("risk_factor") or v.get("severity") or v.get("risk") or ""
+            severity = risk_raw.strip().title() if isinstance(risk_raw, str) else ""
+            if plugin_name and severity:
+                lookup[(plugin_name, host_name)] = severity
+    return lookup
+
+
 def _freemium_automation_placeholder() -> dict:
     """
     Real gap found on review: a Freemium admin's card has automation_card
@@ -3072,6 +3108,7 @@ class VulnerabilityCardListView(APIView):
                 query = {"report_id": report_id}
 
             locked_host_names = _get_locked_host_names(db, report_id)
+            severity_lookup = _true_severity_lookup(db, report_id)
 
             cursor = db[VULN_CARD_COLLECTION].find(
                 query,
@@ -3108,6 +3145,13 @@ class VulnerabilityCardListView(APIView):
                 # Ensure datetime objects are serializable
                 if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
                     card["created_at"] = _su_normalize_iso(card["created_at"])
+
+                # See _true_severity_lookup's own docstring — the real
+                # scanner severity for this exact (vulnerability, host),
+                # same value Register shows, not the AI's own reassessment.
+                card["true_severity"] = severity_lookup.get(
+                    (card.get("vulnerability_name"), card.get("host_name")), ""
+                )
 
                 automation = card.get("automation_card")
                 if automation:
@@ -3191,6 +3235,7 @@ class UserVulnerabilityCardListAPIView(APIView):
             # automation_scripts_api's _find_vuln_card) — a member never
             # sees another organization's cards regardless of team name.
             locked_host_names = _get_locked_host_names(db, report_id)
+            severity_lookup = _true_severity_lookup(db, report_id)
 
             cursor = db[VULN_CARD_COLLECTION].find(
                 {"report_id": report_id, "admin_id": str(admin.id)},
@@ -3216,6 +3261,11 @@ class UserVulnerabilityCardListAPIView(APIView):
             for card in cards:
                 if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
                     card["created_at"] = _su_normalize_iso(card["created_at"])
+
+                # See VulnerabilityCardListView's matching line / _true_severity_lookup's own docstring.
+                card["true_severity"] = severity_lookup.get(
+                    (card.get("vulnerability_name"), card.get("host_name")), ""
+                )
 
                 automation = card.get("automation_card")
                 if automation:

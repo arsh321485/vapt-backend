@@ -356,25 +356,32 @@ def _vuln_facts_body(r):
 
 def card_severity(card):
     """
-    Canonical severity for one vulnerability_cards document — the
-    Vulnerability Analyst agent's own vaptcode_analysis.severity (the SAME
-    value Register/Fix/All Vulns show for this exact finding) takes
-    priority over automation_card.severity.
+    Canonical severity for one vulnerability_cards document.
 
-    Real bug report: every automation-related severity read in this repo
-    (Automations tab, Register->Scripts, the AI stats API rows, Slack's
-    equivalents) used to check automation_card.severity FIRST — but that
-    field is the Automation Engineer agent's own independent restatement
-    of severity (written while deciding how to script the fix), not the
-    authoritative value. It can legitimately disagree with what Register
-    actually shows for the same finding, which is exactly the "severity
-    mismatch" a real report surfaced. vaptcode_analysis.severity (the
-    Vulnerability Analyst's assessment, task_analyse — the crew's actual
-    severity source of truth) now wins; automation_card.severity is only a
-    fallback for the rare case vaptcode_analysis itself has none.
+    Real bug report (round 2): the first fix here made vaptcode_analysis.
+    severity (the Vulnerability Analyst agent's own assessment) win over
+    automation_card.severity — that closed most mismatches, but a live
+    report still showed a real one: "SSL Certificate Chain Contains RSA
+    Keys..." on 192.168.0.2 was Low on Register, High here. Register's
+    severity was NEVER an AI value at all — it's the raw Nessus
+    risk_factor straight from vulnerabilities_by_host (see
+    adminregister.views.LatestSuperAdminVulnerabilityRegisterAPIView), and
+    vaptcode_analysis.severity is ALSO just an AI reassessment that can
+    disagree with the real scan data, same as automation_card.severity
+    could.
+
+    true_severity — injected onto every card by
+    upload_report.views.VulnerabilityCardListView /
+    UserVulnerabilityCardListAPIView (via _true_severity_lookup, which
+    reads that exact same raw vulnerabilities_by_host data) — is the only
+    genuinely authoritative source and now wins outright. The two AI
+    fields stay as fallbacks only for the rare case the raw lookup found
+    nothing (e.g. a finding whose plugin_name no longer matches after a
+    report re-scan).
     """
     return (
-        (card.get("vaptcode_analysis") or {}).get("severity")
+        card.get("true_severity")
+        or (card.get("vaptcode_analysis") or {}).get("severity")
         or (card.get("automation_card") or {}).get("severity")
         or ""
     )

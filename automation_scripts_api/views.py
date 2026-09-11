@@ -569,21 +569,35 @@ def _ai_automation_stats_rows(db, report_ids, download_role=None):
     """
     if not report_ids:
         return []
+    # Real bug report (round 2): vaptcode_analysis.severity (the
+    # Vulnerability Analyst agent's own reassessment) was made to win over
+    # automation_card.severity — that closed most mismatches, but a live
+    # report still showed one for a finding where the AI's own analysis
+    # ALSO disagreed with what Nessus actually reported. Register's
+    # severity was never an AI value at all — it's the raw Nessus
+    # risk_factor from vulnerabilities_by_host. Build that same lookup
+    # (see upload_report.views._true_severity_lookup, which every
+    # Teams/Slack path reaches through VulnerabilityCardListView/
+    # UserVulnerabilityCardListAPIView) directly here too, since this
+    # queries vulnerability_cards straight from Mongo rather than through
+    # that API layer.
+    from upload_report.views import _true_severity_lookup
+    severity_lookup = {}
+    for rid in report_ids:
+        severity_lookup.update(_true_severity_lookup(db, rid))
+
     rows = []
     for card in db[VULN_CARD_COLLECTION].find(
         {"report_id": {"$in": list(report_ids)}, "automation_card.automation_status": {"$in": ["full", "partial"]}},
         {"_id": 0, "card_id": 1, "vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "automation_card": 1, "vaptcode_analysis": 1},
     ):
         automation = card.get("automation_card") or {}
-        # Real bug report: automation_card.severity (the Automation
-        # Engineer agent's own independent restatement, written while
-        # deciding how to script the fix) was checked FIRST here — it can
-        # legitimately disagree with vaptcode_analysis.severity, the
-        # Vulnerability Analyst's actual assessment (the SAME value
-        # Register/Fix/All Vulns show for this exact finding), which is
-        # what surfaced as a "severity mismatch" between this API and the
-        # rest of the app. vaptcode_analysis now wins.
-        severity = (card.get("vaptcode_analysis") or {}).get("severity") or automation.get("severity") or ""
+        severity = (
+            severity_lookup.get((card.get("vulnerability_name"), card.get("host_name")))
+            or (card.get("vaptcode_analysis") or {}).get("severity")
+            or automation.get("severity")
+            or ""
+        )
         row = {
             "plugin_id": None,
             "card_id": card.get("card_id"),
