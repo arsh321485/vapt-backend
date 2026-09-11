@@ -1998,7 +1998,8 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         if existing_cards_missing_automation:
             def _run_existing_card_automation_backfill(card_docs):
                 done = 0
-                for c in card_docs:
+                total = len(card_docs)
+                for i, c in enumerate(card_docs, start=1):
                     try:
                         automation_card = generate_automation_for_existing_card(c)
                         if automation_card:
@@ -2007,10 +2008,23 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                                 {"$set": {"automation_card": automation_card}},
                             )
                             done += 1
+                        # Real request: a summary line only at the very end
+                        # gave zero visibility into whether this was
+                        # actually progressing or stuck — print live,
+                        # per-card progress so `journalctl -f` shows it in
+                        # real time instead of needing a separate Mongo
+                        # count query to check.
+                        print(
+                            f"[AutoGenCards] Automation backfill progress {i}/{total} "
+                            f"(report_id={report_id}) — '{c.get('vulnerability_name')}' on "
+                            f"'{c.get('host_name')}': {'done' if automation_card else 'skipped (no result)'}",
+                            flush=True,
+                        )
                     except Exception:
                         logger.exception(f"[AutoGenCards] automation backfill-on-exists failed for card_id={c.get('card_id')}")
+                        print(f"[AutoGenCards] Automation backfill progress {i}/{total} (report_id={report_id}) — error, see log", flush=True)
                 logger.info(
-                    f"[AutoGenCards] Backfilled automation onto {done}/{len(card_docs)} pre-existing "
+                    f"[AutoGenCards] Backfilled automation onto {done}/{total} pre-existing "
                     f"card(s) for report_id={report_id}"
                 )
 
@@ -2286,7 +2300,9 @@ def backfill_automation_for_admin(admin) -> int:
 
     def _run_backfill(card_docs):
         done = 0
-        for card in card_docs:
+        total = len(card_docs)
+        admin_label = getattr(admin, "email", admin.id)
+        for i, card in enumerate(card_docs, start=1):
             try:
                 automation_card = generate_automation_for_existing_card(card)
                 if automation_card:
@@ -2295,11 +2311,23 @@ def backfill_automation_for_admin(admin) -> int:
                         {"$set": {"automation_card": automation_card}},
                     )
                     done += 1
+                # Real request: a summary line only at the very end gave
+                # zero visibility into whether a large backfill (hundreds
+                # of cards, can run for hours) was actually progressing or
+                # stuck — print live, per-card progress so `journalctl -f`
+                # shows it in real time.
+                print(
+                    f"[AutomationBackfill] Progress {i}/{total} for admin={admin_label} — "
+                    f"'{card.get('vulnerability_name')}' on '{card.get('host_name')}': "
+                    f"{'done' if automation_card else 'skipped (no result)'}",
+                    flush=True,
+                )
             except Exception:
                 logger.exception(f"[AutomationBackfill] card_id={card.get('card_id')} failed")
+                print(f"[AutomationBackfill] Progress {i}/{total} for admin={admin_label} — error, see log", flush=True)
         logger.info(
-            f"[AutomationBackfill] Finished — {done}/{len(card_docs)} card(s) updated for "
-            f"admin={getattr(admin, 'email', admin.id)}"
+            f"[AutomationBackfill] Finished — {done}/{total} card(s) updated for "
+            f"admin={admin_label}"
         )
 
     t = threading.Thread(target=_run_backfill, args=(cards,), daemon=True)
