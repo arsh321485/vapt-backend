@@ -13311,7 +13311,7 @@ class SlackSlashCommandView(APIView):
             rows = [
                 {"vulnerability": r.get("vulnerability") or "Unknown",
                  "severity": r.get("severity") or "", "download_count": r.get("download_count", 0),
-                 "team": r.get("team") or vapt_team}
+                 "team": r.get("team") or vapt_team, "host": r.get("host") or ""}
                 for r in (stats.get("stats") or [])
             ]
             if not rows and stats.get("detail"):
@@ -13383,12 +13383,17 @@ class SlackSlashCommandView(APIView):
                     blocks.append({"type": "divider"})
                 sev = (s.get("severity") or "").strip() or "—"
                 sev_icon = self._SEV_EMOJI_MAP.get(sev.lower(), "⚪")
+                # Real bug report: the same vulnerability name legitimately
+                # appears once per affected asset — without the host
+                # shown, these looked like exact duplicate rows.
+                host = (s.get("host") or "").strip()
+                host_line = f"\n🖥 *{host}*" if host else ""
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
                         "text": (
-                            f"*{s.get('vulnerability') or 'Unknown'}*\n"
+                            f"*{s.get('vulnerability') or 'Unknown'}*{host_line}\n"
                             f"{sev_icon} *{sev.upper()}*  |  Downloads: {s.get('download_count', 0)}  |  Team: {s.get('team')}"
                         ),
                     },
@@ -19246,13 +19251,21 @@ class SlackSlashCommandView(APIView):
                 sev_u = sev.upper() if sev != "—" else "—"
                 downloads = s.get("download_count", 0)
                 team = team_label(s.get("team"))
+                # Real bug report: the same vulnerability name legitimately
+                # appears once per affected asset (a separate
+                # vulnerability_cards document each, source="ai" rows) —
+                # without the host shown, these looked like exact duplicate
+                # rows. Curated-library rows carry no per-host concept, so
+                # host stays "" for those and this line is just omitted.
+                host = (s.get("host") or "").strip()
+                host_line = f"\n🖥 *{host}*" if host else ""
                 blocks.append(
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
                             "text": (
-                                f"*`{sno}`*  *{name}*\n"
+                                f"*`{sno}`*  *{name}*{host_line}\n"
                                 f"{sev_icon(sev)} *{sev_u}*  |  "
                                 f"*Downloads:* {downloads}  |  "
                                 f"*Team:* {team}"

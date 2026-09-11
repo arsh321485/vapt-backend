@@ -168,18 +168,22 @@ def script_list_body(member_user, team_id, team_name, offset=0):
         if sev not in _SEV_ICON:
             sev = "medium"
         name = c.get("vulnerability_name") or "Unknown"
-        card_id = c.get("card_id")
         downloads = automation.get("download_count", 0)
+        host = (c.get("host_name") or "").strip()
         badge = "✅ Full" if automation.get("automation_status") == "full" else "🌓 Partial"
+        # Real bug report: the same vulnerability name legitimately appears
+        # once per affected asset (a separate card each) — without the
+        # host shown, these looked like exact duplicate rows. Explicit
+        # product request: this is a read-only overview list now — no
+        # inline Download button here (downloading happens from the
+        # vulnerability's own Automation Fix detail page instead, matching
+        # the website's Script list, which has no per-row download button
+        # either).
+        subtitle = f"{(host + '   ·   ') if host else ''}{badge}   ·   Downloads: {downloads}"
         items = [
             {"type": "TextBlock", "text": f"{_SEV_ICON[sev]} {name}", "weight": "Bolder", "size": "Small", "wrap": True},
-            {"type": "TextBlock", "text": f"{badge}   ·   Downloads: {downloads}", "size": "Small", "isSubtle": True, "spacing": "None"},
+            {"type": "TextBlock", "text": subtitle, "size": "Small", "isSubtle": True, "spacing": "None"},
         ]
-        if card_id and not automation.get("premium_required"):
-            items.append({
-                "type": "ActionSet", "spacing": "Small",
-                "actions": [{"type": "Action.OpenUrl", "title": "📥 Download Fix Script", "url": fix_tab.script_download_url_ai(team_id, team_name, card_id, "fix")}],
-            })
         body.append({"type": "Container", "spacing": "Medium", "separator": True, "items": items})
     body.extend(fix_tab._pagination_body(offset, total, "ureg_script_pg"))
     return body

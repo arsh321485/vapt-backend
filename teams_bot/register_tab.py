@@ -173,8 +173,12 @@ def script_list_body(admin, offset=0):
         name = c.get("vulnerability_name") or "Unknown"
         downloads = automation.get("download_count", 0)
         team = (c.get("assigned_team") or "—").strip() or "—"
+        host = (c.get("host_name") or "").strip()
         badge = "✅ Full" if automation.get("automation_status") == "full" else "🌓 Partial"
-        subtitle = f"{badge}   ·   Downloads: {downloads}   ·   Team: {team}"
+        # Real bug report: the same vulnerability name legitimately appears
+        # once per affected asset (a separate card each) — without the
+        # host shown, these looked like exact duplicate rows.
+        subtitle = f"{(host + '   ·   ') if host else ''}{badge}   ·   Downloads: {downloads}   ·   Team: {team}"
         body.append({
             "type": "Container", "spacing": "Medium", "separator": True,
             "items": [

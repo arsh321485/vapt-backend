@@ -572,7 +572,7 @@ def _ai_automation_stats_rows(db, report_ids, download_role=None):
     rows = []
     for card in db[VULN_CARD_COLLECTION].find(
         {"report_id": {"$in": list(report_ids)}, "automation_card.automation_status": {"$in": ["full", "partial"]}},
-        {"_id": 0, "card_id": 1, "vulnerability_name": 1, "assigned_team": 1, "automation_card": 1, "vaptcode_analysis": 1},
+        {"_id": 0, "card_id": 1, "vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "automation_card": 1, "vaptcode_analysis": 1},
     ):
         automation = card.get("automation_card") or {}
         severity = automation.get("severity") or (card.get("vaptcode_analysis") or {}).get("severity") or ""
@@ -580,6 +580,16 @@ def _ai_automation_stats_rows(db, report_ids, download_role=None):
             "plugin_id": None,
             "card_id": card.get("card_id"),
             "vulnerability": card.get("vulnerability_name") or "Unknown",
+            # Real bug report: the SAME vulnerability name legitimately
+            # appears once per affected asset (a separate
+            # vulnerability_cards document each) — without a host field on
+            # each row, that looked like exact duplicate entries in every
+            # consumer (website Script table, Teams/Slack Scripts list).
+            # host distinguishes them; curated-library rows never had a
+            # per-host concept (one script entry serves the whole report),
+            # so theirs stays "" and every consumer should render that as
+            # blank/omitted rather than a literal empty string.
+            "host": (card.get("host_name") or "").strip(),
             "severity": severity,
             "download_count": automation.get("download_count", 0),
             "team": (card.get("assigned_team") or "").strip() or "Unassigned",
@@ -607,6 +617,7 @@ def _merge_ai_and_curated_stats(curated_stats, ai_rows):
         if key in ai_by_name:
             continue
         s.setdefault("source", "curated")
+        s.setdefault("host", "")  # no per-host concept in the curated library
         merged.append(s)
     return merged
 
