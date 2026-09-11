@@ -2916,6 +2916,27 @@ def _get_locked_host_names(db, report_id) -> set:
     }
 
 
+def _freemium_automation_placeholder() -> dict:
+    """
+    Real gap found on review: a Freemium admin's card has automation_card
+    == {} (generation intentionally skipped — see mitigation_tool.py's
+    run_automation flag) — indistinguishable, on the wire, from an empty
+    {} the frontend might get for any other reason, and was rendering as
+    a generic "Automation Not Possible" (the same UI as an AI verdict of
+    automation_status="not_possible", which this is NOT — it was never
+    even evaluated). Gives the frontend an explicit, different signal:
+    premium_required=True and automation_status=None (never "not_possible")
+    so it can render an upgrade prompt instead of a false "AI says this
+    can't be automated".
+    """
+    return {
+        "automation_status": None,
+        "automation_possible": None,
+        "premium_required": True,
+        "message": "Automation scripts are a Premium/Custom feature — upgrade your plan to generate one for this vulnerability.",
+    }
+
+
 class VulnerabilityCardListView(APIView):
     """
     GET /api/admin/upload_report/vulnerability-cards/?report_id=<id>
@@ -2989,6 +3010,8 @@ class VulnerabilityCardListView(APIView):
                         "verify_script": "" if premium_required else automation.get("verify_script", ""),
                         "premium_required": premium_required,
                     }
+                elif premium_required:
+                    card["automation_card"] = _freemium_automation_placeholder()
 
             return Response(
                 {
@@ -3095,6 +3118,8 @@ class UserVulnerabilityCardListAPIView(APIView):
                         "verify_script": "" if premium_required else automation.get("verify_script", ""),
                         "premium_required": premium_required,
                     }
+                elif premium_required:
+                    card["automation_card"] = _freemium_automation_placeholder()
 
             return Response(
                 {
@@ -3171,19 +3196,21 @@ class VulnerabilityCardDetailView(APIView):
             # "Freemium never gets script content" rule enforced
             # everywhere else. Strip it here the same way.
             automation = card.get("automation_card")
+            try:
+                from billing.enforcement import is_freemium, _is_unlimited_admin
+                owning_admin_id = card.get("admin_id") or request.user.id
+                premium_required = is_freemium(owning_admin_id) and not _is_unlimited_admin(owning_admin_id)
+            except Exception:
+                premium_required = False
             if automation:
-                try:
-                    from billing.enforcement import is_freemium, _is_unlimited_admin
-                    owning_admin_id = card.get("admin_id") or request.user.id
-                    premium_required = is_freemium(owning_admin_id) and not _is_unlimited_admin(owning_admin_id)
-                except Exception:
-                    premium_required = False
                 card["automation_card"] = {
                     **{k: v for k, v in automation.items() if k not in ("fix_script", "verify_script")},
                     "fix_script": "" if premium_required else automation.get("fix_script", ""),
                     "verify_script": "" if premium_required else automation.get("verify_script", ""),
                     "premium_required": premium_required,
                 }
+            elif premium_required:
+                card["automation_card"] = _freemium_automation_placeholder()
 
             return Response(
                 {
