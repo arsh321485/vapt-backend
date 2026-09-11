@@ -1939,7 +1939,7 @@ def _decode_jwt_tid(token):
         return ""
 
 
-def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name="General", graph_web_url=None):
+def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name="General", graph_web_url=None, admin_email=None):
     """Build stable deep links that open the Teams tab (not chat).
 
     Real bug report (frontend spec, matches the "stuck on teams.microsoft.com,
@@ -2028,6 +2028,32 @@ def _build_teams_tab_urls(team_id, tenant_id=None, channel_id=None, channel_name
     desktop_url = web_url.replace("https://", "msteams://")
     general_desktop_url = general_web_url.replace("https://", "msteams://")
     channel_desktop_url = channel_web_url.replace("https://", "msteams://") if channel_web_url else None
+
+    # Real gap found via a working reference implementation (a sibling
+    # platform that reliably lands on its own team/channel, never Chat):
+    # every deep link here was missing Microsoft's own documented
+    # &login_hint={userEmail} parameter. Without it, Teams' web client has
+    # no explicit signal for WHICH signed-in account to resolve the link
+    # against when the browser has more than one active session/tab —
+    # exactly the "lands on Chat / stale conversation" symptom reported
+    # live. Applied to every WEB url variant (not the msteams:// desktop
+    # ones — the desktop app already knows which account is signed in)
+    # as a final step, including when channel_web_url came from Graph's
+    # own webUrl (preferred above) rather than the hand-built version —
+    # that one needs it just as much.
+    def _with_login_hint(url):
+        if not url or not admin_email:
+            return url
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}login_hint={quote(admin_email)}"
+
+    web_url = _with_login_hint(web_url)
+    web_url_alt = _with_login_hint(web_url_alt)
+    general_web_url = _with_login_hint(general_web_url)
+    general_web_url_alt = _with_login_hint(general_web_url_alt)
+    channel_web_url = _with_login_hint(channel_web_url)
+    channel_web_url_alt = _with_login_hint(channel_web_url_alt)
+
     return {
         "web_url": web_url,
         "web_url_alt": web_url_alt,
@@ -2274,7 +2300,7 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
                         (c.get("webUrl") for c in channels_result if c.get("channelId") == preferred_channel_id),
                         None,
                     )
-                    urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url)
+                    urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url, admin_email=getattr(admin, "email", None))
                     return {
                         "team_id": team_id,
                         "team_name": "Vaptfix",
@@ -2400,7 +2426,7 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
                     (c.get("webUrl") for c in all_channels if c.get("id") == preferred_channel_id),
                     None,
                 )
-                urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url)
+                urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url, admin_email=getattr(admin, "email", None))
                 logger.info(f"VAPTFIX team created (after short sync wait): {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
                 return {
                     "team_id": team_id,
@@ -2469,7 +2495,7 @@ def auto_create_vaptfix_team(access_token, admin=None, tenant_id=None):
             (c.get("webUrl") for c in all_channels if c.get("id") == preferred_channel_id),
             None,
         )
-        urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url)
+        urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url, admin_email=getattr(admin, "email", None))
 
         logger.info(f"VAPTFIX team created: {team_id} with {len([c for c in channels_result if c['status'] == 'created'])} channels")
         return {
@@ -2996,7 +3022,7 @@ class MicrosoftTeamsLoginStatusView(APIView):
                 (c.get("webUrl") for c in channels_result if c.get("channelId") == preferred_channel_id),
                 None,
             )
-            urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url)
+            urls = _build_teams_tab_urls(team_id, tenant_id=tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, graph_web_url=preferred_channel_web_url, admin_email=getattr(user, "email", None))
             return Response({
                 "status": "ready",
                 "teams_tab_url": urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url"),
@@ -9097,7 +9123,7 @@ class TeamsMemberLoginView(APIView):
                         (c.get("channelName") for c in channels_result if c.get("channelId") == preferred_channel_id),
                         "General",
                     )
-                    urls = _build_teams_tab_urls(admin.ms_team_id, tenant_id=admin_tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name)
+                    urls = _build_teams_tab_urls(admin.ms_team_id, tenant_id=admin_tenant_id, channel_id=preferred_channel_id, channel_name=preferred_channel_name, admin_email=getattr(admin, "email", None))
                     teams_tab_url = urls.get("channel_web_url") or urls.get("general_web_url") or urls.get("web_url") or ""
                     teams_tab_url_alt = urls.get("channel_web_url_alt") or urls.get("general_web_url_alt") or urls.get("web_url_alt") or ""
                     teams_desktop_url = urls.get("channel_desktop_url") or urls.get("general_desktop_url") or urls.get("desktop_url") or ""
