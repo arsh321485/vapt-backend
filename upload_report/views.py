@@ -2218,6 +2218,7 @@ class UploadCardsStatusAPIView(APIView):
                 "estimated_total_text": "45 sec",
                 "remaining_seconds": 45,
                 "remaining_time_text": "45 sec",
+                "stalled": False,
                 "host_count": 0,
                 "unique_ip_count": 0,
                 "visible_asset_count": 0,
@@ -2273,7 +2274,35 @@ class UploadCardsStatusAPIView(APIView):
         # Same ETA heuristic used by _auto_generate_cards_bg's caller and the
         # scoping-app onboarding status view: ~45s startup + ~2s/vulnerability.
         estimated_total_seconds = max(45, 45 + (cards_total * 2))
-        remaining_seconds = max(0, estimated_total_seconds - elapsed_seconds)
+
+        # Real bug report: remaining_seconds = max(0, estimated - elapsed)
+        # hits 0 the moment elapsed time simply exceeds the static estimate
+        # — reported "0 sec remaining" for ~20 minutes straight while
+        # generation was still genuinely short (10/44), which reads as
+        # "basically done" when it's actually stuck or just slower than
+        # estimated. remaining_seconds must never be 0 while incomplete.
+        # Once there's real progress to measure, extrapolate from the
+        # actual observed rate instead of the static per-vuln guess —
+        # closer to reality once generation has been running a while, and
+        # naturally GROWS (rather than freezing at 0) if progress stalls.
+        if complete:
+            remaining_seconds = 0
+        elif cards_generated > 0 and elapsed_seconds > 0:
+            rate = cards_generated / elapsed_seconds  # cards/sec
+            remaining_cards = max(0, cards_total - cards_generated)
+            remaining_seconds = max(5, min(3600, int(remaining_cards / rate))) if rate > 0 else max(5, estimated_total_seconds - elapsed_seconds)
+        else:
+            remaining_seconds = max(5, estimated_total_seconds - elapsed_seconds)
+
+        # Real feature request: distinguish "still working, just slow" from
+        # "stuck forever" — no way to know FOR CERTAIN a background thread
+        # has genuinely hung (vs. a huge report that's just slow), so this
+        # is a heuristic: generation is taking 3x+ longer than estimated
+        # with no sign of finishing. Frontend can use this to show
+        # "this is taking longer than usual" instead of an indefinite
+        # spinner, without this session claiming a hard "failed" state it
+        # can't actually confirm.
+        stalled = (not complete) and elapsed_seconds > (estimated_total_seconds * 3)
 
         # Frontend contract (upload_report/host_ip_utils.py) — same 4 fields
         # as the upload response and the detail endpoint.
@@ -2310,6 +2339,7 @@ class UploadCardsStatusAPIView(APIView):
             "estimated_total_text": _fmt_seconds_for_status(estimated_total_seconds),
             "remaining_seconds": remaining_seconds,
             "remaining_time_text": _fmt_seconds_for_status(remaining_seconds),
+            "stalled": stalled,
             "automation_full": automation_full,
             "automation_partial": automation_partial,
             "automation_not_possible": automation_not_possible,

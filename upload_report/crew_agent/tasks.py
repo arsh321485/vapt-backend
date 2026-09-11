@@ -449,14 +449,35 @@ paths, and command syntax — same rule the remediation plan itself followed.
 Base your script on the manual plan's own steps; do not invent a different
 fix.
 
+DEFAULT TO "Yes"/full whenever you can. A step being WRITTEN as manual
+instructions (because a human wrote the remediation plan) does NOT mean it
+NEEDS a human — the same LOCATE/REMOVE/REPLACE/VERIFY commands a person
+would type by hand are exactly what a script executes instead. Config
+edits, registry/file changes, service restarts, firewall rules, package
+upgrades, and their own verification are ALL scriptable — that is the
+common case and should be your default reading of a manual plan, not the
+exception. Only downgrade below "Yes" when a SPECIFIC step in THIS plan
+genuinely cannot run unattended — a GUI-only control panel with no CLI/API
+equivalent, a third-party vendor portal login, a business/approval
+decision, or something requiring human judgement that can't be reduced to
+a deterministic check. "Partial" is not a safe-default fallback to reach
+for when unsure — reach it only when you can name the SPECIFIC step in
+what_must_remain_manual that blocks "Yes". Re-scanning/re-testing after
+the fix is applied is normal verification, already covered by
+verify_script — it is never itself a reason to downgrade to Partial.
+
 DECISION RULES:
   1. automation_possible = "Yes"     → every step in the manual plan can be
-     safely scripted end-to-end. automation_status = "full".
+     safely scripted end-to-end. automation_status = "full". This should
+     be the outcome for most straightforward config/command-level fixes —
+     use it whenever nothing in the plan requires the exceptions above.
   2. automation_possible = "Partial" → some steps can be scripted (the
-     mechanical, deterministic ones), but at least one step genuinely needs
-     a human (approval, GUI-only action, vendor portal, judgement call).
-     automation_status = "partial". List exactly what remains manual in
-     what_must_remain_manual.
+     mechanical, deterministic ones), but at least one SPECIFIC step
+     genuinely needs a human (named explicitly — GUI-only control with no
+     CLI/API path, vendor portal, an approval/business decision). List
+     exactly what remains manual, and WHY it can't be scripted, in
+     what_must_remain_manual — a vague or generic reason here means you
+     should reconsider whether this is actually "Yes".
   3. automation_possible = "No"      → nothing here can be safely scripted
      unattended (e.g. it is entirely a GUI/vendor-portal/manual-judgement
      fix). automation_status = "not_possible". fix_script and verify_script
