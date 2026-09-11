@@ -10,6 +10,7 @@ these tests lock that in.
 """
 import io
 import unittest
+from unittest.mock import patch
 
 from scope.utils import parse_file_content, process_entries, validate_entry
 
@@ -168,3 +169,61 @@ def _import_openpyxl_or_skip():
         return openpyxl
     except ImportError:
         raise unittest.SkipTest("openpyxl not installed")
+
+
+class ParseFileContentExtraFormatsTests(unittest.TestCase):
+    """
+    Real feature request: scope file upload should accept every format
+    Upload Report's own upload does (UploadReportView.ALLOWED_EXTENSIONS)
+    — pdf, excel, csv, nessus, html, doc — not just csv/xlsx/xls/txt.
+    """
+
+    def test_html_table_content_extracted(self):
+        html = b"""<html><body>
+        <table><tr><td>192.168.1.10</td><td>web-server-01</td></tr></table>
+        </body></html>"""
+        values = parse_file_content(_FakeUploadedFile(html), "assets.html")
+        self.assertIn("192.168.1.10", values)
+        self.assertIn("web-server-01", values)
+
+    def test_nessus_xml_host_ip_tag_extracted(self):
+        # Real .nessus structure: the target IP is TEXT CONTENT inside a
+        # <tag name="host-ip"> element, not a one-per-line plain value.
+        xml = b"""<NessusClientData_v2><Report><ReportHost name="host1">
+        <HostProperties><tag name="host-ip">172.16.0.5</tag></HostProperties>
+        </ReportHost></Report></NessusClientData_v2>"""
+        values = parse_file_content(_FakeUploadedFile(xml), "scan.nessus")
+        self.assertIn("172.16.0.5", values)
+
+    def test_pdf_delegates_to_upload_report_parser_and_splits_lines(self):
+        # Reuses upload_report.parsers.parse_pdf's text extraction rather
+        # than reimplementing PDF parsing — mocked here so this test
+        # doesn't need a real PDF file, just verifies the wiring.
+        with patch(
+            "upload_report.parsers.parse_pdf",
+            return_value={"type": "pdf", "text_full": "192.168.1.20\nfinance-server\n"},
+        ) as mock_pdf:
+            values = parse_file_content(_FakeUploadedFile(b"%PDF-fake"), "assets.pdf")
+        self.assertTrue(mock_pdf.called)
+        self.assertIn("192.168.1.20", values)
+        self.assertIn("finance-server", values)
+
+    def test_docx_delegates_to_upload_report_parser(self):
+        with patch(
+            "upload_report.parsers.parse_docx",
+            return_value={"type": "docx", "text_full": "10.0.0.99\n"},
+        ) as mock_docx:
+            values = parse_file_content(_FakeUploadedFile(b"fake-docx"), "assets.docx")
+        self.assertTrue(mock_docx.called)
+        self.assertIn("10.0.0.99", values)
+
+    def test_doc_parser_error_propagates_as_value_error(self):
+        # e.g. antiword not installed on the server — parse_doc's own
+        # documented failure mode; must surface as a clean error, not a
+        # silent empty result.
+        with patch(
+            "upload_report.parsers.parse_doc",
+            return_value={"error": "antiword not installed"},
+        ):
+            with self.assertRaises(ValueError):
+                parse_file_content(_FakeUploadedFile(b"fake-doc"), "assets.doc")

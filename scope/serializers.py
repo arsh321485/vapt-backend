@@ -163,7 +163,17 @@ class FileUploadSerializer(serializers.Serializer):
 
     def validate_file(self, file):
         filename = file.name.lower()
-        valid_extensions = [".csv", ".xlsx", ".xls", ".txt"]
+        # Real feature request: accept every format Upload Report's own
+        # file upload does (UploadReportView.ALLOWED_EXTENSIONS in
+        # upload_report/views.py — pdf, excel, csv, nessus, html, doc,
+        # confirmed against that exact list) — see scope/utils.py's
+        # parse_file_content for how each of these gets its targets
+        # extracted.
+        valid_extensions = [
+            ".csv", ".xlsx", ".xls", ".txt",
+            ".xml", ".nessus", ".html", ".htm",
+            ".pdf", ".docx", ".doc",
+        ]
 
         if not any(filename.endswith(ext) for ext in valid_extensions):
             raise serializers.ValidationError(

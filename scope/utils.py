@@ -248,7 +248,12 @@ def _extract_cell_values(df) -> List[str]:
 def parse_file_content(file_obj, filename: str) -> List[str]:
     """
     Parse file content to extract values.
-    Supports CSV, Excel (.xlsx, .xls), and Text (.txt) files.
+
+    Supports every format Upload Report's own file upload accepts (see
+    upload_report/views.py's UploadReportView.ALLOWED_EXTENSIONS) so a
+    scope file doesn't have to be reshaped into a plain list first: CSV,
+    Excel (.xlsx, .xls), Text (.txt), XML/Nessus (.xml, .nessus),
+    HTML (.html, .htm), PDF (.pdf), and Word (.docx, .doc).
 
     Returns:
         List of extracted values (stripped, non-empty)
@@ -288,6 +293,75 @@ def parse_file_content(file_obj, filename: str) -> List[str]:
             if isinstance(content, bytes):
                 content = content.decode("utf-8", errors="ignore")
             for line in content.splitlines():
+                str_val = line.strip()
+                if str_val:
+                    values.append(str_val)
+
+        elif filename_lower.endswith((".xml", ".nessus", ".html", ".htm")):
+            # Real feature request: scope file upload should accept every
+            # format the Upload Report flow does (see UploadReportView.
+            # ALLOWED_EXTENSIONS). A .nessus/.xml scan file or an .html/.htm
+            # report both carry real targets as TEXT CONTENT inside tags
+            # (e.g. Nessus's <tag name="host-ip">1.2.3.4</tag>), not as
+            # one-per-line plain text — strip the markup with BeautifulSoup
+            # (already a project dependency — see upload_report/parsers.py)
+            # and split what's left the same way the .txt branch does.
+            try:
+                from bs4 import BeautifulSoup
+            except ImportError:
+                raise ValueError("BeautifulSoup4 is required to parse XML/Nessus/HTML scope files. Install: pip install beautifulsoup4")
+            file_obj.seek(0)
+            content = file_obj.read()
+            if isinstance(content, bytes):
+                content = content.decode("utf-8", errors="ignore")
+            soup = BeautifulSoup(content, "html.parser")
+            for line in soup.get_text(separator="\n").splitlines():
+                str_val = line.strip()
+                if str_val:
+                    values.append(str_val)
+
+        elif filename_lower.endswith((".pdf", ".docx", ".doc")):
+            # Same idea for prose/scanned-document scope files — reuse the
+            # SAME text-extraction primitives Upload Report's custom-report
+            # path already relies on (upload_report/parsers.py's
+            # parse_pdf/parse_docx/parse_doc), rather than re-implementing
+            # PDF/Word parsing here. Those take a filesystem path, so the
+            # in-memory upload is written to a short-lived temp file first.
+            # Imported locally (not at module top) to avoid a module-level
+            # circular import between scope and upload_report — the same
+            # pattern already used for scope.utils's own cross-app calls
+            # (e.g. send_scope_report_ready_email, called FROM
+            # upload_report/views.py via a local import).
+            import os
+            import tempfile
+            from upload_report.parsers import parse_pdf, parse_docx, parse_doc
+
+            file_obj.seek(0)
+            raw_bytes = file_obj.read()
+            suffix = filename_lower[filename_lower.rfind("."):]
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    tmp.write(raw_bytes)
+                    tmp_path = tmp.name
+
+                if filename_lower.endswith(".pdf"):
+                    result = parse_pdf(tmp_path)
+                elif filename_lower.endswith(".docx"):
+                    result = parse_docx(tmp_path)
+                else:
+                    result = parse_doc(tmp_path)
+            finally:
+                if tmp_path:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+            if result.get("error"):
+                raise ValueError(result["error"])
+
+            for line in (result.get("text_full") or "").splitlines():
                 str_val = line.strip()
                 if str_val:
                     values.append(str_val)
