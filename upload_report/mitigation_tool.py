@@ -1070,9 +1070,18 @@ class MitigationGenerationTool:
         report_id: str = "",
         host_name: str = "",
         operating_system: str = "",
+        run_automation: bool = True,
     ) -> dict:
         """
         Execute the 5-agent mitigation crew and return structured results.
+
+        run_automation=False skips building/running the Automation Engineer
+        task entirely — no GPT call for it, automation_card comes back
+        empty. Real requirement: automation-script generation is a
+        Premium/Custom-only feature; Freemium admins get the manual card
+        only, at zero automation cost, until they upgrade (see
+        upload_report/views.py's per-admin plan check before calling this,
+        and its backfill-on-upgrade job for existing Freemium-era cards).
 
         Returns a dict with keys:
             success, vulnerability_name, description, plugin_output, report_id,
@@ -1117,7 +1126,7 @@ class MitigationGenerationTool:
             }
 
             agents = build_agents(llm)
-            tasks  = build_tasks(agents, finding)
+            tasks, automation_task = build_tasks(agents, finding, include_automation=run_automation)
 
             crew = Crew(
                 agents=list(agents.values()),
@@ -1126,19 +1135,28 @@ class MitigationGenerationTool:
                 verbose=False,
             )
 
-            logger.info(f"[MitigationCrew] Starting 5-agent vaptcode crew for: {plugin_name}")
+            logger.info(
+                f"[MitigationCrew] Starting {'6' if run_automation else '5'}-agent vaptcode crew "
+                f"for: {plugin_name} (automation={'on' if run_automation else 'off'})"
+            )
             crew_result = crew.kickoff()
             raw_text = str(crew_result)
 
-            # tasks[2] is the async backup task (parallel track)
+            # tasks[2] is the async backup task (parallel track) — always
+            # present regardless of run_automation, so this index is stable.
             backup_raw  = _task_raw_output(tasks[2])
             backup_card = _parse_backup_card(backup_raw)
 
-            # tasks[4] is the async automation-feasibility task (parallel
-            # track, fans out from task_remediate same as backup does from
-            # task_profile) — see build_tasks()'s return-list comment.
-            automation_raw  = _task_raw_output(tasks[4])
-            automation_card = _parse_automation_card(automation_raw)
+            # automation_task is None when run_automation=False — build_tasks
+            # never built it, so there's nothing to read and no GPT call was
+            # made for it. Looked up via the object build_tasks handed back
+            # (not a fixed index) since the task's position in `tasks` isn't
+            # stable across the two shapes.
+            if automation_task is not None:
+                automation_raw  = _task_raw_output(automation_task)
+                automation_card = _parse_automation_card(automation_raw)
+            else:
+                automation_card = {}
 
             parsed = _parse_vaptcode_response(raw_text)
 
@@ -1186,3 +1204,41 @@ class MitigationGenerationTool:
                 "raw_response_sections": [],
                 "error": str(exc),
             }
+
+
+def generate_automation_for_existing_card(card: dict) -> dict:
+    """
+    Backfill automation_card onto a vulnerability_cards document that was
+    generated with run_automation=False (Freemium at the time) — runs
+    ONLY the Automation Engineer step, standalone, reusing the card's
+    already-stored mitigation_table/OS profile instead of re-running the
+    whole 6-agent crew (which would re-pay for the manual steps too, for
+    no reason — they're already correct and stored).
+
+    Returns the automation_card dict (same shape _parse_automation_card
+    produces), or {} on failure (caller should leave the card's
+    automation_card untouched and let a later retry pick it up — same
+    self-healing convention as the rest of this crew's error handling).
+    """
+    try:
+        from crewai import Crew, Process
+        from .crew_agent.agents import build_agents
+        from .crew_agent.tasks import build_standalone_automation_task
+
+        llm = _get_crewai_llm()
+        agents = build_agents(llm)
+        task = build_standalone_automation_task(agents["automation_engineer"], card)
+
+        crew = Crew(
+            agents=[agents["automation_engineer"]],
+            tasks=[task],
+            process=Process.sequential,
+            verbose=False,
+        )
+        logger.info(f"[AutomationBackfill] Starting standalone automation task for card_id={card.get('card_id')}")
+        crew.kickoff()
+        raw = _task_raw_output(task)
+        return _parse_automation_card(raw)
+    except Exception as exc:
+        logger.error(f"[AutomationBackfill] Failed for card_id={card.get('card_id')}: {exc}", exc_info=True)
+        return {}

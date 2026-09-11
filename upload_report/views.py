@@ -1670,8 +1670,25 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
 
         # Build vulnerabilities list — one card per (host, plugin_name) combination
         # nessus_reports now stores plugin_outputs as array; use first entry for AI context
-        vulns_to_process = []
-        for host in nessus_doc.get("vulnerabilities_by_host", []):
+        #
+        # Real requirement: card GENERATION must never be capped or phased
+        # by plan/payment status — only DISPLAY of results is plan-gated,
+        # after generation is fully done. Previously this only iterated
+        # vulnerabilities_by_host, which is the Freemium-trimmed-down
+        # subset (billing.enforcement.select_freemium_active_hosts moves
+        # the rest to locked_hosts at upload time, never discarding them —
+        # see unlock_freemium_hosts_for_admin) — so cards_expected_count
+        # started at whatever the Freemium limit allowed (e.g. 10), the
+        # frontend saw that as "100% done" and moved to payment, and only
+        # THEN did a second generation run for the newly-unlocked hosts
+        # bump cards_total up (e.g. to 44) — the exact "generate → pay →
+        # generate again" loop reported. Including locked_hosts here too
+        # means cards_expected_count reflects the TRUE full report count
+        # from this very first run, for every admin regardless of plan.
+        # Freemium's asset limit still fully applies everywhere else
+        # (dashboard, asset list, billable-asset count) — only generation
+        # itself is no longer capped.
+        for host in list(nessus_doc.get("vulnerabilities_by_host", [])) + list(nessus_doc.get("locked_hosts", [])):
             host_name = (host.get("host_name") or "").strip()
             # Extract OS from host_information (used for OS-specific mitigation steps)
             host_info = host.get("host_information") or {}
@@ -1776,6 +1793,20 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         cached = 0
         errors = 0
 
+        # Real requirement: automation-script generation is Premium/Custom-
+        # only — resolved ONCE per report (not per vulnerability) since an
+        # admin's plan doesn't change mid-run, and is_freemium() hits the
+        # DB. A Freemium admin's cards get manual steps only, at zero
+        # automation GPT cost; on upgrade, unlock_freemium_hosts_for_admin's
+        # counterpart (see backfill_automation_for_admin below) generates
+        # automation for every card that was created while still Freemium.
+        run_automation = True
+        try:
+            from billing.enforcement import is_freemium, _is_unlimited_admin
+            run_automation = (not is_freemium(admin_id)) or _is_unlimited_admin(admin_id)
+        except Exception:
+            logger.warning(f"[AutoGenCards] Could not resolve plan for admin_id={admin_id} — defaulting to automation ON")
+
         for vuln in vulns_to_process:
             vuln_plugin_name = vuln["plugin_name"]
             vuln_host_name   = vuln.get("host_name", "") or ""
@@ -1805,15 +1836,20 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             # cache source — falls through to a fresh tool._run() instead,
             # which creates a new card WITH automation_card; every later
             # upload of that same signature then cache-hits on THAT one.
-            cached_card = db[VULN_CARD_COLLECTION].find_one(
-                {
-                    "vulnerability_name": vuln_plugin_name,
-                    "description": vuln.get("description", ""),
-                    "os_category": vuln_os_category,
-                    "automation_card": {"$exists": True, "$nin": [{}, None]},
-                },
-                sort=[("created_at", -1)],
-            )
+            # Only require a cached candidate to already have automation_card
+            # when THIS run actually wants automation (run_automation=True)
+            # — a Freemium run (automation off) would otherwise never find
+            # a cache hit at all (nothing it generates ever gets an
+            # automation_card), forcing a full GPT re-generation of the
+            # MANUAL steps too on every single upload, for no reason.
+            cache_query = {
+                "vulnerability_name": vuln_plugin_name,
+                "description": vuln.get("description", ""),
+                "os_category": vuln_os_category,
+            }
+            if run_automation:
+                cache_query["automation_card"] = {"$exists": True, "$nin": [{}, None]}
+            cached_card = db[VULN_CARD_COLLECTION].find_one(cache_query, sort=[("created_at", -1)])
 
             if cached_card:
                 # Reuse mitigation data from existing card — no GPT call needed
@@ -1866,6 +1902,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     report_id=report_id,
                     host_name=vuln_host_name,
                     operating_system=vuln.get("operating_system", "") or "",
+                    run_automation=run_automation,
                 )
 
                 if not result["success"]:
@@ -2150,6 +2187,73 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
         logger.warning(f"[FreemiumUnlock] cache invalidation failed for admin_id={admin.id}")
 
     return unlocked_count
+
+
+def backfill_automation_for_admin(admin) -> int:
+    """
+    Called on a successful Freemium -> Premium/Custom upgrade — same
+    trigger point as unlock_freemium_hosts_for_admin, but independent of
+    it (an admin can need this even with zero locked_hosts, if they never
+    hit the Freemium asset limit but were still Freemium when their cards
+    were generated). Finds every vulnerability_cards document belonging
+    to this admin that doesn't have an automation_card yet (generated
+    with run_automation=False — see mitigation_tool.py) and queues a
+    standalone Automation Engineer run for each (see
+    mitigation_tool.generate_automation_for_existing_card) — reuses the
+    card's already-stored manual steps rather than re-running the whole
+    6-agent crew.
+
+    Runs in a background thread (this is called from the Stripe webhook
+    request, which must return promptly) and returns how many cards were
+    queued, for logging/confirmation.
+    """
+    import threading
+    from .mitigation_tool import generate_automation_for_existing_card
+
+    client, db = _get_mongo_client_and_db()
+
+    admin_conditions = [{"admin_id": str(admin.id)}]
+    if getattr(admin, "email", None):
+        admin_conditions.append({"admin_email": admin.email})
+
+    query = {
+        "$and": [
+            {"$or": admin_conditions},
+            {"$or": [
+                {"automation_card": {"$exists": False}},
+                {"automation_card": {}},
+                {"automation_card": None},
+            ]},
+        ]
+    }
+    cards = list(db[VULN_CARD_COLLECTION].find(query))
+    if not cards:
+        return 0
+
+    def _run_backfill(card_docs):
+        done = 0
+        for card in card_docs:
+            try:
+                automation_card = generate_automation_for_existing_card(card)
+                if automation_card:
+                    db[VULN_CARD_COLLECTION].update_one(
+                        {"card_id": card.get("card_id")},
+                        {"$set": {"automation_card": automation_card}},
+                    )
+                    done += 1
+            except Exception:
+                logger.exception(f"[AutomationBackfill] card_id={card.get('card_id')} failed")
+        logger.info(
+            f"[AutomationBackfill] Finished — {done}/{len(card_docs)} card(s) updated for "
+            f"admin={getattr(admin, 'email', admin.id)}"
+        )
+
+    t = threading.Thread(target=_run_backfill, args=(cards,), daemon=True)
+    t.start()
+    logger.info(
+        f"[AutomationBackfill] Queued {len(cards)} card(s) for admin={getattr(admin, 'email', admin.id)}"
+    )
+    return len(cards)
 
 
 def _fmt_seconds_for_status(seconds) -> str:
@@ -2788,6 +2892,29 @@ class RunMitigationView(APIView):
         )
 
 
+def _get_locked_host_names(db, report_id) -> set:
+    """
+    Real gap found on review: card GENERATION now covers locked_hosts too
+    (see _auto_generate_cards_bg's "generation must never be capped by
+    plan" fix) — every read path that lists/serves vulnerability_cards by
+    report_id must keep excluding those hosts' cards, the same way
+    adminasset/userasset already do simply by never reading the
+    locked_hosts field at all. Cards don't carry their own "was this host
+    locked" flag, so this cross-references the LIVE nessus_reports doc at
+    read time — correctly self-updates the moment a host is unlocked
+    (upload_report.views.unlock_freemium_hosts_for_admin merges it back
+    into vulnerabilities_by_host and empties locked_hosts).
+    """
+    doc = db[NESSUS_COLLECTION].find_one({"report_id": str(report_id)}, {"locked_hosts.host_name": 1})
+    if not doc:
+        return set()
+    return {
+        (h.get("host_name") or "").strip()
+        for h in (doc.get("locked_hosts") or [])
+        if h.get("host_name")
+    }
+
+
 class VulnerabilityCardListView(APIView):
     """
     GET /api/admin/upload_report/vulnerability-cards/?report_id=<id>
@@ -2815,6 +2942,8 @@ class VulnerabilityCardListView(APIView):
             if request.user.is_superuser:
                 query = {"report_id": report_id}
 
+            locked_host_names = _get_locked_host_names(db, report_id)
+
             cursor = db[VULN_CARD_COLLECTION].find(
                 query,
                 {
@@ -2826,7 +2955,10 @@ class VulnerabilityCardListView(APIView):
                 },
             ).sort("created_at", -1)
 
-            cards = list(cursor)
+            cards = [
+                c for c in cursor
+                if (c.get("host_name") or "").strip() not in locked_host_names
+            ]
 
             # Same Freemium script-content lock as VulnerabilityCardDetailView
             # — every card in one report_id belongs to the same admin, so
@@ -2927,6 +3059,8 @@ class UserVulnerabilityCardListAPIView(APIView):
             # convention as every other user_* endpoint (e.g.
             # automation_scripts_api's _find_vuln_card) — a member never
             # sees another organization's cards regardless of team name.
+            locked_host_names = _get_locked_host_names(db, report_id)
+
             cursor = db[VULN_CARD_COLLECTION].find(
                 {"report_id": report_id, "admin_id": str(admin.id)},
                 {"mitigation_table": 0, "contextual_analysis": 0, "raw_ai_response": 0, "_id": 0},
@@ -2935,6 +3069,7 @@ class UserVulnerabilityCardListAPIView(APIView):
             cards = [
                 c for c in cursor
                 if (c.get("assigned_team") or "").strip().lower() in teams_lower
+                and (c.get("host_name") or "").strip() not in locked_host_names
             ]
 
             # Same Freemium script-content lock as VulnerabilityCardListView
@@ -3005,6 +3140,19 @@ class VulnerabilityCardDetailView(APIView):
                     {"error": "Vulnerability card not found or access denied"},
                     status=404,
                 )
+
+            # Same locked-host exclusion as VulnerabilityCardListView — a
+            # card for a currently-locked (Freemium-overflow) host must
+            # stay inaccessible here too, not just hidden from the list;
+            # a stale/guessed card_id shouldn't be a way around the limit.
+            # Superusers are exempt, same as the ownership check above.
+            if not request.user.is_superuser:
+                locked_host_names = _get_locked_host_names(db, card.get("report_id"))
+                if (card.get("host_name") or "").strip() in locked_host_names:
+                    return Response(
+                        {"error": "Vulnerability card not found or access denied"},
+                        status=404,
+                    )
 
             if "created_at" in card and isinstance(card["created_at"], datetime.datetime):
                 card["created_at"] = card["created_at"].isoformat()

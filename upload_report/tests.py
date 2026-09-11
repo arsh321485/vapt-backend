@@ -206,7 +206,7 @@ class CrewAgentWiringTests(unittest.TestCase):
             "plugin_output": "out",
             "assigned_to": "Network Security",
         }
-        self.tasks = build_tasks(self.agents, self.finding)
+        self.tasks, self.automation_task = build_tasks(self.agents, self.finding)
 
     def test_existing_five_agents_still_present(self):
         for key in (
@@ -231,8 +231,18 @@ class CrewAgentWiringTests(unittest.TestCase):
         automation_task = self.tasks[4]
         self.assertEqual(automation_task.agent.role, "Automation Feasibility Analyst and Script Engineer")
         self.assertTrue(automation_task.async_execution)
+        self.assertIs(automation_task, self.automation_task)
 
     def test_backup_task_still_async_unchanged(self):
         backup_task = self.tasks[2]
         self.assertEqual(backup_task.agent.role, "Backup and Recovery Engineer")
         self.assertTrue(backup_task.async_execution)
+
+    def test_include_automation_false_omits_automation_task(self):
+        from upload_report.crew_agent.tasks import build_tasks
+        tasks, automation_task = build_tasks(self.agents, self.finding, include_automation=False)
+        self.assertEqual(len(tasks), 5)
+        self.assertIsNone(automation_task)
+        self.assertEqual(tasks[-1].agent.role, "Mitigation Card Formatter and QA Reviewer")
+        roles = [t.agent.role for t in tasks]
+        self.assertNotIn("Automation Feasibility Analyst and Script Engineer", roles)

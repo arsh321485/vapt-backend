@@ -6,6 +6,8 @@ the OS Profiler and the downstream Remediation Engineer and QA Formatter.
 Task 3 (backup) runs async in parallel with Task 4 (remediation).
 """
 
+import json
+
 from crewai import Task
 
 
@@ -214,7 +216,21 @@ AUTOMATION_CARD_SCHEMA = """\
 }"""
 
 
-def build_tasks(agents: dict, finding: dict) -> list:
+def build_tasks(agents: dict, finding: dict, include_automation: bool = True):
+    """
+    Returns (tasks, automation_task) — automation_task is None when
+    include_automation=False, and task_automation is not built at all (so
+    it never runs, no GPT cost incurred for it).
+
+    Real requirement: automation-script generation is a Premium/Custom-
+    only feature — Freemium admins get the manual mitigation card only, at
+    zero automation GPT cost, until they upgrade (see
+    upload_report/mitigation_tool.py's run_automation flag and
+    upload_report/views.py's backfill-on-upgrade job). include_automation
+    lets the caller skip building task_automation entirely rather than
+    running it and discarding the result, which would still pay for the
+    GPT call.
+    """
 
     ip          = finding.get("ip",           "unknown")
     hosts       = finding.get("affected_hosts") or [ip]
@@ -594,4 +610,145 @@ Escape backslashes in any path strings as \\\\ inside JSON.
     # stays the LAST task in this list either way — Process.sequential (see
     # mitigation_tool.py) treats the last task's output as the crew's own
     # final result, and nothing here should change what that already is.
-    return [task_analyse, task_profile, task_backup, task_remediate, task_automation, task_format]
+    #
+    # Building task_automation above costs nothing by itself — no GPT call
+    # happens until crew.kickoff() actually runs a task — so the real
+    # cost-skip is here: when include_automation=False, it's simply left
+    # out of the list the Crew is given, so crewai never executes it.
+    if include_automation:
+        return [task_analyse, task_profile, task_backup, task_remediate, task_automation, task_format], task_automation
+    return [task_analyse, task_profile, task_backup, task_remediate, task_format], None
+
+
+def _mitigation_table_to_text(mitigation_table: list) -> str:
+    """
+    Render an already-generated card's mitigation_table (the parsed,
+    stored form — see mitigation_tool.py's _parse_vaptcode_response) back
+    into the same LOCATE/REMOVE/REPLACE/WHERE/VERIFY plain-text shape the
+    live crew's task_remediate output would have been — what
+    build_standalone_automation_task feeds the Automation Engineer for a
+    card that was generated without automation (Freemium at the time) and
+    is now being backfilled after an upgrade, with no live task_remediate
+    run to pull context from.
+    """
+    lines = []
+    for row in mitigation_table or []:
+        lines.append(f"Step {row.get('step_no', '?')}: {row.get('task_name', '')}")
+        if row.get("action"):
+            lines.append(row["action"])
+        commands = row.get("commands_for_action")
+        if isinstance(commands, list):
+            for block in commands:
+                if not isinstance(block, dict):
+                    continue
+                label = block.get("label") or ""
+                cmds = block.get("commands") or []
+                if label:
+                    lines.append(f"  [{label}]")
+                for c in cmds:
+                    lines.append(f"    {c}")
+        elif commands:
+            lines.append(f"Commands: {commands}")
+        if row.get("system_file_path"):
+            lines.append(f"File path: {row['system_file_path']}")
+        if row.get("verification_steps"):
+            lines.append(f"Verify: {row['verification_steps']}")
+        if row.get("important_consideration"):
+            lines.append(f"Note: {row['important_consideration']}")
+        lines.append("")
+    return "\n".join(lines).strip() or "(no manual steps recorded)"
+
+
+def build_standalone_automation_task(agent, card: dict) -> Task:
+    """
+    Same Automation Engineer task as build_tasks()'s task_automation, but
+    built directly from an ALREADY-GENERATED vulnerability_cards document
+    instead of live sibling-task outputs (task_analyse/task_profile/
+    task_remediate) — for backfilling automation onto a card that was
+    created while the admin was still Freemium (automation skipped then,
+    see mitigation_tool.py's run_automation flag) and has since upgraded.
+    Runs standalone (its own single-task Crew, not part of the original
+    6-agent run) — see upload_report/views.py's backfill_automation_for_admin.
+    """
+    os_profile = card.get("vaptcode_os_profile") or {}
+    os_name = os_profile.get("display_name") or card.get("os_category") or "unknown"
+    vuln_name = card.get("vulnerability_name", "unknown")
+    host_name = card.get("host_name", "unknown")
+    steps_text = _mitigation_table_to_text(card.get("mitigation_table"))
+
+    return Task(
+        description=f"""
+Decide whether the manual mitigation plan below (already produced for this
+finding by a separate agent run) can be automated, and if so, write the
+actual script(s).
+
+FINDING:
+  Affected host  : {host_name}
+  OS             : {os_name}
+  Vulnerability  : {vuln_name}
+
+OS PROFILE (source of truth for vocabulary, paths, and command syntax —
+same rule the manual plan itself followed):
+{json.dumps(os_profile, indent=2) if os_profile else "(not available — infer conservatively from the OS name above)"}
+
+MANUAL MITIGATION PLAN (already produced, use as-is — do not invent a
+different fix):
+{steps_text}
+
+DEFAULT TO "Yes"/full whenever you can. A step being WRITTEN as manual
+instructions (because a human/an earlier agent wrote the remediation plan)
+does NOT mean it NEEDS a human — the same LOCATE/REMOVE/REPLACE/VERIFY
+commands above are exactly what a script executes instead. Config edits,
+registry/file changes, service restarts, firewall rules, package
+upgrades, and their own verification are ALL scriptable — that is the
+common case and should be your default reading of the plan above, not the
+exception. Only downgrade below "Yes" when a SPECIFIC step in THIS plan
+genuinely cannot run unattended — a GUI-only control panel with no CLI/API
+equivalent, a third-party vendor portal login, a business/approval
+decision, or something requiring human judgement that can't be reduced to
+a deterministic check. Re-scanning/re-testing after the fix is applied is
+normal verification, already covered by verify_script — it is never
+itself a reason to downgrade to Partial.
+
+DECISION RULES:
+  1. automation_possible = "Yes"     → every step above can be safely
+     scripted end-to-end. automation_status = "full". This should be the
+     outcome for most straightforward config/command-level fixes.
+  2. automation_possible = "Partial" → some steps can be scripted, but at
+     least one SPECIFIC step genuinely needs a human (named explicitly).
+     List exactly what remains manual, and WHY, in what_must_remain_manual.
+  3. automation_possible = "No"      → nothing above can be safely
+     scripted unattended. automation_status = "not_possible". fix_script
+     and verify_script MUST both be "" (empty string), and
+     reason_not_possible MUST explain why, specifically for this finding.
+
+WHEN Yes OR Partial:
+  • fix_script must be REAL, complete, copy-run-able source code in the
+    chosen `language` — not pseudocode, not a fragment.
+  • verify_script must INDEPENDENTLY confirm the fix is in effect.
+  • No literal IPs or hostnames — use <target_ip> / <target_host>.
+  • Language matches the OS paradigm from the OS profile above.
+  • considerations_before should mention taking a backup first when the
+    change is not trivially reversible.
+  • tested_manually is always exactly:
+    "No — AI-generated, not yet human-tested"
+
+STRICT GATES: OS FIDELITY (no terms/commands from a different OS) and
+PRODUCT FIDELITY (no syntax from a different vendor product).
+
+OUTPUT — return ONLY this JSON object, no markdown fences, no commentary:
+
+{AUTOMATION_CARD_SCHEMA}
+
+Escape backslashes and newlines correctly so the whole object is valid,
+parseable JSON.
+""",
+        expected_output=(
+            "A single valid JSON object matching AUTOMATION_CARD_SCHEMA: "
+            "automation_status/automation_possible honestly assessed from "
+            "the manual plan above, and — only when automation is Yes or "
+            "Partial — real, OS-correct, copy-run-able fix_script and "
+            "verify_script source. Parseable with json.loads()."
+        ),
+        agent=agent,
+    )

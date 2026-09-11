@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from .models import BillingCustomer, Subscription, Invoice, StripeWebhookEvent
 from .plans import (
-    PLAN_PREMIUM,
+    PLAN_PREMIUM, PLAN_CUSTOM,
     MODE_MANAGEMENT, MODE_MANAGEMENT_TESTING,
     MANAGEMENT_BILLING_CYCLES, MANAGEMENT_TESTING_RATE_PER_IP_YEAR,
     calculate_management_amount, calculate_management_testing_amount,
@@ -251,12 +251,21 @@ def _on_checkout_completed(session: dict):
 
     sub.save()
 
-    # Freemium -> Premium upgrade: restore whatever upload_report/views.py's
-    # select_freemium_active_hosts set aside as locked_hosts at upload time
-    # (never discarded) back into vulnerabilities_by_host, and generate cards
-    # for anything newly unlocked — no re-upload needed. A brand-new Freemium
-    # signup or a plan that was never Freemium simply has nothing to unlock.
-    if sub.plan == PLAN_PREMIUM:
+    # Freemium -> Premium/Custom upgrade: restore whatever upload_report/
+    # views.py's select_freemium_active_hosts set aside as locked_hosts at
+    # upload time (never discarded) back into vulnerabilities_by_host, and
+    # generate cards for anything newly unlocked — no re-upload needed. A
+    # brand-new Freemium signup or a plan that was never Freemium simply
+    # has nothing to unlock.
+    #
+    # Real gap found on review: this used to only fire for PLAN_PREMIUM —
+    # an admin upgrading straight to PLAN_CUSTOM (select_freemium_active_
+    # hosts and is_freemium() both already treat Custom as "not Freemium",
+    # so their report was never re-trimmed going forward) still had their
+    # ORIGINAL locked_hosts entries sitting there from before the upgrade,
+    # permanently hidden — nothing ever unlocked them. Matches the
+    # automation-backfill gate right below, which already covers both.
+    if sub.plan in (PLAN_PREMIUM, PLAN_CUSTOM):
         try:
             from upload_report.views import unlock_freemium_hosts_for_admin
             unlocked = unlock_freemium_hosts_for_admin(sub.admin)
@@ -264,6 +273,21 @@ def _on_checkout_completed(session: dict):
                 logger.info(f"[Billing] Upgrade unlocked {unlocked} previously-locked host entrie(s) for {sub.admin.email}")
         except Exception:
             logger.exception(f"[Billing] Freemium-unlock failed for {sub.admin.email} after checkout.session.completed")
+
+    # Real requirement: automation-script generation is Premium/Custom-only
+    # (see upload_report/mitigation_tool.py's run_automation flag) — every
+    # card generated while this admin was still Freemium was skipped for
+    # automation, so backfill it now that they've upgraded to EITHER paid
+    # plan (not just Premium — PLAN_CUSTOM counts too, matching
+    # billing.enforcement.is_freemium's own "anything but freemium" rule).
+    if sub.plan in (PLAN_PREMIUM, PLAN_CUSTOM):
+        try:
+            from upload_report.views import backfill_automation_for_admin
+            queued = backfill_automation_for_admin(sub.admin)
+            if queued:
+                logger.info(f"[Billing] Upgrade queued automation backfill for {queued} card(s) for {sub.admin.email}")
+        except Exception:
+            logger.exception(f"[Billing] Automation backfill failed for {sub.admin.email} after checkout.session.completed")
 
 
 def _on_invoice_paid(invoice: dict):
