@@ -1611,7 +1611,10 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
     """
     import time
     import uuid as _uuid
-    from .mitigation_tool import MitigationGenerationTool, _parse_troubleshooting_guide, _detect_os
+    from .mitigation_tool import (
+        MitigationGenerationTool, _parse_troubleshooting_guide, _detect_os,
+        generate_automation_for_existing_card,
+    )
 
     # Prevent duplicate threads for the same report_id
     with _running_card_jobs_lock:
@@ -1808,6 +1811,8 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         except Exception:
             logger.warning(f"[AutoGenCards] Could not resolve plan for admin_id={admin_id} — defaulting to automation ON")
 
+        existing_cards_missing_automation = []
+
         for vuln in vulns_to_process:
             vuln_plugin_name = vuln["plugin_name"]
             vuln_host_name   = vuln.get("host_name", "") or ""
@@ -1820,6 +1825,21 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 "host_name":          vuln_host_name,
             })
             if already_exists:
+                # Real gap found via live testing: re-triggering generation
+                # for a report whose manual cards ALL already exist (e.g. a
+                # retry, or the same report reprocessed) used to just skip
+                # every single vulnerability here — meaning a card created
+                # before the Automation Engineer existed, or while this
+                # admin was still Freemium, NEVER got automation added,
+                # even after an upgrade, unless the upgrade's own
+                # checkout-webhook backfill happened to already cover it.
+                # Just COLLECT the card here (cheap) — the actual
+                # generation happens once, in its own background thread,
+                # after this whole loop finishes (see below), so it never
+                # slows down THIS run's genuinely-new vulnerabilities by
+                # interleaving slow standalone crew calls into this loop.
+                if run_automation and not (already_exists.get("automation_card") or {}):
+                    existing_cards_missing_automation.append(already_exists)
                 print(f"[AutoGenCards] Already exists, skipping: '{vuln_plugin_name}' on '{vuln_host_name}'", flush=True)
                 cached += 1
                 continue
@@ -1970,6 +1990,39 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             except Exception as insert_err:
                 print(f"[AutoGenCards] Insert error for '{vuln_plugin_name}' on host '{vuln_host_name}': {insert_err}", flush=True)
                 errors += 1
+
+        # Backfill automation onto any already-existing cards this run
+        # found missing it (collected above) — its own background thread,
+        # started only after the main loop is done, so it never delays
+        # this run's genuinely-new vulnerabilities.
+        if existing_cards_missing_automation:
+            def _run_existing_card_automation_backfill(card_docs):
+                done = 0
+                for c in card_docs:
+                    try:
+                        automation_card = generate_automation_for_existing_card(c)
+                        if automation_card:
+                            db[VULN_CARD_COLLECTION].update_one(
+                                {"card_id": c.get("card_id")},
+                                {"$set": {"automation_card": automation_card}},
+                            )
+                            done += 1
+                    except Exception:
+                        logger.exception(f"[AutoGenCards] automation backfill-on-exists failed for card_id={c.get('card_id')}")
+                logger.info(
+                    f"[AutoGenCards] Backfilled automation onto {done}/{len(card_docs)} pre-existing "
+                    f"card(s) for report_id={report_id}"
+                )
+
+            threading.Thread(
+                target=_run_existing_card_automation_backfill,
+                args=(existing_cards_missing_automation,),
+                daemon=True,
+            ).start()
+            logger.info(
+                f"[AutoGenCards] Queued automation backfill for {len(existing_cards_missing_automation)} "
+                f"pre-existing card(s) for report_id={report_id}"
+            )
 
         # Verify actual count in MongoDB
         actual_count = db[VULN_CARD_COLLECTION].count_documents({"report_id": report_id})
