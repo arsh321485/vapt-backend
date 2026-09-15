@@ -11776,17 +11776,30 @@ class SlackSlashCommandView(APIView):
     _FIX_SUBTABS = [
         ("fix_sub_assets", "🖥 All Assets"),
         ("fix_sub_vulns",  "📋 All Vulnerabilities"),
-        ("fix_sub_common", "🧩 Common Vulns"),
+        ("fix_sub_common", "🧩 Common Vulnerabilities"),
     ]
 
     # Common Vulns — team filter keys (clickable category cards in Slack).
+    # "all" is the aggregate-across-every-team view, listed first and the
+    # default landing tab (see _default_common_team_key) — real request:
+    # opening Common Vulns used to always land on whichever real team
+    # happened to be first (in filter order) with at least one common
+    # vuln, which put "Configuration Management" front and center for no
+    # reason meaningful to the admin; an overview tab is the more useful
+    # default. Only ever offered where allowed_keys is None (the admin
+    # channel) — a team channel's allowed_keys is derived by mapping real
+    # team names, so "all" (not a real team) can never end up in a
+    # member's restricted key set and a team channel stays scoped to its
+    # own team exactly as before.
     _COMMON_TEAM_FILTERS = [
+        ("all", "All Teams"),
         ("patch", "Patch Management"),
         ("config", "Configuration Management"),
         ("network", "Network Security"),
         ("arch", "Architectural Flaws"),
     ]
     _COMMON_TEAM_KEY_TO_NAME = {
+        "all": "All Teams",
         "patch": "Patch Management",
         "config": "Configuration Management",
         "network": "Network Security",
@@ -11818,6 +11831,15 @@ class SlackSlashCommandView(APIView):
         ("notif_sub_thisweek",  "🟡 This Week"),
         ("notif_sub_nextweek",  "🟢 Next Week"),
         ("notif_sub_support",   "🎫 Support"),
+    ]
+
+    # Same Day/Week choice set the website's own "Extend Timeline" panel and
+    # the Teams bot's Request Extension form use (teams_bot/user_extend_tab.py
+    # _DEADLINE_DAY_OPTIONS) — real request: match that dropdown exactly
+    # instead of Slack's own freeform 1-90 number input.
+    _DEADLINE_DAY_OPTIONS = [
+        "1 Day", "2 Days", "3 Days", "4 Days", "5 Days", "6 Days",
+        "1 Week", "2 Weeks", "3 Weeks", "4 Weeks", "5 Weeks", "6 Weeks",
     ]
 
     # Support tab — status + team filter keys (Slack Block Kit action values).
@@ -12672,8 +12694,8 @@ class SlackSlashCommandView(APIView):
     ]
     _TEAM_FIX_SUBTABS = [
         ("tfix_sub_assets", "🖥 All Assets"),
-        ("tfix_sub_vulns",  "📋 All Vulns"),
-        ("tfix_sub_common", "🧩 Common Vulns"),
+        ("tfix_sub_vulns",  "📋 All Vulnerabilities"),
+        ("tfix_sub_common", "🧩 Common Vulnerabilities"),
     ]
     _TEAM_REG_SUBTABS = [
         ("treg_sub_register", "📋 Register"),
@@ -12765,7 +12787,7 @@ class SlackSlashCommandView(APIView):
 
         if sub_action_id == "tfix_sub_vulns":
             return self._format_team_vuln_list(
-                vulns, title="📋 All Vulns", action_prefix="tfix_vuln", origin="tfixvulns",
+                vulns, title="📋 All Vulnerabilities", action_prefix="tfix_vuln", origin="tfixvulns",
                 vapt_team=vapt_team, sev_filter=sev_filter, st_filter=st_filter, offset=offset,
             )
 
@@ -12937,18 +12959,27 @@ class SlackSlashCommandView(APIView):
                 ctx_els.append({"type": "mrkdwn", "text": f"`{sno}` *{name}*"})
                 blocks.append({"type": "context", "elements": ctx_els})
                 fix_value = f"{sid}|{origin}|{vapt_team}|{sev_filter}|{st_filter}|{offset}"
+                # Real request: a closed vuln has nothing left to fix —
+                # button reads "View" (no color, nothing actionable left)
+                # instead of "Fix"; a still-open one keeps "Fix" and is
+                # now styled green (Slack's "primary" style) so it reads as
+                # the actionable item it is.
+                is_closed = st == "closed"
+                accessory = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View" if is_closed else "Fix", "emoji": True},
+                    "action_id": f"tav_view_{safe_sid}",
+                    "value": fix_value,
+                }
+                if not is_closed:
+                    accessory["style"] = "primary"
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
                         "text": f"`{host}`  |  {self._sev_label_mrkdwn(sev)}  |  Status: {st.capitalize()}",
                     },
-                    "accessory": {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Fix", "emoji": True},
-                        "action_id": f"tav_view_{safe_sid}",
-                        "value": fix_value,
-                    },
+                    "accessory": accessory,
                 })
 
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
@@ -13126,15 +13157,21 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "context", "elements": ctx_els})
             # sid|origin|team|sev|st|list_offset|host|vuln_offset
             fix_value = f"{sid}|tfixassets|{vapt_team}|{sev_filter}|{st_filter}|{list_offset}|{host}|{offset}"
+            # Same View-vs-Fix / green-when-actionable treatment as
+            # _format_team_vuln_list (Register / All Vulnerabilities).
+            is_closed = st == "closed"
+            accessory = {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "View" if is_closed else "Fix", "emoji": True},
+                "action_id": f"tav_view_{safe_sid}",
+                "value": fix_value,
+            }
+            if not is_closed:
+                accessory["style"] = "primary"
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"{self._sev_label_mrkdwn(sev)}  |  Status: {st.capitalize()}"},
-                "accessory": {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Fix", "emoji": True},
-                    "action_id": f"tav_view_{safe_sid}",
-                    "value": fix_value,
-                },
+                "accessory": accessory,
             })
             blocks.append({"type": "divider"})
 
@@ -13185,7 +13222,7 @@ class SlackSlashCommandView(APIView):
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "🛠 Manual", "emoji": True},
+                    "text": {"type": "plain_text", "text": "🛠 Manual Fix", "emoji": True},
                     "action_id": "tav_detail_manual",
                     "value": btn_value,
                     **({"style": "primary"} if sub == "manual" else {}),
@@ -13578,7 +13615,7 @@ class SlackSlashCommandView(APIView):
     def _build_extend_request_modal(
         self, vulns, vapt_team,
         selected_asset=None, selected_short_id=None,
-        days_initial="7", reason_initial="",
+        days_initial="1 Week", reason_initial="",
     ):
         """
         Request Extension modal — Asset → Vulnerability → (auto) Severity,
@@ -13696,14 +13733,16 @@ class SlackSlashCommandView(APIView):
                 }],
             })
 
+        day_options = [{"text": {"type": "plain_text", "text": d}, "value": d} for d in self._DEADLINE_DAY_OPTIONS]
         days_el = {
-            "type": "number_input",
+            "type": "static_select",
             "action_id": "extend_days_input",
-            "is_decimal_allowed": False,
-            "min_value": "1",
-            "max_value": "90",
-            "initial_value": str(days_initial or "7"),
+            "options": day_options,
+            "placeholder": {"type": "plain_text", "text": "Select duration"},
         }
+        initial_day_option = next((o for o in day_options if o["value"] == days_initial), None)
+        if initial_day_option:
+            days_el["initial_option"] = initial_day_option
         reason_el = {
             "type": "plain_text_input",
             "action_id": "extend_reason_input",
@@ -13985,24 +14024,29 @@ class SlackSlashCommandView(APIView):
             "offset": offset,
             "vuln": vuln,
         })
-        blocks.append({
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "← Back", "emoji": True},
-                    "action_id": "tsup_detail_back",
-                    "value": f"{vapt_team}|{st_filter}|{offset}",
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "✈ Reply", "emoji": True},
-                    "action_id": "tsup_reply_open",
-                    "value": meta,
-                    "style": "primary",
-                },
-            ],
-        })
+        action_elements = [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": "← Back", "emoji": True},
+            "action_id": "tsup_detail_back",
+            "value": f"{vapt_team}|{st_filter}|{offset}",
+        }]
+        # Real request: closed requests can't take new replies — matches
+        # the server-side guard in UserSupportRequestsByReportAPIView.post
+        # and the same UI treatment on admin's _format_support_detail.
+        if (st or "").strip().lower() == "closed":
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "_This request is closed — no new replies can be added._"}],
+            })
+        else:
+            action_elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "✈ Reply", "emoji": True},
+                "action_id": "tsup_reply_open",
+                "value": meta,
+                "style": "primary",
+            })
+        blocks.append({"type": "actions", "elements": action_elements})
         return blocks
 
     # ── Fixed (team) ─────────────────────────────────────────────────────
@@ -14401,7 +14445,7 @@ class SlackSlashCommandView(APIView):
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "🛠 Manual", "emoji": True},
+                    "text": {"type": "plain_text", "text": "🛠 Manual Fix", "emoji": True},
                     "action_id": "av_detail_manual",
                     "value": btn_value,
                     **({"style": "primary"} if sub == "manual" else {}),
@@ -14702,6 +14746,14 @@ class SlackSlashCommandView(APIView):
 
         rows = (vd_data.get("rows") or vd_data.get("results") or vd_data.get("vulnerabilities") or []) \
             if isinstance(vd_data, dict) else (vd_data if isinstance(vd_data, list) else [])
+        # Assign short IDs on the FULL list, BEFORE bucketing — so a
+        # bucketed row's short_id is the exact same one the "View" button's
+        # own detail-lookup handler will re-derive when it re-fetches this
+        # same endpoint and re-runs _assign_severity_short_ids on the full
+        # list. Assigning IDs after bucketing (on just one bucket's subset)
+        # would renumber everything relative to that smaller list and every
+        # View button would resolve to the wrong vulnerability.
+        rows = self._assign_severity_short_ids(rows)
         rc_list = (rc_data.get("risk_criteria") or []) if isinstance(rc_data, dict) else []
         if not rc_list:
             return self._text_block("❌ No Risk Criteria configured yet — set it up under Risk Criteria first.")
@@ -15029,6 +15081,7 @@ class SlackSlashCommandView(APIView):
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": "view_fix_asset",
                     "value": f"{host}|{sev_filter}|{st_filter}|{offset}|0",
+                    "style": "primary",
                 },
             })
             blocks.append({"type": "divider"})
@@ -15123,76 +15176,110 @@ class SlackSlashCommandView(APIView):
             slack_user_id=user_id,
         )
 
+    def _build_common_vuln_team_entry(self, display_name, rows):
+        """
+        Group one team's (or, for the "all" aggregate, every team's combined)
+        flat vulnerability rows by plugin_name into the shape Common Vulns
+        rendering expects: { display_name, total, row_count, severity,
+        affected_assets, vulns: [{name, severity, asset_count, assets}] }.
+        Factored out of _group_common_vulns_by_team so the "All Teams" tab
+        can reuse the exact same grouping/sorting logic over every team's
+        rows combined, instead of a second, drifting implementation.
+        """
+        by_plugin = {}
+        for r in rows:
+            pname = (r.get("plugin_name") or "").strip()
+            if not pname:
+                continue
+            entry = by_plugin.setdefault(pname, {
+                "name": pname,
+                "severity": (r.get("risk_factor") or r.get("severity") or "").strip().lower() or "medium",
+                "assets": [],
+                "hosts": set(),
+            })
+            host = (r.get("host_name") or "").strip()
+            if host and host not in entry["hosts"]:
+                entry["hosts"].add(host)
+                entry["assets"].append({
+                    "host": host,
+                    "os": r.get("os") or "—",
+                    "status": (r.get("status") or "open").strip().lower(),
+                    "port": r.get("port") or "",
+                })
+            # Prefer non-empty severity
+            sev = (r.get("risk_factor") or r.get("severity") or "").strip().lower()
+            if sev in ("critical", "high", "medium", "low"):
+                entry["severity"] = sev
+
+        vulns = []
+        sev_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        all_hosts = set()
+        for pname, entry in sorted(by_plugin.items(), key=lambda kv: (-len(kv[1]["assets"]), kv[0].lower())):
+            asset_count = len(entry["assets"])
+            sev = entry["severity"] if entry["severity"] in sev_counts else "medium"
+            sev_counts[sev] += asset_count  # count asset-rows toward severity (matches HTML sample style of totals)
+            all_hosts.update(entry["hosts"])
+            vulns.append({
+                "name": entry["name"],
+                "severity": sev,
+                "asset_count": asset_count,
+                "assets": entry["assets"],
+            })
+
+        # Better severity counts: count unique vulns by severity (like category card "Medium: 26")
+        # Recompute as vuln-count not asset-count to match HTML "total: 26" with medium: 26
+        sev_vuln_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        for v in vulns:
+            if v["severity"] in sev_vuln_counts:
+                sev_vuln_counts[v["severity"]] += 1
+
+        return {
+            "display_name": display_name,
+            "total": len(vulns),
+            "row_count": len(rows),
+            "severity": sev_vuln_counts,
+            "affected_assets": len(all_hosts),
+            "vulns": vulns,
+        }
+
     def _group_common_vulns_by_team(self, data):
         """
         Transform by-team API flat rows into:
         { team_name: { total, severity, affected_assets, vulns: [{name, severity, asset_count, assets}] } }
+
+        "all" is the every-team aggregate (see _COMMON_TEAM_FILTERS) — built
+        from every real team's rows combined, same grouping/sorting as a
+        single team so it reads as one coherent list rather than four
+        stapled together.
         """
         teams_raw = (data or {}).get("teams") or {}
         result = {}
+        all_rows = []
         for key, display_name in self._COMMON_TEAM_KEY_TO_NAME.items():
+            if key == "all":
+                continue  # built last, from every other team's rows combined
             bucket = teams_raw.get(display_name) or {}
             rows = bucket.get("vulnerabilities") or []
-            # Group by plugin_name
-            by_plugin = {}
-            for r in rows:
-                pname = (r.get("plugin_name") or "").strip()
-                if not pname:
-                    continue
-                entry = by_plugin.setdefault(pname, {
-                    "name": pname,
-                    "severity": (r.get("risk_factor") or r.get("severity") or "").strip().lower() or "medium",
-                    "assets": [],
-                    "hosts": set(),
-                })
-                host = (r.get("host_name") or "").strip()
-                if host and host not in entry["hosts"]:
-                    entry["hosts"].add(host)
-                    entry["assets"].append({
-                        "host": host,
-                        "os": r.get("os") or "—",
-                        "status": (r.get("status") or "open").strip().lower(),
-                        "port": r.get("port") or "",
-                    })
-                # Prefer non-empty severity
-                sev = (r.get("risk_factor") or r.get("severity") or "").strip().lower()
-                if sev in ("critical", "high", "medium", "low"):
-                    entry["severity"] = sev
-
-            vulns = []
-            sev_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            all_hosts = set()
-            for pname, entry in sorted(by_plugin.items(), key=lambda kv: (-len(kv[1]["assets"]), kv[0].lower())):
-                asset_count = len(entry["assets"])
-                sev = entry["severity"] if entry["severity"] in sev_counts else "medium"
-                sev_counts[sev] += asset_count  # count asset-rows toward severity (matches HTML sample style of totals)
-                all_hosts.update(entry["hosts"])
-                vulns.append({
-                    "name": entry["name"],
-                    "severity": sev,
-                    "asset_count": asset_count,
-                    "assets": entry["assets"],
-                })
-
-            # Better severity counts: count unique vulns by severity (like category card "Medium: 26")
-            # Recompute as vuln-count not asset-count to match HTML "total: 26" with medium: 26
-            sev_vuln_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            for v in vulns:
-                if v["severity"] in sev_vuln_counts:
-                    sev_vuln_counts[v["severity"]] += 1
-
-            result[key] = {
-                "display_name": display_name,
-                "total": len(vulns),
-                "row_count": len(rows),
-                "severity": sev_vuln_counts,
-                "affected_assets": len(all_hosts),
-                "vulns": vulns,
-            }
+            all_rows.extend(rows)
+            result[key] = self._build_common_vuln_team_entry(display_name, rows)
+        result["all"] = self._build_common_vuln_team_entry(
+            self._COMMON_TEAM_KEY_TO_NAME["all"], all_rows
+        )
         return result
 
     def _default_common_team_key(self, grouped, allowed_keys=None):
         keys = [k for k, _ in self._COMMON_TEAM_FILTERS if allowed_keys is None or k in allowed_keys]
+        # Real request: land on the "All Teams" overview by default instead
+        # of whichever single real team happened to be first (in filter
+        # order) with a nonzero common-vuln count — that used to put
+        # "Configuration Management" front and center just because Patch
+        # Management's count was 0, with no real significance to it. Only
+        # reachable here when "all" is actually offered (admin channel,
+        # allowed_keys is None) — a team-restricted channel's allowed_keys
+        # never contains "all" (it's not a real team name), so this is a
+        # no-op there and falls through to the original per-team behavior.
+        if "all" in keys:
+            return "all"
         for key in keys:
             if grouped.get(key, {}).get("total", 0) > 0:
                 return key
@@ -15555,6 +15642,14 @@ class SlackSlashCommandView(APIView):
         "fixvulns":   ("nav_fix", "fix_sub_vulns"),
         "fixassets":  ("nav_fix", "fix_sub_assets"),
         "register":   ("nav_register", "reg_sub_register"),
+        # Reminder tab's deadline buckets — one origin per bucket so a
+        # "View" click's own Back button returns to the SAME bucket it was
+        # opened from (Overdue vs Due Today vs This Week vs Next Week),
+        # not always the same one regardless of where the click came from.
+        "notifoverdue":  ("nav_notification", "notif_sub_overdue"),
+        "notiftoday":    ("nav_notification", "notif_sub_today"),
+        "notifthisweek": ("nav_notification", "notif_sub_thisweek"),
+        "notifnextweek": ("nav_notification", "notif_sub_nextweek"),
     }
 
     def _parse_vuln_detail_action_value(self, value):
@@ -15666,7 +15761,19 @@ class SlackSlashCommandView(APIView):
             st   = r.get("status", "review")
             section = {"type": "section", "text": {"type": "mrkdwn", "text": f"`{sid}` *{vuln}*\n+{days} days"}}
             if st == "approved":
-                section["text"]["text"] += "\n✅ *Approved*"
+                # Real request: a decided row's "✅ Approved" used to be
+                # appended as extra body text below the vuln/days line —
+                # moved to a right-side accessory button (same placement as
+                # the still-pending row's "Approve Request" button just
+                # below) so a decided request reads the same way as every
+                # other right-side-action row in this app, and clicking it
+                # opens that request's full details instead of nothing.
+                section["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✅ Approved · View", "emoji": True},
+                    "action_id": "av_hist_view_row",
+                    "value": f"{sid}|approve|{offset}",
+                }
             else:
                 section["accessory"] = {
                     "type": "button",
@@ -15724,8 +15831,17 @@ class SlackSlashCommandView(APIView):
             st   = r.get("status", "review")
             section = {"type": "section", "text": {"type": "mrkdwn", "text": f"`{sid}` *{vuln}*\n+{days} days"}}
             if st == "rejected":
-                reason = r.get("reason") or "—"
-                section["text"]["text"] += f"\n❌ *Rejected* — Reason: {reason}"
+                # Same right-side-button treatment as the Approve list's
+                # decided rows — was body text below the row, now an
+                # accessory button that opens the full detail (reason
+                # included) instead of only ever showing a truncated reason
+                # inline here.
+                section["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "❌ Rejected · View", "emoji": True},
+                    "action_id": "av_hist_view_row",
+                    "value": f"{sid}|reject|{offset}",
+                }
             else:
                 section["accessory"] = {
                     "type": "button",
@@ -15749,6 +15865,48 @@ class SlackSlashCommandView(APIView):
             })
         if nav_buttons:
             blocks.append({"type": "actions", "elements": nav_buttons})
+        return blocks
+
+    def _build_history_detail_blocks(self, r, history_view="approve", offset=0):
+        """
+        Full detail view for one already-decided (approved/rejected)
+        timeline extension request — reached via the "View" accessory
+        button on its row in _build_approve_list_blocks/
+        _build_reject_list_blocks. Shows everything the list row's old
+        inline text only hinted at (who requested it and when, the
+        original reason, the admin's own comment on decline) plus a Back
+        button that returns to the same Approve/Reject list at the same
+        page it was opened from.
+        """
+        st = r.get("status", "review")
+        status_label = "✅ Approved" if st == "approved" else ("❌ Rejected" if st == "rejected" else "⏳ Pending")
+        icon = self._SEV_ICONS.get((r.get("severity") or "").title(), "⚪")
+
+        lines = [
+            f"*Vulnerability:* {r.get('vul_name') or 'Unknown'}",
+            f"*Asset:* `{r.get('asset') or '—'}`",
+            f"*Severity:* {icon} {(r.get('severity') or '—').title()}",
+            f"*Requested Extension:* +{r.get('extension_days', 0)} day(s)",
+            f"*Status:* {status_label}",
+            f"*Requested By:* {r.get('requested_by') or '—'}"
+            + (f" ({r.get('requested_by_email')})" if r.get("requested_by_email") else ""),
+            f"*Requested On:* {(r.get('request_date') or '—')[:10] if r.get('request_date') else '—'}",
+        ]
+        if r.get("reason"):
+            lines.append(f"*Reason:* {r['reason']}")
+        if st == "rejected" and r.get("admin_comment"):
+            lines.append(f"*Rejection Comment:* {r['admin_comment']}")
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"⏳ Extension Request Details — `{r.get('short_id', '?')}`", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
+            {"type": "actions", "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "← Back", "emoji": True},
+                "action_id": "av_hist_view_back",
+                "value": f"{history_view}|{offset}",
+            }]},
+        ]
         return blocks
 
     _PICKER_PAGE_SIZE = 10  # Slack's own hard cap on options per checkboxes element
@@ -18407,24 +18565,32 @@ class SlackSlashCommandView(APIView):
             })
 
         blocks.append({"type": "divider"})
-        blocks.append({
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "← Back to list", "emoji": True},
-                    "action_id": "sup_back_list",
-                    "value": f"{st_filter}|{team_filter}|{offset}",
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "✈ Reply", "emoji": True},
-                    "action_id": "sup_reply_open",
-                    "value": meta,
-                    "style": "primary",
-                },
-            ],
-        })
+        action_elements = [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": "← Back to list", "emoji": True},
+            "action_id": "sup_back_list",
+            "value": f"{st_filter}|{team_filter}|{offset}",
+        }]
+        # Real request: once a request is closed, no new message should be
+        # addable — matches the server-side guard now enforced in
+        # SupportRequestByReportAPIView.post (belt-and-suspenders: hiding
+        # the button here avoids the round-trip-then-error for the common
+        # case, the server check is what actually stops a stale/cached
+        # message that still shows the button).
+        if (st or "").strip().lower() == "closed":
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "_This request is closed — no new replies can be added._"}],
+            })
+        else:
+            action_elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "✈ Reply", "emoji": True},
+                "action_id": "sup_reply_open",
+                "value": meta,
+                "style": "primary",
+            })
+        blocks.append({"type": "actions", "elements": action_elements})
         return blocks
 
     def _build_support_reply_modal(self, meta_json, vuln_label):
@@ -19359,18 +19525,33 @@ class SlackSlashCommandView(APIView):
                     due_label = "Due today"
                 else:
                     due_label = f"Due in {remaining} day{'s' if remaining != 1 else ''}"
-                blocks.append(
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                f"*`{sno}`*  *{name}*\n"
-                                f"`{asset}`  |  {sev_icon(sev)} *{sev.upper()}*  |  *{due_label}*"
-                            ),
-                        },
+                # Real request: a right-side "View" button per row so the
+                # admin can jump straight to that vulnerability's detail
+                # (Manual/Automation fix steps) from the Reminder tab
+                # itself, instead of having to go hunt for it under
+                # Register/Fix. short_id was assigned on the FULL vuln list
+                # before bucketing (see _notification_subtab_blocks) so it
+                # resolves to the SAME vuln the detail handler re-derives.
+                sid = v.get("short_id")
+                section = {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*`{sno}`*  *{name}*\n"
+                            f"`{asset}`  |  {sev_icon(sev)} *{sev.upper()}*  |  *{due_label}*"
+                        ),
+                    },
+                }
+                if sid:
+                    safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
+                    section["accessory"] = {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": f"view_allvuln_detail_{safe_sid}",
+                        "value": f"{sid}|notif{bucket_key}",
                     }
-                )
+                blocks.append(section)
 
         blocks.append(
             {
@@ -19877,10 +20058,13 @@ class SlackSlashCommandView(APIView):
         # rather than falling into the generic fields block below with
         # every content section empty. Matches the same branch added to
         # teams_bot/fix_tab.py's _automation_fix_body.
+        asset = v.get("asset") or v.get("host_name") or "—"
+
         if automation.get("automation_possible") == "No":
             blocks = [
                 {"type": "header", "text": {"type": "plain_text", "text": f"🤖 Automated Fix: {name}"[:150], "emoji": True}},
                 {"type": "section", "fields": [
+                    {"type": "mrkdwn", "text": f"*Asset*\n`{asset}`"},
                     {"type": "mrkdwn", "text": f"*Severity*\n{automation.get('severity') or '—'}"},
                     {"type": "mrkdwn", "text": f"*OS*\n{automation.get('os') or '—'}"},
                 ]},
@@ -19901,6 +20085,10 @@ class SlackSlashCommandView(APIView):
                 "Read-only — script preview only."
             ),
             {"type": "section", "fields": [
+                # Real request: which asset this automated fix is FOR was
+                # never shown here at all — only visible by backing out to
+                # the list it was opened from.
+                {"type": "mrkdwn", "text": f"*Asset*\n`{asset}`"},
                 {"type": "mrkdwn", "text": f"*Severity*\n{automation.get('severity') or '—'}"},
                 {"type": "mrkdwn", "text": f"*OS*\n{automation.get('os') or '—'}"},
                 {"type": "mrkdwn", "text": f"*Language*\n{automation.get('language') or '—'}"},
@@ -22181,6 +22369,54 @@ class SlackInteractivityView(APIView):
                 self._debug_write(f"_handle_action: {action_id} views.open -> {getattr(resp, 'text', None)}")
                 return
 
+            if action_id == "av_hist_view_row":
+                # Right-side "View" button on an already-decided (approved/
+                # rejected) history row — shows that one request's full
+                # detail instead of the old truncated inline text.
+                sid, history_view, page_offset_raw = (value.split("|") + ["approve", "0"])[:3]
+                page_offset = int(page_offset_raw) if page_offset_raw.isdigit() else 0
+                ext_data = slash._call_api(
+                    "/api/admin/admindashboard/dashboard/mitigation-timeline-extension/report/", team_id,
+                    slack_user_id=slack_user_id,
+                )
+                all_requests = slash._assign_severity_short_ids(ext_data.get("results") or [])
+                target = next((r for r in all_requests if slash._short_ids_match(r.get("short_id"), sid)), None)
+                content = (
+                    slash._build_history_detail_blocks(target, history_view=history_view, offset=page_offset)
+                    if target else
+                    slash._text_block(f"❌ Request `{sid}` not found. Reopen the list and try again.")
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_request")
+                    + slash._request_subnav_block(active_sub="req_sub_history")
+                    + content
+                )
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
+            if action_id == "av_hist_view_back":
+                # Detail view's Back button — returns to the same
+                # Approve/Reject history list at the same page it was
+                # opened from.
+                history_view, page_offset_raw = (value.split("|") + ["approve", "0"])[:2]
+                page_offset = int(page_offset_raw) if page_offset_raw.isdigit() else 0
+                content_blocks = slash._request_subtab_blocks(
+                    "req_sub_history", team_id, slack_user_id, history_view=history_view, offset=page_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_request")
+                    + slash._request_subnav_block(active_sub="req_sub_history")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {
+                    "replace_original": True,
+                    "blocks": blocks,
+                }, action_id)
+                return
+
             if (
                 action_id in ("view_allvuln_detail", "av_detail_manual", "av_detail_automation")
                 or action_id.startswith("view_allvuln_detail_")
@@ -23061,12 +23297,15 @@ class SlackInteractivityView(APIView):
                 vapt_team = meta.get("team") or ""
                 vuln_opt = ((values.get("extend_vuln_block") or {}).get("extend_vuln_select") or {}).get("selected_option") or {}
                 short_id = vuln_opt.get("value") or meta.get("sid") or ""
-                days_raw = ((values.get("extend_days_block") or {}).get("extend_days_input") or {}).get("value") or "7"
+                # Extension Days is now the same Day/Week dropdown as the
+                # website + Teams bot (see _DEADLINE_DAY_OPTIONS) instead of
+                # a freeform number — its value is a string like "2 Weeks",
+                # parsed into a day count via _parse_rc_days (already used
+                # for the same "N Day(s)"/"N Week(s)" shape elsewhere).
+                days_opt = ((values.get("extend_days_block") or {}).get("extend_days_input") or {}).get("selected_option") or {}
+                days_raw = days_opt.get("value") or "1 Week"
+                days = slash._parse_rc_days(days_raw) or 7
                 reason = (((values.get("extend_reason_block") or {}).get("extend_reason_input") or {}).get("value") or "").strip()
-                try:
-                    days = int(days_raw)
-                except (TypeError, ValueError):
-                    days = 7
                 if not short_id or short_id == "none":
                     blocks = slash._text_block("❌ Please select an asset and a vulnerability.")
                 elif not reason:
@@ -23368,8 +23607,8 @@ class SlackInteractivityView(APIView):
                 selected_asset = asset_opt.get("value")
 
         days_raw = (
-            (state_values.get("extend_days_block") or {}).get("extend_days_input") or {}
-        ).get("value") or "7"
+            ((state_values.get("extend_days_block") or {}).get("extend_days_input") or {}).get("selected_option") or {}
+        ).get("value") or "1 Week"
         reason_raw = (
             (state_values.get("extend_reason_block") or {}).get("extend_reason_input") or {}
         ).get("value") or ""
@@ -23381,7 +23620,7 @@ class SlackInteractivityView(APIView):
                 vulns, vapt_team,
                 selected_asset=selected_asset or None,
                 selected_short_id=selected_sid or None,
-                days_initial=str(days_raw or "7"),
+                days_initial=days_raw or "1 Week",
                 reason_initial=reason_raw or "",
             )
         except Exception:

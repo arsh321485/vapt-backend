@@ -3200,6 +3200,27 @@ class SupportRequestByReportAPIView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
+            # Real request: once a support request is closed, no new
+            # message should be addable to it — the GET side already
+            # computes this SAME "effective closed" status (either the
+            # request's own status field, or its linked vulnerability
+            # having been closed separately) to show "Closed" in the
+            # detail view; this POST had no matching check at all, so a
+            # reply could still be sent right through a ticket the admin
+            # was shown as already closed.
+            is_closed = (support_doc.get("status") or "").strip().lower() == "closed"
+            if not is_closed:
+                vulnerability_id = str(support_doc.get("vulnerability_id") or "").strip()
+                if vulnerability_id and db[FIX_VULN_CLOSED_COLLECTION].find_one(
+                    {"fix_vulnerability_id": vulnerability_id}
+                ):
+                    is_closed = True
+            if is_closed:
+                return Response(
+                    {"detail": "This support request is closed — no new replies can be added."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             message_entry = {
                 "_id": ObjectId(),
                 "sender": "admin",
