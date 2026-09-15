@@ -13,7 +13,7 @@ from .plans import (
     PLAN_PREMIUM, PLAN_CUSTOM,
     MODE_MANAGEMENT, MODE_MANAGEMENT_TESTING,
     MANAGEMENT_BILLING_CYCLES, MANAGEMENT_TESTING_RATE_PER_IP_YEAR,
-    calculate_management_amount, calculate_management_testing_amount,
+    calculate_management_amount, calculate_management_testing_amount, calculate_custom_amount,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,68 @@ def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_
         plan="premium",
         mode=mode,
         billing_cycle=billing_cycle if mode == MODE_MANAGEMENT else "annual",
+        asset_count=asset_count,
+        price_per_ip=str(price_per_ip),
+        amount_due=str(amount_due),
+        status="incomplete",
+        stripe_checkout_session_id=session["id"],
+    )
+
+    return {"checkout_url": session["url"], "session_id": session["id"], "amount_due": str(amount_due)}
+
+
+def create_custom_checkout_session(admin, asset_count: int) -> dict:
+    """
+    Custom tier (>250 assets) — same Stripe Checkout Session pattern as
+    create_premium_checkout_session's Management/Annual path (subscription
+    mode, dynamic price_data since quantity varies per admin, same
+    success/cancel URLs), just uncapped and always Annual-only. Kept as a
+    separate function (rather than a branch inside
+    create_premium_checkout_session) since Custom has no "mode" concept at
+    all — the request body is just {"asset_count": N}.
+    """
+    customer_id = get_or_create_customer(admin)
+
+    cfg = MANAGEMENT_BILLING_CYCLES["annual"]
+    unit_amount_cents = int(cfg["rate_per_ip"] * cfg["months"] * 100)
+    recurring = {"interval": cfg["stripe_interval"], "interval_count": cfg["stripe_interval_count"]}
+    product_name = "VaptFix Custom — Management (Annual)"
+    amount_due = calculate_custom_amount(asset_count)
+    price_per_ip = cfg["rate_per_ip"]
+
+    metadata = {
+        "admin_id": str(admin.id),
+        "plan": "custom",
+        "mode": MODE_MANAGEMENT,
+        "billing_cycle": "annual",
+        "asset_count": str(asset_count),
+    }
+
+    frontend_url = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+    session = stripe.checkout.Session.create(
+        customer=customer_id,
+        mode="subscription",
+        payment_method_types=["card"],
+        line_items=[{
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": product_name},
+                "unit_amount": unit_amount_cents,
+                "recurring": recurring,
+            },
+            "quantity": max(int(asset_count), 1),
+        }],
+        success_url=f"{frontend_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{frontend_url}/billing/cancel",
+        metadata=metadata,
+        subscription_data={"metadata": metadata},
+    )
+
+    Subscription.objects.create(
+        admin=admin,
+        plan=PLAN_CUSTOM,
+        mode=MODE_MANAGEMENT,
+        billing_cycle="annual",
         asset_count=asset_count,
         price_per_ip=str(price_per_ip),
         amount_due=str(amount_due),

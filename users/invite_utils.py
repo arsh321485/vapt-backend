@@ -7,8 +7,8 @@ pick it themselves at signup via Slack / MS Teams / Email), so the link
 itself is the sole authorization: whoever completes signup with a valid,
 unexpired token gets the report(s) reassigned to their new account.
 
-Storage: Django's shared cache (same FileBasedCache already used for the
-Slack pending-upload flow) — a plain token -> dict mapping with a hard
+Storage: Django's shared cache (same MongoDB-backed cache already used for
+the Slack pending-upload flow) — a plain token -> dict mapping with a hard
 15-minute TTL. No new DB table needed; expiry is handled by the cache
 backend itself.
 """

@@ -21,6 +21,10 @@ class PremiumCheckoutRequestSerializer(serializers.Serializer):
         return attrs
 
 
+class CustomCheckoutRequestSerializer(serializers.Serializer):
+    asset_count = serializers.IntegerField(min_value=1)
+
+
 class CustomLeadRequestSerializer(serializers.Serializer):
     full_name = serializers.CharField(max_length=255)
     work_email = serializers.EmailField()

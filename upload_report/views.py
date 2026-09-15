@@ -1921,8 +1921,20 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     # vulnerability+OS should never need re-generating —
                     # forward it from the cached card exactly like every
                     # other cached field above ("next time same vuln → same
-                    # automation script" — no new GPT call).
-                    "automation_card":    cached_card.get("automation_card", {}),
+                    # automation script" — no new GPT call). Real bug
+                    # report: forwarding download_count/last_downloaded_at
+                    # too made every host sharing this vuln+OS signature
+                    # show the SAME download count in /automation-scripts/
+                    # stats/ (confirmed live: 7 different hosts' cards all
+                    # showing "11" for the same vulnerability, with
+                    # byte-identical last_downloaded_at) — those are this
+                    # brand-new card's OWN usage stats, never downloaded
+                    # yet, not part of the reusable script content.
+                    "automation_card":    {
+                        **(cached_card.get("automation_card") or {}),
+                        "download_count": 0,
+                        "last_downloaded_at": None,
+                    },
                 }
             else:
                 # ── Step 3: No cache — call GPT-4o to generate new card ──
@@ -2215,6 +2227,36 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
         if not locked_hosts:
             continue
 
+        # Real bug report: an admin who deleted OR held an asset (
+        # AssetDeleteAPIView / AssetHoldAPIView — both $pull it from
+        # vulnerabilities_by_host, logging it to deleted_assets / hold_assets
+        # respectively) BEFORE upgrading saw it silently reappear (delete)
+        # or come off hold (hold) on the Assets/Register/Team Performance
+        # pages right after the upgrade completed — a leftover locked_hosts
+        # entry for that same host_name (e.g. from the
+        # select_freemium_active_hosts vuln-overflow duplication this same
+        # report went through pre-fix) still gets merged back in below,
+        # since deleting/holding only ever touched vulnerabilities_by_host,
+        # never locked_hosts. Both must survive an upgrade — only skip
+        # resurrecting a host if it's NOT already active (an admin could
+        # delete/hold, then have it come back via a fresh same-day
+        # re-upload, which legitimately re-adds it to vulnerabilities_by_host
+        # and should win over an old deleted/held flag).
+        skip_host_names = {
+            d.get("host_name")
+            for d in db["deleted_assets"].find(
+                {"report_id": str(report_id)}, {"host_name": 1}
+            )
+            if d.get("host_name")
+        }
+        skip_host_names |= {
+            d.get("host_name")
+            for d in db["hold_assets"].find(
+                {"report_id": str(report_id)}, {"host_name": 1}
+            )
+            if d.get("host_name")
+        }
+
         # Real bug report: the same vulnerability started appearing TWICE
         # on the same asset in the Register list right after a Freemium ->
         # Premium upgrade — this naive concatenation is why. Unlike
@@ -2242,7 +2284,7 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
                     if vuln.get("plugin_name") not in existing_plugin_names:
                         existing.setdefault("vulnerabilities", []).append(vuln)
                         existing_plugin_names.add(vuln.get("plugin_name"))
-            else:
+            elif name not in skip_host_names:
                 by_name[name] = h
 
         merged_hosts = list(by_name.values())

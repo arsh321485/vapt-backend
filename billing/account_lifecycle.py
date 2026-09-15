@@ -202,33 +202,38 @@ def _remove_teams_bot_and_revoke(admin):
             logger.exception(f"[BillingLifecycle] Teams app removal failed for {admin.email}")
 
 
-def purge_premium_admin_data(admin: User):
+def purge_admin_records(admin_id: str, admin_email: str, member_emails=None, aad_ids=None, team_id=None,
+                         *, admin=None, dry_run: bool = False):
     """
-    Full, permanent, irreversible deletion of a Premium admin's data after
-    their subscription ends — deliberately aggressive per explicit
-    instruction. Never touches billing.Subscription / billing.Invoice /
-    billing.BillingCustomer / billing.StripeWebhookEvent (financial/audit
-    records) or the User row itself (deactivated instead of deleted, so
-    Invoice/Subscription FKs stay intact and the email/account identity
-    can't be silently reused).
+    The actual cross-app/cross-collection cascade — factored out of
+    purge_premium_admin_data() so it can also be driven purely by
+    admin_id/admin_email (no live User row required). That split exists for
+    a real gap: an admin manually deleted from the database (e.g. via the
+    Django admin panel or a raw query) leaves every OTHER collection this
+    app writes to untouched — Django's FK CASCADE only ever fires for
+    models with a real ForeignKey to User, and this app's raw-pymongo
+    collections (nessus_reports, vulnerability_cards, deleted/held asset
+    history, tickets, ...) have no such relationship at all. Since almost
+    every admin-scoped Mongo lookup in this app falls back to matching on
+    admin_email when admin_id doesn't match (see e.g. billing/
+    asset_service.py's get_admin_asset_count), a fresh signup with that
+    SAME email — which gets a brand-new admin_id — still matches all this
+    leftover data by email and resurfaces it under the "new" account. A
+    truly clean re-signup requires purging every collection this function
+    covers, not just the one report an admin happened to remember to delete.
+
+    Pass a live `admin` User instance when one still exists so ORM deletes
+    can use the FK relation directly (`admin=admin`) instead of the raw
+    id column — behavior is identical either way, filtering on the same
+    underlying column. `dry_run=True` counts what WOULD be deleted without
+    deleting anything (via .count() instead of .delete(), and
+    count_documents() instead of delete_many()).
+
+    Returns {collection_or_model_name: count}.
     """
-    admin_id = str(admin.id)
-    admin_email = admin.email
-    logger.warning(f"[BillingLifecycle] Starting full data purge for admin={admin_email} id={admin_id}")
-
-    _revoke_slack(admin)
-    _remove_teams_bot_and_revoke(admin)
-
-    # -- Gather everything needed to find related records BEFORE the ORM
-    # deletes below remove the rows these come from (team member emails,
-    # Teams AAD ids) -----------------------------------------------------
-    from users_details.models import UserDetail
-
-    member_details = list(UserDetail.objects.filter(admin=admin).values("email", "ms_teams_member_id"))
-    member_emails = {admin_email} | {d["email"] for d in member_details if d.get("email")}
-    aad_ids = {aid for aid in (
-        [getattr(admin, "ms_teams_object_id", None)] + [d.get("ms_teams_member_id") for d in member_details]
-    ) if aid}
+    member_emails = set(member_emails or [])
+    member_emails.add(admin_email)
+    aad_ids = set(aad_ids or [])
 
     from vaptfix.mongo_client import MongoContext
 
@@ -255,21 +260,57 @@ def purge_premium_admin_data(admin: User):
     # -- Django ORM models -------------------------------------------------
     from upload_report.models import UploadReport
     from risk_criteria.models import RiskCriteria
+    from users_details.models import UserDetail
     from scope.models import Scope
     from location.models import Location
     from scoping.models import ProjectDetail, TestingMethodology
 
+    def _qs_result(qs):
+        if dry_run:
+            return qs.count()
+        deleted, _ = qs.delete()
+        return deleted
+
     deleted_counts = {}
-    deleted_counts["UploadReport"] = UploadReport.objects.filter(admin=admin).delete()
-    deleted_counts["RiskCriteria"] = RiskCriteria.objects.filter(admin=admin).delete()
-    deleted_counts["UserDetail"] = UserDetail.objects.filter(admin=admin).delete()
-    deleted_counts["Scope"] = Scope.objects.filter(admin=admin).delete()
-    deleted_counts["Location"] = Location.objects.filter(admin=admin).delete()
-    deleted_counts["ProjectDetail"] = ProjectDetail.objects.filter(admin=admin).delete()
-    deleted_counts["TestingMethodology"] = TestingMethodology.objects.filter(admin=admin).delete()
+    if admin is not None:
+        upload_report_qs = UploadReport.objects.filter(admin=admin)
+        risk_criteria_qs = RiskCriteria.objects.filter(admin=admin)
+        user_detail_qs = UserDetail.objects.filter(admin=admin)
+        scope_qs = Scope.objects.filter(admin=admin)
+        location_qs = Location.objects.filter(admin=admin)
+        project_detail_qs = ProjectDetail.objects.filter(admin=admin)
+        testing_methodology_qs = TestingMethodology.objects.filter(admin=admin)
+    else:
+        upload_report_qs = UploadReport.objects.filter(admin_id=admin_id)
+        risk_criteria_qs = RiskCriteria.objects.filter(admin_id=admin_id)
+        user_detail_qs = UserDetail.objects.filter(admin_id=admin_id)
+        scope_qs = Scope.objects.filter(admin_id=admin_id)
+        location_qs = Location.objects.filter(admin_id=admin_id)
+        project_detail_qs = ProjectDetail.objects.filter(admin_id=admin_id)
+        testing_methodology_qs = TestingMethodology.objects.filter(admin_id=admin_id)
+
+    deleted_counts["UploadReport"] = _qs_result(upload_report_qs)
+    # UploadReport.admin_email is denormalized independently of the admin
+    # FK (kept even after a SET_NULL) — a row created before the FK was
+    # cleared, or one the admin_id filter above missed entirely because the
+    # User row is already gone, still needs catching by email.
+    deleted_counts["UploadReport (by admin_email)"] = _qs_result(
+        UploadReport.objects.filter(admin_email__iexact=admin_email)
+    )
+    deleted_counts["RiskCriteria"] = _qs_result(risk_criteria_qs)
+    deleted_counts["UserDetail"] = _qs_result(user_detail_qs)
+    deleted_counts["Scope"] = _qs_result(scope_qs)
+    deleted_counts["Location"] = _qs_result(location_qs)
+    deleted_counts["ProjectDetail"] = _qs_result(project_detail_qs)
+    deleted_counts["TestingMethodology"] = _qs_result(testing_methodology_qs)
 
     # -- Raw Mongo collections ----------------------------------------------
     with MongoContext() as db:
+        def _mongo_result(coll_name, filt):
+            if dry_run:
+                return db[coll_name].count_documents(filt)
+            return db[coll_name].delete_many(filt).deleted_count
+
         admin_id_or_email = {"$or": [{"admin_id": admin_id}, {"admin_email": admin_email}]}
         member_email_filter = {"user_email": {"$in": list(member_emails)}}
 
@@ -279,22 +320,22 @@ def purge_premium_admin_data(admin: User):
             "notifications_notification",
         ):
             try:
-                result = db[coll].delete_many(admin_id_or_email)
-                if result.deleted_count:
-                    deleted_counts[coll] = result.deleted_count
+                count = _mongo_result(coll, admin_id_or_email)
+                if count:
+                    deleted_counts[coll] = count
             except Exception:
-                logger.exception(f"[BillingLifecycle] delete_many failed for collection={coll}")
+                logger.exception(f"[BillingLifecycle] delete failed for collection={coll}")
 
         # Keyed by user_email (admin's own + every team member's — these
         # collections record who downloaded/gave feedback on a script, not
         # who owns the account).
         for coll in ("script_user_downloads", "script_feedback"):
             try:
-                result = db[coll].delete_many(member_email_filter)
-                if result.deleted_count:
-                    deleted_counts[coll] = result.deleted_count
+                count = _mongo_result(coll, member_email_filter)
+                if count:
+                    deleted_counts[coll] = count
             except Exception:
-                logger.exception(f"[BillingLifecycle] delete_many failed for collection={coll}")
+                logger.exception(f"[BillingLifecycle] delete failed for collection={coll}")
 
         # tickets: admin-created ones carry admin_id/admin_email; team-member
         # -submitted ones carry only report_id — need both filters, OR'd.
@@ -303,11 +344,11 @@ def purge_premium_admin_data(admin: User):
                 {"admin_id": admin_id}, {"admin_email": admin_email},
                 {"report_id": {"$in": list(report_ids)}},
             ]} if report_ids else admin_id_or_email
-            result = db["tickets"].delete_many(ticket_filter)
-            if result.deleted_count:
-                deleted_counts["tickets"] = result.deleted_count
+            count = _mongo_result("tickets", ticket_filter)
+            if count:
+                deleted_counts["tickets"] = count
         except Exception:
-            logger.exception("[BillingLifecycle] delete_many failed for collection=tickets")
+            logger.exception("[BillingLifecycle] delete failed for collection=tickets")
 
         # ScopeEntry docs (scope_entries) have no admin field of their own —
         # cascade-deleted via the Scope ORM delete above already; nothing to
@@ -323,52 +364,90 @@ def purge_premium_admin_data(admin: User):
                 "card_gen_locks",
             ):
                 try:
-                    result = db[coll].delete_many(rid_filter)
-                    if result.deleted_count:
-                        deleted_counts[coll] = result.deleted_count
+                    count = _mongo_result(coll, rid_filter)
+                    if count:
+                        deleted_counts[coll] = count
                 except Exception:
-                    logger.exception(f"[BillingLifecycle] delete_many failed for collection={coll}")
+                    logger.exception(f"[BillingLifecycle] delete failed for collection={coll}")
 
             # fix_vulnerability_steps carries its own report_id field too —
             # direct filter, no need to go via fix_vuln_ids.
             try:
-                result = db["fix_vulnerability_steps"].delete_many(rid_filter)
-                if result.deleted_count:
-                    deleted_counts["fix_vulnerability_steps"] = result.deleted_count
+                count = _mongo_result("fix_vulnerability_steps", rid_filter)
+                if count:
+                    deleted_counts["fix_vulnerability_steps"] = count
             except Exception:
-                logger.exception("[BillingLifecycle] delete_many failed for collection=fix_vulnerability_steps")
+                logger.exception("[BillingLifecycle] delete failed for collection=fix_vulnerability_steps")
 
         if fix_vuln_ids:
             fv_filter = {"fix_vulnerability_id": {"$in": list(fix_vuln_ids)}}
             for coll in ("fix_step_feedback", "fix_vulnerability_final_feedback"):
                 try:
-                    result = db[coll].delete_many(fv_filter)
-                    if result.deleted_count:
-                        deleted_counts[coll] = result.deleted_count
+                    count = _mongo_result(coll, fv_filter)
+                    if count:
+                        deleted_counts[coll] = count
                 except Exception:
-                    logger.exception(f"[BillingLifecycle] delete_many failed for collection={coll}")
+                    logger.exception(f"[BillingLifecycle] delete failed for collection={coll}")
 
         # Teams bot bookkeeping — no admin_id/admin_email field on
         # teams_bot_conversations, only user_aad_id + team_id.
-        team_id = getattr(admin, "ms_team_id", None)
         try:
             if team_id:
-                result = db["teams_bot_team_channels"].delete_many({"team_id": team_id})
-                if result.deleted_count:
-                    deleted_counts["teams_bot_team_channels"] = result.deleted_count
+                count = _mongo_result("teams_bot_team_channels", {"team_id": team_id})
+                if count:
+                    deleted_counts["teams_bot_team_channels"] = count
             conv_filter_or = []
             if aad_ids:
                 conv_filter_or.append({"user_aad_id": {"$in": list(aad_ids)}})
             if team_id:
                 conv_filter_or.append({"team_id": team_id})
             if conv_filter_or:
-                result = db["teams_bot_conversations"].delete_many({"$or": conv_filter_or})
-                if result.deleted_count:
-                    deleted_counts["teams_bot_conversations"] = result.deleted_count
+                count = _mongo_result("teams_bot_conversations", {"$or": conv_filter_or})
+                if count:
+                    deleted_counts["teams_bot_conversations"] = count
         except Exception:
-            logger.exception("[BillingLifecycle] delete_many failed for teams_bot collections")
+            logger.exception("[BillingLifecycle] delete failed for teams_bot collections")
 
-    logger.warning(f"[BillingLifecycle] Purge complete for admin={admin_email}: {deleted_counts}")
+    verb = "Dry-run purge" if dry_run else "Purge"
+    logger.warning(f"[BillingLifecycle] {verb} complete for admin={admin_email}: {deleted_counts}")
+    return deleted_counts
+
+
+def purge_premium_admin_data(admin: User):
+    """
+    Full, permanent, irreversible deletion of a Premium admin's data after
+    their subscription ends — deliberately aggressive per explicit
+    instruction. Never touches billing.Subscription / billing.Invoice /
+    billing.BillingCustomer / billing.StripeWebhookEvent (financial/audit
+    records) or the User row itself (deactivated instead of deleted, so
+    Invoice/Subscription FKs stay intact and the email/account identity
+    can't be silently reused — see purge_admin_data management command /
+    purge_admin_records() above for the variant that DOES delete the row,
+    for when an admin is being removed on purpose rather than auto-purged
+    after a lapsed subscription).
+    """
+    admin_id = str(admin.id)
+    admin_email = admin.email
+    logger.warning(f"[BillingLifecycle] Starting full data purge for admin={admin_email} id={admin_id}")
+
+    _revoke_slack(admin)
+    _remove_teams_bot_and_revoke(admin)
+
+    # -- Gather everything needed to find related records BEFORE the ORM
+    # deletes inside purge_admin_records() remove the rows these come from
+    # (team member emails, Teams AAD ids) ---------------------------------
+    from users_details.models import UserDetail
+
+    member_details = list(UserDetail.objects.filter(admin=admin).values("email", "ms_teams_member_id"))
+    member_emails = {admin_email} | {d["email"] for d in member_details if d.get("email")}
+    aad_ids = {aid for aid in (
+        [getattr(admin, "ms_teams_object_id", None)] + [d.get("ms_teams_member_id") for d in member_details]
+    ) if aid}
+    team_id = getattr(admin, "ms_team_id", None)
+
+    deleted_counts = purge_admin_records(
+        admin_id, admin_email, member_emails=member_emails, aad_ids=aad_ids, team_id=team_id, admin=admin,
+    )
 
     # -- Send the closure notice BEFORE locking the account, then deactivate --
     try:

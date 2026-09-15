@@ -266,6 +266,22 @@ class UserTotalAssetsAPIView(APIView):
                     if pname and matched:
                         plugin_team_map.setdefault(pname, set()).add(matched)
 
+                # Real bug report: this view never excluded held/deleted
+                # vulnerabilities, so a host whose ONLY finding for a given
+                # team was put on hold/deleted from All Vulns/All Assets
+                # still counted toward that team's asset total here — even
+                # though UserAvgScoreAPIView (same summary response, same
+                # "total_assets"/"by_team" shape) already excludes them,
+                # producing two different asset counts for the SAME team in
+                # the SAME dashboard load. Same exclusion set as that view.
+                excluded_vuln_keys = {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["hold_vulnerabilities"].find({"report_id": str(report_id)})
+                } | {
+                    ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+                    for d in db["deleted_vulnerabilities"].find({"report_id": str(report_id)})
+                }
+
                 # Count unique hosts per team from nessus doc (with host-ip fallback)
                 by_team = {t: set() for t in active_teams}
                 for host in (nessus_doc.get("vulnerabilities_by_host") or []):
@@ -282,6 +298,8 @@ class UserTotalAssetsAPIView(APIView):
                         pname = (
                             v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                         ).strip()
+                        if (pname, h_name) in excluded_vuln_keys:
+                            continue
                         for matched in plugin_team_map.get(pname, set()):
                             by_team[matched].add(h_name)
 

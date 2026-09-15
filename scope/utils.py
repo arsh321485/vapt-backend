@@ -219,6 +219,105 @@ def validate_entry(value: str, entry_type: str) -> Tuple[bool, str]:
     return (True, "")
 
 
+def extract_scope_targets_via_ai(raw_text: str) -> Optional[List[str]]:
+    """
+    Real bug report: a rich prose/tabular scope document (an API spec PDF —
+    "Scope Summary" table + per-endpoint request/response schema tables +
+    JSON examples) got exploded by the naive one-line-per-target split in
+    parse_file_content into 800+ raw lines / ~350 "assets" (table headers,
+    schema field names, JSON payload fragments, page footers — none of them
+    real targets) for a document that genuinely lists 5-6 API endpoints —
+    quoting a Custom plan at $1.25/asset for hundreds of assets that don't
+    exist. No regex/word-count heuristic can reliably tell a real target
+    apart from this kind of noise (schema field names like "trade_no" are
+    just as "target-shaped" as a real endpoint path) — this needs the
+    document actually read and understood, not just split.
+
+    Returns a deduplicated list of genuine targets (IPs, subnets, hostnames,
+    URLs, API endpoint paths) as GPT-4o-mini identifies them from the raw
+    extracted text, or None if the call fails/is unusable — callers should
+    fall back to the plain line-split on None, never on an empty list
+    (a document with genuinely zero targets is a valid, different outcome).
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+
+    from upload_report.mitigation_tool import _get_crewai_llm
+
+    # Keep well under the model's context window regardless of document
+    # size — a scope PDF/DOCX this long is already pathological, and the
+    # targets themselves (if any exist) are essentially always announced
+    # early (a summary/scope table up front), never buried past ~60k chars.
+    truncated = text[:60000]
+
+    prompt = f"""You are extracting a penetration-testing SCOPE LIST from a document's raw extracted text. The document may be a clean list, or a rich document (API specification, network diagram description, prose report) where the real scope is mixed in with a lot of unrelated text.
+
+Return ONLY the genuine, in-scope TEST TARGETS — each one of:
+- an IP address or CIDR subnet
+- a domain name, hostname, or URL (web or mobile app)
+- an API endpoint path (e.g. "/withdraw/autoWithdraw", "POST /v1/payment/payin/apply" — keep the HTTP method prefix only if it's written directly next to the path in the source text)
+
+Do NOT include: table/column headers, schema field names (e.g. "merchant_name", "trade_no"), data types, JSON example keys/values, prose sentences, page numbers/footers, or anything that is documentation ABOUT an API rather than the API's own address/path.
+
+If the same target (same IP/URL/endpoint path) appears more than once, include it only ONCE.
+If the document genuinely contains zero recognizable targets, return an empty array.
+
+Respond with ONLY a JSON array of strings — no markdown fences, no explanation, no other text.
+
+Document text:
+---
+{truncated}
+---"""
+
+    try:
+        llm = _get_crewai_llm()
+        response = llm.invoke(prompt)
+        raw_out = getattr(response, "content", None) or str(response)
+        raw_out = raw_out.strip()
+
+        # Best-effort JSON extraction — same fallback chain already used
+        # elsewhere in this codebase for LLM JSON output (plain parse, then
+        # a ```json fence, then a bare [...]/{...} scan) since a model
+        # occasionally wraps its answer in prose or a code fence despite
+        # being told not to.
+        import json
+        parsed = None
+        try:
+            parsed = json.loads(raw_out)
+        except (json.JSONDecodeError, ValueError):
+            m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw_out, re.DOTALL | re.IGNORECASE)
+            if m:
+                try:
+                    parsed = json.loads(m.group(1))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        if parsed is None:
+            m = re.search(r"\[.*\]", raw_out, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group(0))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+        if not isinstance(parsed, list):
+            logger.warning("[ScopeAI] Could not parse a JSON array from the LLM's target-extraction response")
+            return None
+
+        seen = set()
+        out = []
+        for item in parsed:
+            val = str(item).strip() if item is not None else ""
+            if val and val not in seen:
+                seen.add(val)
+                out.append(val)
+        return out
+
+    except Exception as e:
+        logger.error(f"[ScopeAI] AI target extraction failed, caller will fall back to plain line-split: {e}")
+        return None
+
+
 def _extract_cell_values(df) -> List[str]:
     """
     Flatten every non-empty cell of a DataFrame (one Excel sheet, or a CSV)
@@ -361,10 +460,27 @@ def parse_file_content(file_obj, filename: str) -> List[str]:
             if result.get("error"):
                 raise ValueError(result["error"])
 
-            for line in (result.get("text_full") or "").splitlines():
-                str_val = line.strip()
-                if str_val:
-                    values.append(str_val)
+            text_full = result.get("text_full") or ""
+
+            # Real bug report: a rich prose/tabular PDF (an API spec —
+            # summary table + per-endpoint schema tables + JSON examples)
+            # got exploded into 800+ raw lines / ~350 fake "assets" (field
+            # names, table headers, JSON fragments) by the plain line-split
+            # below — quoting a Custom plan for hundreds of assets that
+            # don't exist, for a document with 5-6 real endpoints. Ask
+            # GPT-4o-mini to actually read the document and pull out the
+            # genuine targets instead. Falls back to the old plain split
+            # only if the AI call itself fails (None) — an empty AI result
+            # (genuinely zero targets found) is trusted as-is, not treated
+            # as a failure.
+            ai_values = extract_scope_targets_via_ai(text_full)
+            if ai_values is not None:
+                values.extend(ai_values)
+            else:
+                for line in text_full.splitlines():
+                    str_val = line.strip()
+                    if str_val:
+                        values.append(str_val)
 
         else:
             # Try to read as text

@@ -428,10 +428,15 @@ LOGGING = {
 
 
 CACHES = {
+    # Backed by the same shared MongoDB every environment already talks to
+    # (vaptfix.mongo_client), not local disk — a data-fix management
+    # command run from any machine (a dev box included) now invalidates
+    # what every gunicorn worker on every machine sees, instead of only
+    # clearing that command's own local filesystem cache. See
+    # vaptfix/mongo_cache.py for the real bug report this fixes.
     "default": {
-        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
-        "LOCATION": os.path.join(BASE_DIR, "django_cache"),
+        "BACKEND": "vaptfix.mongo_cache.MongoCache",
+        "LOCATION": "app_cache",
         "TIMEOUT": 300,
-        "OPTIONS": {"MAX_ENTRIES": 1000},
     }
 }

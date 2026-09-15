@@ -84,3 +84,12 @@ def calculate_management_amount(asset_count: int, billing_cycle: str) -> Decimal
 
 def calculate_management_testing_amount(asset_count: int) -> Decimal:
     return Decimal(asset_count) * MANAGEMENT_TESTING_RATE_PER_IP_YEAR
+
+
+def calculate_custom_amount(asset_count: int) -> Decimal:
+    """
+    Custom tier (>250 assets) — Annual-only, same per-IP rate as Premium's
+    own Annual Management cycle, just uncapped (no 250-asset ceiling).
+    """
+    cfg = MANAGEMENT_BILLING_CYCLES[CYCLE_ANNUAL]
+    return Decimal(asset_count) * cfg["rate_per_ip"] * cfg["months"]

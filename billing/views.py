@@ -22,7 +22,7 @@ from .plans import (
     calculate_management_amount, calculate_management_testing_amount,
 )
 from .serializers import (
-    PlanEstimateRequestSerializer, PremiumCheckoutRequestSerializer,
+    PlanEstimateRequestSerializer, PremiumCheckoutRequestSerializer, CustomCheckoutRequestSerializer,
     CustomLeadRequestSerializer, SubscriptionSerializer, InvoiceSerializer,
 )
 from . import stripe_service
@@ -344,6 +344,57 @@ class PremiumCheckoutConfirmView(APIView):
         })
 
 
+class CustomCheckoutView(APIView):
+    """
+    POST /api/admin/billing/checkout/custom/
+
+    Custom tier (>250 assets) — mirrors PremiumCheckoutView's Stripe
+    Checkout Session pattern exactly, but takes asset_count directly from
+    the request body instead of computing it server-side from the admin's
+    report/scope (the frontend already showed the admin this exact number
+    on the Confirm & Pay screen before they got here). Real bug report:
+    this endpoint never existed — the frontend's Custom "Confirm & Pay"
+    screen called it and got a 404 right after the (separate, already-
+    working) sales-lead capture succeeded, blocking every Custom-tier
+    checkout.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = CustomCheckoutRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        asset_count = serializer.validated_data["asset_count"]
+
+        if asset_count <= PREMIUM_ASSET_CEILING:
+            return Response(
+                {
+                    "detail": f"{PREMIUM_ASSET_CEILING} or fewer assets — use the Premium plan instead.",
+                    "asset_count": asset_count,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        admin = request.user
+        try:
+            result = stripe_service.create_custom_checkout_session(admin, asset_count=asset_count)
+        except Exception as e:
+            # Same error-surfacing convention as PremiumCheckoutView — pass
+            # through Stripe's own human-readable reason instead of a
+            # generic message wherever one exists.
+            logger.exception(f"[Billing] Custom checkout session creation failed for {admin.email}")
+            try:
+                import stripe as _stripe
+                if isinstance(e, _stripe.error.StripeError):
+                    detail = getattr(e, "user_message", None) or str(e) or "Could not start checkout. Please try again."
+                else:
+                    detail = "Could not start checkout. Please try again."
+            except Exception:
+                detail = "Could not start checkout. Please try again."
+            return Response({"detail": detail}, status=500)
+
+        return Response(result, status=status.HTTP_201_CREATED)
+
+
 class CustomLeadView(APIView):
     """Step 3 for Custom — no payment, just captures the lead and notifies sales."""
     permission_classes = [IsAuthenticated]
@@ -422,9 +473,15 @@ class SubscriptionCancelView(APIView):
 class SubscriptionSyncAssetsView(APIView):
     """
     Recomputes the admin's asset count (e.g. after uploading a new report)
-    and, if they're on an active Premium/Management subscription, updates
-    the Stripe quantity with proration. Intended to be called both manually
-    and from the upload_report pipeline after a report finishes parsing.
+    and, if they're on an active Premium/Custom Management subscription,
+    updates the Stripe quantity with proration. Intended to be called both
+    manually and from the upload_report pipeline after a report finishes
+    parsing.
+
+    Real gap: this only ever matched plan=PLAN_PREMIUM — a Custom-tier
+    subscription (same mode="management"/billing_cycle="annual" shape,
+    just uncapped) silently never got its Stripe quantity synced after a
+    new report changed the asset count.
     """
     permission_classes = [IsAuthenticated]
 
@@ -438,7 +495,7 @@ class SubscriptionSyncAssetsView(APIView):
         asset_count = get_admin_billable_asset_count(str(admin.id))
 
         sub = Subscription.objects.filter(
-            admin=admin, plan=PLAN_PREMIUM, mode=MODE_MANAGEMENT, status="active"
+            admin=admin, plan__in=[PLAN_PREMIUM, PLAN_CUSTOM], mode=MODE_MANAGEMENT, status="active"
         ).first()
 
         if sub and sub.asset_count != asset_count:

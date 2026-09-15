@@ -14977,7 +14977,14 @@ class SlackSlashCommandView(APIView):
             zero_count = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
             extra = [(h, dict(zero_count)) for h in all_host_names if h not in present]
             if extra:
-                assets = sorted(assets + extra, key=lambda kv: kv[0])
+                # Real request: a 0-vuln asset (no open findings at all)
+                # should sort to the END of the list, not mixed in wherever
+                # its hostname happens to fall alphabetically — plain
+                # alpha-sort put low-numbered clean IPs (e.g. "...31.1") on
+                # page 1 ahead of every host that actually has findings
+                # (e.g. "...58.86"), which is backwards for a list meant to
+                # highlight what needs attention first.
+                assets = sorted(assets + extra, key=lambda kv: (kv[1]["total"] == 0, kv[0]))
         count = len(assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = assets[offset:offset + PAGE_SIZE]
