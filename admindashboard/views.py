@@ -1243,6 +1243,19 @@ class AdminVulnerabilitiesAPIView(APIView):
                         if p:
                             excluded_vulns.add((p, h))
 
+                    # Real bug report: a vuln appearing on the SAME host across
+                    # multiple ports (e.g. an SSL cert issue on 443, 631, 7627)
+                    # is a separate raw entry per port in vulnerabilities_by_host
+                    # — counted here once per port, while Team Performance
+                    # (AdminDistributionByTeamDetailAPIView) counts once per
+                    # (vulnerability, host) via vulnerability_cards (one card,
+                    # port-independent). That structural difference — not
+                    # severity mislabeling — was the bulk of the two tiles'
+                    # totals disagreeing (confirmed live: dashboard tile 46,
+                    # Team Performance 27, for the same report). Dedupe by
+                    # (plugin_name, host_name) here too so "how many
+                    # vulnerabilities" means the same thing everywhere.
+                    seen_plugin_host = set()
                     for host in doc.get("vulnerabilities_by_host") or []:
                         host_name = (host.get("host_name") or "").strip().lower()
                         for v in (host.get("vulnerabilities") or []):
@@ -1251,6 +1264,9 @@ class AdminVulnerabilitiesAPIView(APIView):
                             # Skip closed/held/deleted vulnerabilities
                             if (plugin_name, host_name) in excluded_vulns:
                                 continue
+                            if (plugin_name, host_name) in seen_plugin_host:
+                                continue
+                            seen_plugin_host.add((plugin_name, host_name))
 
                             risk = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
                             if risk.startswith("crit"):
