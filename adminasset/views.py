@@ -302,27 +302,10 @@ class AssetDeleteAPIView(APIView):
                     "deleted_by": getattr(request.user, "email", str(request.user.id)),
                 })
 
-                # Remove from report — ALSO pull any locked_hosts entry for
-                # this same host_name. Real bug report: a Freemium host
-                # whose own findings got "fair share" trimmed (billing.
-                # enforcement.select_freemium_active_hosts Step 2) has an
-                # overflow-slice entry sitting in locked_hosts under the
-                # SAME host_name as its visible entry here — deleting only
-                # from vulnerabilities_by_host left that twin behind, and
-                # upload_report.views.unlock_freemium_hosts_for_admin (on a
-                # later Premium upgrade) merges locked_hosts back by
-                # host_name: finding this host_name no longer in
-                # vulnerabilities_by_host, it silently re-added it as if it
-                # were a fresh host — reviving a deliberately deleted asset.
-                # Deleting both entries together closes that gap at the
-                # source (unlock_freemium_hosts_for_admin never even sees
-                # a leftover entry for it to revive).
+                # Remove from report
                 res = coll.update_one(
                     {"report_id": str(report_id)},
-                    {"$pull": {
-                        "vulnerabilities_by_host": {"$or": [{"host_name": host_name}, {"host": host_name}]},
-                        "locked_hosts": {"$or": [{"host_name": host_name}, {"host": host_name}]},
-                    }}
+                    {"$pull": {"vulnerabilities_by_host": {"$or": [{"host_name": host_name}, {"host": host_name}]}}}
                 )
 
                 if res.modified_count == 0:

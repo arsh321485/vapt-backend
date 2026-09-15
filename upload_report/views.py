@@ -2217,24 +2217,6 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
         # Stripe webhook retry race) produced a literal duplicate
         # (host_name, plugin_name) row. Same dedupe-by-plugin_name-per-host
         # rule now applies here too.
-        # Real bug report: a host the admin deliberately DELETED
-        # (adminasset.AssetDeleteAPIView, while still Freemium) could have
-        # an "overflow twin" entry left behind in locked_hosts under the
-        # same host_name (see that view's own updated $pull, which now
-        # also cleans locked_hosts going forward) — deleting only removes
-        # the host from vulnerabilities_by_host, so this function used to
-        # find the host_name absent there and silently revive it as if it
-        # were a brand-new host. Cross-reference adminasset's deletion
-        # history and skip reviving anything that was explicitly deleted —
-        # belt-and-suspenders alongside AssetDeleteAPIView's own fix, and
-        # the only thing that protects admins who deleted an asset BEFORE
-        # that fix shipped (their locked_hosts twin is already orphaned).
-        deleted_host_names = {
-            (d.get("host_name") or "").strip()
-            for d in db["deleted_assets"].find({"report_id": str(report_id)}, {"host_name": 1})
-            if d.get("host_name")
-        }
-
         by_name = {}
         for h in (report.get("vulnerabilities_by_host") or []):
             by_name[h.get("host_name")] = h
@@ -2249,7 +2231,7 @@ def unlock_freemium_hosts_for_admin(admin) -> int:
                     if vuln.get("plugin_name") not in existing_plugin_names:
                         existing.setdefault("vulnerabilities", []).append(vuln)
                         existing_plugin_names.add(vuln.get("plugin_name"))
-            elif name not in deleted_host_names:
+            else:
                 by_name[name] = h
 
         merged_hosts = list(by_name.values())

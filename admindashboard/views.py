@@ -1243,19 +1243,6 @@ class AdminVulnerabilitiesAPIView(APIView):
                         if p:
                             excluded_vulns.add((p, h))
 
-                    # Real bug report: a vuln appearing on the SAME host across
-                    # multiple ports (e.g. an SSL cert issue on 443, 631, 7627)
-                    # is a separate raw entry per port in vulnerabilities_by_host
-                    # — counted here once per port, while Team Performance
-                    # (AdminDistributionByTeamDetailAPIView) counts once per
-                    # (vulnerability, host) via vulnerability_cards (one card,
-                    # port-independent). That structural difference — not
-                    # severity mislabeling — was the bulk of the two tiles'
-                    # totals disagreeing (confirmed live: dashboard tile 46,
-                    # Team Performance 27, for the same report). Dedupe by
-                    # (plugin_name, host_name) here too so "how many
-                    # vulnerabilities" means the same thing everywhere.
-                    seen_plugin_host = set()
                     for host in doc.get("vulnerabilities_by_host") or []:
                         host_name = (host.get("host_name") or "").strip().lower()
                         for v in (host.get("vulnerabilities") or []):
@@ -1264,9 +1251,6 @@ class AdminVulnerabilitiesAPIView(APIView):
                             # Skip closed/held/deleted vulnerabilities
                             if (plugin_name, host_name) in excluded_vulns:
                                 continue
-                            if (plugin_name, host_name) in seen_plugin_host:
-                                continue
-                            seen_plugin_host.add((plugin_name, host_name))
 
                             risk = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
                             if risk.startswith("crit"):
@@ -1778,19 +1762,10 @@ class AdminDistributionByTeamAPIView(APIView):
                 team_names_lower = {name.lower(): name for name in TEAM_NAMES}
 
                 # Build set of closed (plugin_name, host_name) pairs — per-host match only
-                # Real bug report: the extra created_by/admin_id $or here was
-                # redundant (report_id alone already scopes to one admin's
-                # one report) AND risked UNDER-matching — any closed record
-                # missing/mismatching those two specific fields stayed
-                # invisible here while AdminVulnerabilitiesAPIView's own
-                # dashboard tile (report_id-only, no such filter) still
-                # correctly excluded it, so a vuln could show "open" in Team
-                # Performance while the dashboard tile already had it closed.
-                # Matches the dashboard tile's simpler, broader query.
                 admin_id = str(request.user.id)
                 closed_vuln_keys = set()
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": report_id}
+                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
                 ):
                     pname = (doc_c.get("plugin_name") or "").strip()
                     hname = (doc_c.get("host_name") or "").strip()
@@ -1897,22 +1872,9 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                 team_names_lower = {name.lower(): name for name in TEAM_NAMES}
                 risk_levels = ["Critical", "High", "Medium", "Low"]
 
-                # ── (plugin_name, host_name) → risk_factor from nessus ──────────
-                # Real bug report: this used to be keyed by plugin_name ALONE,
-                # first-occurrence-wins across every host — AdminVulnerabilitiesAPIView
-                # (the dashboard's own Critical/High/Medium/Low tile) reads
-                # risk_factor PER OCCURRENCE instead, so the same plugin_name
-                # legitimately showing a different severity on a different
-                # host (or dict-build order just picking a different host's
-                # value here) made Team Performance's per-team severity
-                # breakdown disagree with the dashboard tile's own totals for
-                # the identical findings. Keying by (plugin_name, host_name) —
-                # matching how vulnerability_cards/closed/held/deleted are all
-                # already matched below — makes this resolve the exact same
-                # per-occurrence value the dashboard tile uses.
+                # ── plugin_name → risk_factor from nessus ───────────────────────
                 plugin_risk = {}
                 for host in doc.get("vulnerabilities_by_host", []):
-                    host_name_for_risk = (host.get("host_name") or host.get("host") or "").strip()
                     for v in host.get("vulnerabilities", []):
                         pname = (
                             v.get("plugin_name")
@@ -1920,8 +1882,7 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                             or v.get("name")
                             or ""
                         )
-                        risk_key = (pname, host_name_for_risk)
-                        if pname and risk_key not in plugin_risk:
+                        if pname and pname not in plugin_risk:
                             risk_raw = (
                                 v.get("risk_factor")
                                 or v.get("severity")
@@ -1929,25 +1890,21 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                                 or ""
                             ).strip()
                             if risk_raw.lower().startswith("crit"):
-                                plugin_risk[risk_key] = "Critical"
+                                plugin_risk[pname] = "Critical"
                             elif risk_raw.lower().startswith("high"):
-                                plugin_risk[risk_key] = "High"
+                                plugin_risk[pname] = "High"
                             elif risk_raw.lower().startswith("med"):
-                                plugin_risk[risk_key] = "Medium"
+                                plugin_risk[pname] = "Medium"
                             elif risk_raw.lower().startswith("low"):
-                                plugin_risk[risk_key] = "Low"
+                                plugin_risk[pname] = "Low"
                             else:
-                                plugin_risk[risk_key] = None
+                                plugin_risk[pname] = None
 
                 # ── closed (plugin_name, host_name) pairs — per-host match only ──
-                # Real bug report: the created_by/admin_id $or here was
-                # redundant (report_id already scopes to one admin) and
-                # risked under-matching a closed record missing those exact
-                # fields — matches AdminVulnerabilitiesAPIView's dashboard
-                # tile, which only ever filtered by report_id.
+                # Match both admin-closed (created_by=admin) and user-closed (admin_id=admin)
                 closed_vuln_keys = set()
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": report_id}
+                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
                 ):
                     pname = (doc_c.get("plugin_name") or "").strip()
                     hname = (doc_c.get("host_name") or "").strip()
@@ -2002,7 +1959,7 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                     if key in held_vuln_keys or key in deleted_vuln_keys:
                         continue
 
-                    risk_label  = plugin_risk.get(key)
+                    risk_label  = plugin_risk.get(plugin_name)
                     # Real bug report: Info-severity (and any other
                     # unrecognized risk_factor) findings still counted
                     # toward a team's "total"/"open" here even though they
@@ -2077,22 +2034,9 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
 
                 report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
-                # ── (plugin_name, host_name) → risk_factor from nessus ──────────
-                # Real bug report: this used to be keyed by plugin_name ALONE,
-                # first-occurrence-wins across every host — AdminVulnerabilitiesAPIView
-                # (the dashboard's own Critical/High/Medium/Low tile) reads
-                # risk_factor PER OCCURRENCE instead, so the same plugin_name
-                # legitimately showing a different severity on a different
-                # host (or dict-build order just picking a different host's
-                # value here) made Team Performance's per-team severity
-                # breakdown disagree with the dashboard tile's own totals for
-                # the identical findings. Keying by (plugin_name, host_name) —
-                # matching how vulnerability_cards/closed/held/deleted are all
-                # already matched below — makes this resolve the exact same
-                # per-occurrence value the dashboard tile uses.
+                # ── plugin_name → risk_factor from nessus ───────────────────────
                 plugin_risk = {}
                 for host in doc.get("vulnerabilities_by_host", []):
-                    host_name_for_risk = (host.get("host_name") or host.get("host") or "").strip()
                     for v in host.get("vulnerabilities", []):
                         pname = (
                             v.get("plugin_name")
@@ -2100,8 +2044,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             or v.get("name")
                             or ""
                         )
-                        risk_key = (pname, host_name_for_risk)
-                        if pname and risk_key not in plugin_risk:
+                        if pname and pname not in plugin_risk:
                             risk_raw = (
                                 v.get("risk_factor")
                                 or v.get("severity")
@@ -2109,25 +2052,21 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                                 or ""
                             ).strip()
                             if risk_raw.lower().startswith("crit"):
-                                plugin_risk[risk_key] = "Critical"
+                                plugin_risk[pname] = "Critical"
                             elif risk_raw.lower().startswith("high"):
-                                plugin_risk[risk_key] = "High"
+                                plugin_risk[pname] = "High"
                             elif risk_raw.lower().startswith("med"):
-                                plugin_risk[risk_key] = "Medium"
+                                plugin_risk[pname] = "Medium"
                             elif risk_raw.lower().startswith("low"):
-                                plugin_risk[risk_key] = "Low"
+                                plugin_risk[pname] = "Low"
                             else:
-                                plugin_risk[risk_key] = None
+                                plugin_risk[pname] = None
 
                 # ── closed (plugin_name, host_name) pairs — per-host match only ──
-                # Real bug report: the created_by/admin_id $or here was
-                # redundant (report_id already scopes to one admin) and
-                # risked under-matching a closed record missing those exact
-                # fields — matches AdminVulnerabilitiesAPIView's dashboard
-                # tile, which only ever filtered by report_id.
+                # Match both admin-closed (created_by=admin) and user-closed (admin_id=admin)
                 closed_vuln_keys = set()
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": report_id}
+                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
                 ):
                     pname = (doc_c.get("plugin_name") or "").strip()
                     hname = (doc_c.get("host_name") or "").strip()
@@ -2213,7 +2152,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             continue
                         seen.add(row_key)
 
-                        risk_factor = plugin_risk.get((plugin_name, h_name))
+                        risk_factor = plugin_risk.get(plugin_name)
                         # Real bug report: this row still showed up in the
                         # downloadable report's "Detailed Vulnerability Log"
                         # (with a blank Severity pill) even though the

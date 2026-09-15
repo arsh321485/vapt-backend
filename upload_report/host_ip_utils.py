@@ -117,29 +117,12 @@ def counts_from_report_doc(doc: Dict[str, Any]) -> Dict[str, int]:
     (billing.enforcement.select_freemium_active_hosts stores these back
     onto the same doc at upload time — see upload_report/views.py's
     _store_in_mongodb) so host_count/unique_ip_count reflect the WHOLE
-    file, not just what a Freemium trim currently leaves visible.
-
-    Real bug report: host_count used to be raw len(visible) + len(locked)
-    — select_freemium_active_hosts' "fair share" per-host trimming (Step
-    2) can split ONE host's own findings across both lists (the visible
-    slice stays in vulnerabilities_by_host, the overflow slice becomes its
-    own locked_hosts entry with the SAME host_name), so that one physical
-    host got counted twice in the total (confirmed live: a 49-host report
-    showed host_count=50, matching billing.asset_service.
-    get_admin_billable_asset_count's identical bug there — same fix
-    applied to both together, see that function's own docstring). Dedupe
-    by host_name across the combined list for the TOTAL; visible_asset_count/
-    locked_asset_count stay as raw per-list sizes (those are legitimately
-    "how many array slots are visible vs still locked", including a
-    host with slots in both, not a unique-host count)."""
+    file, not just what a Freemium trim currently leaves visible."""
     visible_hosts = doc.get("vulnerabilities_by_host") or []
     locked_hosts = doc.get("locked_hosts") or []
     all_hosts = list(visible_hosts) + list(locked_hosts)
-    unique_host_names = {
-        (h.get("host_name") or h.get("host") or "") for h in all_hosts
-    }
     return {
-        "host_count": len(unique_host_names),
+        "host_count": len(all_hosts),
         "unique_ip_count": compute_unique_ip_count(all_hosts),
         "visible_asset_count": len(visible_hosts),
         "locked_asset_count": len(locked_hosts),
