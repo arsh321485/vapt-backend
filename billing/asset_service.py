@@ -84,6 +84,14 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
     ("upload karte hain to jitne bhi asset hai sare ko count karna hai")
     was the actual complaint, not the host_name-based total this used to
     return.
+
+    One exception: locked_hosts entries flagged `_vuln_overflow` by
+    billing.enforcement.select_freemium_active_hosts are the trimmed-off
+    findings of a host that's ALREADY counted in vulnerabilities_by_host,
+    not a second distinct asset — counting them here double-billed that
+    host (real bug: a 49-host report priced as 50). Excluded from the
+    size, not from locked_hosts itself, so the upgrade-restore path
+    (unlock_freemium_hosts_for_admin) still finds and merges them back.
     """
     try:
         conditions = [{"admin_id": str(admin_id)}]
@@ -102,7 +110,10 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
                 {"$project": {
                     "count": {"$add": [
                         {"$size": {"$ifNull": ["$vulnerabilities_by_host", []]}},
-                        {"$size": {"$ifNull": ["$locked_hosts", []]}},
+                        {"$size": {"$filter": {
+                            "input": {"$ifNull": ["$locked_hosts", []]},
+                            "cond": {"$ne": ["$$this._vuln_overflow", True]},
+                        }}},
                     ]},
                 }},
                 {"$group": {"_id": None, "total": {"$sum": "$count"}}},
@@ -123,6 +134,10 @@ def get_admin_locked_asset_count(admin_id: str) -> int:
     (billing itself uses get_admin_billable_asset_count, the deduplicated
     union) — this is what the API contract's separate 'locked_asset_count'
     field reports.
+
+    Excludes entries flagged `_vuln_overflow` (see
+    get_admin_billable_asset_count) — those are trimmed findings for an
+    already-visible host, not a separate locked-out asset.
     """
     try:
         conditions = [{"admin_id": str(admin_id)}]
@@ -138,7 +153,10 @@ def get_admin_locked_asset_count(admin_id: str) -> int:
         with MongoContext() as db:
             pipeline = [
                 {"$match": {"$or": conditions}},
-                {"$project": {"locked_count": {"$size": {"$ifNull": ["$locked_hosts", []]}}}},
+                {"$project": {"locked_count": {"$size": {"$filter": {
+                    "input": {"$ifNull": ["$locked_hosts", []]},
+                    "cond": {"$ne": ["$$this._vuln_overflow", True]},
+                }}}}},
                 {"$group": {"_id": None, "total": {"$sum": "$locked_count"}}},
             ]
             result = list(db[NESSUS_COLLECTION].aggregate(pipeline))

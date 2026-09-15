@@ -958,7 +958,18 @@ class UploadReportView(APIView):
                                             }},
                                         )
                                     report_active_count = len(_active)
-                                    report_locked_count = len(_locked)
+                                    # Exclude _vuln_overflow entries (billing.
+                                    # enforcement.select_freemium_active_hosts)
+                                    # from the count — they're trimmed findings
+                                    # for a host already counted in _active, not
+                                    # a second distinct asset. Real bug: a
+                                    # 49-host report's upload response showed
+                                    # locked/original/billable_asset_count as
+                                    # 50 because one active host's vuln
+                                    # overflow was counted as a whole extra
+                                    # locked host. See billing/asset_service.py
+                                    # for the matching fix on the read side.
+                                    report_locked_count = sum(1 for h in _locked if not h.get("_vuln_overflow"))
                             except Exception as _trim_err:
                                 logger.error(f"[FreemiumTrim] Could not reapply trim for report_id={report_id}: {_trim_err}")
 

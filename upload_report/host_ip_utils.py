@@ -120,10 +120,17 @@ def counts_from_report_doc(doc: Dict[str, Any]) -> Dict[str, int]:
     file, not just what a Freemium trim currently leaves visible."""
     visible_hosts = doc.get("vulnerabilities_by_host") or []
     locked_hosts = doc.get("locked_hosts") or []
-    all_hosts = list(visible_hosts) + list(locked_hosts)
+    # Entries flagged _vuln_overflow (billing.enforcement.
+    # select_freemium_active_hosts) are trimmed-off findings for a host
+    # already in visible_hosts, not a second distinct asset — counting
+    # them here double-counted that host (real bug: 49 real hosts shown
+    # as 50). Kept in locked_hosts itself (needed to restore those
+    # findings on upgrade), just excluded from every count.
+    billable_locked_hosts = [h for h in locked_hosts if not h.get("_vuln_overflow")]
+    all_hosts = list(visible_hosts) + billable_locked_hosts
     return {
         "host_count": len(all_hosts),
         "unique_ip_count": compute_unique_ip_count(all_hosts),
         "visible_asset_count": len(visible_hosts),
-        "locked_asset_count": len(locked_hosts),
+        "locked_asset_count": len(billable_locked_hosts),
     }

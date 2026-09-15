@@ -259,6 +259,16 @@ def select_freemium_active_hosts(vulnerabilities_by_host, admin):
             if idx in overflow_by_host:
                 overflow_host = dict(h)
                 overflow_host["vulnerabilities"] = overflow_by_host[idx]
+                # This host_name is already counted in active_hosts — this
+                # entry only carries its trimmed-off findings for later
+                # restore (see unlock_freemium_hosts_for_admin), it is NOT
+                # a second distinct asset. Flagged so every asset/host count
+                # (get_admin_billable_asset_count, counts_from_report_doc,
+                # ...) can exclude it and not double-bill this host — real
+                # bug: a report with 49 real hosts priced as 50 because one
+                # active host's vuln overflow landed in locked_hosts as if
+                # it were a whole separate locked host.
+                overflow_host["_vuln_overflow"] = True
                 locked_hosts.append(overflow_host)
         active_hosts = new_active_hosts
 

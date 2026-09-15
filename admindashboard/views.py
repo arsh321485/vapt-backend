@@ -2311,7 +2311,15 @@ def _freemium_upgrade_prompt(admin) -> dict:
         for report in reports:
             report_id = report.get("report_id")
             locked_hosts = report.get("locked_hosts") or []
-            total_locked_assets += len({h.get("host_name") for h in locked_hosts if h.get("host_name")})
+            # Skip _vuln_overflow entries (billing.enforcement.
+            # select_freemium_active_hosts) — those are trimmed findings for
+            # a host already active/visible, not a whole unlockable asset;
+            # counting them here overstated "N more assets" by however many
+            # active hosts had findings trimmed.
+            total_locked_assets += len({
+                h.get("host_name") for h in locked_hosts
+                if h.get("host_name") and not h.get("_vuln_overflow")
+            })
 
             active_pairs = set()
             for host in report.get("vulnerabilities_by_host") or []:

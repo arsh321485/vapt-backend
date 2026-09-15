@@ -5194,7 +5194,15 @@ def _post_freemium_trim_notice(bot_token, channel_id, report_ids):
         if not trimmed:
             return
         total_active = sum(int(r.get("total_hosts") or 0) for r in trimmed)
-        total_locked = sum(len(r.get("locked_hosts") or []) for r in trimmed)
+        # Exclude _vuln_overflow entries (billing.enforcement.
+        # select_freemium_active_hosts) — trimmed findings for an already-
+        # active host, not a whole extra asset; counting them overstated
+        # "N more saved and ready to unlock" by however many active hosts
+        # had findings trimmed.
+        total_locked = sum(
+            sum(1 for h in (r.get("locked_hosts") or []) if not h.get("_vuln_overflow"))
+            for r in trimmed
+        )
         if total_locked <= 0:
             return
         _http_post(
