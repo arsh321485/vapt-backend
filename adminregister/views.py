@@ -4156,6 +4156,23 @@ def _build_report_data(request):
     _total_assets = (summary.get("total_assets") or {}).get("total_assets", 0)
     _report_id_for_classification = str(latest_upload.get("report_id") or latest_doc.get("report_id", ""))
 
+    # Real bug report: "Remediation Progress" on the downloaded report
+    # showed Closed/Open numbers that didn't add up to "Total Findings"
+    # (e.g. Total Findings: 23, Closed: 2, but Open: 45) — vulnerabilities_
+    # detail below is intentionally one row per (vulnerability, host, PORT)
+    # for the detailed table (the same vulnerability on 3 ports of one
+    # host is 3 separate rows there, by design, for that table), so its
+    # raw length is NOT the same "how many vulnerabilities" total as
+    # vulnerabilities{critical,high,medium,low} above (deduped one-per-
+    # (vulnerability,host), matching vulnerability_cards' own definition
+    # and Team Performance) — whichever UI read vulnerabilities_detail's
+    # length for Open/Closed math was using the wrong field. Exposing the
+    # correct total/open counts explicitly here so nothing has to infer
+    # them from an array length that was never meant to equal it.
+    vulnerabilities_fixed = summary.get("vulnerabilities_fixed") or {}
+    _closed_count = int(vulnerabilities_fixed.get("total_fixed") or 0)
+    _open_count = max(total - _closed_count, 0)
+
     return {
         "report_id": _report_id_for_classification,
         "report_generated_on": _generated_date,
@@ -4163,7 +4180,10 @@ def _build_report_data(request):
         "total_assets": _total_assets,
         "risk_score": risk_score,
         "vulnerabilities": {"critical": critical, "high": high, "medium": medium, "low": low},
-        "vulnerabilities_fixed": summary.get("vulnerabilities_fixed") or {},
+        "vulnerabilities_total": total,
+        "vulnerabilities_open": _open_count,
+        "vulnerabilities_closed": _closed_count,
+        "vulnerabilities_fixed": vulnerabilities_fixed,
         "team_distribution": distribution_data.get("distribution") or [],
         "vulnerabilities_detail": detailed_data.get("vulnerabilities") or [],
         # Real bug report: the "Sensitivity" badge was hardcoded to just
