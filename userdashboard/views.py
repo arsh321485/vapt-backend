@@ -79,23 +79,34 @@ def _load_latest_report_meta(db, admin_id, admin_email):
 
 def _build_plugin_risk_map(nessus_doc):
     """
-    Build plugin_name -> risk_factor map from nessus report.
+    Build (plugin_name, host_name) -> risk_factor map from nessus report.
     Used to look up severity of vulnerabilities in vulnerability_cards.
+
+    Real bug report: this used to be keyed by plugin_name ALONE,
+    first-occurrence-wins across every host — the same plugin can
+    legitimately carry a different severity on a different host, so this
+    collapsed to whichever host happened to be iterated first, producing
+    counts that disagreed with the admin-side dashboard tile (which reads
+    risk_factor per occurrence) for the identical findings. Keyed by
+    (plugin_name, host_name) now, matching admindashboard's own fix for
+    the exact same bug (AdminDistributionByTeamDetailAPIView).
     """
     plugin_risk = {}
     for host in (nessus_doc.get("vulnerabilities_by_host") or []):
+        host_name = (host.get("host_name") or host.get("host") or "").strip()
         for v in (host.get("vulnerabilities") or []):
             pname = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
-            if pname and pname not in plugin_risk:
+            risk_key = (pname, host_name)
+            if pname and risk_key not in plugin_risk:
                 raw = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
                 if raw.startswith("crit"):
-                    plugin_risk[pname] = "critical"
+                    plugin_risk[risk_key] = "critical"
                 elif raw.startswith("high"):
-                    plugin_risk[pname] = "high"
+                    plugin_risk[risk_key] = "high"
                 elif raw.startswith("med"):
-                    plugin_risk[pname] = "medium"
+                    plugin_risk[risk_key] = "medium"
                 elif raw.startswith("low"):
-                    plugin_risk[pname] = "low"
+                    plugin_risk[risk_key] = "low"
     return plugin_risk
 
 
@@ -195,8 +206,15 @@ def _to_iso(dt_val):
 
 
 def _build_plugin_severity_map(report_doc):
+    """
+    Real bug report: keyed by plugin_name ALONE, first-occurrence-wins
+    across every host — same fix as _build_plugin_risk_map above, applied
+    here too (a separate, near-duplicate helper with the identical bug).
+    Keyed by (plugin_name, host_name) now.
+    """
     plugin_risk = {}
     for host in report_doc.get("vulnerabilities_by_host", []):
+        host_name = (host.get("host_name") or host.get("host") or "").strip()
         for vuln in host.get("vulnerabilities", []):
             pname = (
                 vuln.get("plugin_name")
@@ -204,9 +222,10 @@ def _build_plugin_severity_map(report_doc):
                 or vuln.get("name")
                 or ""
             ).strip()
-            if not pname or pname in plugin_risk:
+            risk_key = (pname, host_name)
+            if not pname or risk_key in plugin_risk:
                 continue
-            plugin_risk[pname] = _normalize_severity_key(vuln.get("risk_factor") or vuln.get("severity") or "")
+            plugin_risk[risk_key] = _normalize_severity_key(vuln.get("risk_factor") or vuln.get("severity") or "")
     return plugin_risk
 
 
@@ -507,7 +526,7 @@ class UserVulnerabilitiesAPIView(APIView):
                     # (when card has no host_name)
                     if not card_host and any(p == pname for p, _ in excluded_plugins):
                         continue
-                    risk = plugin_risk.get(pname)
+                    risk = plugin_risk.get((pname, card_host))
                     if risk in counts:
                         counts[risk] += 1
 
@@ -843,9 +862,10 @@ class UserPatchManagementAPIView(APIView):
                     if not matched:
                         continue
                     pname = (card.get("vulnerability_name") or "").strip()
+                    card_host = (card.get("host_name") or "").strip()
                     if pname:
                         plugin_team_map[pname] = matched
-                    risk = plugin_risk.get(pname)
+                    risk = plugin_risk.get((pname, card_host))
                     if risk in team_data[matched]["vulnerabilities"]:
                         team_data[matched]["vulnerabilities"][risk] += 1
 
@@ -1169,8 +1189,17 @@ class UserMitigationTimelineExtensionOptionsAPIView(APIView):
                 admin_id_str = str(admin_user.id)
 
                 # Step 1: build severity map from nessus report (most reliable source).
+                # _build_plugin_severity_map is keyed by (plugin_name, host_name)
+                # now (see its own docstring) — this lookup has no host context
+                # (vulnerability_cards isn't even projecting host_name below),
+                # so collapse to a plugin_name-only map here, same as the
+                # pre-fix behaviour, rather than crash on tuple.lower().
                 plugin_severity = _build_plugin_severity_map(report_doc)
-                plugin_severity_lower = {k.lower(): v for k, v in plugin_severity.items()}
+                plugin_severity_lower = {}
+                for (pname, _hname), sev in plugin_severity.items():
+                    key = pname.lower()
+                    if key not in plugin_severity_lower:
+                        plugin_severity_lower[key] = sev
 
                 # Step 2: collect {vuln_lower: vuln_original} for this team+severity.
                 # Severity is determined from nessus report, not from vulnerability_cards fields.
@@ -1312,7 +1341,7 @@ class UserMitigationTimelineExtensionOptionsByFixAPIView(APIView):
                     return Response({"detail": "No report found"}, status=status.HTTP_404_NOT_FOUND)
 
                 plugin_severity = _build_plugin_severity_map(report_doc)
-                severity_filter = plugin_severity.get(vul_name)
+                severity_filter = plugin_severity.get((vul_name, asset))
                 if not severity_filter:
                     severity_filter = _normalize_severity_key(
                         card.get("risk_factor") or card.get("severity") or ""
@@ -1401,7 +1430,7 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                 if not selected_card:
                     return Response({"detail": "Selected asset/vulnerability is not assigned to your team"}, status=status.HTTP_403_FORBIDDEN)
 
-                detected_severity = plugin_severity.get(vulnerability_name)
+                detected_severity = plugin_severity.get((vulnerability_name, asset))
                 if detected_severity and detected_severity != severity:
                     return Response({"detail": "Selected severity does not match vulnerability severity"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1632,7 +1661,7 @@ class UserMitigationTimelineExtensionReportAPIView(APIView):
 #                     if pname:
 #                         team_plugins.add(pname)
 #                         plugin_team_map[pname] = matched
-#                     risk = plugin_risk.get(pname)
+#                     risk = plugin_risk.get((pname, card_host))
 #                     if risk in vuln_counts:
 #                         vuln_counts[risk] += 1
 

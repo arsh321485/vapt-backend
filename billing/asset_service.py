@@ -72,18 +72,34 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
     from day one) gets an identical number from both functions, so this is
     a pure superset, never an undercount risk the other way.
 
-    Real product decision (explicit): this counts RAW host entries — same
-    definition as the Assets page's own "host_count" field (upload_report/
-    host_ip_utils.py's counts_from_report_doc) — not deduplicated by
-    host_name and not collapsed to unique IPs (that's unique_ip_count, a
-    DIFFERENT, smaller number used only for the "This report has X IPs"
-    display, never for billing). Whatever entries the uploaded file
-    produced in vulnerabilities_by_host/locked_hosts is what gets billed,
-    matching the file's own host_count 1:1 — confirmed via real feedback
-    that pricing disagreeing with the file's own displayed host_count
-    ("upload karte hain to jitne bhi asset hai sare ko count karna hai")
-    was the actual complaint, not the host_name-based total this used to
-    return.
+    Real product decision (explicit, from an earlier fix): this counts
+    host entries the uploaded file produced in vulnerabilities_by_host/
+    locked_hosts — same definition as the Assets page's own "host_count"
+    field (upload_report/host_ip_utils.py's counts_from_report_doc) — NOT
+    collapsed to unique IPs (that's unique_ip_count, a DIFFERENT, smaller
+    number used only for the "This report has X IPs" display, never for
+    billing). Confirmed via real feedback that pricing disagreeing with
+    the file's own displayed host_count ("upload karte hain to jitne bhi
+    asset hai sare ko count karna hai") was the actual complaint, not a
+    host_name-based total.
+
+    Real bug report (round 2): the naive `$add` of the two arrays' raw
+    SIZES double-counted a host — billing/enforcement.py's
+    select_freemium_active_hosts "fair share" trimming (Step 2) can split
+    ONE host's own findings across both arrays when that single host has
+    more findings than the Freemium per-host quota: the visible slice
+    stays in vulnerabilities_by_host, the overflow slice becomes its own
+    locked_hosts ENTRY — same host_name, two array slots. `$add` of the
+    sizes counted that one physical host twice (confirmed live: 49 real
+    hosts, one with an overflow slice, produced asset_count=50). A host
+    genuinely absent from vulnerabilities_by_host (wholly locked — never
+    even partially visible) still only has the one locked_hosts entry, so
+    it's unaffected either way. Deduping by host_name via $setUnion across
+    BOTH arrays combined fixes the double-count while still counting
+    every locked-only host exactly once (same non-undercounting property
+    the earlier fix protected) — matches host_count above 1:1 again, now
+    for the right reason (each physical host billed exactly once,
+    regardless of how many array slots it's split across).
     """
     try:
         conditions = [{"admin_id": str(admin_id)}]
@@ -100,11 +116,18 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
             pipeline = [
                 {"$match": {"$or": conditions}},
                 {"$project": {
-                    "count": {"$add": [
-                        {"$size": {"$ifNull": ["$vulnerabilities_by_host", []]}},
-                        {"$size": {"$ifNull": ["$locked_hosts", []]}},
+                    "unique_hosts": {"$setUnion": [
+                        {"$map": {
+                            "input": {"$ifNull": ["$vulnerabilities_by_host", []]},
+                            "as": "h", "in": "$$h.host_name",
+                        }},
+                        {"$map": {
+                            "input": {"$ifNull": ["$locked_hosts", []]},
+                            "as": "h", "in": "$$h.host_name",
+                        }},
                     ]},
                 }},
+                {"$project": {"count": {"$size": "$unique_hosts"}}},
                 {"$group": {"_id": None, "total": {"$sum": "$count"}}},
             ]
             result = list(db[NESSUS_COLLECTION].aggregate(pipeline))
