@@ -1,18 +1,32 @@
 """
-One-off cleanup for the real bug fixed in
-upload_report/views.py's unlock_freemium_hosts_for_admin (Freemium->Premium
-upgrade unlock merge) — it concatenated locked_hosts' vulnerabilities onto
-vulnerabilities_by_host's existing list WITHOUT deduping by plugin_name
-(unlike merge_service.merge_hosts_into_report's same-day-reupload merge,
-which always has). Any admin who upgraded before that fix now has literal
-duplicate (host_name, plugin_name) rows sitting in their nessus_reports
-doc's vulnerabilities_by_host — showing up as the same vulnerability
-appearing twice on the same asset in Register/Fix/All Vulns everywhere.
+Cleanup for two related real bugs that both leave literal duplicate rows in
+a nessus_reports doc's vulnerabilities_by_host:
 
-This command finds every such report and collapses duplicate plugin_name
-entries within each host back down to one (first one wins — matches
-merge_hosts_into_report's own "already have it, skip" semantics), then
-recomputes total_hosts/total_vulnerabilities.
+1. The bug originally fixed in upload_report/views.py's
+   unlock_freemium_hosts_for_admin (Freemium->Premium upgrade unlock merge)
+   — it used to concatenate locked_hosts' vulnerabilities onto
+   vulnerabilities_by_host's existing list WITHOUT deduping by plugin_name
+   (unlike merge_service.merge_hosts_into_report's same-day-reupload merge,
+   which always has). Any admin who upgraded before that fix has duplicate
+   (host_name, plugin_name) rows WITHIN one host entry — the same
+   vulnerability appearing twice on the same asset in Register/Fix/All Vulns.
+
+2. The bug fixed in upload_report/parsers.py's parse_nessus_xml_streaming —
+   it used to append every <ReportHost> block as its own list entry with no
+   merge-by-name, so a .nessus file with more than one <ReportHost> block
+   for the same host_name (a combined export across scan policies/passes is
+   a real, common case) produced two-plus SEPARATE entries for that one
+   asset. Every downstream count (Assets page severity badges, billing's
+   asset count, the Freemium active/locked split) then treated them as two
+   different hosts — inflating "X assets"/severity counts, or splitting one
+   physical host's findings between "active" and "locked".
+
+This command finds every affected report, merges any host_name that appears
+more than once back into a single entry (first entry wins on
+host_information key conflicts, vulnerabilities unioned by plugin_name),
+then collapses duplicate plugin_name entries within each host back down to
+one (first one wins — matches merge_hosts_into_report's own "already have
+it, skip" semantics), then recomputes total_hosts/total_vulnerabilities.
 
 Does NOT touch vulnerability_cards — those are already deduplicated by
 their own (report_id, vulnerability_name, host_name) upsert key, so a
@@ -52,10 +66,46 @@ class Command(BaseCommand):
         for report in coll.find(query, {"report_id": 1, "vulnerabilities_by_host": 1, "admin_id": 1}):
             reports_checked += 1
             report_id = report.get("report_id")
-            hosts = report.get("vulnerabilities_by_host") or []
+            raw_hosts = report.get("vulnerabilities_by_host") or []
             changed = False
             dupes_here = 0
+            hosts_merged_here = 0
 
+            # Pass 1 — merge any host_name that appears as more than one
+            # array entry (parse_nessus_xml_streaming pre-fix bug) into one,
+            # unioning vulnerabilities by plugin_name and filling in any
+            # host_information keys the first entry was missing.
+            hosts = []
+            by_name = {}
+            for host in raw_hosts:
+                host_name = host.get("host_name")
+                existing = by_name.get(host_name) if host_name else None
+                if existing is None:
+                    merged = dict(host)
+                    merged["vulnerabilities"] = list(host.get("vulnerabilities") or [])
+                    hosts.append(merged)
+                    if host_name:
+                        by_name[host_name] = merged
+                    continue
+
+                changed = True
+                hosts_merged_here += 1
+                for k, v in (host.get("host_information") or {}).items():
+                    existing.setdefault("host_information", {}).setdefault(k, v)
+                seen_plugins = {
+                    v.get("plugin_name") for v in existing["vulnerabilities"] if v.get("plugin_name")
+                }
+                for vuln in (host.get("vulnerabilities") or []):
+                    pname = vuln.get("plugin_name")
+                    if pname and pname in seen_plugins:
+                        dupes_here += 1
+                        continue
+                    if pname:
+                        seen_plugins.add(pname)
+                    existing["vulnerabilities"].append(vuln)
+
+            # Pass 2 — collapse duplicate plugin_name entries within each
+            # (now-merged) host back down to one.
             for host in hosts:
                 vulns = host.get("vulnerabilities") or []
                 seen = set()
@@ -77,7 +127,8 @@ class Command(BaseCommand):
             total_hosts = len(hosts)
             total_vulns = sum(len(h.get("vulnerabilities") or []) for h in hosts)
             self.stdout.write(
-                f"report_id={report_id}: removed {dupes_here} duplicate row(s) "
+                f"report_id={report_id}: merged {hosts_merged_here} duplicate host_name "
+                f"row(s), removed {dupes_here} duplicate vulnerability row(s) "
                 f"-> total_hosts={total_hosts} total_vulnerabilities={total_vulns}"
             )
             reports_fixed += 1

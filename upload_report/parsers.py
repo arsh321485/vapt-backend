@@ -887,6 +887,16 @@ def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
     scan_info: Dict[str, Any] = {}
     current_host: Dict[str, Any] = None
     in_report = False
+    # Real bug report: the same IP/hostname can legitimately appear as
+    # multiple separate <ReportHost> blocks in one .nessus file (e.g. a
+    # combined export across scan policies/passes) — appending each block
+    # as its own vulnerabilities_by_host entry produced literal duplicate
+    # host_name rows, which every downstream count (Assets page severity
+    # badges, billing's asset count, the Freemium trim) either double-
+    # counted or split across active/locked as if they were two different
+    # hosts. Tracks the already-appended entry for each non-empty host_name
+    # so a repeat block merges into it instead of appending a new one.
+    _host_index: Dict[str, Dict[str, Any]] = {}
 
     # Helper to get the localname of a tag (in case namespaces are present)
     def local(tag: str) -> str:
@@ -977,11 +987,34 @@ def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
                 # Clear the ReportItem subtree to free memory
                 elem.clear()
 
-            # End of this ReportHost -> append to list and clear memory
+            # End of this ReportHost -> merge into an existing entry for the
+            # same host_name, or append as a new one, then clear memory
             if event == "end" and tag == "reporthost":
                 # Only include host if it has vulnerabilities or host_information (keeps result compact)
                 if current_host is not None and (current_host["vulnerabilities"] or current_host["host_information"]):
-                    vulnerabilities_by_host.append(current_host)
+                    host_name = current_host["host_name"]
+                    existing = _host_index.get(host_name) if host_name else None
+                    if existing is not None:
+                        # Fill in host_information keys the earlier block
+                        # didn't have (e.g. one pass resolves the MAC/OS,
+                        # another doesn't), keep the earlier block's value
+                        # on conflict.
+                        for k, v in current_host["host_information"].items():
+                            existing["host_information"].setdefault(k, v)
+                        seen_plugins = {
+                            v.get("plugin_name") for v in existing["vulnerabilities"] if v.get("plugin_name")
+                        }
+                        for vuln in current_host["vulnerabilities"]:
+                            pname = vuln.get("plugin_name")
+                            if pname and pname in seen_plugins:
+                                continue
+                            if pname:
+                                seen_plugins.add(pname)
+                            existing["vulnerabilities"].append(vuln)
+                    else:
+                        vulnerabilities_by_host.append(current_host)
+                        if host_name:
+                            _host_index[host_name] = current_host
                 # Clear host element
                 elem.clear()
                 current_host = None
