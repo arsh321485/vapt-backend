@@ -14745,8 +14745,27 @@ class SlackSlashCommandView(APIView):
         category = "partial" if sub_action_id == "auto_sub_partial" else "full"
         all_cards = self._fetch_automation_cards(team_id, user_id)
 
+        # short_id is assigned across the FULL admin automation-card set
+        # (every category, not just this one) so a "View" click always
+        # resolves to the same row via _find_automation_card_by_short_id
+        # regardless of which Full/Partial sub-tab or severity filter it
+        # was opened from — same rule as every other short_id list in this
+        # file (must be computed before any subsetting/bucketing).
+        tagged_cards = self._assign_severity_short_ids(
+            [
+                dict(c, severity=(
+                    c.get("true_severity")
+                    or (c.get("vaptcode_analysis") or {}).get("severity")
+                    or (c.get("automation_card") or {}).get("severity")
+                    or ""
+                ))
+                for c in all_cards
+            ],
+            name_key="vulnerability_name",
+        )
+
         rows = []
-        for c in all_cards:
+        for c in tagged_cards:
             automation = c.get("automation_card") or {}
             if automation.get("automation_status") != category:
                 continue
@@ -14758,12 +14777,58 @@ class SlackSlashCommandView(APIView):
             # which _fetch_automation_cards above calls) is that same raw
             # value and now wins outright.
             rows.append({
+                "short_id": c.get("short_id"),
                 "vulnerability": c.get("vulnerability_name") or "Unknown",
                 "severity": c.get("true_severity") or (c.get("vaptcode_analysis") or {}).get("severity") or automation.get("severity") or "",
                 "team": c.get("assigned_team") or "",
+                "asset": c.get("host_name") or c.get("host") or "—",
             })
 
         return self._format_automation_tab(category, rows, sev_filter=sev_filter, offset=offset)
+
+    def _find_automation_card_by_short_id(self, team_id, user_id, sid):
+        """Re-resolves a short_id from the Automations tab back to its full
+        vulnerability_cards document — same short_id scheme _automation_subtab_blocks
+        assigns, recomputed fresh (deterministic as long as the underlying
+        cards haven't changed between the list view and this click)."""
+        all_cards = self._fetch_automation_cards(team_id, user_id)
+        tagged_cards = self._assign_severity_short_ids(
+            [
+                dict(c, severity=(
+                    c.get("true_severity")
+                    or (c.get("vaptcode_analysis") or {}).get("severity")
+                    or (c.get("automation_card") or {}).get("severity")
+                    or ""
+                ))
+                for c in all_cards
+            ],
+            name_key="vulnerability_name",
+        )
+        return next((c for c in tagged_cards if self._short_ids_match(c.get("short_id"), sid)), None)
+
+    def _automation_row_detail_blocks(self, sid, team_id, user_id, category, sev_filter, offset):
+        """Detail view opened via a 'View' click on an Automations-tab row — Back returns to the same list/filter/page it was opened from."""
+        back = {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "← Back", "emoji": True},
+                "action_id": "auto_view_row_back",
+                "value": f"{category}|{sev_filter}|{offset}",
+            }],
+        }
+        card = self._find_automation_card_by_short_id(team_id, user_id, sid)
+        if not card:
+            return [back, {"type": "section", "text": {"type": "mrkdwn", "text": "❌ Vulnerability not found."}}]
+
+        from teams_bot.fix_tab import shape_automation_detail
+        automation = shape_automation_detail(card)
+        v = {
+            "short_id": card.get("short_id", "?"),
+            "vul_name": card.get("vulnerability_name"),
+            "host_name": card.get("host_name") or card.get("host") or "",
+        }
+        return [back] + self._format_vulndata_automation_detail(v, automation, can_download=False)
 
     def _parse_rc_days(self, raw_value):
         """
@@ -19780,18 +19845,27 @@ class SlackSlashCommandView(APIView):
                 sev_norm = _norm_sev(s)
                 sev_label = sev_norm.upper() if sev_norm else "—"
                 team = (s.get("team") or "").strip() or "—"
-                blocks.append(
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                f"*`{sno}`*  *{name}*\n"
-                                f"{sev_icon(sev_norm)} *{sev_label}*  |  *Team:* {team}  |  {badge}"
-                            ),
-                        },
+                asset = (s.get("asset") or "").strip() or "—"
+                section = {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*`{sno}`*  *{name}*\n"
+                            f"{sev_icon(sev_norm)} *{sev_label}*  |  *Asset:* `{asset}`  |  *Team:* {team}  |  {badge}"
+                        ),
+                    },
+                }
+                sid = s.get("short_id")
+                if sid:
+                    section["accessory"] = {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": "auto_view_row",
+                        "value": f"{sid}|{category}|{sev_filter}|{offset}",
+                        "style": "primary",
                     }
-                )
+                blocks.append(section)
 
         blocks.append(
             {
@@ -21561,6 +21635,45 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id.startswith("auto_sev_") or action_id.startswith("auto_list_pg_"):
+                # value format: "<category>|<sev>|<offset>"
+                parts = value.split("|")
+                category = parts[0] if len(parts) > 0 and parts[0] else "full"
+                sev_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                sub_action_id = "auto_sub_partial" if category == "partial" else "auto_sub_full"
+                content_blocks = slash._automation_subtab_blocks(
+                    sub_action_id, team_id, slack_user_id, sev_filter=sev_filter, offset=page_offset,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_automation")
+                    + slash._automation_subnav_block(active_sub=sub_action_id)
+                    + content_blocks
+                )
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            if action_id == "auto_view_row":
+                # value format: "<short_id>|<category>|<sev>|<offset>"
+                parts = value.split("|")
+                row_sid = parts[0] if len(parts) > 0 else ""
+                category = parts[1] if len(parts) > 1 and parts[1] else "full"
+                sev_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                blocks = slash._automation_row_detail_blocks(
+                    row_sid, team_id, slack_user_id, category, sev_filter, page_offset,
+                )
+                self._post_response_url(
+                    response_url,
+                    {"replace_original": True, "blocks": blocks},
+                    action_id,
+                )
+                return
+
+            if action_id == "auto_view_row_back":
                 # value format: "<category>|<sev>|<offset>"
                 parts = value.split("|")
                 category = parts[0] if len(parts) > 0 and parts[0] else "full"
