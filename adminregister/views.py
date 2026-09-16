@@ -4238,7 +4238,15 @@ def _get_asset_classification_counts(report_id):
         for asset_type in asset_type_map.values():
             if asset_type in counts:
                 counts[asset_type] += 1
-        counts["assets"] = len(asset_type_map)
+        # Real bug report: "assets" was set to len(asset_type_map) — the
+        # GRAND TOTAL across every classification — but the report's Asset
+        # Classification box renders it as a 4th box alongside Web App/
+        # Firewall/Server as if it were its own peer category, so the 4
+        # numbers should sum to the total (they didn't: e.g. 15+0+0+13=28
+        # for a 15-asset report). "Assets" here means "classified as
+        # neither web_app, firewall, nor server" (get_asset_type_map_for_report's
+        # "other" bucket) — the leftover count, not a duplicate of the total.
+        counts["assets"] = len(asset_type_map) - counts["web_app"] - counts["firewall"] - counts["server"]
         return counts
     except Exception:
         logger.exception(f"[Report] asset classification counts failed for report_id={report_id}")

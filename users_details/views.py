@@ -1080,50 +1080,84 @@ class UserDetailCreateView(generics.CreateAPIView):
             threading.Thread(target=_send_emails, daemon=True).start()
             email_sent, error = True, None  # optimistic — logged inside send methods
 
-            # Sync to MS Teams — use token from request body first, else fall back to admin's stored token
-            teams_sync_result = []
+            # Sync to MS Teams / Slack — real Graph/Slack API calls (per-
+            # channel member add, workspace lookups, etc. — several round
+            # trips) that used to run SYNCHRONOUSLY here, blocking this
+            # view's response.
+            #
+            # Real bug report: MS Teams' Action.Execute invoke blocks the
+            # CLIENT waiting on this exact HTTP response within a tight
+            # timeout (~5s). When this sync work took longer than that
+            # (easily, with 2+ Graph API round trips for multi-team adds),
+            # Teams' own client showed "Something went wrong. Please try
+            # again." to the admin — even though the user WAS actually
+            # created and the sync finished moments later. Same "don't
+            # block the response" fix already applied to the welcome
+            # emails above (see the _send_emails() comment) — now applied
+            # here too. teams_sync/slack_sync in the response are
+            # therefore only ever "queued" now, not a live per-channel
+            # result — same optimistic convention email_sent already uses.
             ms_access_token = request.data.get("access_token") or getattr(admin_user, "ms_access_token", None)
             team_id = request.data.get("team_id") or getattr(admin_user, "ms_team_id", None)
+            slack_bot_token = request.data.get("slack_bot_token") or getattr(admin_user, "slack_bot_token", None)
+            teams_sync_queued = bool(ms_access_token and team_id)
+            slack_sync_queued = bool(slack_bot_token)
+
             logger.info(
                 f"[UserDetailCreate] Teams sync check: admin_id={getattr(admin_user, 'id', None)} "
                 f"ms_access_token_set={bool(ms_access_token)} ms_team_id={getattr(admin_user, 'ms_team_id', None)} "
                 f"team_id_used={team_id} roles={roles}"
             )
-            # Teams sync — runs even with empty roles (still adds user to team + saves ms_teams_member_id)
-            if ms_access_token and team_id:
-                teams_sync_result, ms_user_id = sync_member_to_teams_channels(
-                    access_token=ms_access_token,
-                    team_id=team_id,
-                    user_email=email,
-                    member_roles=roles or [],
-                )
-                # Save team_id, ms_teams_member_id, and platform via direct pymongo
-                teams_fields = {"team_id": team_id}
-                if ms_user_id and not user_detail.ms_teams_member_id:
-                    teams_fields["ms_teams_member_id"] = ms_user_id
-                if not user_detail.platform:
-                    teams_fields["platform"] = "microsoft_teams"
-                _ud_set(user_detail, **teams_fields)
-                logger.info(f"[UserDetailCreate] MS Teams sync done for {email}: ms_user_id={ms_user_id} result={teams_sync_result}")
-            else:
-                if not ms_access_token:
-                    logger.warning(f"[UserDetailCreate] Teams sync skipped: missing ms_access_token for admin_id={admin_user.id}")
-                elif not team_id:
-                    logger.warning(f"[UserDetailCreate] Teams sync skipped: missing team_id/ms_team_id for admin_id={admin_user.id}")
-
-            # Sync to Slack — use token from request body first, else fall back to admin's stored token
-            slack_sync_result = {}
-            slack_bot_token = request.data.get("slack_bot_token") or getattr(admin_user, "slack_bot_token", None)
             logger.info(
                 f"[UserDetailCreate] Slack sync check: admin_id={getattr(admin_user, 'id', None)} "
                 f"slack_bot_token_set={bool(slack_bot_token)} roles={roles} target_email={email}"
             )
-            # Slack sync — runs even with empty roles (still saves slack_member_id)
-            if slack_bot_token:
-                # Try to get slack_user_id from member's Django User record first, else lookup by email
-                member_user = User.objects.filter(email=email).first()
-                slack_user_id = getattr(member_user, "slack_user_id", None) or lookup_slack_user_by_email(slack_bot_token, email)
-                if slack_user_id:
+
+            def _sync_teams_and_slack():
+                # Teams sync — runs even with empty roles (still adds user to team + saves ms_teams_member_id)
+                if ms_access_token and team_id:
+                    try:
+                        teams_sync_result, ms_user_id = sync_member_to_teams_channels(
+                            access_token=ms_access_token,
+                            team_id=team_id,
+                            user_email=email,
+                            member_roles=roles or [],
+                        )
+                        # Save team_id, ms_teams_member_id, and platform via direct pymongo
+                        teams_fields = {"team_id": team_id}
+                        if ms_user_id and not user_detail.ms_teams_member_id:
+                            teams_fields["ms_teams_member_id"] = ms_user_id
+                        if not user_detail.platform:
+                            teams_fields["platform"] = "microsoft_teams"
+                        _ud_set(user_detail, **teams_fields)
+                        logger.info(f"[UserDetailCreate] MS Teams sync done for {email}: ms_user_id={ms_user_id} result={teams_sync_result}")
+                    except Exception:
+                        logger.exception(f"[UserDetailCreate] MS Teams sync failed for {email}")
+                else:
+                    if not ms_access_token:
+                        logger.warning(f"[UserDetailCreate] Teams sync skipped: missing ms_access_token for admin_id={admin_user.id}")
+                    elif not team_id:
+                        logger.warning(f"[UserDetailCreate] Teams sync skipped: missing team_id/ms_team_id for admin_id={admin_user.id}")
+
+                # Slack sync — runs even with empty roles (still saves slack_member_id)
+                if not slack_bot_token:
+                    # Not applicable, not a failure — this admin has no Slack
+                    # connected at all (e.g. Email/Teams-only admin), so
+                    # attempting Slack sync was never on the table to begin with.
+                    logger.info(f"[UserDetailCreate] Slack sync not applicable (no slack_bot_token) for admin_id={admin_user.id}")
+                    return
+
+                try:
+                    sync_email = email
+                    # Try to get slack_user_id from member's Django User record first, else lookup by email
+                    member_user = User.objects.filter(email=sync_email).first()
+                    slack_user_id = getattr(member_user, "slack_user_id", None) or lookup_slack_user_by_email(slack_bot_token, sync_email)
+                    if not slack_user_id:
+                        # User not found in Slack workspace — try to invite them
+                        invite_result = invite_user_to_slack_workspace(slack_bot_token, sync_email)
+                        logger.warning(f"[UserDetailCreate] Slack lookup failed for {sync_email}, invite_result={invite_result}")
+                        return
+
                     # Always save slack_member_id and platform via direct pymongo
                     slack_fields = {}
                     if not user_detail.slack_member_id:
@@ -1133,7 +1167,7 @@ class UserDetailCreateView(generics.CreateAPIView):
 
                     # If frontend accidentally sent admin email, prefer actual Slack profile email.
                     try:
-                        if email.strip().lower() == (getattr(admin_user, "email", "") or "").strip().lower():
+                        if sync_email.strip().lower() == (getattr(admin_user, "email", "") or "").strip().lower():
                             profile_resp = _http_get(
                                 "https://slack.com/api/users.info",
                                 params={"user": slack_user_id},
@@ -1146,11 +1180,11 @@ class UserDetailCreateView(generics.CreateAPIView):
                                 .get("profile", {})
                                 .get("email")
                             )
-                            if profile_email and profile_email.strip().lower() != email.strip().lower():
+                            if profile_email and profile_email.strip().lower() != sync_email.strip().lower():
                                 if not UserDetail.objects.filter(admin=admin_user, email=profile_email).exists():
                                     slack_fields["email"] = profile_email.strip().lower()
-                                    email = profile_email.strip().lower()
-                                    logger.info(f"[UserDetailCreate] Corrected UserDetail email from admin email to member email: {email}")
+                                    sync_email = profile_email.strip().lower()
+                                    logger.info(f"[UserDetailCreate] Corrected UserDetail email from admin email to member email: {sync_email}")
                     except Exception:
                         logger.warning("[UserDetailCreate] Slack profile email correction failed", exc_info=True)
 
@@ -1190,13 +1224,7 @@ class UserDetailCreateView(generics.CreateAPIView):
                     if slack_fields:
                         _ud_set(user_detail, **slack_fields)
 
-                    slack_sync_result = {
-                        "status": "success",
-                        "workspace": {"invited": False, "already_member": True},
-                        "user_lookup": {"email": email, "slack_user_id": slack_user_id},
-                        "channels": slack_results,
-                    }
-                    logger.info(f"[UserDetailCreate] Slack sync done for {email}: slack_user_id={slack_user_id} channels={channel_ids}")
+                    logger.info(f"[UserDetailCreate] Slack sync done for {sync_email}: slack_user_id={slack_user_id} channels={channel_ids}")
 
                     # Send Slack platform email for channels user was successfully added to
                     synced_channels = [
@@ -1205,56 +1233,19 @@ class UserDetailCreateView(generics.CreateAPIView):
                         if r.get("status") == "invited"
                     ]
                     if synced_channels:
-                        _slack_email = email
-                        _slack_first = first_name
-                        _slack_last = last_name
-                        _slack_channels = synced_channels
-                        _view_ref = self
+                        try:
+                            self.send_slack_platform_email(
+                                email=sync_email,
+                                first_name=first_name,
+                                last_name=last_name,
+                                channel_names=synced_channels,
+                            )
+                        except Exception:
+                            logger.exception(f"[UserDetailCreate] Slack platform email failed for {sync_email}")
+                except Exception:
+                    logger.exception(f"[UserDetailCreate] Slack sync failed for {email}")
 
-                        def _send_slack_platform_email():
-                            try:
-                                _view_ref.send_slack_platform_email(
-                                    email=_slack_email,
-                                    first_name=_slack_first,
-                                    last_name=_slack_last,
-                                    channel_names=_slack_channels,
-                                )
-                            except Exception:
-                                logger.exception(f"[UserDetailCreate] Slack platform email failed for {_slack_email}")
-
-                        threading.Thread(target=_send_slack_platform_email, daemon=True).start()
-                else:
-                    # User not found in Slack workspace — try to invite them
-                    invite_result = invite_user_to_slack_workspace(slack_bot_token, email)
-                    if invite_result.get("status") in {"invited", "already_member"}:
-                        slack_sync_result = {
-                            "status": "pending_workspace_join" if invite_result.get("status") == "invited" else "already_member_no_lookup",
-                            "workspace": {
-                                "invited": invite_result.get("status") == "invited",
-                                "already_member": invite_result.get("status") == "already_member",
-                                "invite_email": email,
-                            },
-                            "channels": [],
-                            "note": "User invited to Slack workspace. Channel mapping will apply after they join.",
-                        }
-                    else:
-                        slack_sync_result = {
-                            "status": "failed",
-                            "workspace": {"invited": False, "already_member": False},
-                            "channels": [],
-                            "error": invite_result.get("error") or "User not found in Slack workspace",
-                        }
-                    logger.warning(f"[UserDetailCreate] Slack lookup failed for {email}")
-            else:
-                # Not applicable, not a failure — this admin has no Slack
-                # connected at all (e.g. Email/Teams-only admin), so
-                # attempting Slack sync was never on the table to begin
-                # with. Log for our own visibility only; leaving
-                # slack_sync_result unset keeps it out of the response
-                # (see `if slack_sync_result:` below) so the frontend
-                # doesn't surface a confusing "missing_slack_bot_token"
-                # toast to admins who were never going to use Slack.
-                logger.info(f"[UserDetailCreate] Slack sync not applicable (no slack_bot_token) for admin_id={admin_user.id}")
+            threading.Thread(target=_sync_teams_and_slack, daemon=True).start()
 
             response_data = {
                 "message": "User detail created successfully",
@@ -1268,10 +1259,10 @@ class UserDetailCreateView(generics.CreateAPIView):
             else:
                 logger.info(f"User created and email sent successfully for {email}")
 
-            if teams_sync_result:
-                response_data["teams_sync"] = teams_sync_result
-            if slack_sync_result:
-                response_data["slack_sync"] = slack_sync_result
+            if teams_sync_queued:
+                response_data["teams_sync"] = {"status": "queued"}
+            if slack_sync_queued:
+                response_data["slack_sync"] = {"status": "queued"}
 
             return Response(response_data, status=status.HTTP_201_CREATED)
 
