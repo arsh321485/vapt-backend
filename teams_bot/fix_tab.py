@@ -102,9 +102,12 @@ def _status_filter_columnset(prefix, active_sev, active_st, counts, extra_value=
     )
 
 
-def _row(title_text, subtitle_text, action_id, value):
+def _row(title_text, subtitle_text, action_id, value, size="Small"):
     """One clickable list row — title/subtitle on the left, a real 'View'
-    button on the right (matches Slack's section+accessory-button rows)."""
+    button on the right (matches Slack's section+accessory-button rows).
+    `size` bumps both lines up together (e.g. "Default") for callers that
+    want a larger read — defaults to "Small" so every other caller's
+    layout is unchanged."""
     return {
         "type": "ColumnSet",
         "spacing": "Medium",
@@ -113,8 +116,8 @@ def _row(title_text, subtitle_text, action_id, value):
             {
                 "type": "Column", "width": "stretch",
                 "items": [
-                    {"type": "TextBlock", "text": title_text, "weight": "Bolder", "size": "Small", "wrap": True},
-                    {"type": "TextBlock", "text": subtitle_text, "size": "Small", "isSubtle": True, "wrap": True, "spacing": "None"},
+                    {"type": "TextBlock", "text": title_text, "weight": "Bolder", "size": size, "wrap": True},
+                    {"type": "TextBlock", "text": subtitle_text, "size": size, "isSubtle": True, "wrap": True, "spacing": "None"},
                 ],
             },
             {
@@ -268,8 +271,12 @@ def assets_list_body(admin, sev="all", st="all", offset=0):
         body.append({"type": "TextBlock", "text": "No assets found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
     for a in page:
-        subtitle = f"{a['total']} Vulns   ·   {_status_label(a['status'])}\n{_sev_dots_text(a['counts'])}"
-        body.append(_row(f"🖥 {a['host']}", subtitle, "fix_asset_view", {"host": a["host"], "offset": offset}))
+        # Real request: host name, vuln count, and status used to be on
+        # separate lines — combine them into one row so the count/status
+        # is visible at a glance without the row taking two lines just for
+        # that, and bump the font size up a step for readability.
+        title = f"🖥 {a['host']}   ·   {a['total']} Vulns   ·   {_status_label(a['status'])}"
+        body.append(_row(title, _sev_dots_text(a["counts"]), "fix_asset_view", {"host": a["host"], "offset": offset}, size="Default"))
     body.extend(_pagination_body(offset, total, "fix_asset_pg", {"sev": sev, "st": st}))
     return body
 

@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 UFIX_SUBTABS = [
     ("ufix_sub_assets", "🖥 All Assets"),
-    ("ufix_sub_vulns",  "📋 All Vulns"),
-    ("ufix_sub_common", "🧩 Common Vulns"),
+    ("ufix_sub_vulns",  "📋 All Vulnerabilities"),
+    ("ufix_sub_common", "🧩 Common Vulnerabilities"),
 ]
 
 # "Configuration Management" -> "config" (COMMON_VULNS_TEAMS is
@@ -82,8 +82,10 @@ def assets_list_body(member_user, team_name, sev="all", st="all", offset=0):
         body.append({"type": "TextBlock", "text": "No assets found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
         return body
     for a in page:
-        subtitle = f"{a['total']} Vulns   ·   {_status_label(a['status'])}\n{_sev_dots_text(a['counts'])}"
-        body.append(_row(f"🖥 {a['host']}", subtitle, "ufix_asset_view", {"host": a["host"], "offset": offset}))
+        # Same combined-row + larger-font request as the admin side's
+        # assets_list_body (fix_tab.py).
+        title = f"🖥 {a['host']}   ·   {a['total']} Vulns   ·   {_status_label(a['status'])}"
+        body.append(_row(title, _sev_dots_text(a["counts"]), "ufix_asset_view", {"host": a["host"], "offset": offset}, size="Default"))
     body.extend(_pagination_body(offset, total, "ufix_asset_pg", {"sev": sev, "st": st}))
     return body
 

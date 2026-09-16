@@ -277,7 +277,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_common", common_team=team_key)
         except Exception:
             logger.exception("[TeamsBot] fix_tab_body (common vulns team switch) failed")
-            body = [cards._header("🧩 Common Vulns"), cards._body_text("Could not load this right now.")]
+            body = [cards._header("🧩 Common Vulnerabilities"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     # Fix tab drill-down: asset/vuln "View" + pagination + Back — all real
@@ -343,7 +343,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_vulns", offset=offset, sev=sev, st=st)
         except Exception:
             logger.exception("[TeamsBot] fix_vuln_pg/sev/st failed")
-            body = [cards._header("📋 All Vulns"), cards._body_text("Could not load this right now.")]
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id == "fix_vuln_view":
@@ -592,7 +592,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_vulns", offset=offset)
         except Exception:
             logger.exception("[TeamsBot] fix_vuln_back failed")
-            body = [cards._header("📋 All Vulns"), cards._body_text("Could not load this right now.")]
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id in ("fix_common_vuln_pg", "fix_common_vuln_sev", "fix_common_vuln_st"):
@@ -604,7 +604,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_common", offset=offset, common_team=team_key, sev=sev, st=st)
         except Exception:
             logger.exception("[TeamsBot] fix_common_vuln_pg/sev/st failed")
-            body = [cards._header("🧩 Common Vulns"), cards._body_text("Could not load this right now.")]
+            body = [cards._header("🧩 Common Vulnerabilities"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id in ("fix_common_vuln_view", "fix_common_vuln_asset_pg"):
@@ -667,7 +667,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_common", offset=offset, common_team=team_key)
         except Exception:
             logger.exception("[TeamsBot] fix_common_vuln_back failed")
-            body = [cards._header("🧩 Common Vulns"), cards._body_text("Could not load this right now.")]
+            body = [cards._header("🧩 Common Vulnerabilities"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     # ── Team tab ───────────────────────────────────────────────────────

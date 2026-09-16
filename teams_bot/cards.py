@@ -684,8 +684,8 @@ def freemium_upgrade_banner_items(admin, team_id):
 # guess at the mapping).
 FIX_SUBTABS = [
     ("fix_sub_assets", "🖥 All Assets"),
-    ("fix_sub_vulns", "📋 All Vulns"),
-    ("fix_sub_common", "🧩 Common Vulns"),
+    ("fix_sub_vulns", "📋 All Vulnerabilities"),
+    ("fix_sub_common", "🧩 Common Vulnerabilities"),
 ]
 
 

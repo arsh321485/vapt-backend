@@ -33,8 +33,8 @@ UNAV_ITEMS = [
 ]
 UFIX_SUBTABS = [
     ("ufix_sub_assets", "🖥 All Assets"),
-    ("ufix_sub_vulns",  "📋 All Vulns"),
-    ("ufix_sub_common", "🧩 Common Vulns"),
+    ("ufix_sub_vulns",  "📋 All Vulnerabilities"),
+    ("ufix_sub_common", "🧩 Common Vulnerabilities"),
 ]
 UREG_SUBTABS = [
     ("ureg_sub_register", "📋 Register"),
