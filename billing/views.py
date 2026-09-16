@@ -88,7 +88,7 @@ class PlanEstimateView(APIView):
                     "asset_count": asset_count,
                     "asset_ceiling": PREMIUM_ASSET_CEILING,
                     "over_ceiling": True,
-                    "message": "250+ assets — this account must use the Custom plan.",
+                    "message": "More than 250 assets — this account must use the Custom plan.",
                 })
 
             if mode == MODE_MANAGEMENT:
@@ -238,7 +238,7 @@ class PremiumCheckoutView(APIView):
 
         if asset_count > PREMIUM_ASSET_CEILING:
             return Response(
-                {"detail": "250+ assets — use the Custom plan instead.", "asset_count": asset_count},
+                {"detail": "More than 250 assets — use the Custom plan instead.", "asset_count": asset_count},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if asset_count == 0:
