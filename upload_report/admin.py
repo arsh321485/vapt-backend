@@ -563,7 +563,14 @@ class UploadReportAdmin(admin.ModelAdmin):
                 validation_result.get("reason")
                 or "This file does not appear to contain vulnerability scan data."
             )
-        return validation_result, None
+        # Same Info/None-severity strip the website's own upload API
+        # (upload_report/views.py post()) already applies to this AI
+        # extraction output — missing here, a custom report uploaded via
+        # this admin panel path let Info-severity findings survive into
+        # the Register/dashboards while the exact same file uploaded via
+        # the website wouldn't have.
+        from .parsers import _strip_non_risk_findings
+        return _strip_non_risk_findings(validation_result), None
 
     def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
         extra_context = extra_context or {}

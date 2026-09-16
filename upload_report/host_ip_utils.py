@@ -91,15 +91,57 @@ def extract_ip_from_host(host: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _domain_identity_from_host(host: Dict[str, Any]) -> Optional[str]:
+    """
+    Fallback target identity for a host that has no literal IP at all —
+    a custom PDF/CSV/API-testing report's "host" is routinely a URL/domain
+    (e.g. "https://pay-api.icopperstone.com"), never meant to resolve to
+    one IP address. Real bug: extract_ip_from_host correctly returns None
+    for these (it's not an IP), and unique_ip_set was silently dropping
+    the host entirely — a genuine, billable target reported as "0 IPs" on
+    a report that plainly has 1. Same scheme/path/port stripping as
+    normalize_ip_candidate, just without requiring the result to parse as
+    an ipaddress — a lowercased hostname/domain string is a perfectly
+    stable dedupe key on its own.
+    """
+    host_information = host.get("host_information") or {}
+    for raw in (
+        host.get("host_name"),
+        host.get("host"),
+        host_information.get("host-ip"),
+        host_information.get("IP"),
+        host_information.get("ip"),
+    ):
+        if not raw:
+            continue
+        value = str(raw).strip()
+        if not value:
+            continue
+        value = _SCHEME_RE.sub("", value)
+        value = re.split(r"[/?#]", value, 1)[0].strip()
+        if value.count(":") == 1 and not value.startswith(":"):
+            host_part, _, maybe_port = value.rpartition(":")
+            if maybe_port.isdigit():
+                value = host_part
+        value = value.strip().lower()
+        if value:
+            return value
+    return None
+
+
 def unique_ip_set(vulnerabilities_by_host: Optional[Iterable[Dict[str, Any]]]) -> set:
-    """The distinct IPv4/IPv6 addresses across a vulnerabilities_by_host
-    list. Pass active_hosts + locked_hosts combined to count the full,
-    untrimmed report — see upload_report/views.py's UploadReportView for
-    why unique_ip_count must reflect the whole file, not just what a
-    Freemium trim currently leaves visible."""
+    """The distinct target identities across a vulnerabilities_by_host
+    list — a real IPv4/IPv6 address where one is extractable (Nessus-style
+    scans keep counting exactly as before), falling back to a normalized
+    domain/hostname string for hosts that never had a literal IP at all
+    (custom PDF/CSV/API-testing reports) so a genuine target never
+    silently drops to 0. Pass active_hosts + locked_hosts combined to
+    count the full, untrimmed report — see upload_report/views.py's
+    UploadReportView for why unique_ip_count must reflect the whole file,
+    not just what a Freemium trim currently leaves visible."""
     ips = set()
     for host in (vulnerabilities_by_host or []):
-        ip = extract_ip_from_host(host)
+        ip = extract_ip_from_host(host) or _domain_identity_from_host(host)
         if ip:
             ips.add(ip)
     return ips

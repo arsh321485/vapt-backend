@@ -92,6 +92,16 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
     host (real bug: a 49-host report priced as 50). Excluded from the
     size, not from locked_hosts itself, so the upgrade-restore path
     (unlock_freemium_hosts_for_admin) still finds and merges them back.
+
+    Real bug report: a 42-IP file, with 1 asset manually Deleted and 1
+    manually Held (adminasset/views.py's AssetDeleteAPIView/AssetHoldAPIView
+    — both $pull the host straight out of vulnerabilities_by_host, into
+    the deleted_assets/hold_assets collections respectively, neither of
+    which is locked_hosts), priced Premium at 40 assets instead of the
+    file's real 42 — same "must reflect the original uploaded file size"
+    principle locked_hosts was already carved out for, just two more
+    collections that quietly remove a host from vulnerabilities_by_host
+    without ever putting it in locked_hosts. Count them back in.
     """
     try:
         conditions = [{"admin_id": str(admin_id)}]
@@ -108,6 +118,7 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
             pipeline = [
                 {"$match": {"$or": conditions}},
                 {"$project": {
+                    "report_id": 1,
                     "count": {"$add": [
                         {"$size": {"$ifNull": ["$vulnerabilities_by_host", []]}},
                         {"$size": {"$filter": {
@@ -116,10 +127,15 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
                         }}},
                     ]},
                 }},
-                {"$group": {"_id": None, "total": {"$sum": "$count"}}},
             ]
-            result = list(db[NESSUS_COLLECTION].aggregate(pipeline))
-            return int(result[0]["total"]) if result else 0
+            reports = list(db[NESSUS_COLLECTION].aggregate(pipeline))
+            total = sum(int(r.get("count") or 0) for r in reports)
+
+            report_ids = [str(r["report_id"]) for r in reports if r.get("report_id")]
+            if report_ids:
+                total += db["deleted_assets"].count_documents({"report_id": {"$in": report_ids}})
+                total += db["hold_assets"].count_documents({"report_id": {"$in": report_ids}})
+            return total
     except Exception as e:
         logger.error(f"[Billing] billable asset count aggregation failed for admin_id={admin_id}: {e}")
         return 0
