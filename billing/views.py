@@ -206,6 +206,23 @@ class FreemiumActivateView(APIView):
             except Exception as e:
                 logger.error(f"[Billing] SetupIntent creation failed for {admin.email}: {e}")
 
+        # Real bug report: after choosing Freemium on the WEBSITE, the
+        # Teams admin-dashboard channel kept showing the stale "Choose
+        # Your Plan" card indefinitely — same gap already fixed for
+        # Premium/Custom (see stripe_service.py's checkout.session.completed
+        # handler, which calls this exact same function). Freemium never
+        # goes through Stripe checkout at all (it's free), so that fix
+        # never covered this path. Call it here too so the "needs_plan"
+        # card gets replaced with the real next step (Set Risk Criteria,
+        # since _admin_has_selected_plan(admin) now resolves True) within
+        # seconds of activating, matching what the website itself shows
+        # immediately. No-ops quietly if this admin never connected Teams.
+        try:
+            from teams_bot.onboarding import post_onboarding_step
+            post_onboarding_step(admin)
+        except Exception:
+            logger.exception(f"[Billing] Teams onboarding-card refresh failed for {admin.email} after Freemium activation")
+
         return Response({
             "subscription": SubscriptionSerializer(sub).data,
             "setup_intent_client_secret": setup_intent["client_secret"] if setup_intent else None,
