@@ -16,7 +16,7 @@ from .serializers import (
     VulnerabilitiesSerializer,
     MitigationTimelineSerializer, MeanTimeRemediateSerializer
 )
-from .utils import MongoContext, safe_float_from
+from .utils import MongoContext, safe_float_from, estimate_score_from_risk_factor
 from .utils import MongoContext, parse_timeline_to_hours, humanize_hours
 from vaptfix.mongo_client import ensure_performance_indexes
 
@@ -196,7 +196,8 @@ class ReportAvgScoreAPIView(APIView):
                     {"report_id": str(report_id)},
                     {"vulnerabilities_by_host.vulnerabilities.cvss_v3_base_score": 1,
                      "vulnerabilities_by_host.vulnerabilities.cvss": 1,
-                     "vulnerabilities_by_host.vulnerabilities.cvss_score": 1}
+                     "vulnerabilities_by_host.vulnerabilities.cvss_score": 1,
+                     "vulnerabilities_by_host.vulnerabilities.risk_factor": 1}
                 )
                 if not doc:
                     return Response({"detail":"report not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -205,6 +206,12 @@ class ReportAvgScoreAPIView(APIView):
                     for v in (host.get("vulnerabilities") or []):
                         cv_raw = v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
                         num = safe_float_from(cv_raw)
+                        if num is None:
+                            # Scanner gave no numeric CVSS at all for this finding
+                            # (e.g. Nessus results with only risk_factor) — fall
+                            # back to a severity midpoint so a report full of
+                            # Critical/High findings doesn't score as 0.
+                            num = estimate_score_from_risk_factor(v.get("risk_factor"))
                         if num is not None:
                             cvss_vals.append(num)
                 # Same "0, not null" fix as AdminAvgScoreAPIView below.
@@ -1129,7 +1136,8 @@ class AdminAvgScoreAPIView(APIView):
                                 "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
                                 "vulnerabilities_by_host.vulnerabilities.cvss_v3_base_score": 1,
                                 "vulnerabilities_by_host.vulnerabilities.cvss": 1,
-                                "vulnerabilities_by_host.vulnerabilities.cvss_score": 1, "report_id": 1})
+                                "vulnerabilities_by_host.vulnerabilities.cvss_score": 1,
+                                "vulnerabilities_by_host.vulnerabilities.risk_factor": 1, "report_id": 1})
 
                 if not doc:
                     return Response({"avg_score": None, "report_id": None}, status=status.HTTP_200_OK)
@@ -1158,6 +1166,15 @@ class AdminAvgScoreAPIView(APIView):
                             continue
                         cv_raw = v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
                         num = safe_float_from(cv_raw)
+                        if num is None:
+                            # Real bug report: reports uploaded from scanners that
+                            # only populate risk_factor (Critical/High/Medium/Low
+                            # text) and never cvss_v3_base_score were averaging to
+                            # 0 / "Low risk" on the Slack + website dashboard even
+                            # when the report was full of Critical/High findings —
+                            # fall back to a severity midpoint per finding instead
+                            # of silently dropping it from the average.
+                            num = estimate_score_from_risk_factor(v.get("risk_factor"))
                         if num is not None:
                             cvss_vals.append(num)
 

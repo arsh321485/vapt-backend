@@ -334,6 +334,17 @@ def _safe_float(value):
         return None
 
 
+# Same fallback as admindashboard.utils.estimate_score_from_risk_factor —
+# reports from scanners that only populate risk_factor (Critical/High/
+# Medium/Low text) and never a numeric CVSS score were averaging to 0 /
+# "Low risk" on the team dashboard even when full of Critical/High findings.
+_RISK_FACTOR_SCORE_MIDPOINT = {"critical": 9.5, "high": 7.5, "medium": 5.0, "low": 2.0}
+
+
+def _estimate_score_from_risk_factor(risk_factor):
+    return _RISK_FACTOR_SCORE_MIDPOINT.get((str(risk_factor or "")).strip().lower())
+
+
 class UserAvgScoreAPIView(APIView):
     """
     GET /api/user/dashboard/avg-score/
@@ -410,6 +421,8 @@ class UserAvgScoreAPIView(APIView):
                         # Collect CVSS score for this vulnerability
                         cv_raw = v.get("cvss_v3_base_score") or v.get("cvss") or v.get("cvss_score") or ""
                         num = _safe_float(cv_raw)
+                        if num is None:
+                            num = _estimate_score_from_risk_factor(v.get("risk_factor"))
                         if num is not None:
                             cvss_vals.append(num)
 

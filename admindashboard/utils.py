@@ -46,6 +46,23 @@ def safe_float_from(value: Any) -> Optional[float]:
             except Exception:
                 return None
     return None
+
+# Risk-score midpoints for scanners/reports that only carry a text severity
+# (risk_factor: Critical/High/Medium/Low, no numeric CVSS at all) — used as
+# a fallback so the Avg Risk Score card doesn't misreport genuinely
+# critical/high findings as "0 / Low risk" just because the source report
+# never populated cvss_v3_base_score.
+RISK_FACTOR_SCORE_MIDPOINT = {
+    "critical": 9.5,
+    "high": 7.5,
+    "medium": 5.0,
+    "low": 2.0,
+}
+
+def estimate_score_from_risk_factor(risk_factor: Any) -> Optional[float]:
+    key = (str(risk_factor or "")).strip().lower()
+    return RISK_FACTOR_SCORE_MIDPOINT.get(key)
+
 def parse_timeline_to_hours(timeline: str) -> int:
     """
     Convert timeline strings like:

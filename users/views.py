@@ -4751,6 +4751,24 @@ def _get_admin_onboarding_state(admin):
     return "ready"
 
 
+def _admin_has_selected_plan(admin) -> bool:
+    """
+    True once this admin has picked a plan at all — Freemium (activated via
+    FreemiumActivateView, which creates a Subscription with
+    status="trialing") or Premium/Custom (status="active" after Stripe
+    checkout, or "past_due" — still a plan on file, just needs a payment
+    fix, not "never chose one"). No Subscription row at all, in any of
+    these statuses, means the admin has uploaded a report but never
+    actually gone through plan selection yet. Mirrors
+    teams_bot.onboarding._admin_has_selected_plan exactly — kept as a
+    separate copy (not a shared import) for the same reason
+    _parse_rc_days is duplicated per-file in this app: avoids a
+    cross-app import just for one small check.
+    """
+    from billing.models import Subscription
+    return Subscription.objects.filter(admin=admin, status__in=["trialing", "active", "past_due"]).exists()
+
+
 def _build_admin_welcome_blocks():
     return [
         {"type": "header", "text": {"type": "plain_text", "text": "👋 Welcome to VaptFix, Admin", "emoji": True}},
@@ -4785,6 +4803,53 @@ def _build_admin_risk_criteria_prompt_blocks():
                 "type": "button",
                 "text": {"type": "plain_text", "text": "⚙️ Set Risk Criteria", "emoji": True},
                 "action_id": "open_risk_criteria_modal",
+                "style": "primary",
+            }],
+        },
+    ]
+
+
+def _build_admin_plan_prompt_blocks(admin):
+    """
+    Real bug report: "needs_risk_criteria" (above) used to show right after
+    the first report landed regardless of whether the admin had actually
+    picked a plan yet — on the website, plan selection is its own gated
+    step before Risk Criteria; Slack was skipping straight past it (same
+    gap teams_bot.onboarding.post_onboarding_step already had, and already
+    fixed there — see its own _admin_has_selected_plan). Shown instead of
+    the risk-criteria prompt whenever a report exists but no Subscription
+    row does yet — Set Risk Criteria only appears once a plan is actually
+    on file, same order the website enforces.
+
+    Real request: don't imply the admin is already "on Freemium" here
+    (they haven't chosen anything yet) — this is deliberately just "go
+    pick a plan", pointing at the website since Slack itself has no
+    Stripe checkout UI to do that inline (same handoff every other "do
+    this on the website" action already uses — Upload Report, Enter
+    Scope). Uses the same signed pricing-handoff token as every other
+    Slack "go to pricing" link (see SlackPricingHandoffView) so the
+    website page knows which admin is visiting instead of showing
+    "$0.00 / 0 assets".
+    """
+    pricing_url = "https://vaptfix.ai/pricingplan?source=slack"
+    if admin:
+        handoff_token = _slack_pricing_handoff_signer().sign(str(admin.id))
+        pricing_url = f"{pricing_url}&admin_token={quote(handoff_token)}"
+
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "📊 Your first report is in!", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            "Select your plan for solving the vulnerabilities — Freemium (free, "
+            "limited) or Premium (full report, all assets). For pricing, go to "
+            "the website."
+        )}},
+        {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "💳 Choose Your Plan", "emoji": True},
+                "action_id": "open_pricing_plan",
+                "url": pricing_url,
                 "style": "primary",
             }],
         },
@@ -5106,6 +5171,18 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
     actually finished onboarding. Returns the resolved state.
     """
     state = _get_admin_onboarding_state(admin)
+    # Real bug report: this went straight from "no_report" to
+    # "needs_risk_criteria" the moment a report landed, regardless of
+    # whether the admin had actually picked a plan yet — the website
+    # gates Risk Criteria behind plan selection first (Freemium or
+    # Premium/Custom), and Slack was skipping straight past that step.
+    # Only overrides the "needs_risk_criteria" case (a report genuinely
+    # exists) — does not touch _get_admin_onboarding_state itself, so the
+    # website/Teams (which already enforce this their own way) are
+    # unaffected. Mirrors teams_bot.onboarding.post_onboarding_step's own
+    # identical override.
+    if state == "needs_risk_criteria" and not _admin_has_selected_plan(admin):
+        state = "needs_plan"
     if state == "ready":
         SlackEventsView()._post_admin_navbar_message(bot_token, channel_id, team_id)
         return state
@@ -5128,8 +5205,15 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
         logger.info(f"[OnboardingMsg] Skipped duplicate post — state={state} already posted for team_id={team_id} channel_id={channel_id}")
         return state
 
-    blocks = _build_admin_welcome_blocks() if state == "no_report" else _build_admin_risk_criteria_prompt_blocks()
-    text = "VaptFix — Welcome" if state == "no_report" else "VaptFix — Set Risk Criteria"
+    if state == "no_report":
+        blocks = _build_admin_welcome_blocks()
+        text = "VaptFix — Welcome"
+    elif state == "needs_plan":
+        blocks = _build_admin_plan_prompt_blocks(admin)
+        text = "VaptFix — Choose Your Plan"
+    else:  # needs_risk_criteria
+        blocks = _build_admin_risk_criteria_prompt_blocks()
+        text = "VaptFix — Set Risk Criteria"
     try:
         resp = _http_post(
             "https://slack.com/api/chat.postMessage",
@@ -12526,8 +12610,54 @@ class SlackSlashCommandView(APIView):
         if not card:
             return {"matched": False, "message": "No automated fix available for this vulnerability."}
 
+        if not card.get("automation_card"):
+            # Real bug report: a card generated while the admin was still
+            # Freemium never gets an automation_card (run_automation=False
+            # in mitigation_tool.py) — billing.stripe_service queues a
+            # one-shot backfill_automation_for_admin() on the upgrade
+            # webhook to fix every such card, but if that queue was missed,
+            # raced, or errored (or the plan was changed outside the normal
+            # Stripe checkout.session.completed path), the vuln is stuck
+            # showing "not ready" forever even after the admin is paid.
+            # Self-heal here instead of just reporting the stale state.
+            self._maybe_requeue_automation_backfill(team_id, user_id)
+            return {"matched": False, "message": (
+                "_Automation script is still being generated for this vulnerability — "
+                "this can take a few minutes after upgrading. Please check back shortly._"
+            )}
+
         from teams_bot.fix_tab import shape_automation_detail
         return shape_automation_detail(card)
+
+    def _maybe_requeue_automation_backfill(self, team_id, user_id=None):
+        """
+        Cooldown-gated re-trigger of backfill_automation_for_admin for a
+        paid (non-Freemium) admin whose vulnerability_cards still have
+        cards missing automation_card. Re-running is idempotent (same
+        "missing automation_card" query each time) but each run re-scans
+        Mongo and kicks off a GPT call per still-missing card, so this is
+        capped to once per 10 minutes per admin — enough to self-heal a
+        missed/failed backfill within minutes without hammering GPT on
+        every single Automation Fix click across a whole team.
+        """
+        admin = self._get_admin_user(team_id, slack_user_id=user_id)
+        if not admin:
+            return
+        try:
+            from billing.enforcement import is_freemium
+            if is_freemium(admin):
+                return
+        except Exception:
+            return
+        if not cache.add(f"automation_backfill_requeue_{admin.id}", True, timeout=600):
+            return
+        try:
+            from upload_report.views import backfill_automation_for_admin
+            queued = backfill_automation_for_admin(admin)
+            if queued:
+                logger.info(f"[automation_match] requeued automation backfill for {queued} card(s), admin={admin.email}")
+        except Exception:
+            logger.exception(f"[automation_match] requeue backfill failed for admin={admin.id}")
 
     def _call_user_api_raw(self, path, team_id, user_id, params=None):
         """Like _call_user_api but returns the raw response (for binary file downloads)."""
@@ -12597,9 +12727,19 @@ class SlackSlashCommandView(APIView):
         if not admin:
             return None
         state = _get_admin_onboarding_state(admin)
+        # Same "must pick a plan before Risk Criteria" gate as
+        # _post_admin_onboarding_message — keeps /dashboard and
+        # /postnavbar from showing the Risk Criteria prompt before a plan
+        # is actually on file, matching the auto-posted channel message.
+        if state == "needs_risk_criteria" and not _admin_has_selected_plan(admin):
+            state = "needs_plan"
         if state == "ready":
             return None
-        return _build_admin_welcome_blocks() if state == "no_report" else _build_admin_risk_criteria_prompt_blocks()
+        if state == "no_report":
+            return _build_admin_welcome_blocks()
+        if state == "needs_plan":
+            return _build_admin_plan_prompt_blocks(admin)
+        return _build_admin_risk_criteria_prompt_blocks()
 
     def _cmd_dashboard(self, text, team_id, user_id):
         gate = self._admin_onboarding_gate_blocks(team_id)
