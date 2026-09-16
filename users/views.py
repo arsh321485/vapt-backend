@@ -4998,7 +4998,7 @@ def _build_enter_scope_options_blocks():
         {"type": "header", "text": {"type": "plain_text", "text": "📋 Enter Your Scope", "emoji": True}},
         {"type": "section", "text": {"type": "mrkdwn", "text": (
             "Add targets with a file, or enter IPs / hosts manually.\n\n"
-            "📄 *CSV File* — Upload a CSV, Excel, or text file of assets / "
+            "📄 *Scope File* — Upload a CSV, Excel, or text file of assets / "
             "IPs / web apps. One row per target works best.\n"
             "✍️ *Manual Entry* — Type IP addresses, hostnames, or CIDR "
             "ranges one per line."
@@ -5008,7 +5008,7 @@ def _build_enter_scope_options_blocks():
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "📄 CSV File", "emoji": True},
+                    "text": {"type": "plain_text", "text": "📄 Scope File", "emoji": True},
                     "action_id": "open_scope_csv_modal",
                     "style": "primary",
                 },
@@ -5070,17 +5070,18 @@ def _build_scope_csv_modal(latest_scope=None):
     return {
         "type": "modal",
         "callback_id": "modal_scope_csv_submit",
-        "title": {"type": "plain_text", "text": "Upload CSV"},
+        "title": {"type": "plain_text", "text": "Upload Scope File"},
         "submit": {"type": "plain_text", "text": "Upload"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": (
-                "Upload a CSV of assets/IPs. One row per target works best."
+                "Upload a CSV, Excel, or text file of assets / IPs / web "
+                "apps. One row per target works best."
             )}},
             {
                 "type": "input",
                 "block_id": "scope_csv_file_block",
-                "label": {"type": "plain_text", "text": "CSV File"},
+                "label": {"type": "plain_text", "text": "Scope File"},
                 "element": {
                     "type": "file_input",
                     "action_id": "scope_csv_file_input",
@@ -21284,7 +21285,7 @@ class SlackInteractivityView(APIView):
                 "modal_extend_request_submit": "Request Extension",
                 "modal_risk_criteria_submit": "Set Risk Criteria",
                 "modal_upload_report_submit": "Upload Report",
-                "modal_scope_csv_submit": "Upload CSV",
+                "modal_scope_csv_submit": "Upload Scope File",
                 "modal_scope_manual_submit": "Enter Scope",
             }
             if callback_id not in titles:
@@ -23600,7 +23601,7 @@ class SlackInteractivityView(APIView):
             "modal_extend_request_submit": "Request Extension",
             "modal_risk_criteria_submit": "Set Risk Criteria",
             "modal_upload_report_submit": "Upload Report",
-            "modal_scope_csv_submit": "Upload CSV",
+            "modal_scope_csv_submit": "Upload Scope File",
             "modal_scope_manual_submit": "Enter Scope",
         }
         if callback_id not in titles:
