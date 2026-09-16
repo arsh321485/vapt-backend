@@ -924,9 +924,18 @@ def _combined_common_vulns_team(grouped):
     tagging each vuln with its real team's display name (via "_team_name",
     read back by common_vulns_list_body's own row rendering) since which
     team a vuln belongs to is no longer implied by a single selection."""
+    # Real bug report: `grouped` (from _group_common_vulns_by_team) already
+    # has its OWN "all" key — the every-team aggregate, deduped by plugin
+    # name across teams and tagged with the generic "All Teams" display
+    # name. Not skipping it here meant every vuln got added TWICE: once
+    # correctly under its real team (config/pm/ns/af), and again from the
+    # "all" bucket itself, mislabeled "Team: All Teams" — exactly the
+    # duplicate rows seen in the Common Vulnerabilities > All Teams list.
     all_vulns = []
     totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for key, team in (grouped or {}).items():
+        if key == "all":
+            continue
         for v in team.get("vulns") or []:
             tagged = dict(v)
             tagged["_team_name"] = team.get("display_name") or dict(cards.COMMON_VULNS_TEAMS).get(key, key)
