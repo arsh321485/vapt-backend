@@ -12472,6 +12472,39 @@ class SlackSlashCommandView(APIView):
         if rec.get("message"):
             summary += f"\n\n{rec['message']}"
         summary += "\nOur team will review and begin testing — we'll notify you here once your first report is ready."
+
+        # Real request: scope submission (CSV or manual) never surfaced the
+        # "Choose Your Plan" prompt at all — _post_admin_onboarding_message
+        # (the same one a report upload eventually triggers) gates on
+        # _get_admin_onboarding_state, which only ever looks at whether a
+        # report exists, never scope. A Management+Testing admin submits
+        # scope FIRST (no report yet — VaptFix's own team hasn't tested
+        # anything), so they'd never see plan selection until a report
+        # eventually landed. Scope pricing is explicitly designed to work
+        # standalone (billing.asset_service.resolve_management_testing_
+        # asset_count already supports asset_source="scope"), so post the
+        # same plan-prompt blocks directly here, independent of report
+        # state — skipped once the admin has already picked any plan.
+        try:
+            admin = User.objects.filter(slack_team_id=team_id).first()
+            if admin and not _admin_has_selected_plan(admin):
+                bt = self._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if bt:
+                    admin_ch_id = self._get_admin_channel_id(bt)
+                    if admin_ch_id:
+                        _http_post(
+                            "https://slack.com/api/chat.postMessage",
+                            headers={"Authorization": f"Bearer {bt}", "Content-Type": "application/json"},
+                            json={
+                                "channel": admin_ch_id,
+                                "blocks": _build_admin_plan_prompt_blocks(admin),
+                                "text": "VaptFix — Choose Your Plan",
+                            },
+                            timeout=15,
+                        )
+        except Exception:
+            logger.exception("[SlackScopeSubmit] failed to post plan-selection prompt after scope submit")
+
         return self._text_block(summary)
 
     def _get_member_token(self, team_id, slack_user_id):
