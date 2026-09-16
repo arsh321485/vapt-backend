@@ -731,17 +731,28 @@ def _parse_automation_card(raw_text: str) -> dict:
     # is withheld entirely (never partially-served) and the card is marked
     # not_possible with a reason that says so, rather than silently
     # shipping code that can't even be parsed, let alone run safely.
+    # Real bug report (round 2): this syntax check only ran when the LLM's
+    # own self-reported `language` field said "python" — but language is a
+    # hard "always python" product requirement (see crew_agent/tasks.py's
+    # Automation Engineer prompt), not something the LLM gets to opt out
+    # of by reporting something else. When the LLM ignored that
+    # instruction and returned raw PowerShell/Bash (e.g. language:
+    # "powershell") with automation_possible "Yes"/"Partial", this whole
+    # check was skipped and the non-Python script shipped straight through
+    # to real downloads — exactly the "asked for Python, got PowerShell"
+    # bug. Validate unconditionally now (raw PowerShell/Bash fails
+    # ast.parse() immediately, same as a genuine Python syntax error) and
+    # never trust the LLM's own language label either way — see below.
     invalid_reason = None
-    if "python" in (automation.get("language") or "").strip().lower():
-        for label, src in (("fix_script", fix_script), ("verify_script", verify_script)):
-            if not src.strip():
-                continue
-            try:
-                ast.parse(src)
-            except SyntaxError as exc:
-                invalid_reason = f"AI-generated {label} failed a Python syntax check ({exc.msg} at line {exc.lineno}) and was withheld for safety."
-                logger.warning(f"[MitigationCrew] automation card {label} failed ast.parse: {exc}")
-                break
+    for label, src in (("fix_script", fix_script), ("verify_script", verify_script)):
+        if not src.strip():
+            continue
+        try:
+            ast.parse(src)
+        except SyntaxError as exc:
+            invalid_reason = f"AI-generated {label} was not valid Python ({exc.msg} at line {exc.lineno}) and was withheld for safety."
+            logger.warning(f"[MitigationCrew] automation card {label} failed ast.parse: {exc}")
+            break
 
     if invalid_reason:
         status = "not_possible"
@@ -766,7 +777,11 @@ def _parse_automation_card(raw_text: str) -> dict:
         "recommended_approach":       automation.get("recommended_approach", ""),
         "considerations_before":      automation.get("considerations_before", ""),
         "considerations_after":       automation.get("considerations_after", ""),
-        "language":                   automation.get("language", ""),
+        # Always "python", never the LLM's own self-reported value — the
+        # ast.parse() check above is what actually enforces the "language
+        # is ALWAYS python" product requirement now; this field should
+        # never disagree with what was just validated.
+        "language":                   "python" if fix_script or verify_script else automation.get("language", ""),
         "libraries":                  automation.get("libraries", ""),
         "command_download_libraries": automation.get("command_download_libraries", ""),
         "command_run_script":         automation.get("command_run_script", ""),
@@ -780,30 +795,24 @@ def _parse_automation_card(raw_text: str) -> dict:
     }
 
 
-def _automation_script_extension(language: str) -> str:
-    lang = (language or "").strip().lower()
-    if "powershell" in lang:
-        return "ps1"
-    if "python" in lang:
-        return "py"
-    if "bash" in lang or "shell" in lang or "sh" == lang:
-        return "sh"
-    return "txt"
-
-
 def _automation_script_filename(automation: dict, script_content: str, kind: str) -> str:
     """Build a stable filename for the fix/verify script download — no
     plugin_id available for AI-generated cards (custom/AWS reports never
     have one), so this is derived from the vulnerability name + OS instead.
     Takes the ALREADY-resolved script_content (post "not_possible" safety
     net in _parse_automation_card), not the raw LLM field, so a forced-empty
-    script never ends up with a filename pointing at nothing."""
+    script never ends up with a filename pointing at nothing.
+
+    Extension is always .py — script_content only ever reaches this
+    function after _parse_automation_card's ast.parse() gate, so anything
+    non-empty here is already confirmed valid Python (language is an
+    "always python" product requirement, not something derived from
+    whatever the LLM happened to self-report — see that gate for why)."""
     if not (script_content or "").strip():
         return ""
     vuln = re.sub(r"[^a-zA-Z0-9]+", "_", (automation.get("vulnerability") or "vulnerability")).strip("_")[:60]
     os_part = re.sub(r"[^a-zA-Z0-9]+", "_", (automation.get("os") or "os")).strip("_")[:20]
-    ext = _automation_script_extension(automation.get("language", ""))
-    return f"{vuln}_{os_part}_{kind}.{ext}"
+    return f"{vuln}_{os_part}_{kind}.py"
 
 
 def _parse_vaptcode_response(raw_text: str) -> dict:

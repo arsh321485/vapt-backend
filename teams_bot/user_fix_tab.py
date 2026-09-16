@@ -437,10 +437,14 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
                 and automation.get("automation_possible") in ("Yes", "Partial")
                 and card_id and team_id
             ):
-                body.append({
-                    "type": "ActionSet", "spacing": "Small",
-                    "actions": [{"type": "Action.OpenUrl", "title": "📥 Download Fix Script", "url": fix_tab.script_download_url_ai(team_id, team_name, card_id, "fix")}],
-                })
+                dl_actions = [{"type": "Action.OpenUrl", "title": "📥 Download Fix Script", "url": fix_tab.script_download_url_ai(team_id, team_name, card_id, "fix")}]
+                # Real gap: website already offers Download Fix Script AND
+                # Download Verify Script as two separate buttons — Teams
+                # only ever had the fix one. Same signed-URL download
+                # endpoint, just script_type="verify".
+                if automation.get("has_verify_script"):
+                    dl_actions.append({"type": "Action.OpenUrl", "title": "📥 Download Verify Script", "url": fix_tab.script_download_url_ai(team_id, team_name, card_id, "verify")})
+                body.append({"type": "ActionSet", "spacing": "Small", "actions": dl_actions})
         else:
             fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
             steps_data = _fetch_fix_steps(member_user, fix_vuln_id) if fix_vuln_id else None

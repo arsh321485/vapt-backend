@@ -13217,6 +13217,7 @@ class SlackSlashCommandView(APIView):
                         "action_id": "tasset_view",
                         # host|team|sev|st|list_offset|vuln_offset
                         "value": f"{a['host_name']}|{vapt_team}|{sev_filter}|{st_filter}|{offset}|0",
+                        "style": "primary",
                     },
                 })
 
@@ -14064,6 +14065,7 @@ class SlackSlashCommandView(APIView):
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
                         "action_id": f"tsup_view_{safe_sid}",
                         "value": f"{sid}|{vapt_team}|{st_filter}|{offset}",
+                        "style": "primary",
                     },
                 })
                 blocks.append({
@@ -15362,6 +15364,7 @@ class SlackSlashCommandView(APIView):
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": f"view_allvuln_detail_{safe_sid}",
                     "value": f"{sid}|fixassets",
+                    "style": "primary",
                 },
             })
             blocks.append({"type": "divider"})
@@ -15656,6 +15659,7 @@ class SlackSlashCommandView(APIView):
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
                         "action_id": f"fix_common_vuln_{team_key}_{vuln_idx}",
                         "value": f"{team_key}|{vuln_idx}|{offset}",
+                        "style": "primary",
                     },
                 })
                 blocks.append({"type": "divider"})
@@ -15808,6 +15812,7 @@ class SlackSlashCommandView(APIView):
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
                         "action_id": f"fix_common_asset_view_{offset + i}_{safe_host}",
                         "value": f"{team_key}|{vuln_idx}|{list_offset}|{offset}|{host}|{sev_filter}|{st_filter}",
+                        "style": "primary",
                     },
                 })
                 blocks.append({"type": "divider"})
@@ -16309,10 +16314,30 @@ class SlackSlashCommandView(APIView):
         assets_by_id = {}
         vulns_by_id = {}
         for team_name in team_names:
-            data = self._call_api(
-                "/api/admin/users_details/report-assets-vulns/", team_id,
-                params={"role": team_name}, slack_user_id=user_id,
-            )
+            # Real bug report: the Add User modal's Assets/Vulns picker
+            # sometimes just never appeared after checking a Team box —
+            # one call per selected team, and a single transient timeout/
+            # 5xx on any one of them silently aborted the whole live
+            # update (see _handle_adduser_modal_live's try/except) with no
+            # retry, leaving the modal looking exactly as if the click had
+            # done nothing. One retry after a short pause absorbs a
+            # transient blip instead of requiring the admin to re-click
+            # and hope for better luck.
+            data = None
+            last_exc = None
+            for attempt in range(2):
+                try:
+                    data = self._call_api(
+                        "/api/admin/users_details/report-assets-vulns/", team_id,
+                        params={"role": team_name}, slack_user_id=user_id,
+                    )
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt == 0:
+                        time.sleep(0.5)
+            if data is None:
+                raise last_exc
             for a in (data.get("assets") or []):
                 host = a.get("host_name")
                 if not host:
@@ -17989,25 +18014,45 @@ class SlackSlashCommandView(APIView):
         # file attachment in this team's channel — separate from the inline
         # preview shown below, which stays truncated for long scripts.
         uploaded = False
-        if script_bytes:
-            channel_name = next((cn for cn, tn in self.TEAM_CHANNELS.items() if tn == team_name), None)
-            bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
-            if channel_name and bot_token:
-                channel_id = self._get_channel_id_by_name(bot_token, channel_name)
-                if channel_id:
-                    filename = (
-                        automation.get("fix_script_name")
-                        or automation.get("script_name")
-                        or f"{card_id}_fix.py"
-                    )
-                    uploaded = self._upload_file_to_slack(
-                        bot_token, channel_id, filename, script_bytes,
+        verify_uploaded = False
+        attempted_upload = False
+        channel_name = next((cn for cn, tn in self.TEAM_CHANNELS.items() if tn == team_name), None)
+        bot_token = self._get_bot_token(team_id, slack_user_id=user_id)
+        channel_id = self._get_channel_id_by_name(bot_token, channel_name) if (channel_name and bot_token) else None
+        if script_bytes and channel_id:
+            attempted_upload = True
+            filename = (
+                automation.get("fix_script_name")
+                or automation.get("script_name")
+                or f"{card_id}_fix.py"
+            )
+            uploaded = self._upload_file_to_slack(
+                bot_token, channel_id, filename, script_bytes,
+                initial_comment=(
+                    f"🤖 Automated fix script for `{vuln_id}` — {automation.get('vulnerability', '')}"
+                ),
+            )
+            # Real gap: website already offers Download Fix Script AND
+            # Download Verify Script as two separate buttons — /autofix
+            # only ever uploaded the fix one, with no way to get the verify
+            # script from Slack at all.
+            if automation.get("has_verify_script"):
+                verify_resp = self._call_user_api_raw(
+                    f"/api/user/automation-scripts/ai/{card_id}/download/", team_id, user_id, params={"type": "verify"},
+                )
+                if verify_resp is not None and verify_resp.status_code == 200 and verify_resp.content:
+                    verify_filename = automation.get("verify_script_name") or f"{card_id}_verify.py"
+                    verify_uploaded = self._upload_file_to_slack(
+                        bot_token, channel_id, verify_filename, verify_resp.content,
                         initial_comment=(
-                            f"🤖 Automated fix script for `{vuln_id}` — {automation.get('vulnerability', '')}"
+                            f"✅ Verification script for `{vuln_id}` — {automation.get('vulnerability', '')}"
                         ),
                     )
 
-        return self._format_autofix(automation, script_text, vuln_id, uploaded=uploaded)
+        return self._format_autofix(
+            automation, script_text, vuln_id, uploaded=uploaded,
+            attempted_upload=attempted_upload, verify_uploaded=verify_uploaded,
+        )
 
     def _cmd_scriptfeedback(self, text, team_id, user_id, team_name):
         """
@@ -18667,6 +18712,7 @@ class SlackSlashCommandView(APIView):
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
                         "action_id": f"sup_view_{safe_sid}",
                         "value": f"{sid}|{st_filter}|{team_filter}|{offset}",
+                        "style": "primary",
                     },
                 })
                 blocks.append({
@@ -19352,6 +19398,7 @@ class SlackSlashCommandView(APIView):
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": f"view_allvuln_detail_{safe_sid}",
                     "value": f"{sid}|{origin}" if origin else sid,
+                    "style": "primary",
                 },
             })
             blocks.append({"type": "divider"})
@@ -19755,6 +19802,7 @@ class SlackSlashCommandView(APIView):
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
                         "action_id": f"view_allvuln_detail_{safe_sid}",
                         "value": f"{sid}|notif{bucket_key}",
+                        "style": "primary",
                     }
                 blocks.append(section)
 
@@ -20341,16 +20389,25 @@ class SlackSlashCommandView(APIView):
             # real Nessus plugin_id — vulnerability_cards isn't keyed by
             # one) — route the download through the AI-specific handler.
             card_id = automation.get("card_id") or ""
-            blocks.append({
-                "type": "actions",
-                "elements": [{
+            dl_elements = [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "⬇️ Download Fix Script", "emoji": True},
+                "action_id": "vulndata_ai_autofix_download",
+                "value": f"{card_id}|{sid}",
+                "style": "primary",
+            }]
+            # Real gap: website already offers Download Fix Script AND
+            # Download Verify Script as two separate buttons — Slack only
+            # ever had the fix one (plain "Download Script"), with no way
+            # to get the verify script at all.
+            if automation.get("has_verify_script"):
+                dl_elements.append({
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "⬇️ Download Script", "emoji": True},
-                    "action_id": "vulndata_ai_autofix_download",
+                    "text": {"type": "plain_text", "text": "⬇️ Download Verify Script", "emoji": True},
+                    "action_id": "vulndata_ai_verify_download",
                     "value": f"{card_id}|{sid}",
-                    "style": "primary",
-                }],
-            })
+                })
+            blocks.append({"type": "actions", "elements": dl_elements})
         else:
             blocks.append(self._ctx(
                 f"Script: `{automation.get('fix_script_name') or '—'}` — team members can download this in their team channel."
@@ -20833,7 +20890,8 @@ class SlackSlashCommandView(APIView):
             })
         return blocks
 
-    def _format_autofix(self, automation, script_text, vuln_id, uploaded=False):
+    def _format_autofix(self, automation, script_text, vuln_id, uploaded=False,
+                         attempted_upload=False, verify_uploaded=False):
         """
         Format the automation_scripts match + downloaded script into Slack
         blocks — surfaces every field the API/Google-Sheet-synced document
@@ -20899,16 +20957,25 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ *Before running:*\n{before[:400]}"}})
 
         if script_text:
-            snippet = script_text[:2500]
-            truncated = len(script_text) > 2500
+            # Real bug report: this used to always paste up to 2500 chars
+            # of raw script inline as the primary content — regardless of
+            # whether the real file upload above actually succeeded — so a
+            # long script read as a wall of pasted text with no real
+            # downloadable file, which is exactly what looked like "the
+            # script isn't downloading" even when generation itself worked
+            # fine. Now: a short peek only, and the upload's actual
+            # success/failure is stated explicitly instead of implied.
+            snippet = script_text[:400]
             if uploaded:
                 trailer = "\n_📎 Full script uploaded above as a downloadable file._"
-            elif truncated:
-                trailer = "\n_...truncated — full script also on the VaptFix dashboard._"
+            elif attempted_upload:
+                trailer = "\n_⚠️ Could not upload the file to this channel — run `/autofix` again, or download it from the VaptFix dashboard._"
             else:
-                trailer = ""
+                trailer = "\n_📎 Full script available on the VaptFix dashboard._"
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                "text": f"*Script (`{script_name}`):*\n```{snippet}```" + trailer}})
+                "text": f"*Script preview (`{script_name}`):*\n```{snippet}```" + trailer}})
+            if verify_uploaded:
+                blocks.append(self._ctx("✅ Verification script uploaded above too."))
         else:
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": "_Script file could not be fetched — download it from the VaptFix dashboard instead._"}})
@@ -23286,12 +23353,16 @@ class SlackInteractivityView(APIView):
                     }, action_id)
                 return
 
-            if action_id == "vulndata_ai_autofix_download":
+            if action_id in ("vulndata_ai_autofix_download", "vulndata_ai_verify_download"):
                 # AI-automation counterpart to vulndata_autofix_download —
                 # same "download server-side, upload straight into the
                 # channel" pattern, routed to the card_id-keyed AI endpoint
                 # (user_download_ai_automation_script) instead of the
                 # plugin_id-keyed curated one. Value format: "card_id|sid".
+                # Real gap: this only ever fetched type=fix — verify_script
+                # (which the website already offers as its own "Download
+                # Verify Script" button) had no Slack equivalent at all.
+                script_type = "verify" if action_id == "vulndata_ai_verify_download" else "fix"
                 dl_parts   = value.split("|")
                 dl_card_id = dl_parts[0] if len(dl_parts) > 0 else ""
                 dl_sid     = dl_parts[1] if len(dl_parts) > 1 else ""
@@ -23304,7 +23375,7 @@ class SlackInteractivityView(APIView):
 
                 script_resp = slash._call_user_api_raw(
                     f"/api/user/automation-scripts/ai/{dl_card_id}/download/", team_id, slack_user_id,
-                    params={"type": "fix"},
+                    params={"type": script_type},
                 )
                 if script_resp is None or script_resp.status_code != 200 or not script_resp.content:
                     err_text = "Could not download the script right now — please try again."
@@ -23325,10 +23396,11 @@ class SlackInteractivityView(APIView):
                 # plugin_id to build a fallback filename from).
                 content_disp = script_resp.headers.get("Content-Disposition", "")
                 m = re.search(r'filename="([^"]+)"', content_disp)
-                filename = m.group(1) if m else f"{dl_card_id}_fix.py"
+                filename = m.group(1) if m else f"{dl_card_id}_{script_type}.py"
+                label = "verification" if script_type == "verify" else "fix"
                 uploaded = bool(bot_token) and slash._upload_file_to_slack(
                     bot_token, channel_id, filename, script_resp.content,
-                    initial_comment=f"🤖 AI-generated automated fix script for `{dl_sid}`",
+                    initial_comment=f"🤖 AI-generated {label} script for `{dl_sid}`",
                 )
                 if not uploaded:
                     self._post_response_url(response_url, {
@@ -23754,6 +23826,32 @@ class SlackInteractivityView(APIView):
             import traceback
             logger.exception(f"[SlackInteractivity] adduser modal live ({action_id}) failed")
             self._debug_write(f"_handle_adduser_modal_live: EXCEPTION action={action_id}\n{traceback.format_exc()}")
+            # Real bug report: this used to just return here — the modal
+            # was left exactly as it was before the click (Team box now
+            # checked, but the Assets/Vulns picker never appears), with no
+            # indication anything went wrong. A silent no-op after a
+            # transient backend blip reads as "the dropdown doesn't open"
+            # even though retrying the exact same click usually works.
+            # Push a visible error instead so it's obvious to retry.
+            try:
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if bot_token and view_id:
+                    error_view = slash._build_adduser_modal(selected_teams=state.get("teams"))
+                    error_view["blocks"].append({
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": (
+                            "⚠️ _Couldn't load assets/vulnerabilities for the selected "
+                            "team(s) — network hiccup. Uncheck and recheck a team to retry._"
+                        )},
+                    })
+                    _http_post(
+                        "https://slack.com/api/views.update",
+                        headers={"Authorization": f"Bearer {bot_token}"},
+                        json={"view_id": view_id, "view": error_view},
+                        timeout=10,
+                    )
+            except Exception:
+                self._debug_write("_handle_adduser_modal_live: failed to push error view too")
             return
 
         self._debug_write(

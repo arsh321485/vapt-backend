@@ -533,6 +533,16 @@ def shape_automation_detail(card):
         "considerations_after": automation.get("considerations_after"),
         "tested_manually": automation.get("tested_manually"),
         "fix_script_name": automation.get("fix_script_filename") or automation.get("script_name") or "automation_fix",
+        # Real gap: neither Slack nor Teams had any way to know a verify
+        # script even existed for this card — both only ever offered a
+        # "Download Fix Script" action, with no equivalent for
+        # automation_card.verify_script (which the website already
+        # surfaces as its own separate "Download Verify Script" button).
+        # Only a bool, never the raw script content — same rule as
+        # fix_script above, actual download stays behind the authenticated
+        # /automation-scripts/ai/<card_id>/download/?type=verify endpoint.
+        "has_verify_script": bool((automation.get("verify_script") or "").strip()),
+        "verify_script_name": automation.get("verify_script_filename") or None,
     }
 
 

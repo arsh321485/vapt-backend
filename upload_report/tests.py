@@ -16,7 +16,6 @@ import json
 import unittest
 
 from upload_report.mitigation_tool import (
-    _automation_script_extension,
     _automation_script_filename,
     _normalize_automation_status,
     _parse_automation_card,
@@ -38,23 +37,19 @@ class NormalizeAutomationStatusTests(unittest.TestCase):
         self.assertEqual(_normalize_automation_status(None), "not_possible")
 
 
-class AutomationScriptExtensionTests(unittest.TestCase):
-    def test_language_to_extension(self):
-        self.assertEqual(_automation_script_extension("bash"), "sh")
-        self.assertEqual(_automation_script_extension("Bash"), "sh")
-        self.assertEqual(_automation_script_extension("PowerShell"), "ps1")
-        self.assertEqual(_automation_script_extension("python"), "py")
-        self.assertEqual(_automation_script_extension("vendor_cli"), "txt")
-        self.assertEqual(_automation_script_extension(""), "txt")
-        self.assertEqual(_automation_script_extension(None), "txt")
-
-
 class AutomationScriptFilenameTests(unittest.TestCase):
+    # Extension is always .py now, regardless of whatever `language` the
+    # automation dict carries — language is an "always python" product
+    # requirement (crew_agent/tasks.py's Automation Engineer prompt), not
+    # something derived from the LLM's own self-reported value. By the
+    # time this function is called from _parse_automation_card, the
+    # content has already passed an ast.parse() Python-syntax gate, so a
+    # non-.py extension would just be lying about what's actually inside.
     def test_builds_filename_from_vuln_and_os(self):
         automation = {"vulnerability": "Weak TLS Cipher", "os": "Ubuntu 22.04", "language": "bash"}
-        name = _automation_script_filename(automation, "#!/bin/bash\necho hi", "fix")
+        name = _automation_script_filename(automation, "import subprocess\nprint('hi')", "fix")
         self.assertTrue(name.startswith("Weak_TLS_Cipher_Ubuntu_22_04_fix"))
-        self.assertTrue(name.endswith(".sh"))
+        self.assertTrue(name.endswith(".py"))
 
     def test_empty_script_content_yields_empty_filename(self):
         automation = {"vulnerability": "Weak TLS Cipher", "os": "Ubuntu 22.04", "language": "bash"}
@@ -64,11 +59,11 @@ class AutomationScriptFilenameTests(unittest.TestCase):
 
     def test_sanitizes_special_characters(self):
         automation = {"vulnerability": "SSL/TLS: Weak Cipher (RC4)!", "os": "Windows Server 2019", "language": "powershell"}
-        name = _automation_script_filename(automation, "Write-Host fix", "verify")
+        name = _automation_script_filename(automation, "print('fix')", "verify")
         # No slashes, colons, parens, spaces, etc. left in the filename.
         for bad_char in "/\\:()! ":
             self.assertNotIn(bad_char, name)
-        self.assertTrue(name.endswith("_verify.ps1"))
+        self.assertTrue(name.endswith("_verify.py"))
 
 
 class ParseAutomationCardTests(unittest.TestCase):
@@ -82,19 +77,25 @@ class ParseAutomationCardTests(unittest.TestCase):
             "automation_status": "full",
             "automation_possible": "Yes",
             "reason_not_possible": "",
-            "script_name": "disable_weak_ciphers.sh",
+            "script_name": "disable_weak_ciphers.py",
             "script_description": "Disables weak TLS ciphers in nginx.",
             "what_can_be_automated": "All of it.",
             "what_must_remain_manual": "",
             "recommended_approach": "Run the fix script, then verify.",
             "considerations_before": "Back up nginx.conf first.",
             "considerations_after": "Restart nginx and re-scan.",
-            "language": "bash",
+            "language": "python",
             "libraries": "",
             "command_download_libraries": "",
-            "command_run_script": "bash fix.sh",
-            "fix_script": "#!/bin/bash\necho fixing",
-            "verify_script": "#!/bin/bash\necho verifying",
+            "command_run_script": "python fix.py",
+            # language is an "always python" product requirement — every
+            # fix_script/verify_script fixture here is real, parseable
+            # Python (subprocess-wrapping the OS-native command), never a
+            # raw bash/PowerShell file, matching what _parse_automation_card
+            # now enforces via ast.parse() regardless of what `language`
+            # the LLM claims.
+            "fix_script": "import subprocess\nsubprocess.run(['bash', 'fix.sh'])\nprint('fixing')",
+            "verify_script": "import subprocess\nsubprocess.run(['bash', 'verify.sh'])\nprint('verifying')",
         }
         obj.update(overrides)
         return obj
@@ -104,10 +105,11 @@ class ParseAutomationCardTests(unittest.TestCase):
         card = _parse_automation_card(raw)
         self.assertEqual(card["automation_status"], "full")
         self.assertEqual(card["automation_possible"], "Yes")
-        self.assertIn("echo fixing", card["fix_script"])
-        self.assertIn("echo verifying", card["verify_script"])
-        self.assertTrue(card["fix_script_filename"].endswith(".sh"))
-        self.assertTrue(card["verify_script_filename"].endswith(".sh"))
+        self.assertIn("print('fixing')", card["fix_script"])
+        self.assertIn("print('verifying')", card["verify_script"])
+        self.assertTrue(card["fix_script_filename"].endswith(".py"))
+        self.assertTrue(card["verify_script_filename"].endswith(".py"))
+        self.assertEqual(card["language"], "python")
         self.assertEqual(card["tested_manually"], "No — AI-generated, not yet human-tested")
         self.assertEqual(card["download_count"], 0)
         self.assertIn("generated_at", card)
@@ -116,7 +118,7 @@ class ParseAutomationCardTests(unittest.TestCase):
         raw = "```json\n" + json.dumps({"automation": self._full_automation_obj()}) + "\n```"
         card = _parse_automation_card(raw)
         self.assertEqual(card["automation_status"], "full")
-        self.assertIn("echo fixing", card["fix_script"])
+        self.assertIn("print('fixing')", card["fix_script"])
 
     def test_bare_json_object_scan_fallback(self):
         obj = self._full_automation_obj(automation_status="partial", automation_possible="Partial")
@@ -159,6 +161,42 @@ class ParseAutomationCardTests(unittest.TestCase):
         raw = json.dumps({"automation": obj})
         card = _parse_automation_card(raw)
         self.assertEqual(card["reason_not_possible"], "")
+
+    def test_invalid_python_syntax_is_withheld(self):
+        # A genuine Python syntax error must never reach a real download.
+        obj = self._full_automation_obj(
+            fix_script="from datetime import import datetime\nclass Broken(",
+        )
+        raw = json.dumps({"automation": obj})
+        card = _parse_automation_card(raw)
+        self.assertEqual(card["automation_status"], "not_possible")
+        self.assertEqual(card["fix_script"], "")
+        self.assertEqual(card["verify_script"], "")
+        self.assertTrue(card["generation_invalid"])
+        self.assertIn("not valid Python", card["reason_not_possible"])
+
+    def test_non_python_script_is_withheld_even_when_llm_mislabels_language(self):
+        # Real bug report: "language" is a hard "always python" product
+        # requirement (crew_agent/tasks.py), but the LLM sometimes ignores
+        # it and returns a raw PowerShell/Bash script anyway with
+        # automation_status "full"/"Yes" and language set to something
+        # else. That used to sail straight through (the old syntax check
+        # only ran when language already said "python", so a mislabeled
+        # non-Python script was never caught) and reach a real user's
+        # download as-is. It must be withheld now regardless of what
+        # `language` claims — non-Python content fails ast.parse().
+        obj = self._full_automation_obj(
+            language="powershell",
+            fix_script='$community = Get-WmiObject -Namespace "root\\microsoft\\windows\\snmp"',
+            verify_script="Get-WmiObject -Namespace root",
+        )
+        raw = json.dumps({"automation": obj})
+        card = _parse_automation_card(raw)
+        self.assertEqual(card["automation_status"], "not_possible")
+        self.assertEqual(card["fix_script"], "")
+        self.assertEqual(card["verify_script"], "")
+        self.assertEqual(card["fix_script_filename"], "")
+        self.assertTrue(card["generation_invalid"])
 
     def test_missing_automation_status_is_derived_from_automation_possible(self):
         obj = self._full_automation_obj(automation_possible="Partial")
