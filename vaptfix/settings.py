@@ -204,7 +204,7 @@ SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://vaptfix.ai")
 VAPTFIX_LOGO_URL = os.getenv("VAPTFIX_LOGO_URL", f"{FRONTEND_URL.rstrip('/')}/logo.png")
-VAPTFIX_TEAMS_ICON_PATH = os.getenv("VAPTFIX_TEAMS_ICON_PATH", os.path.join(BASE_DIR, "users", "static", "users", "icon.jpg"))
+VAPTFIX_TEAMS_ICON_PATH = os.getenv("VAPTFIX_TEAMS_ICON_PATH", os.path.join(BASE_DIR, "users", "static", "users", "vaptfix_v_logo.png"))
 VAPTFIX_LOGIN_URL = os.getenv("VAPTFIX_LOGIN_URL", "https://vaptfix.ai/auth?tab=user")
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://vaptbackend.secureitlab.com")
 

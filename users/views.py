@@ -2138,11 +2138,27 @@ def _get_vaptfix_team_icon_bytes():
 
 
 def _png_to_jpeg_bytes(png_bytes):
-    """Convert PNG bytes to JPEG bytes. Teams desktop app requires JPEG."""
+    """Convert PNG bytes to JPEG bytes. Teams desktop app requires JPEG.
+
+    Real bug report: a transparent-background PNG logo (e.g. a black "V"
+    mark on a transparent canvas) turned the transparent area solid BLACK
+    once flattened to JPEG, making the mark itself invisible — plain
+    `.convert("RGB")` on an RGBA image just drops the alpha channel and
+    keeps whatever RGB values were underneath the transparent pixels
+    (usually black), it does NOT composite onto white first. Paste onto an
+    explicit white background before flattening so transparent areas come
+    out white, not black."""
     try:
         from PIL import Image
         import io
-        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        img = Image.open(io.BytesIO(png_bytes))
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            img = img.convert("RGBA")
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            background.paste(img, mask=img.split()[3])
+            img = background
+        else:
+            img = img.convert("RGB")
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=95)
         return buf.getvalue()
