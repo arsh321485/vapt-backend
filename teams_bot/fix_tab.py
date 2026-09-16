@@ -658,11 +658,6 @@ def _automation_fix_body(automation, admin=None):
     add("Before running", "considerations_before")
     add("After running", "considerations_after")
 
-    body.append({
-        "type": "TextBlock",
-        "text": f"Script: `{automation.get('fix_script_name') or '—'}` — team members can download this in their team channel.",
-        "wrap": True, "size": "Small", "isSubtle": True, "spacing": "Medium",
-    })
     return body
 
 

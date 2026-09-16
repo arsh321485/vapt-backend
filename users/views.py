@@ -20408,10 +20408,6 @@ class SlackSlashCommandView(APIView):
                     "value": f"{card_id}|{sid}",
                 })
             blocks.append({"type": "actions", "elements": dl_elements})
-        else:
-            blocks.append(self._ctx(
-                f"Script: `{automation.get('fix_script_name') or '—'}` — team members can download this in their team channel."
-            ))
         return blocks
 
     def _format_vulndata_automation(self, data):
