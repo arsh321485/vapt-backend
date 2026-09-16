@@ -367,6 +367,17 @@ def _on_checkout_completed(session: dict):
     except Exception:
         logger.exception(f"[Billing] Teams onboarding-card refresh failed for {sub.admin.email} after checkout.session.completed")
 
+    # Same gap, Slack side — see users.views._post_slack_onboarding_step's
+    # own docstring. This Stripe webhook never told Slack the plan had
+    # changed either, so the "Choose Your Plan" prompt (or the "Unknown
+    # action" left behind by clicking its url button) never refreshed to
+    # Set Risk Criteria on its own after payment completed.
+    try:
+        from users.views import _post_slack_onboarding_step
+        _post_slack_onboarding_step(sub.admin)
+    except Exception:
+        logger.exception(f"[Billing] Slack onboarding-message refresh failed for {sub.admin.email} after checkout.session.completed")
+
 
 def _on_invoice_paid(invoice: dict):
     _upsert_invoice(invoice, status="paid")

@@ -223,6 +223,16 @@ class FreemiumActivateView(APIView):
         except Exception:
             logger.exception(f"[Billing] Teams onboarding-card refresh failed for {admin.email} after Freemium activation")
 
+        # Same gap, Slack side — Slack's "Choose Your Plan" prompt never
+        # refreshed to "Set Risk Criteria" on its own either after
+        # activating Freemium (Freemium skips Stripe checkout entirely, so
+        # nothing else naturally revisits this admin's Slack channel).
+        try:
+            from users.views import _post_slack_onboarding_step
+            _post_slack_onboarding_step(admin)
+        except Exception:
+            logger.exception(f"[Billing] Slack onboarding-message refresh failed for {admin.email} after Freemium activation")
+
         return Response({
             "subscription": SubscriptionSerializer(sub).data,
             "setup_intent_client_secret": setup_intent["client_secret"] if setup_intent else None,

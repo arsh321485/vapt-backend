@@ -5243,6 +5243,41 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
     return state
 
 
+def _post_slack_onboarding_step(admin):
+    """
+    Slack's counterpart to teams_bot.onboarding.post_onboarding_step —
+    posts whichever onboarding message matches this admin's current state
+    (same "needs_risk_criteria" -> "needs_plan" override
+    _post_admin_onboarding_message already applies) into their Slack
+    admin-dashboard channel, replacing a stale "Choose Your Plan" prompt
+    with the real next step (Set Risk Criteria) the moment a plan is
+    actually on file. No-op (logged, not raised) if this admin never
+    connected Slack. Called alongside post_onboarding_step from the same
+    two billing call sites (FreemiumActivateView, stripe_service's
+    checkout.session.completed handler) so Slack gets the identical
+    "come back and see the next step" pop Teams already had — real
+    request: Slack was stuck showing "Unknown action"/a stale plan prompt
+    indefinitely after checkout, never refreshing on its own.
+    """
+    team_id = getattr(admin, "slack_team_id", None)
+    if not team_id:
+        logger.info(f"[SlackOnboarding] admin={getattr(admin, 'email', None)} has no slack_team_id — skipping")
+        return None
+    try:
+        bot_token = SlackSlashCommandView()._get_bot_token(team_id)
+        if not bot_token:
+            logger.info(f"[SlackOnboarding] admin={getattr(admin, 'email', None)} has no bot token — skipping")
+            return None
+        channel_id = SlackSlashCommandView()._get_admin_channel_id(bot_token)
+        if not channel_id:
+            logger.info(f"[SlackOnboarding] admin={getattr(admin, 'email', None)} has no admin channel — skipping")
+            return None
+        return _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
+    except Exception:
+        logger.exception(f"[SlackOnboarding] failed to post onboarding step for {getattr(admin, 'email', None)}")
+        return None
+
+
 def _slack_progress_bar(pct, width=20):
     pct = max(0, min(100, pct))
     filled = int(round((pct / 100) * width))
@@ -5486,7 +5521,18 @@ def _watch_reports_and_post_onboarding(
         # _post_admin_onboarding_message's own posting) — see its own
         # dedup logic for why this is safe to call from more than one
         # code path for the same report_ids.
-        _post_freemium_trim_notice(bot_token, channel_id, report_ids)
+        #
+        # Real request: skip this entirely when the admin hasn't picked
+        # ANY plan yet — _post_admin_onboarding_message below is about to
+        # show "Choose Your Plan" for that exact case, and having BOTH a
+        # "View Pricing Plans" (this trim notice) and a separate "Choose
+        # Your Plan" message back to back was confusing/redundant (an
+        # admin who hasn't chosen Freemium yet doesn't need an "upgrade
+        # from Freemium" notice — they haven't even started). Still posts
+        # normally once a plan IS on file (e.g. a Freemium admin who later
+        # uploads a bigger file).
+        if _admin_has_selected_plan(admin):
+            _post_freemium_trim_notice(bot_token, channel_id, report_ids)
 
         resolved_state = _post_admin_onboarding_message(bot_token, channel_id, team_id, admin)
         logger.info(f"[UploadWatch] Posted onboarding message for report_ids={report_ids}, resolved_state={resolved_state}")
@@ -22533,15 +22579,17 @@ class SlackInteractivityView(APIView):
                 cache.delete(f"slack_pending_upload_{value}")
                 return
 
-            if action_id == "freemium_view_pricing_plans":
-                # Plain `url` button (see _post_freemium_trim_notice) —
-                # Slack navigates there directly; nothing for the backend
-                # to do. Real bug this fixes: the button had no action_id
-                # at all, so Slack's own interaction payload for it (yes,
-                # Slack still sends one for url-type buttons) fell through
-                # to the "Unknown action" fallback below, which replaced
-                # the button with that error text — the admin lost the
-                # ability to click it again later to go back and upgrade.
+            if action_id in ("freemium_view_pricing_plans", "open_pricing_plan"):
+                # Plain `url` button (see _post_freemium_trim_notice and
+                # _build_admin_plan_prompt_blocks' "Choose Your Plan"
+                # button) — Slack navigates there directly; nothing for the
+                # backend to do. Same bug as freemium_view_pricing_plans:
+                # Slack still sends a block_actions payload for url-type
+                # buttons, and open_pricing_plan was never in this list —
+                # it fell through to the "Unknown action" fallback below,
+                # which replaced the "Choose Your Plan" button with that
+                # error text and left the admin with no way to click it
+                # again.
                 return
 
             if action_id == "team_sub_deleteteamuser":
