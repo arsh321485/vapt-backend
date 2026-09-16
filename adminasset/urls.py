@@ -75,14 +75,14 @@ urlpatterns = [
 
   # ---------------- HOST NAME BY RAISE SUPPORT REQUEST ----------------
     path(
-        "support-requests/host/<str:host_name>/",
+        "support-requests/host/<path:host_name>/",
         SupportRequestByHostAPIView.as_view(),
         name="support-requests-by-host"
     ),
     
       # ---------------- HOST NAME BY FixVulnerabilitie ----------------
     path(
-        "fix-vulnerabilities/host/<str:host_name>/closed/",
+        "fix-vulnerabilities/host/<path:host_name>/closed/",
         ClosedFixVulnerabilitiesByHostAPIView.as_view(),
         name="closed-fix-vulnerabilities-by-host"
     ),

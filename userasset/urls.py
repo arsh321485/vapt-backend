@@ -104,14 +104,14 @@ urlpatterns = [
 
     # GET support requests raised by this user for a host
     path(
-        "support-requests/host/<str:host_name>/",
+        "support-requests/host/<path:host_name>/",
         UserSupportRequestByHostAPIView.as_view(),
         name="user-support-requests-by-host",
     ),
 
     # GET closed fix-vulnerabilities for a host (team-filtered)
     path(
-        "fix-vulnerabilities/host/<str:host_name>/closed/",
+        "fix-vulnerabilities/host/<path:host_name>/closed/",
         UserClosedFixVulnerabilitiesByHostAPIView.as_view(),
         name="user-closed-fix-vulnerabilities-by-host",
     ),

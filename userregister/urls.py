@@ -30,7 +30,13 @@ urlpatterns = [
 
     # 2. Fix vulnerability create + list (per asset)
     path(
-        "fix-vulnerability/report/<str:report_id>/asset/<str:host_name>/create/",
+        # host_name uses the `path` converter, not `str` — a custom PDF/API
+        # report's host is routinely a full URL ("https://pay-api...") with
+        # embedded slashes, which `str` (single path segment, no "/") can
+        # never match, producing a hard 404 on every such asset. Real bug
+        # report: this exact 404 on "Manual Fix" create for a custom-report
+        # asset whose host_name is a URL.
+        "fix-vulnerability/report/<str:report_id>/asset/<path:host_name>/create/",
         UserFixVulnerabilityCreateAPIView.as_view(),
         name="user-fix-vuln-create",
     ),
@@ -100,7 +106,7 @@ urlpatterns = [
 
     # 10b. All support requests by host/asset (team-filtered)
     path(
-        "support-requests/host/<str:host_name>/",
+        "support-requests/host/<path:host_name>/",
         UserSupportRequestsByHostAPIView.as_view(),
         name="user-support-requests-by-host",
     ),
