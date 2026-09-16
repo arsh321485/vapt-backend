@@ -632,10 +632,21 @@ def _send_teams_notification(admin_id, recipient_type, notif_type, title, messag
 
 
 def create_notification(admin, recipient_type, notif_type, title, message,
-                        metadata=None, recipient_email=''):
+                        metadata=None, recipient_email='', notify_bots=True):
     """
     admin  – User instance OR admin_id string (both accepted)
     recipient_email – user's email; '' = broadcast to all users of this admin
+    notify_bots – whether to also push this as a Slack/Teams chat message.
+        Real request: website-triggered asset hold/unhold/delete were
+        posting a chat message into the admin-dashboard/team channels
+        every time, even though the admin/member was already looking at
+        the website when they took the action — noisy, and not what
+        Slack/Teams-originated actions (which DO still want the chat
+        confirmation, since that's the surface the user is on) should
+        lose. Callers for the website-only paths pass notify_bots=False;
+        the in-app notification record (bell icon, notifications list)
+        is still created either way — only the proactive chat push is
+        skippable.
     Uses raw pymongo to avoid djongo ORM bugs.
     """
     try:
@@ -657,8 +668,9 @@ def create_notification(admin, recipient_type, notif_type, title, message,
         with MongoContext() as db:
             db[COLLECTION].insert_one(doc)
         _bust_notif_cache(admin_id, recipient_type, recipient_email)
-        _send_slack_notification(admin_id, recipient_type, notif_type, title, message, metadata, recipient_email)
-        _send_teams_notification(admin_id, recipient_type, notif_type, title, message, metadata, recipient_email)
+        if notify_bots:
+            _send_slack_notification(admin_id, recipient_type, notif_type, title, message, metadata, recipient_email)
+            _send_teams_notification(admin_id, recipient_type, notif_type, title, message, metadata, recipient_email)
     except Exception as exc:
         logger.error("create_notification failed [%s | %s]: %s", notif_type, recipient_type, exc)
 

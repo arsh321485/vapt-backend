@@ -317,8 +317,8 @@ class AssetDeleteAPIView(APIView):
                     _n_title = f"Asset Removed: {host_name}"
                     _n_msg = (f"Asset Removed: {host_name} has been removed from the platform. "
                               "Dashboard metrics have been updated.")
-                    create_notification(request.user, 'admin', 'asset_deleted', _n_title, _n_msg, _n_meta)
-                    create_notification(request.user, 'user', 'asset_deleted', _n_title, _n_msg, _n_meta, recipient_email='')
+                    create_notification(request.user, 'admin', 'asset_deleted', _n_title, _n_msg, _n_meta, notify_bots=False)
+                    create_notification(request.user, 'user', 'asset_deleted', _n_title, _n_msg, _n_meta, recipient_email='', notify_bots=False)
                 except Exception as _e:
                     import logging; logging.getLogger(__name__).error("asset_deleted notification failed: %s", _e, exc_info=True)
 
@@ -539,8 +539,8 @@ class AssetHoldAPIView(APIView):
                     _n_title = f"Asset On Hold: {host_name}"
                     _n_msg = (f"Asset On Hold: {host_name} has been placed on hold and "
                               "excluded from active remediation workflows.")
-                    create_notification(request.user, 'admin', 'asset_held', _n_title, _n_msg, _n_meta)
-                    create_notification(request.user, 'user', 'asset_held', _n_title, _n_msg, _n_meta, recipient_email='')
+                    create_notification(request.user, 'admin', 'asset_held', _n_title, _n_msg, _n_meta, notify_bots=False)
+                    create_notification(request.user, 'user', 'asset_held', _n_title, _n_msg, _n_meta, recipient_email='', notify_bots=False)
                 except Exception as _e:
                     import logging; logging.getLogger(__name__).error("asset_held notification failed: %s", _e, exc_info=True)
 
@@ -654,8 +654,8 @@ class AssetUnholdAPIView(APIView):
                         f"to the report. Vulnerability remediation can resume."
                     )
                     _n_meta = {"asset": host_name, "report_id": str(report_id), "severity_counts": asset_response["severity_counts"]}
-                    create_notification(request.user, 'admin', 'asset_unhold', _n_title, _n_msg, _n_meta)
-                    create_notification(request.user, 'user', 'asset_unhold', _n_title, _n_msg, _n_meta, recipient_email='')
+                    create_notification(request.user, 'admin', 'asset_unhold', _n_title, _n_msg, _n_meta, notify_bots=False)
+                    create_notification(request.user, 'user', 'asset_unhold', _n_title, _n_msg, _n_meta, recipient_email='', notify_bots=False)
                 except Exception as _e:
                     import logging; logging.getLogger(__name__).error("asset_unhold notification failed: %s", _e, exc_info=True)
 

@@ -1126,8 +1126,8 @@ class UserAssetHoldAPIView(APIView):
                     _n_title = f"Asset On Hold: {host_name}"
                     _n_msg = (f"Asset On Hold: {host_name} has been placed on hold and "
                               "excluded from active remediation workflows.")
-                    create_notification(admin_user, 'user', 'asset_held', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
-                    create_notification(admin_user, 'admin', 'asset_held', _n_title, _n_msg, _n_meta)
+                    create_notification(admin_user, 'user', 'asset_held', _n_title, _n_msg, _n_meta, recipient_email=request.user.email, notify_bots=False)
+                    create_notification(admin_user, 'admin', 'asset_held', _n_title, _n_msg, _n_meta, notify_bots=False)
                 except Exception:
                     pass
 
@@ -1244,8 +1244,8 @@ class UserAssetUnholdAPIView(APIView):
                         f"to the report. Vulnerability remediation can resume."
                     )
                     _n_meta = {"asset": host_name, "report_id": str(report_id), "severity_counts": asset_response["severity_counts"]}
-                    create_notification(admin_user, 'admin', 'asset_unhold', _n_title, _n_msg, _n_meta)
-                    create_notification(admin_user, 'user', 'asset_unhold', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                    create_notification(admin_user, 'admin', 'asset_unhold', _n_title, _n_msg, _n_meta, notify_bots=False)
+                    create_notification(admin_user, 'user', 'asset_unhold', _n_title, _n_msg, _n_meta, recipient_email=request.user.email, notify_bots=False)
                 except Exception:
                     pass
 
@@ -1352,8 +1352,8 @@ class UserAssetDeleteAPIView(APIView):
                     _n_title = f"Asset Removed: {host_name}"
                     _n_msg = (f"Asset Removed: {host_name} has been removed from the platform. "
                               "Dashboard metrics have been updated.")
-                    create_notification(admin_user, 'user', 'asset_deleted', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
-                    create_notification(admin_user, 'admin', 'asset_deleted', _n_title, _n_msg, _n_meta)
+                    create_notification(admin_user, 'user', 'asset_deleted', _n_title, _n_msg, _n_meta, recipient_email=request.user.email, notify_bots=False)
+                    create_notification(admin_user, 'admin', 'asset_deleted', _n_title, _n_msg, _n_meta, notify_bots=False)
                 except Exception:
                     pass
 
