@@ -169,7 +169,16 @@ def new_request_form_body(member_user, team_name, selected_asset=None, selected_
         body.append({"type": "TextBlock", "text": f"Pick an asset assigned to {team_name}, then a vulnerability on it.", "size": "Small", "isSubtle": True, "wrap": True})
         asset_choices = [{"title": a, "value": a} for a in assets]
         body.extend([
-            {"type": "Input.ChoiceSet", "id": "uex_new_asset", "label": "Asset", "style": "compact", "choices": asset_choices},
+            # Real bug report: "compact" style's native dropdown popup was
+            # rendering pinned to the top-left of the whole window instead
+            # of anchored under the field — a known Adaptive Cards/Teams
+            # Web issue with "compact" ChoiceSets that have many choices
+            # (this list is every asset assigned to the team, easily 20-30+).
+            # "filtered" (Adaptive Cards 1.5+, see _VERSION above) is
+            # Microsoft's own documented fix for exactly this case — a
+            # searchable inline list instead of a native <select> popup.
+            {"type": "Input.ChoiceSet", "id": "uex_new_asset", "label": "Asset", "style": "filtered",
+             "placeholder": "Search assets…", "choices": asset_choices},
             {
                 "type": "ActionSet", "spacing": "Medium",
                 "actions": [cards._execute_action("Next →", {"action_id": "uex_new_pick_asset"}, style="positive")],
@@ -188,7 +197,10 @@ def new_request_form_body(member_user, team_name, selected_asset=None, selected_
             for i, r in enumerate(asset_vulns[:50])
         ]
         body.extend([
-            {"type": "Input.ChoiceSet", "id": "uex_new_idx", "label": "Vulnerability", "style": "compact", "choices": choices},
+            # Same top-left-popup fix as the Asset picker above — this list
+            # can have up to 50 entries.
+            {"type": "Input.ChoiceSet", "id": "uex_new_idx", "label": "Vulnerability", "style": "filtered",
+             "placeholder": "Search vulnerabilities…", "choices": choices},
             {
                 "type": "ActionSet", "spacing": "Medium",
                 "actions": [

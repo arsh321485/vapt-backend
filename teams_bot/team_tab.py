@@ -359,8 +359,12 @@ def add_user_form_body(admin, form_data=None):
         if teams_members:
             body.append({"type": "TextBlock", "text": "Pick someone already in this Teams team:", "size": "Small", "weight": "Bolder", "spacing": "Medium"})
             body.append({
-                "type": "Input.ChoiceSet", "id": f"au_pick_member_{rev}", "style": "compact",
-                "placeholder": "Select a Teams member",
+                # Same top-left-popup fix as the Extend Request Asset/
+                # Vulnerability pickers (user_extend_tab.py) — "compact"'s
+                # native dropdown mispositions with many choices, "filtered"
+                # (Adaptive Cards 1.5+) is Microsoft's documented fix.
+                "type": "Input.ChoiceSet", "id": f"au_pick_member_{rev}", "style": "filtered",
+                "placeholder": "Search Teams members…",
                 "choices": [{"title": f"{m['displayName']} ({m['email']})", "value": m["email"]} for m in teams_members],
             })
             body.append({

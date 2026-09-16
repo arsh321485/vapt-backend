@@ -158,10 +158,11 @@ class Command(BaseCommand):
                 failed += 1
                 continue
 
+            merged_automation = self._preserve_download_stats(c.get("automation_card") or {}, new_automation)
             coll.update_one(
                 {"card_id": card_id},
                 {"$set": {
-                    "automation_card": new_automation,
+                    "automation_card": merged_automation,
                     "automation_regenerated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 }},
             )
@@ -172,6 +173,20 @@ class Command(BaseCommand):
             ok += 1
 
         self.stdout.write(self.style.SUCCESS(f"Finished — {ok} regenerated, {failed} failed."))
+
+    def _preserve_download_stats(self, old_automation, new_automation):
+        """Real bug report: regenerating overwrote the WHOLE automation_card
+        (via _parse_automation_card, which always sets a fresh
+        download_count=0) — silently wiping out real historical download
+        counts/timestamps for every card touched, even ones that had
+        genuinely been downloaded by real users before. These two fields
+        are per-card usage stats, not part of the generation itself, so
+        carry them forward from whatever this specific card already had."""
+        merged = dict(new_automation)
+        merged["download_count"] = old_automation.get("download_count", 0)
+        if old_automation.get("last_downloaded_at"):
+            merged["last_downloaded_at"] = old_automation["last_downloaded_at"]
+        return merged
 
     def _dedupe_key(self, card):
         """(vulnerability_name, OS, mitigation_table) — the exact three
@@ -233,10 +248,14 @@ class Command(BaseCommand):
 
             now = datetime.datetime.now(datetime.timezone.utc).isoformat()
             for c in group_cards:
+                # download_count/last_downloaded_at are per-CARD usage
+                # stats, not part of the shared generation — each card in
+                # this group keeps its own, not the representative's.
+                merged_automation = self._preserve_download_stats(c.get("automation_card") or {}, new_automation)
                 coll.update_one(
                     {"card_id": c.get("card_id")},
                     {"$set": {
-                        "automation_card": new_automation,
+                        "automation_card": merged_automation,
                         "automation_regenerated_at": now,
                     }},
                 )

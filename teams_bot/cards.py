@@ -64,7 +64,7 @@ _SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
 # live client. pill_columnset uses a ColumnSet of Action.Execute buttons
 # instead (see there) — proven to render (that was the working layout
 # this whole epic has been tested against) while still using real buttons.
-_VERSION = "1.4"
+_VERSION = "1.5"
 
 # Same option list + defaults as users/views.py's _RISK_LEVEL_OPTIONS /
 # _RISK_CRITERIA_DEFAULTS — kept as a separate copy (not imported) so
