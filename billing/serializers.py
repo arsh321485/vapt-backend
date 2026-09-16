@@ -12,6 +12,12 @@ class PlanEstimateRequestSerializer(serializers.Serializer):
 class PremiumCheckoutRequestSerializer(serializers.Serializer):
     mode = serializers.ChoiceField(choices=MODE_CHOICES)
     billing_cycle = serializers.ChoiceField(choices=CYCLE_CHOICES, required=False)
+    # Where the admin arrived from before landing on the pricing page
+    # (e.g. "slack", "teams") — same value the pricing-handoff link already
+    # carries as ?source=. Passed through to Stripe's success_url so the
+    # /billing/success page knows to show "head back to Slack/Teams" after
+    # payment instead of a platform-agnostic "you're all set".
+    source = serializers.CharField(required=False, allow_blank=True, max_length=32)
 
     def validate(self, attrs):
         if attrs["mode"] == "management" and not attrs.get("billing_cycle"):
@@ -23,6 +29,7 @@ class PremiumCheckoutRequestSerializer(serializers.Serializer):
 
 class CustomCheckoutRequestSerializer(serializers.Serializer):
     asset_count = serializers.IntegerField(min_value=1)
+    source = serializers.CharField(required=False, allow_blank=True, max_length=32)
 
 
 class CustomLeadRequestSerializer(serializers.Serializer):

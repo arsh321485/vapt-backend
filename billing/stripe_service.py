@@ -3,6 +3,7 @@ All direct Stripe API calls live here — views.py stays thin and testable.
 """
 import logging
 from datetime import datetime, timezone as dt_timezone
+from urllib.parse import quote
 
 import stripe
 from django.conf import settings
@@ -55,7 +56,7 @@ def create_setup_intent(admin) -> dict:
     return {"client_secret": intent["client_secret"], "customer_id": customer_id}
 
 
-def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_count: int) -> dict:
+def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_count: int, source: str = None) -> dict:
     """
     Builds a Stripe Checkout Session with a dynamic per-IP price (price_data) —
     no pre-created Stripe Price objects needed since the unit quantity (asset
@@ -88,6 +89,9 @@ def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_
     }
 
     frontend_url = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+    success_url = f"{frontend_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}"
+    if source:
+        success_url += f"&source={quote(source)}"
     session = stripe.checkout.Session.create(
         customer=customer_id,
         mode="subscription",
@@ -101,7 +105,7 @@ def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_
             },
             "quantity": max(int(asset_count), 1),
         }],
-        success_url=f"{frontend_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+        success_url=success_url,
         cancel_url=f"{frontend_url}/billing/cancel",
         metadata=metadata,
         subscription_data={"metadata": metadata},
@@ -122,7 +126,7 @@ def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_
     return {"checkout_url": session["url"], "session_id": session["id"], "amount_due": str(amount_due)}
 
 
-def create_custom_checkout_session(admin, asset_count: int) -> dict:
+def create_custom_checkout_session(admin, asset_count: int, source: str = None) -> dict:
     """
     Custom tier (>250 assets) — same Stripe Checkout Session pattern as
     create_premium_checkout_session's Management/Annual path (subscription
@@ -150,6 +154,9 @@ def create_custom_checkout_session(admin, asset_count: int) -> dict:
     }
 
     frontend_url = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+    success_url = f"{frontend_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}"
+    if source:
+        success_url += f"&source={quote(source)}"
     session = stripe.checkout.Session.create(
         customer=customer_id,
         mode="subscription",
@@ -163,7 +170,7 @@ def create_custom_checkout_session(admin, asset_count: int) -> dict:
             },
             "quantity": max(int(asset_count), 1),
         }],
-        success_url=f"{frontend_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+        success_url=success_url,
         cancel_url=f"{frontend_url}/billing/cancel",
         metadata=metadata,
         subscription_data={"metadata": metadata},

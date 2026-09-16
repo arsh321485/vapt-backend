@@ -276,7 +276,8 @@ class PremiumCheckoutView(APIView):
 
         try:
             result = stripe_service.create_premium_checkout_session(
-                admin, mode=mode, billing_cycle=billing_cycle, asset_count=asset_count
+                admin, mode=mode, billing_cycle=billing_cycle, asset_count=asset_count,
+                source=serializer.validated_data.get("source"),
             )
         except Exception as e:
             # Surface the real reason instead of a generic "please try
@@ -403,7 +404,9 @@ class CustomCheckoutView(APIView):
 
         admin = request.user
         try:
-            result = stripe_service.create_custom_checkout_session(admin, asset_count=asset_count)
+            result = stripe_service.create_custom_checkout_session(
+                admin, asset_count=asset_count, source=serializer.validated_data.get("source"),
+            )
         except Exception as e:
             # Same error-surfacing convention as PremiumCheckoutView — pass
             # through Stripe's own human-readable reason instead of a

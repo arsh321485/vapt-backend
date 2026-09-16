@@ -4997,7 +4997,11 @@ def _build_enter_scope_options_blocks():
     return [
         {"type": "header", "text": {"type": "plain_text", "text": "📋 Enter Your Scope", "emoji": True}},
         {"type": "section", "text": {"type": "mrkdwn", "text": (
-            "Add targets with a CSV file, or enter IPs/hosts manually."
+            "Add targets with a file, or enter IPs / hosts manually.\n\n"
+            "📄 *CSV File* — Upload a CSV, Excel, or text file of assets / "
+            "IPs / web apps. One row per target works best.\n"
+            "✍️ *Manual Entry* — Type IP addresses, hostnames, or CIDR "
+            "ranges one per line."
         )}},
         {
             "type": "actions",
