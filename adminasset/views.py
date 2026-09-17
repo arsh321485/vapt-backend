@@ -1322,16 +1322,22 @@ class AllVulnerabilitiesAPIView(APIView):
                         asset_type = asset_type_map.get(host_name, "other")
                         entry["asset_type_counts"][asset_type] += 1
 
-                # Real request: total vulnerability-findings per asset
-                # category, alongside the existing per-vulnerability
-                # breakdown — the sum of every vulnerability's own
-                # asset_type_counts (a vulnerability-count, not a
-                # distinct-asset count; the same host can contribute to
-                # this more than once if it has more than one vulnerability).
+                # Real request: how many DISTINCT vulnerabilities affect at
+                # least one asset of each category — the tab-bar filter
+                # count (Assets/Web App/Firewall/Server), so it's bounded
+                # by "total" (len(vuln_map)), never bigger. NOT a sum of
+                # asset_type_counts (that's a findings/instance count, and
+                # can exceed "total" when a vulnerability hits several
+                # assets of the same type — see git history on this file
+                # for that earlier, rejected version). A vulnerability
+                # affecting more than one category (e.g. both a server and
+                # a web app) counts toward each of those, same as the tab
+                # filter itself would show it under either one.
                 asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
                 for _entry in vuln_map.values():
                     for _atype, _n in _entry["asset_type_counts"].items():
-                        asset_type_totals[_atype] += _n
+                        if _n > 0:
+                            asset_type_totals[_atype] += 1
 
                 return Response({
                     "report_id": str(report_id),

@@ -1474,13 +1474,14 @@ class UserAllVulnerabilitiesAPIView(APIView):
                         asset_type = asset_type_map.get(host_name, "other")
                         entry["asset_type_counts"][asset_type] += 1
 
-                # Total vulnerability-findings per asset category, same as
-                # the admin-side endpoint — the sum of every (already
-                # team-filtered) vulnerability's own asset_type_counts.
+                # How many DISTINCT (already team-filtered) vulnerabilities
+                # affect at least one asset of each category — same as the
+                # admin-side endpoint. Bounded by "total", never bigger.
                 asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
                 for _entry in vuln_map.values():
                     for _atype, _n in _entry["asset_type_counts"].items():
-                        asset_type_totals[_atype] += _n
+                        if _n > 0:
+                            asset_type_totals[_atype] += 1
 
                 return Response({
                     "report_id": str(report_id),
