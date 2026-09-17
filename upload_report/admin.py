@@ -695,6 +695,42 @@ class UploadReportAdmin(admin.ModelAdmin):
                 logger.info(f"[AdminUploadBG] Auto card generation started report_id={report_id}")
                 print(f"[AdminUploadBG] Auto card generation started report_id={report_id}", flush=True)
 
+            # Same cache-invalidation + Slack/Teams "Set Risk Criteria"
+            # nudge as the synchronous save_model path above — this large-
+            # HTML background worker is a separate upload path with its own
+            # storage call and had neither, so an admin whose HTML report
+            # was big enough to queue here (>=20MB) saw the same stale
+            # zeroed dashboard and never got notified their report was
+            # ready.
+            try:
+                from django.core.cache import cache as _mit_cache
+                for _ck in (
+                    f"mitigation_by_team_v2_{admin_id}",
+                    f"admin_total_assets_{admin_id}",
+                    f"admin_avg_score_{admin_id}",
+                    f"admin_vulnerabilities_{admin_id}",
+                    f"admin_inprocess_timeline_{admin_id}",
+                    f"admin_dashboard_summary_{admin_id}",
+                    f"admin_register_list_{admin_id}",
+                    f"admin_asset_list_{admin_id}",
+                ):
+                    _mit_cache.delete(_ck)
+            except Exception as _mce:
+                logger.warning(f"[AdminUploadBG] Could not clear dashboard cache: {_mce}")
+
+            try:
+                from users.models import User as _User
+                from users.views import notify_admin_report_uploaded
+                _admin_obj = _User.objects.filter(id=admin_id).first()
+                if _admin_obj:
+                    threading.Thread(
+                        target=notify_admin_report_uploaded,
+                        args=(_admin_obj, [report_id]),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                logger.exception(f"[AdminUploadBG] Failed to trigger Slack/Teams onboarding notification for report_id={report_id}")
+
             logger.info(
                 "[AdminUploadBG] Completed report_id=%s parsed_count=%s upload_actual=%ss estimated=%ss",
                 report_id, parsed_count, int(round(upload_actual_seconds)), upload_estimate_seconds
@@ -825,6 +861,32 @@ class UploadReportAdmin(admin.ModelAdmin):
                     if mongodb_stored:
                         self._mark_scope_fulfilled(scope_id, str(obj._id))
                         upload_actual_seconds = time.perf_counter() - op_started
+
+                        # Same cache-invalidation this admin panel was
+                        # missing entirely — the DRF upload API
+                        # (upload_report/views.py) clears these 8 keys so
+                        # the dashboard/Register/Assets pages see the new
+                        # report immediately; this path never did, so a
+                        # superadmin upload left the Home dashboard showing
+                        # the PREVIOUS (often all-zero, pre-report) cached
+                        # summary for up to 5 minutes even though every
+                        # other tab already had the real data.
+                        try:
+                            from django.core.cache import cache as _mit_cache
+                            _admin_id_str = str(admin_user.id)
+                            for _ck in (
+                                f"mitigation_by_team_v2_{_admin_id_str}",
+                                f"admin_total_assets_{_admin_id_str}",
+                                f"admin_avg_score_{_admin_id_str}",
+                                f"admin_vulnerabilities_{_admin_id_str}",
+                                f"admin_inprocess_timeline_{_admin_id_str}",
+                                f"admin_dashboard_summary_{_admin_id_str}",
+                                f"admin_register_list_{_admin_id_str}",
+                                f"admin_asset_list_{_admin_id_str}",
+                            ):
+                                _mit_cache.delete(_ck)
+                        except Exception as _mce:
+                            logger.warning(f"[AdminUploadCache] Could not clear dashboard cache: {_mce}")
 
                         # Same Slack onboarding hook as the DRF upload API
                         # (upload_report/views.py) — this admin panel form is
