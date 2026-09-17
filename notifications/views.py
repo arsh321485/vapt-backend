@@ -68,7 +68,7 @@ def _get_admin_id_for_user(user_email):
             cache.set(cache_key, admin_id, 300)
             return admin_id
     except Exception:
-        pass
+        pass  # nosec B110 - best-effort, intentionally non-fatal
     return None
 
 

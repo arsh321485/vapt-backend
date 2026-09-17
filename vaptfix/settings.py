@@ -18,7 +18,7 @@ for _stream in (sys.stdout, sys.stderr):
         try:
             _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
         except Exception:
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
 
 
 MONGO_DB_URL = os.getenv("MONGO_DB_URL") or os.getenv("MONGO_URI")
@@ -232,7 +232,7 @@ SLACK_REDIRECT_URI = os.getenv("SLACK_REDIRECT_URI", "")
 VAPTFIX_BACKEND_URL = os.getenv("VAPTFIX_BACKEND_URL", "https://vaptbackend.secureitlab.com")
 
 SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
-SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"  # nosec B105 - public API endpoint URL, not a secret
 
 SLACK_SCOPES = [
     'channels:read',
@@ -258,7 +258,7 @@ JIRA_REDIRECT_URI = os.getenv("JIRA_REDIRECT_URI", "http://localhost:8000/api/ad
 
 
 JIRA_AUTH_URL = "https://auth.atlassian.com/authorize"
-JIRA_TOKEN_URL = "https://auth.atlassian.com/oauth/token"
+JIRA_TOKEN_URL = "https://auth.atlassian.com/oauth/token"  # nosec B105 - public API endpoint URL, not a secret
 JIRA_API_URL = "https://api.atlassian.com"
 
 

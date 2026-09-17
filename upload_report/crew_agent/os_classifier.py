@@ -177,7 +177,7 @@ _WIN = OSProfile(
     ssh_config = "C:\\ProgramData\\ssh\\sshd_config",
 
     list_users      = "Get-LocalUser | Select-Object Name,Enabled,PasswordRequired,LastLogon",
-    change_password = 'net user {user} "NewStr0ngP@ss#2024!"',
+    change_password = 'net user {user} "NewStr0ngP@ss#2024!"',  # nosec B105 - command template shown to the admin, not a real credential
     lock_account    = 'Disable-LocalUser -Name "{user}"',
     disable_account = 'Disable-LocalUser -Name "{user}"',
 
@@ -255,7 +255,7 @@ _UBUNTU = OSProfile(
     ssh_config = "/etc/ssh/sshd_config",
 
     list_users      = "cut -d: -f1,3,7 /etc/passwd | awk -F: '$2>=1000 && $3 !~/nologin|false/{print $1, $3}'",
-    change_password = "sudo passwd {user}",
+    change_password = "sudo passwd {user}",  # nosec B105 - command template shown to the admin, not a real credential
     lock_account    = "sudo usermod -L {user}",
     disable_account = "sudo usermod --shell /usr/sbin/nologin --expiredate 1 {user}",
 
@@ -333,7 +333,7 @@ _RHEL = OSProfile(
     ssh_config = "/etc/ssh/sshd_config",
 
     list_users      = "cut -d: -f1,3,7 /etc/passwd | awk -F: '$2>=1000 && $3 !~/nologin|false/{print $1, $3}'",
-    change_password = "sudo passwd {user}",
+    change_password = "sudo passwd {user}",  # nosec B105 - command template shown to the admin, not a real credential
     lock_account    = "sudo usermod -L {user}",
     disable_account = "sudo usermod --shell /sbin/nologin --expiredate 1 {user}",
 
@@ -411,7 +411,7 @@ _SUSE = OSProfile(
     ssh_config = "/etc/ssh/sshd_config",
 
     list_users      = "cut -d: -f1,3,7 /etc/passwd | awk -F: '$2>=1000 && $3 !~/nologin|false/{print $1, $3}'",
-    change_password = "sudo passwd {user}",
+    change_password = "sudo passwd {user}",  # nosec B105 - command template shown to the admin, not a real credential
     lock_account    = "sudo usermod -L {user}",
     disable_account = "sudo usermod --shell /sbin/nologin --expiredate 1 {user}",
 
@@ -489,7 +489,7 @@ _MACOS = OSProfile(
     ssh_config = "/etc/ssh/sshd_config",
 
     list_users      = "dscl . list /Users | grep -v '^_'",
-    change_password = "sudo dscl . -passwd /Users/{user}",
+    change_password = "sudo dscl . -passwd /Users/{user}",  # nosec B105 - command template shown to the admin, not a real credential
     lock_account    = "sudo dscl . -create /Users/{user} AuthenticationAuthority ';DisabledUser;'",
     disable_account = "sudo dscl . -create /Users/{user} UserShell /usr/bin/false",
 

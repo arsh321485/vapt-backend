@@ -226,7 +226,7 @@ def _load_all_reports_plugin_ids(db, admin_id, admin_email):
                 try:
                     plugin_ids.add(int(v.get("plugin_id")))
                 except (TypeError, ValueError):
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
                 name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                 for key in _vuln_name_lookup_keys(name):
                     vuln_names.add(_normalize_vuln_name(key))
@@ -422,7 +422,7 @@ def _build_stats(docs, report_id=None):
                     try:
                         team_by_plugin[int(pid)] = team
                     except (TypeError, ValueError):
-                        pass
+                        pass  # nosec B110 - best-effort, intentionally non-fatal
 
         # Also pull team from fix register rows that have plugin_id + assigned_team
         plugin_ids = []
@@ -430,7 +430,7 @@ def _build_stats(docs, report_id=None):
             try:
                 plugin_ids.append(int(d.get("plugin_id")))
             except (TypeError, ValueError):
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
         plugin_ids = list({p for p in plugin_ids})
         if plugin_ids:
             # plugin_id may be stored as int or string in register collections
@@ -482,7 +482,7 @@ def _build_stats(docs, report_id=None):
         try:
             pid = int(d.get("plugin_id"))
         except (TypeError, ValueError):
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
         if team and pid is not None and pid not in team_by_plugin:
             team_by_plugin[pid] = team
         provisional.append((d, vuln, pid, team))
@@ -689,7 +689,7 @@ def admin_match_scripts_bulk(request):
         try:
             int_ids.append(int(pid))
         except (ValueError, TypeError):
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
 
     by_plugin = _fetch_scripts_bulk(int_ids, os=os_param)
     premium_required, message = _premium_required_message(str(request.user.id))
@@ -911,7 +911,7 @@ def user_match_scripts_bulk(request):
         try:
             int_ids.append(int(pid))
         except (ValueError, TypeError):
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
 
     by_plugin = _fetch_scripts_bulk(int_ids, os=os_param)
     _admin_id, _, _ = _resolve_admin_and_teams(request)

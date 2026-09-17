@@ -251,7 +251,7 @@ def normalize_adduser_form_data(value, admin=None):
         try:
             prev_offset = max(0, int(value.get(offset_key) or 0))
         except (TypeError, ValueError):
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
         page_ids = {it["id"] for it in items[prev_offset:prev_offset + PAGE_SIZE]}
         echoed_ids = {x.strip() for x in echoed.split(",") if x.strip()}
         new_full = (prev_full - page_ids) | (echoed_ids & page_ids)

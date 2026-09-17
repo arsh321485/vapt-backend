@@ -207,7 +207,7 @@ class UploadReportAdmin(admin.ModelAdmin):
             try:
                 selected.append(UploadReport.objects.get(_id=_ObjectId(sid)))
             except (UploadReport.DoesNotExist, _InvalidId):
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
 
         # Compare raw admin_id (not r.admin.id) — djongo doesn't reliably
         # resolve the FK relation on these instances either.
@@ -1214,7 +1214,7 @@ class FixVulnVerificationAdmin(admin.ModelAdmin):
                                 create_notification(_admin_id, 'admin', 'vuln_closed', _title, _msg, _meta)
                                 create_notification(_admin_id, 'user', 'vuln_closed', _title, _msg, _meta)
                         except Exception:
-                            pass
+                            pass  # nosec B110 - best-effort, intentionally non-fatal
 
                         messages.success(request, f"✅ '{fix_doc.get('plugin_name')}' on {fix_doc.get('host_name')} approved and closed.")
                     else:
@@ -1339,7 +1339,7 @@ class SupportRequestReviewAdmin(admin.ModelAdmin):
                                         recipient_email=_requested_by,
                                     )
                         except Exception:
-                            pass
+                            pass  # nosec B110 - best-effort, intentionally non-fatal
 
                         messages.success(request, f"✅ Support request for '{doc.get('vul_name') or 'General'}' closed.")
                     else:

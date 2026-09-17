@@ -3649,7 +3649,7 @@ class ReportHeaderAPIView(APIView):
                     if not report_id:
                         report_id = str(nessus_doc.get("report_id") or nessus_doc.get("_id", ""))
         except Exception:
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
 
         return Response({
             "success":            True,
@@ -4156,7 +4156,7 @@ class SuperAdminApproveVerificationAPIView(APIView):
                     ):
                         _cache.delete(_ck)
             except Exception:
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
 
             # Notifications to admin and user
             try:
@@ -4185,7 +4185,7 @@ class SuperAdminApproveVerificationAPIView(APIView):
                     create_notification(_admin_id, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
                     create_notification(_admin_id, 'user', 'vuln_closed', _n_title, _n_msg, _n_meta)
             except Exception:
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
 
             return Response({
                 "message": "Vulnerability verified and closed successfully.",

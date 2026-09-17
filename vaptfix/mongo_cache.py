@@ -20,7 +20,7 @@ already talks to (vaptfix.mongo_client) makes cache.get/set/delete/clear
 consistent no matter which machine issues them — a fix run from anywhere
 immediately invalidates what every gunicorn worker on every machine sees.
 """
-import pickle
+import pickle  # nosec B403 - see MongoCache._pack/_unpack docstring below
 from datetime import datetime
 
 import pymongo
@@ -60,7 +60,7 @@ class MongoCache(BaseCache):
             try:
                 coll.create_index("expires_at", expireAfterSeconds=0)
             except Exception:
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
             _indexes_ensured.add(self._collection_name)
         return coll
 
@@ -87,11 +87,11 @@ class MongoCache(BaseCache):
     # user-input-reachable path.
     @staticmethod
     def _pack(value):
-        return Binary(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+        return Binary(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))  # nosec B301 - see class docstring above
 
     @staticmethod
     def _unpack(raw):
-        return pickle.loads(bytes(raw))
+        return pickle.loads(bytes(raw))  # nosec B301 - see class docstring above
 
     def add(self, key, value, timeout=DEFAULT_TIMEOUT, version=None):
         k = self.make_key(key, version=version)

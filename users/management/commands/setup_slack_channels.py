@@ -145,7 +145,7 @@ class Command(BaseCommand):
 
         users = User.objects.filter(
             slack_bot_token__isnull=False
-        ).exclude(slack_bot_token="")
+        ).exclude(slack_bot_token="")  # nosec B106 - empty-string filter comparison, not a credential
 
         for user in users:
             resp = requests.get(

@@ -423,7 +423,12 @@ def parse_doc(file_path: str) -> Dict[str, Any]:
     comes through as text in reading order, which is still enough for the
     GPT validation/extraction step downstream.
     """
-    if not shutil.which("antiword"):
+    # Resolved to a full path (not the bare "antiword") before use — a
+    # partial executable name relies on $PATH lookup at call time, which
+    # a compromised/manipulated PATH could redirect to a different binary
+    # (Bandit B607).
+    antiword_path = shutil.which("antiword")
+    if not antiword_path:
         return {
             "error": (
                 "Legacy .doc files require the 'antiword' tool, which is not installed "
@@ -435,7 +440,7 @@ def parse_doc(file_path: str) -> Dict[str, Any]:
 
     try:
         result = subprocess.run(
-            ["antiword", file_path],
+            [antiword_path, file_path],
             capture_output=True,
             text=True,
             timeout=60,

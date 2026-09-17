@@ -1550,7 +1550,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         if _closer_detail and (_closer_detail.first_name or _closer_detail.last_name):
                             _closer_name = f"{_closer_detail.first_name or ''} {_closer_detail.last_name or ''}".strip()
                     except Exception:
-                        pass
+                        pass  # nosec B110 - best-effort, intentionally non-fatal
                     _closer_name = _closer_name or getattr(request.user, "email", "")
 
                     closed_doc = fix_doc.copy()
@@ -1605,7 +1605,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                             create_notification(_admin_id_cache, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
                             create_notification(_admin_id_cache, 'user', 'vuln_closed', _n_title, _n_msg, _n_meta)
                     except Exception:
-                        pass
+                        pass  # nosec B110 - best-effort, intentionally non-fatal
 
                     _msg = (
                         f"All {total_steps} steps completed at once. Vulnerability closed."
@@ -1742,7 +1742,7 @@ class UserSendVerificationAPIView(APIView):
                             if _rd and (_rd.first_name or _rd.last_name):
                                 _requester_name = f"{_rd.first_name or ''} {_rd.last_name or ''}".strip()
                         except Exception:
-                            pass
+                            pass  # nosec B110 - best-effort, intentionally non-fatal
                         _requester_name = _requester_name or getattr(request.user, "email", "")
                         _n_title = f"Retest Requested: {_vuln_name[:80]}"
                         _n_msg   = (
@@ -1762,7 +1762,7 @@ class UserSendVerificationAPIView(APIView):
                             create_notification(_admin_id_retest, 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
                             create_notification(_admin_id_retest, 'user', 'vuln_verification_request', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
                     except Exception:
-                        pass
+                        pass  # nosec B110 - best-effort, intentionally non-fatal
 
                     return Response(
                         {
@@ -1867,7 +1867,7 @@ class UserSendVerificationAPIView(APIView):
                         if _rd and (_rd.first_name or _rd.last_name):
                             _requester_name = f"{_rd.first_name or ''} {_rd.last_name or ''}".strip()
                     except Exception:
-                        pass
+                        pass  # nosec B110 - best-effort, intentionally non-fatal
                     _requester_name = _requester_name or getattr(request.user, "email", "")
                     _n_title = f"Verification Request: {_vuln_name[:80]}"
                     _n_msg   = (
@@ -1887,7 +1887,7 @@ class UserSendVerificationAPIView(APIView):
                         create_notification(_admin_id, 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
                         create_notification(_admin_id, 'user', 'vuln_verification_request', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
                 except Exception:
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
 
                 return Response(
                     {

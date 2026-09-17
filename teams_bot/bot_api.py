@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # authority; single-tenant bots must request it from their OWN Entra ID
 # tenant instead — same settings.MICROSOFT_TOKEN_URL already used for Graph
 # API calls elsewhere in this app.
-_TOKEN_SCOPE = "https://api.botframework.com/.default"
+_TOKEN_SCOPE = "https://api.botframework.com/.default"  # nosec B105 - public OAuth scope identifier, not a secret
 
 _cached_token = None
 _cached_token_expires_at = 0

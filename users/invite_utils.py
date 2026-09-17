@@ -84,7 +84,7 @@ def claim_invite(token: str, new_admin) -> int:
             try:
                 object_ids.append(ObjectId(rid))
             except (InvalidId, TypeError):
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
         if object_ids:
             rows_updated = UploadReport.objects.filter(_id__in=object_ids).update(admin=new_admin)
             logger.info("[ReportInvite] UploadReport rows reassigned: %d", rows_updated)

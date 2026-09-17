@@ -939,7 +939,7 @@ class AdminMitigationTimelineExtensionStatusAPIView(APIView):
                             recipient_email=_requested_by_email
                         )
                 except Exception:
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
 
                 return Response({
                     "message": "Request status updated",

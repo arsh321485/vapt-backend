@@ -1129,7 +1129,7 @@ class UserAssetHoldAPIView(APIView):
                     create_notification(admin_user, 'user', 'asset_held', _n_title, _n_msg, _n_meta, recipient_email=request.user.email, notify_bots=False)
                     create_notification(admin_user, 'admin', 'asset_held', _n_title, _n_msg, _n_meta, notify_bots=False)
                 except Exception:
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
 
                 _clear_admin_dashboard_cache(admin_user.id)
                 _clear_user_dashboard_cache(request.user.id, teams)
@@ -1247,7 +1247,7 @@ class UserAssetUnholdAPIView(APIView):
                     create_notification(admin_user, 'admin', 'asset_unhold', _n_title, _n_msg, _n_meta, notify_bots=False)
                     create_notification(admin_user, 'user', 'asset_unhold', _n_title, _n_msg, _n_meta, recipient_email=request.user.email, notify_bots=False)
                 except Exception:
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
 
                 _clear_admin_dashboard_cache(admin_user.id)
                 _clear_user_dashboard_cache(request.user.id, teams)
@@ -1355,7 +1355,7 @@ class UserAssetDeleteAPIView(APIView):
                     create_notification(admin_user, 'user', 'asset_deleted', _n_title, _n_msg, _n_meta, recipient_email=request.user.email, notify_bots=False)
                     create_notification(admin_user, 'admin', 'asset_deleted', _n_title, _n_msg, _n_meta, notify_bots=False)
                 except Exception:
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
 
                 _clear_admin_dashboard_cache(admin_user.id)
                 _clear_user_dashboard_cache(request.user.id, teams)

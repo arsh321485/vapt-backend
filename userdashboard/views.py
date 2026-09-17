@@ -1500,7 +1500,7 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                     }
                     create_notification(admin_user, 'admin', 'extension_requested', _n_title, _n_msg, _n_meta)
                 except Exception:
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
 
                 return Response({
                     "message": "Extension request submitted",

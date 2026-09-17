@@ -68,7 +68,7 @@ def check_deadlines_for_admin(admin_id_str):
                 user = User.objects.get(id=admin_id_str)
                 rc = RiskCriteria.objects.filter(admin=user).order_by('-created_at').first()
             except Exception:
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
         if not rc:
             return
 

@@ -291,14 +291,14 @@ Document text:
                 try:
                     parsed = json.loads(m.group(1))
                 except (json.JSONDecodeError, ValueError):
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
         if parsed is None:
             m = re.search(r"\[.*\]", raw_out, re.DOTALL)
             if m:
                 try:
                     parsed = json.loads(m.group(0))
                 except (json.JSONDecodeError, ValueError):
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
 
         if not isinstance(parsed, list):
             logger.warning("[ScopeAI] Could not parse a JSON array from the LLM's target-extraction response")
@@ -455,7 +455,7 @@ def parse_file_content(file_obj, filename: str) -> List[str]:
                     try:
                         os.remove(tmp_path)
                     except OSError:
-                        pass
+                        pass  # nosec B110 - best-effort, intentionally non-fatal
 
             if result.get("error"):
                 raise ValueError(result["error"])

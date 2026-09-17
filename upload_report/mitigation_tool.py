@@ -641,21 +641,21 @@ def _parse_backup_card(raw_text: str) -> dict:
     try:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        pass
+        pass  # nosec B110 - best-effort, intentionally non-fatal
 
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
     if m:
         try:
             return json.loads(m.group(1))
         except (json.JSONDecodeError, ValueError):
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
 
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(0))
         except (json.JSONDecodeError, ValueError):
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
 
     logger.warning("[MitigationCrew] Could not parse backup card JSON output")
     return {"raw_backup_output": raw_text}
@@ -843,7 +843,7 @@ def _parse_vaptcode_response(raw_text: str) -> dict:
     try:
         card = json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        pass
+        pass  # nosec B110 - best-effort, intentionally non-fatal
 
     # Try 2: ```json ... ``` fences
     if not isinstance(card, dict):
@@ -852,7 +852,7 @@ def _parse_vaptcode_response(raw_text: str) -> dict:
             try:
                 card = json.loads(m.group(1))
             except (json.JSONDecodeError, ValueError):
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
 
     # Try 3: first { ... } block
     if not isinstance(card, dict):
@@ -861,7 +861,7 @@ def _parse_vaptcode_response(raw_text: str) -> dict:
             try:
                 card = json.loads(m.group(0))
             except (json.JSONDecodeError, ValueError):
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
 
     if not isinstance(card, dict):
         logger.warning("[MitigationCrew] Could not parse vaptcode JSON output")

@@ -5915,7 +5915,7 @@ class SlackOAuthCallbackView(APIView):
             logger.info(f"Slack callback received: code={code}, redirect_uri={redirect_uri}")
 
             # ✅ Step 1: Exchange code for access tokens
-            token_url = "https://slack.com/api/oauth.v2.access"
+            token_url = "https://slack.com/api/oauth.v2.access"  # nosec B105 - public API endpoint URL, not a secret
             token_data = {
                 "client_id": settings.SLACK_CLIENT_ID,
                 "client_secret": settings.SLACK_CLIENT_SECRET,
@@ -11711,7 +11711,7 @@ def _dashboard_png_bytes(html, selector=".dash"):
             try:
                 page.evaluate("() => document.fonts && document.fonts.ready")
             except Exception:
-                pass
+                pass  # nosec B110 - best-effort, intentionally non-fatal
             page.wait_for_timeout(250)
             el = page.query_selector(selector)
             if not el:
@@ -18673,7 +18673,7 @@ class SlackSlashCommandView(APIView):
                 except ValueError:
                     continue
         except Exception:
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
         return s[:10] if len(s) >= 10 else s
 
     def _normalize_support_team(self, raw):
@@ -21294,7 +21294,10 @@ class SlackInteractivityView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    DEBUG_LOG_PATH = "/tmp/slack_interactivity_debug.log"
+    # Under the project's own directory, not the shared, world-writable
+    # /tmp — a hardcoded /tmp path is a symlink/race target any other
+    # local process could pre-create (Bandit B108).
+    DEBUG_LOG_PATH = os.path.join(settings.BASE_DIR, "logs", "slack_interactivity_debug.log")
 
     def _debug_write(self, msg):
         """
@@ -21307,10 +21310,11 @@ class SlackInteractivityView(APIView):
         """
         try:
             from datetime import datetime as _dt
+            os.makedirs(os.path.dirname(self.DEBUG_LOG_PATH), exist_ok=True)
             with open(self.DEBUG_LOG_PATH, "a") as f:
                 f.write(f"{_dt.utcnow().isoformat()} {msg}\n")
         except Exception:
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
 
     def post(self, request):
         try:
@@ -21445,7 +21449,7 @@ class SlackInteractivityView(APIView):
                 try:
                     self._debug_write(f"_post_response_url: action={action_id} SENT_PAYLOAD={json.dumps(payload)}")
                 except Exception:
-                    pass
+                    pass  # nosec B110 - best-effort, intentionally non-fatal
                 # A visible ephemeral fallback lived here briefly purely to
                 # diagnose the "invalid_blocks" duplicate-action_id bug (see
                 # the __allstep fix) — that's what surfaced it. Root cause is
@@ -23483,7 +23487,7 @@ class SlackInteractivityView(APIView):
                         try:
                             err_text = script_resp.json().get("error") or err_text
                         except Exception:
-                            pass
+                            pass  # nosec B110 - best-effort, intentionally non-fatal
                     self._post_response_url(response_url, {
                         "response_type": "ephemeral", "replace_original": False,
                         "text": f"❌ {err_text}",
@@ -23538,7 +23542,7 @@ class SlackInteractivityView(APIView):
                         try:
                             err_text = script_resp.json().get("error") or err_text
                         except Exception:
-                            pass
+                            pass  # nosec B110 - best-effort, intentionally non-fatal
                     self._post_response_url(response_url, {
                         "response_type": "ephemeral", "replace_original": False,
                         "text": f"❌ {err_text}",

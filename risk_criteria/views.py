@@ -221,7 +221,7 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
             create_notification(request.user, 'admin', 'deadline_updated', _title, _msg, _rc_meta)
             create_notification(request.user, 'user',  'deadline_updated', _title, _msg, _rc_meta, recipient_email='')
         except Exception:
-            pass
+            pass  # nosec B110 - best-effort, intentionally non-fatal
 
         data = RiskCriteriaSerializer(risk_criteria).data
         return Response(

@@ -913,7 +913,7 @@ class SlackOAuthCodeSerializer(serializers.Serializer):
             # Dynamic redirect URI — fallback to default
             redirect_uri = redirect_uri or getattr(settings, "SLACK_REDIRECT_URI", "http://localhost:3000/slack/callback")
 
-            token_url = "https://slack.com/api/oauth.v2.access"
+            token_url = "https://slack.com/api/oauth.v2.access"  # nosec B105 - public API endpoint URL, not a secret
             token_data = {
                 "client_id": settings.SLACK_CLIENT_ID,
                 "client_secret": settings.SLACK_CLIENT_SECRET,
