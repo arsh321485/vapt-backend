@@ -357,6 +357,27 @@ def plan_prompt_card(admin=None):
     )
 
 
+def awaiting_report_card():
+    """
+    Mirrors users.views._build_admin_awaiting_report_blocks() — shown once
+    a Management+Testing (scope-based) admin has paid for a plan but
+    VaptFix hasn't finished testing their scope yet (see
+    _get_admin_onboarding_state's "awaiting_report" state). Same moment as
+    the website's own post-payment popup. No buttons — nothing to do but
+    wait; Set Risk Criteria appears automatically once the real report
+    lands.
+    """
+    return _card(
+        body=[
+            _header("✅ Payment received"),
+            _body_text(
+                "Our Super Admin will analyse your file and begin testing. "
+                "We'll notify you right here the moment your first report is ready."
+            ),
+        ],
+    )
+
+
 # Same tab set + order as SlackSlashCommandView._NAV_ITEMS, and the same
 # internal action_id spelling (nav_home, nav_fix, ...) so any shared
 # downstream data-formatting code keys off one consistent name across both

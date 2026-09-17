@@ -4739,12 +4739,22 @@ def _authorize_view_submission(callback_id, team_id, slack_user_id):
 
 def _get_admin_onboarding_state(admin):
     """
-    Returns one of "no_report" / "needs_risk_criteria" / "ready" for a given
-    admin (a users.models.User instance). These are the same two
-    preconditions the website's own onboarding status endpoint reports
-    (see AdminOnboardingStatusAPIView) — a Nessus report must exist, then
-    Risk Criteria (per-severity SLA days) must be configured, before the
-    admin's real dashboard/navbar shows anywhere (Slack or website).
+    Returns one of "no_report" / "awaiting_report" / "needs_risk_criteria" /
+    "ready" for a given admin (a users.models.User instance). The first two
+    preconditions match the website's own onboarding status endpoint (see
+    AdminOnboardingStatusAPIView) — a Nessus report must exist, then Risk
+    Criteria (per-severity SLA days) must be configured, before the admin's
+    real dashboard/navbar shows anywhere (Slack, Teams, or website).
+
+    Real request: a Management+Testing (scope-based) admin who already
+    paid for a plan, but has no report yet because VaptFix's own team
+    hasn't finished testing their submitted scope, used to resolve to
+    "no_report" here — identical to an admin who's done NOTHING at all —
+    so Slack/Teams kept showing "Welcome, upload report or provide scope"
+    even though they'd already paid and were just waiting on VaptFix.
+    Distinguished as its own "awaiting_report" state (matches the website's
+    own post-payment "Our Super Admin will analyse your file" message):
+    plan already on file + at least one Scope submitted + no report yet.
     """
     from vaptfix.mongo_client import MongoContext
     from risk_criteria.models import RiskCriteria
@@ -4759,6 +4769,10 @@ def _get_admin_onboarding_state(admin):
         has_report = db["nessus_reports"].count_documents({"$or": conditions}) > 0
 
     if not has_report:
+        if _admin_has_selected_plan(admin):
+            from scope.models import Scope
+            if Scope.objects.filter(admin=admin).exists():
+                return "awaiting_report"
         return "no_report"
 
     if not RiskCriteria.objects.filter(admin=admin).exists():
@@ -4869,6 +4883,28 @@ def _build_admin_plan_prompt_blocks(admin):
                 "style": "primary",
             }],
         },
+    ]
+
+
+def _build_admin_awaiting_report_blocks():
+    """
+    Shown once a Management+Testing (scope-based) admin has paid for a
+    plan but VaptFix hasn't finished testing their scope yet — same
+    moment/message as the website's own post-payment popup ("Payment
+    received — Our Super Admin will analyse your file"). Replaces what
+    would otherwise be a stale "Choose Your Plan" card (already acted on)
+    or, worse, the "Welcome" card again (see _get_admin_onboarding_state's
+    "awaiting_report" state). No buttons — nothing for the admin to do
+    but wait; Set Risk Criteria appears automatically once the real
+    report lands (notify_admin_report_uploaded already fires from the
+    admin-panel "Fulfills Scope" upload path).
+    """
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "✅ Payment received", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            "Our Super Admin will analyse your file and begin testing. "
+            "We'll notify you right here the moment your first report is ready."
+        )}},
     ]
 
 
@@ -5232,6 +5268,9 @@ def _post_admin_onboarding_message(bot_token, channel_id, team_id, admin):
     elif state == "needs_plan":
         blocks = _build_admin_plan_prompt_blocks(admin)
         text = "VaptFix — Choose Your Plan"
+    elif state == "awaiting_report":
+        blocks = _build_admin_awaiting_report_blocks()
+        text = "VaptFix — Payment Received"
     else:  # needs_risk_criteria
         blocks = _build_admin_risk_criteria_prompt_blocks()
         text = "VaptFix — Set Risk Criteria"

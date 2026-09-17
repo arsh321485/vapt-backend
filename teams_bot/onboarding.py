@@ -171,6 +171,8 @@ def build_state_card(admin, team_id, state):
         return cards.welcome_card()
     if state == "needs_plan":
         return cards.plan_prompt_card(admin)
+    if state == "awaiting_report":
+        return cards.awaiting_report_card()
     if state == "needs_risk_criteria":
         return cards.risk_criteria_prompt_card()
     # Home tab's real content, not just the bare nav bar — confirmed via
