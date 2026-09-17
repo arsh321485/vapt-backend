@@ -222,6 +222,21 @@ class MitigationStrategyByTeamAPIView(APIView):
                 teams = {name: [] for name in TEAM_NAMES}
                 teams["Unassigned"] = []
 
+                # Real bug report: the same vulnerability on the same host
+                # but a different port (e.g. SSL Self-Signed Certificate on
+                # both 443 and 7627) produced a SEPARATE row each time —
+                # this view's own "asset_count" already counts DISTINCT
+                # hosts (see plugin_asset_counts above), so a "13 ASSETS"
+                # header next to 17 rows (because some of those 13 assets
+                # had the same finding on 2-3 ports) looked broken. This is
+                # an asset-level summary (unlike the Register page, which
+                # intentionally keeps one row per port for per-port fix
+                # tracking) — one row per (host, vulnerability) here,
+                # regardless of how many ports it was found on. If any port
+                # is still open, the merged row stays "open" — only shown
+                # "closed" once every port instance of it is.
+                seen_host_vuln_row = {}
+
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
                     host_info = host.get("host_information") or {}
@@ -278,6 +293,17 @@ class MitigationStrategyByTeamAPIView(APIView):
                         # teams dict keys are "Configuration Management")
                         assigned_team = _SLUG_TO_TEAM.get(_raw_team.strip().lower(), _raw_team)
 
+                        dedup_key = (host_name, plugin_name)
+                        existing_row = seen_host_vuln_row.get(dedup_key)
+                        if existing_row is not None:
+                            # Same asset + same vulnerability, different
+                            # port — merge instead of adding another row.
+                            # Any still-open instance keeps the merged row
+                            # "open".
+                            if existing_row["status"] == "closed" and vuln_status != "closed":
+                                existing_row["status"] = vuln_status
+                            continue
+
                         row = {
                             "id":            str(uuid.uuid4()),
                             "host_name":     host_name,
@@ -290,6 +316,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                             "status":        vuln_status,
                             "assigned_team": assigned_team,
                         }
+                        seen_host_vuln_row[dedup_key] = row
 
                         if assigned_team in teams:
                             teams[assigned_team].append(row)
