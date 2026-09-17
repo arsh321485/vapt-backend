@@ -999,7 +999,16 @@ def user_download_script(request, plugin_id):
         logger.warning(f"[ScriptDownload] doc has no fix_script_path — plugin_id={plugin_id} os={doc.get('os')} email={user_email}")
         return Response({"error": "Script file not available for this vulnerability."}, status=404)
 
-    full_path = BASE_DIR / fix_script_path
+    # fix_script_path comes from the automation_scripts collection, not
+    # directly from the request — but it's still only as trustworthy as
+    # whatever wrote that document, so resolve it and verify it hasn't
+    # escaped the intended scripts directory (e.g. "../../vaptfix/settings.py")
+    # before ever opening it, rather than trusting the stored value as-is.
+    scripts_root = (BASE_DIR / "automation_scripts").resolve()
+    full_path = (BASE_DIR / fix_script_path).resolve()
+    if scripts_root not in full_path.parents and full_path != scripts_root:
+        logger.warning(f"[ScriptDownload] rejected path outside scripts root — plugin_id={plugin_id} path={full_path} email={user_email}")
+        return Response({"error": "Script file not available for this vulnerability."}, status=404)
     if not full_path.exists():
         logger.warning(f"[ScriptDownload] file missing on disk — plugin_id={plugin_id} os={doc.get('os')} path={full_path} email={user_email}")
         return Response({"error": f"Script file not found on server: {fix_script_path}"}, status=404)

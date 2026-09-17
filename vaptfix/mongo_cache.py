@@ -74,6 +74,17 @@ class MongoCache(BaseCache):
             return _NEVER_EXPIRES
         return datetime.utcfromtimestamp(epoch_seconds)
 
+    # Security note (Semgrep flags pickle.loads as a code-execution risk):
+    # this mirrors Django's own built-in cache backends (FileBasedCache,
+    # DatabaseCache), which pickle for the same reason — the cache API
+    # must be able to store arbitrary Python objects, not just JSON-safe
+    # ones. The only writer of this collection's "value" field is _pack()
+    # below, called exclusively from this app's own cache.set()/add()
+    # calls — an attacker would need direct write access to the MongoDB
+    # cluster itself to inject a malicious pickle payload here, at which
+    # point they already have full read/write access to every other
+    # collection (users, reports, vulnerabilities, ...). Not a
+    # user-input-reachable path.
     @staticmethod
     def _pack(value):
         return Binary(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))

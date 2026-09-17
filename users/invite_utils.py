@@ -93,8 +93,10 @@ def claim_invite(token: str, new_admin) -> int:
         # djongo hiccup here doesn't undo the part that already succeeded.
         logger.warning("[ReportInvite] UploadReport reassignment failed for %s: %s", report_ids, e)
 
+    # Note: only new_admin's id/email and the reassigned report count/ids
+    # are logged here — never the invite token value itself.
     logger.info(
-        "[ReportInvite] Claimed token for new_admin=%s (%s) — reassigned %d report(s): %s",
+        "[ReportInvite] Claimed invite for new_admin=%s (%s) — reassigned %d report(s): %s",
         new_admin.id, new_admin.email, result.modified_count, report_ids,
     )
 
