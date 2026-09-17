@@ -150,6 +150,13 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                 # Step 6: Filter by member's teams only
                 teams = {name: [] for name in member_teams_normalized}
 
+                # Same fix as the admin-side endpoint (adminmitigationstrategy.
+                # MitigationStrategyByTeamAPIView) — the same vulnerability on
+                # the same host but a different port produced a separate row
+                # each time; one row per (host, vulnerability) here instead,
+                # merging to "open" if any port instance is still open.
+                seen_host_vuln_row = {}
+
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
                     host_info = host.get("host_information") or {}
@@ -201,6 +208,13 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                         if assigned_team not in member_teams_normalized:
                             continue
 
+                        dedup_key = (host_name, plugin_name)
+                        existing_row = seen_host_vuln_row.get(dedup_key)
+                        if existing_row is not None:
+                            if existing_row["status"] == "closed" and vuln_status != "closed":
+                                existing_row["status"] = vuln_status
+                            continue
+
                         row = {
                             "id":            str(uuid.uuid4()),
                             "host_name":     host_name,
@@ -213,6 +227,7 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                             "status":        vuln_status,
                             "assigned_team": assigned_team,
                         }
+                        seen_host_vuln_row[dedup_key] = row
                         teams[assigned_team].append(row)
 
                 teams_response = {
