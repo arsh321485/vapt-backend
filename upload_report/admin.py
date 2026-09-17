@@ -836,8 +836,17 @@ class UploadReportAdmin(admin.ModelAdmin):
                         # having actually landed.
                         try:
                             from users.views import notify_admin_report_uploaded
+                            # Real bug: notify_admin_report_uploaded's first
+                            # line is `if not report_ids: return` — called
+                            # here with no report_ids at all (only admin_user)
+                            # meant this no-op'd on EVERY admin-panel upload,
+                            # silently skipping the "Set Risk Criteria"/
+                            # navbar refresh entirely. Must pass the report
+                            # that was just created.
                             threading.Thread(
-                                target=notify_admin_report_uploaded, args=(admin_user,), daemon=True,
+                                target=notify_admin_report_uploaded,
+                                args=(admin_user, [str(obj._id)]),
+                                daemon=True,
                             ).start()
                         except Exception:
                             logger.exception("Failed to trigger Slack onboarding notification after admin-panel upload")
