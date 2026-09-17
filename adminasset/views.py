@@ -1322,9 +1322,24 @@ class AllVulnerabilitiesAPIView(APIView):
                         asset_type = asset_type_map.get(host_name, "other")
                         entry["asset_type_counts"][asset_type] += 1
 
+                # Real request: a report-wide total by asset category,
+                # alongside the existing per-vulnerability breakdown. NOT
+                # a sum of each vulnerability's own asset_type_counts —
+                # the same host is counted once per vulnerability it has,
+                # so summing those would double/triple-count it. Counted
+                # instead from asset_type_map itself (one entry per
+                # DISTINCT host in the report), which is exactly what
+                # Report Header's own "Asset Classification" box already
+                # does.
+                asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
+                for _atype in asset_type_map.values():
+                    if _atype in asset_type_totals:
+                        asset_type_totals[_atype] += 1
+
                 return Response({
                     "report_id": str(report_id),
                     "total": len(vuln_map),
+                    "asset_type_totals": asset_type_totals,
                     "vulnerabilities": list(vuln_map.values()),
                 }, status=status.HTTP_200_OK)
 

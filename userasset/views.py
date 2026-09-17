@@ -1438,6 +1438,7 @@ class UserAllVulnerabilitiesAPIView(APIView):
                 )
 
                 vuln_map = {}
+                team_relevant_hosts = set()
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
                     for v in host.get("vulnerabilities", []):
@@ -1473,11 +1474,28 @@ class UserAllVulnerabilitiesAPIView(APIView):
                             entry["open_count"] += 1
                         asset_type = asset_type_map.get(host_name, "other")
                         entry["asset_type_counts"][asset_type] += 1
+                        team_relevant_hosts.add(host_name)
+
+                # Report-wide total by asset category, same as the admin-
+                # side endpoint — but scoped to only the DISTINCT hosts
+                # actually relevant to this team's vulnerabilities
+                # (team_relevant_hosts, built above), not asset_type_map's
+                # full report. asset_type_map itself covers every host in
+                # the report regardless of team, so counting straight from
+                # it here would include hosts with nothing assigned to
+                # this team at all — inconsistent with "total" right next
+                # to it, which is already team-scoped.
+                asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
+                for _host in team_relevant_hosts:
+                    _atype = asset_type_map.get(_host, "other")
+                    if _atype in asset_type_totals:
+                        asset_type_totals[_atype] += 1
 
                 return Response({
                     "report_id": str(report_id),
                     "teams": teams,
                     "total": len(vuln_map),
+                    "asset_type_totals": asset_type_totals,
                     "vulnerabilities": list(vuln_map.values()),
                 }, status=status.HTTP_200_OK)
 
