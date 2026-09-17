@@ -2166,10 +2166,22 @@ def _png_to_jpeg_bytes(png_bytes):
         return None
 
 
-def _set_vaptfix_team_icon(team_id, access_token):
+def _set_vaptfix_team_icon(team_id, access_token, attempts=3, retry_delay_seconds=6):
     """
     Upload team icon as JPEG (required by Teams desktop app).
     Groups endpoint is authoritative for M365-backed Teams.
+
+    Real bug report: a brand-new team showed no icon at all (just the
+    default "VA" initials) even though this ran right after the team
+    itself became queryable (GET /teams/{id} returning 200). Microsoft's
+    own eventual-consistency: a Team being "ready" and its underlying M365
+    Group's /photo endpoint being ready are two separate provisioning
+    stages — the very first PUT attempt can 404/error for a short window
+    right after creation even though the team object itself already
+    resolves fine, and this had no retry at all, so that one failed
+    attempt was permanent until the admin happened to log in again (which
+    retries via the "team already exists" branch). A few retries here
+    closes that window without needing a second login.
     """
     if not team_id or not access_token:
         return False
@@ -2205,18 +2217,24 @@ def _set_vaptfix_team_icon(team_id, access_token):
         f"https://graph.microsoft.com/v1.0/groups/{team_id}/photo/$value",
         f"https://graph.microsoft.com/v1.0/teams/{team_id}/photo/$value",
     ]
-    for url in candidate_urls:
-        try:
-            resp = _http_put(url, headers=headers, data=icon_bytes, timeout=20)
-            if resp.status_code in (200, 201, 204):
-                logger.info(f"VAPTFIX team icon updated for team_id={team_id} via {url}")
-                return True
-            logger.warning(
-                f"VAPTFIX icon upload failed for team_id={team_id} url={url} "
-                f"status={resp.status_code} body={resp.text[:300]}"
-            )
-        except Exception:
-            logger.warning(f"VAPTFIX icon upload exception for team_id={team_id} url={url}", exc_info=True)
+    for attempt in range(1, max(1, attempts) + 1):
+        for url in candidate_urls:
+            try:
+                resp = _http_put(url, headers=headers, data=icon_bytes, timeout=20)
+                if resp.status_code in (200, 201, 204):
+                    logger.info(f"VAPTFIX team icon updated for team_id={team_id} via {url} (attempt {attempt})")
+                    return True
+                logger.warning(
+                    f"VAPTFIX icon upload failed for team_id={team_id} url={url} "
+                    f"attempt={attempt}/{attempts} status={resp.status_code} body={resp.text[:300]}"
+                )
+            except Exception:
+                logger.warning(
+                    f"VAPTFIX icon upload exception for team_id={team_id} url={url} attempt={attempt}/{attempts}",
+                    exc_info=True,
+                )
+        if attempt < attempts:
+            time.sleep(retry_delay_seconds)
 
     return False
 
