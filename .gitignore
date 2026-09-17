@@ -28,3 +28,9 @@ cache/
 django_cache/
 *.djcache
 prompt.txt
+
+# Dead-code backups — kept on disk (and in git HISTORY, already committed
+# once) for recovery, but excluded from tracking going forward so SAST
+# scanners (Bandit/Semgrep) stop flagging unused, never-executed code.
+_backups/
+automation_scripts_old_backup/
