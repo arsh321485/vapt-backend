@@ -1789,20 +1789,6 @@ class AdminDistributionByTeamAPIView(APIView):
                     if pname:
                         closed_vuln_keys.add((pname, hname))
 
-                # Real bug report: this view (source of the "download-data"
-                # report's team_distribution) never checked hold_vulnerabilities/
-                # deleted_vulnerabilities, nor whole-asset holds — same gap as
-                # AdminDetailedVulnerabilitiesAPIView, fixed the same way
-                # AdminDistributionByTeamDetailAPIView (the "Team Performance"
-                # view already confirmed correct) already does it: cards come
-                # from vulnerability_cards, a static snapshot never updated by
-                # hold/unhold/delete, so both an asset-level hold ($pull from
-                # vulnerabilities_by_host) and a per-vulnerability hold/delete
-                # need an explicit check here.
-                active_host_names = {
-                    (h.get("host_name") or h.get("host") or "").strip()
-                    for h in doc.get("vulnerabilities_by_host", [])
-                }
                 held_vuln_keys = {
                     ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
                     for d in db["hold_vulnerabilities"].find({"report_id": report_id})
@@ -1812,27 +1798,62 @@ class AdminDistributionByTeamAPIView(APIView):
                     for d in db["deleted_vulnerabilities"].find({"report_id": report_id})
                 }
 
-                # Count distribution directly from vulnerability_cards (excluding closed)
-                # Each card = one unique vulnerability — avoids inflating counts from multi-host repeats
+                # Real request: this view's own "total_vulnerabilities" must
+                # match the dashboard summary's vulnerabilities count
+                # (AdminVulnerabilitiesAPIView) — counted from vulnerability_
+                # cards (one card per (vuln, host) regardless of how many
+                # ports it was found on), this undercounted a vulnerability
+                # present on the same host across multiple ports, since the
+                # summary counts straight from raw vulnerabilities_by_host
+                # (one entry per port). Now counts from the same raw data
+                # the summary does, using vulnerability_cards only for its
+                # assigned_team lookup (still one card per (vuln, host), so
+                # every port-level finding of that pair resolves to the same
+                # team). Whole-asset hold/delete is already reflected by
+                # vulnerabilities_by_host itself (both $pull the host out),
+                # so no separate active_host_names check is needed here
+                # (unlike the old vulnerability_cards-based approach, whose
+                # cards are a static snapshot never updated by hold/delete).
+                vuln_team_map = {}
+                for card in vuln_card_coll.find(
+                    {"report_id": report_id}, {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1}
+                ):
+                    vuln_team_map[(
+                        (card.get("vulnerability_name") or "").strip(),
+                        (card.get("host_name") or "").strip(),
+                    )] = (card.get("assigned_team") or "").strip()
+
                 counts = {name: 0 for name in TEAM_NAMES}
                 counts["Unassigned"] = 0
                 total = 0
 
-                for card in vuln_card_coll.find({"report_id": report_id}):
-                    plugin_name = (card.get("vulnerability_name") or "").strip()
-                    host_name   = (card.get("host_name") or "").strip()
-                    if host_name not in active_host_names:
-                        continue
-                    key = (plugin_name, host_name)
-                    if key in closed_vuln_keys or key in held_vuln_keys or key in deleted_vuln_keys:
-                        continue
-                    raw_team = (card.get("assigned_team", "") or "").strip()
-                    matched_team = team_names_lower.get(raw_team.lower())
-                    if matched_team:
-                        counts[matched_team] += 1
-                    else:
-                        counts["Unassigned"] += 1
-                    total += 1
+                for host in doc.get("vulnerabilities_by_host", []):
+                    host_name = (host.get("host_name") or host.get("host") or "").strip()
+                    for v in host.get("vulnerabilities", []):
+                        plugin_name = (
+                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        ).strip()
+                        if not plugin_name:
+                            continue
+                        # Info/unrecognized severities are never counted —
+                        # same rule AdminVulnerabilitiesAPIView applies
+                        # (nothing increments for them), so this total stays
+                        # consistent with the summary's own.
+                        risk_raw = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
+                        if not (risk_raw.startswith("crit") or risk_raw.startswith("high")
+                                or risk_raw.startswith("med") or risk_raw.startswith("low")):
+                            continue
+
+                        key = (plugin_name, host_name)
+                        if key in closed_vuln_keys or key in held_vuln_keys or key in deleted_vuln_keys:
+                            continue
+                        raw_team = vuln_team_map.get(key, "")
+                        matched_team = team_names_lower.get(raw_team.lower())
+                        if matched_team:
+                            counts[matched_team] += 1
+                        else:
+                            counts["Unassigned"] += 1
+                        total += 1
 
                 distribution = [
                     {
@@ -1928,18 +1949,6 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                     if pname:
                         closed_vuln_keys.add((pname, hname))
 
-                # ── currently-active hosts — vulnerability_cards is populated once
-                # at card-generation time and never touched by hold/unhold/delete
-                # (those only update nessus_reports + their own hold_assets /
-                # deleted_assets / hold_vulnerabilities / deleted_vulnerabilities
-                # collections), so without this check a held or deleted asset's
-                # cards would still be counted here.
-                active_host_names = set()
-                for host in doc.get("vulnerabilities_by_host", []):
-                    hn = (host.get("host_name") or host.get("host") or "").strip()
-                    if hn:
-                        active_host_names.add(hn)
-
                 held_vuln_keys = {
                     ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
                     for d in db["hold_vulnerabilities"].find({"report_id": report_id})
@@ -1948,6 +1957,18 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                     ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
                     for d in db["deleted_vulnerabilities"].find({"report_id": report_id})
                 }
+
+                # ── assigned_team lookup only — vulnerability_cards has one
+                # card per (vuln, host) regardless of how many ports it was
+                # found on, so this is safe purely for a team-name lookup.
+                vuln_team_map = {}
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": report_id}, {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1}
+                ):
+                    vuln_team_map[(
+                        (card.get("vulnerability_name") or "").strip(),
+                        (card.get("host_name") or "").strip(),
+                    )] = (card.get("assigned_team") or "").strip()
 
                 # ── initialize team buckets ─────────────────────────────────────
                 all_teams = TEAM_NAMES + ["Unassigned"]
@@ -1962,44 +1983,54 @@ class AdminDistributionByTeamDetailAPIView(APIView):
 
                 teams = {t: empty_bucket() for t in all_teams}
 
-                # ── iterate vulnerability_cards (one unique vuln per card) ───────
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
-                    plugin_name = (card.get("vulnerability_name") or "").strip()
-                    host_name   = (card.get("host_name") or "").strip()
+                # Real bug report: this view's counts came from vulnerability_
+                # cards (one card per (vuln, host) regardless of port count),
+                # so a team's total here undercounted vs. the dashboard
+                # summary's own vulnerabilities count (AdminVulnerabilitiesAPIView),
+                # which counts straight from raw vulnerabilities_by_host (one
+                # entry per port). Now iterates the same raw per-host/per-port
+                # data the summary does, so the two totals always match.
+                # Whole-asset hold/delete already removes the host entirely
+                # from vulnerabilities_by_host ($pull), so no separate
+                # active_host_names check is needed (unlike the old
+                # vulnerability_cards-based approach, whose cards are a
+                # static snapshot never updated by hold/delete).
+                for host in doc.get("vulnerabilities_by_host", []):
+                    host_name = (host.get("host_name") or host.get("host") or "").strip()
+                    for v in host.get("vulnerabilities", []):
+                        plugin_name = (
+                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        ).strip()
+                        if not plugin_name:
+                            continue
 
-                    # Whole asset held/deleted → its cards no longer belong to
-                    # the active report. Per-vulnerability held/deleted → this
-                    # specific (host, vuln) pair was pulled out on its own.
-                    if host_name not in active_host_names:
-                        continue
-                    key = (plugin_name, host_name)
-                    if key in held_vuln_keys or key in deleted_vuln_keys:
-                        continue
+                        key = (plugin_name, host_name)
+                        if key in held_vuln_keys or key in deleted_vuln_keys:
+                            continue
 
-                    risk_label  = plugin_risk.get(plugin_name)
-                    # Real bug report: Info-severity (and any other
-                    # unrecognized risk_factor) findings still counted
-                    # toward a team's "total"/"open" here even though they
-                    # never match any of the 4 risk_levels buckets above —
-                    # inflated the OPEN count (e.g. 14 shown, but
-                    # critical+high+medium+low only summed to 13) with an
-                    # Info finding invisible anywhere in the severity
-                    # breakdown. Info must never be counted, same explicit
-                    # repeated rule as everywhere else — skip the card
-                    # entirely instead of just leaving it out of by_risk.
-                    if not risk_label:
-                        continue
+                        risk_label = plugin_risk.get(plugin_name)
+                        # Info-severity (and any other unrecognized
+                        # risk_factor) findings are never counted — same
+                        # explicit repeated rule as everywhere else.
+                        if not risk_label:
+                            continue
 
-                    raw_team    = (card.get("assigned_team", "") or "").strip()
-                    team_key    = team_names_lower.get(raw_team.lower(), "") or "Unassigned"
+                        raw_team = vuln_team_map.get(key, "")
+                        team_key = team_names_lower.get(raw_team.lower(), "") or "Unassigned"
 
-                    is_closed   = (plugin_name, host_name) in closed_vuln_keys
-                    vuln_status = "closed" if is_closed else "open"
-
-                    bucket = teams[team_key]
-                    bucket["total"] += 1
-                    bucket[vuln_status] += 1
-                    bucket["by_risk"][risk_label] += 1
+                        bucket = teams[team_key]
+                        if key in closed_vuln_keys:
+                            # Summary (AdminVulnerabilitiesAPIView) excludes
+                            # closed vulnerabilities from its counts entirely
+                            # (same as held/deleted) — tracked here only as
+                            # an informational "closed" stat, never folded
+                            # into "total"/"open"/"by_risk", so the team
+                            # total stays equal to Summary's total.
+                            bucket["closed"] += 1
+                            continue
+                        bucket["total"] += 1
+                        bucket["open"] += 1
+                        bucket["by_risk"][risk_label] += 1
 
                 return Response(
                     {
