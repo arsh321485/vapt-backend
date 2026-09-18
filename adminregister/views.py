@@ -358,6 +358,24 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                     )
                     fix_doc_lookup[key] = fdoc  # active overrides closed if both exist
 
+                # Real bug report: a vulnerability closed on ONE port of an
+                # asset (e.g. SWEET32 on 192.168.0.101's tcp/443/www) still
+                # has other, unrelated ports for the same (vuln, host) pair
+                # left open in vulnerabilities_by_host (e.g. tcp/514) — the
+                # per-port closed_vulns set above never marks the pair
+                # itself as closed, only that one port. All Vulnerabilities
+                # (adminasset.AllVulnerabilitiesAPIView) already treats the
+                # whole pair as closed the moment ANY closed doc exists for
+                # it, with no per-port requirement — Register must match
+                # that same (plugin_name, host_name)-level definition of
+                # "closed", or a real closed fix silently reverts to "open"
+                # here purely because dedup collapsed it under a still-open
+                # port of the very same vulnerability.
+                closed_vuln_host_set = {
+                    (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""))
+                    for fdoc in closed_coll.find({"report_id": str(report_id)})
+                }
+
                 rows = []
                 # Real bug report: the same vulnerability found on multiple
                 # ports of the same asset (e.g. "SSL Certificate Cannot Be
@@ -365,9 +383,9 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 # 192.168.0.2) produced one Register row per port — same
                 # (plugin_name, host_name) shown as separate repeated rows.
                 # Dedup to one row per (vuln, asset), keeping the first
-                # port's details but upgrading status to "open" if ANY
-                # port-level instance is still open — only shown "closed"
-                # once every port of that vuln on that asset is fixed.
+                # port's details; status is "closed" whenever the pair is in
+                # closed_vuln_host_set (see above), else whatever the first-
+                # encountered port's own status resolved to.
                 _seen_vuln_asset_rows = {}
 
                 # Extract vulnerabilities from the latest report
@@ -424,10 +442,12 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                         second_obs = _fix.get("verification_sent_at") or v.get("updated_at")
 
                         dedup_key = (plugin_name, host_name)
+                        if dedup_key in closed_vuln_host_set:
+                            vuln_status = "closed"
                         existing_row = _seen_vuln_asset_rows.get(dedup_key)
                         if existing_row is not None:
-                            if existing_row["status"] == "closed" and vuln_status != "closed":
-                                existing_row["status"] = vuln_status
+                            if existing_row["status"] != "closed" and vuln_status == "closed":
+                                existing_row["status"] = "closed"
                             continue
 
                         row = {

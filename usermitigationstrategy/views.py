@@ -106,15 +106,28 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                 report_id = str(latest_doc.get("report_id", ""))
 
                 # Step 3: Build closed vulnerability keys set
+                # Real bug report: filtering on created_by=admin_id here
+                # silently dropped every real closed doc, since a doc's own
+                # "created_by" is whoever (the team member) actually closed
+                # it, not the admin — report_id is already inherently
+                # admin-scoped (matched to this admin's own report above),
+                # so this extra filter is redundant and, per the identical
+                # fix already applied on the admin-side endpoint
+                # (adminmitigationstrategy.MitigationStrategyByTeamAPIView),
+                # unsafe on top of that.
                 closed_vulns = set()
-                for doc in closed_coll.find(
-                    {"report_id": report_id, "created_by": admin_id}
-                ):
-                    closed_vulns.add((
-                        doc.get("plugin_name", ""),
-                        doc.get("host_name", ""),
-                        str(doc.get("port", "")),
-                    ))
+                closed_vuln_host_set = set()
+                for doc in closed_coll.find({"report_id": report_id}):
+                    _pname = doc.get("plugin_name", "")
+                    _hname = doc.get("host_name", "")
+                    closed_vulns.add((_pname, _hname, str(doc.get("port", ""))))
+                    # Real bug report: same fix as the admin-side endpoint —
+                    # a vuln closed on one port of a host still had other
+                    # ports of the same (vuln, host) pair open, collapsing
+                    # the merged row back to "open". Match
+                    # AllVulnerabilitiesAPIView's pair-level "closed"
+                    # definition (no per-port requirement) instead.
+                    closed_vuln_host_set.add((_pname, _hname))
 
                 # Step 4: Bulk-fetch vulnerability_cards for this report
                 vuln_cards = {}
@@ -190,7 +203,7 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                         )
                         vuln_status = (
                             "closed"
-                            if (plugin_name, host_name, str(port)) in closed_vulns
+                            if (plugin_name, host_name) in closed_vuln_host_set
                             else "open"
                         )
 
@@ -211,8 +224,8 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                         dedup_key = (host_name, plugin_name)
                         existing_row = seen_host_vuln_row.get(dedup_key)
                         if existing_row is not None:
-                            if existing_row["status"] == "closed" and vuln_status != "closed":
-                                existing_row["status"] = vuln_status
+                            if existing_row["status"] != "closed" and vuln_status == "closed":
+                                existing_row["status"] = "closed"
                             continue
 
                         row = {

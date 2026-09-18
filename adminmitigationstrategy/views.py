@@ -157,15 +157,25 @@ class MitigationStrategyByTeamAPIView(APIView):
                 # happen to be missing that particular field, showing a
                 # genuinely-closed or in-progress vuln as plain "open".
                 closed_vulns = set()
+                closed_vuln_host_set = set()
                 for doc in closed_coll.find(
                     {"report_id": report_id},
                     {"plugin_name": 1, "host_name": 1, "port": 1},
                 ):
-                    closed_vulns.add((
-                        doc.get("plugin_name", ""),
-                        doc.get("host_name", ""),
-                        str(doc.get("port", "")),
-                    ))
+                    _pname = doc.get("plugin_name", "")
+                    _hname = doc.get("host_name", "")
+                    closed_vulns.add((_pname, _hname, str(doc.get("port", ""))))
+                    # Real bug report: a vuln closed on one port of a host
+                    # still has other ports for that same (vuln, host) pair
+                    # sitting open in vulnerabilities_by_host — the per-port
+                    # closed_vulns set above only marks that one port,
+                    # letting the dedup merge below collapse the row back
+                    # to "open" purely because a DIFFERENT, unrelated port
+                    # of the same vuln is still unfixed. All Vulnerabilities
+                    # (adminasset.AllVulnerabilitiesAPIView) already treats
+                    # the pair as closed the moment any closed doc exists
+                    # for it, no per-port requirement — match that here too.
+                    closed_vuln_host_set.add((_pname, _hname))
 
                 # Bulk-fetch active fix docs so a vuln's real status
                 # (in_progress / open/review) can be surfaced instead of
@@ -273,7 +283,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                             else ""
                         )
                         _status_key = (plugin_name, host_name, str(port))
-                        if _status_key in closed_vulns:
+                        if (plugin_name, host_name) in closed_vuln_host_set:
                             vuln_status = "closed"
                         elif _status_key in active_status_by_key:
                             # Real status from the active fix doc — e.g.
@@ -298,10 +308,14 @@ class MitigationStrategyByTeamAPIView(APIView):
                         if existing_row is not None:
                             # Same asset + same vulnerability, different
                             # port — merge instead of adding another row.
-                            # Any still-open instance keeps the merged row
-                            # "open".
-                            if existing_row["status"] == "closed" and vuln_status != "closed":
-                                existing_row["status"] = vuln_status
+                            # vuln_status is already pair-level "closed"
+                            # (see closed_vuln_host_set above) when it
+                            # applies, so every port of a closed pair agrees
+                            # here already; this only still matters for
+                            # non-closed statuses (e.g. in_progress vs open)
+                            # picked up from different ports.
+                            if existing_row["status"] != "closed" and vuln_status == "closed":
+                                existing_row["status"] = "closed"
                             continue
 
                         row = {

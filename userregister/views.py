@@ -265,12 +265,24 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                     )
                     fix_doc_lookup[key] = fdoc  # active overrides closed if both exist
 
+                # Real bug report: a vulnerability closed on ONE port of an
+                # asset still has other, unrelated ports for the same
+                # (vuln, host) pair left open — same fix as the admin-side
+                # register list: match AllVulnerabilitiesAPIView's
+                # definition of "closed", which is per (plugin_name,
+                # host_name) with no per-port requirement, not "every port
+                # of this pair must be closed".
+                closed_vuln_host_set = {
+                    (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""))
+                    for fdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": str(report_id)})
+                }
+
                 # Step 3: Build rows — only team-assigned vulnerabilities
                 rows = []
                 # Same dedup as the admin-side register list: one row per
-                # (vuln, asset) regardless of how many ports it was found on,
-                # status only flips to "closed" once every port instance of
-                # that (vuln, asset) pair is fixed.
+                # (vuln, asset) regardless of how many ports it was found
+                # on, status is "closed" whenever the pair is in
+                # closed_vuln_host_set (see above).
                 _seen_vuln_asset_rows = {}
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
@@ -319,10 +331,12 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                         second_obs = _fix.get("verification_sent_at") or v.get("updated_at")
 
                         dedup_key = (plugin_name, host_name)
+                        if dedup_key in closed_vuln_host_set:
+                            vuln_status = "closed"
                         existing_row = _seen_vuln_asset_rows.get(dedup_key)
                         if existing_row is not None:
-                            if existing_row["status"] == "closed" and vuln_status != "closed":
-                                existing_row["status"] = vuln_status
+                            if existing_row["status"] != "closed" and vuln_status == "closed":
+                                existing_row["status"] = "closed"
                             continue
 
                         row = {
