@@ -267,6 +267,11 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
 
                 # Step 3: Build rows — only team-assigned vulnerabilities
                 rows = []
+                # Same dedup as the admin-side register list: one row per
+                # (vuln, asset) regardless of how many ports it was found on,
+                # status only flips to "closed" once every port instance of
+                # that (vuln, asset) pair is fixed.
+                _seen_vuln_asset_rows = {}
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
 
@@ -313,7 +318,14 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                         first_obs  = v.get("created_at") or uploaded_at
                         second_obs = _fix.get("verification_sent_at") or v.get("updated_at")
 
-                        rows.append({
+                        dedup_key = (plugin_name, host_name)
+                        existing_row = _seen_vuln_asset_rows.get(dedup_key)
+                        if existing_row is not None:
+                            if existing_row["status"] == "closed" and vuln_status != "closed":
+                                existing_row["status"] = vuln_status
+                            continue
+
+                        row = {
                             "id": str(uuid.uuid4()),
                             "vul_name": plugin_name,
                             "asset": host_name,
@@ -324,7 +336,9 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                             "first_observation": _normalize_iso(first_obs),
                             "second_observation": _normalize_iso(second_obs),
                             "status": vuln_status,
-                        })
+                        }
+                        _seen_vuln_asset_rows[dedup_key] = row
+                        rows.append(row)
 
                 _payload = {
                     "report_id": str(report_id),

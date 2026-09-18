@@ -359,6 +359,16 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                     fix_doc_lookup[key] = fdoc  # active overrides closed if both exist
 
                 rows = []
+                # Real bug report: the same vulnerability found on multiple
+                # ports of the same asset (e.g. "SSL Certificate Cannot Be
+                # Trusted" on both tcp/636/ldap and tcp/3389/msrdp of
+                # 192.168.0.2) produced one Register row per port — same
+                # (plugin_name, host_name) shown as separate repeated rows.
+                # Dedup to one row per (vuln, asset), keeping the first
+                # port's details but upgrading status to "open" if ANY
+                # port-level instance is still open — only shown "closed"
+                # once every port of that vuln on that asset is fixed.
+                _seen_vuln_asset_rows = {}
 
                 # Extract vulnerabilities from the latest report
                 # Show both Open and Closed vulnerabilities with correct status
@@ -413,7 +423,14 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                         first_obs  = v.get("created_at") or uploaded_at
                         second_obs = _fix.get("verification_sent_at") or v.get("updated_at")
 
-                        rows.append({
+                        dedup_key = (plugin_name, host_name)
+                        existing_row = _seen_vuln_asset_rows.get(dedup_key)
+                        if existing_row is not None:
+                            if existing_row["status"] == "closed" and vuln_status != "closed":
+                                existing_row["status"] = vuln_status
+                            continue
+
+                        row = {
                             "id": str(uuid.uuid4()),
                             "vul_name": plugin_name,
                             "asset": host_name,
@@ -431,7 +448,9 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             "fix_vulnerability_id": str(_fix["_id"]) if _fix.get("_id") else None,
                             "operating_system": host_os,
                             "plugin_id": v.get("plugin_id"),
-                        })
+                        }
+                        _seen_vuln_asset_rows[dedup_key] = row
+                        rows.append(row)
 
                 # Current user's admin info
                 current_admin_id = str(request.user.id)
