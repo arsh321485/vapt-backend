@@ -727,7 +727,22 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                     )
                 }
 
+                # Real bug report: same fix as the admin-side endpoint — a
+                # (plugin_name, host_name) pair is "closed" the moment ANY
+                # closed doc exists for it, not "every port of it is closed".
+                closed_plugins = {
+                    cdoc.get("plugin_name", "")
+                    for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+
                 out = []
+                # Real bug report: the same vulnerability on this asset but a
+                # different port produced a separate row per port — one row
+                # per plugin_name here instead (host_name is fixed for this
+                # whole view already, so plugin_name alone is the dedup key).
+                seen_plugins = {}
                 for v in (host_entry.get("vulnerabilities") or []):
                     plugin_name   = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                     assigned_team = plugin_team_map.get(plugin_name)
@@ -736,10 +751,19 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                     if plugin_name in held_plugins or plugin_name in deleted_plugins:
                         continue
 
-                    port        = str(v.get("port", ""))
-                    vuln_status = _status_lookup.get((plugin_name, host_name, port), "open")
+                    port = str(v.get("port", ""))
+                    if plugin_name in closed_plugins:
+                        vuln_status = "closed"
+                    else:
+                        vuln_status = _status_lookup.get((plugin_name, host_name, port), "open")
 
-                    out.append({
+                    existing_item = seen_plugins.get(plugin_name)
+                    if existing_item is not None:
+                        if existing_item["status"] != "closed" and vuln_status == "closed":
+                            existing_item["status"] = "closed"
+                        continue
+
+                    item = {
                         "asset": host_name,
                         "exposure": member_type,
                         "owner": organisation_name,
@@ -753,7 +777,9 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                         "description": _join_description(v),
                         "status": vuln_status,
                         "assigned_team": assigned_team,
-                    })
+                    }
+                    seen_plugins[plugin_name] = item
+                    out.append(item)
 
                 serializer = UserAssetVulnSerializer(out, many=True)
                 return Response({
@@ -852,7 +878,22 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                     )
                 }
 
+                # Real bug report: same fix as the admin-side endpoint — a
+                # (plugin_name, host_name) pair is "closed" the moment ANY
+                # closed doc exists for it, not "every port of it is closed".
+                closed_plugins = {
+                    cdoc.get("plugin_name", "")
+                    for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+
                 out = []
+                # Real bug report: the same vulnerability on this asset but a
+                # different port produced a separate row per port — one row
+                # per plugin_name here instead (host_name is fixed for this
+                # whole view already, so plugin_name alone is the dedup key).
+                seen_plugins = {}
                 for v in (host_entry.get("vulnerabilities") or []):
                     plugin_name   = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                     assigned_team = plugin_team_map.get(plugin_name)
@@ -861,10 +902,19 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                     if plugin_name in held_plugins or plugin_name in deleted_plugins:
                         continue
 
-                    port        = str(v.get("port", ""))
-                    vuln_status = _status_lookup.get((plugin_name, host_name, port), "open")
+                    port = str(v.get("port", ""))
+                    if plugin_name in closed_plugins:
+                        vuln_status = "closed"
+                    else:
+                        vuln_status = _status_lookup.get((plugin_name, host_name, port), "open")
 
-                    out.append({
+                    existing_item = seen_plugins.get(plugin_name)
+                    if existing_item is not None:
+                        if existing_item["status"] != "closed" and vuln_status == "closed":
+                            existing_item["status"] = "closed"
+                        continue
+
+                    item = {
                         "asset": host_name,
                         "exposure": member_type,
                         "owner": organisation_name,
@@ -878,7 +928,9 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                         "description": _join_description(v),
                         "status": vuln_status,
                         "assigned_team": assigned_team,
-                    })
+                    }
+                    seen_plugins[plugin_name] = item
+                    out.append(item)
 
                 serializer = UserAssetVulnSerializer(out, many=True)
                 return Response({

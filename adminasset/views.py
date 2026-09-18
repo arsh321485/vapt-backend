@@ -398,6 +398,19 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
                     if _key not in _status_lookup:
                         _status_lookup[_key] = fdoc.get("status", "open")
 
+                # Real bug report: a vuln closed on ONE port of this asset
+                # still shows as a separate "open" row for its other ports —
+                # same fix as Register/adminmitigationstrategy: a
+                # (plugin_name, host_name) pair is "closed" the moment ANY
+                # closed doc exists for it (matches AllVulnerabilitiesAPIView's
+                # own definition), not "every port of it is closed".
+                closed_plugins = {
+                    cdoc.get("plugin_name", "")
+                    for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+
                 held_plugins = {
                     h.get("plugin_name", "")
                     for h in db[HOLD_VULNS_COLLECTION].find(
@@ -412,6 +425,12 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
                 }
 
                 out = []
+                # Real bug report: the same vulnerability on this asset but a
+                # different port (e.g. "SSL Certificate Cannot Be Trusted" on
+                # two ports) produced a separate row per port — one row per
+                # plugin_name here instead (host_name is fixed for this whole
+                # view already, so plugin_name alone is the dedup key).
+                seen_plugins = {}
                 for v in (host_entry.get("vulnerabilities") or []):
                     plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                     port = str(v.get("port", ""))
@@ -419,7 +438,16 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
                     if plugin_name in held_plugins or plugin_name in deleted_plugins:
                         continue
 
-                    vuln_status = _status_lookup.get((plugin_name, host_name, port), "open")
+                    if plugin_name in closed_plugins:
+                        vuln_status = "closed"
+                    else:
+                        vuln_status = _status_lookup.get((plugin_name, host_name, port), "open")
+
+                    existing_item = seen_plugins.get(plugin_name)
+                    if existing_item is not None:
+                        if existing_item["status"] != "closed" and vuln_status == "closed":
+                            existing_item["status"] = "closed"
+                        continue
 
                     item = {
                         "asset": host_name,
@@ -433,6 +461,7 @@ class AssetVulnerabilitiesByHostAPIView(APIView):
                         "description": _join_description(v),
                         "status": vuln_status,
                     }
+                    seen_plugins[plugin_name] = item
                     out.append(item)
 
                 serializer = AssetHostVulnSerializer(out, many=True)
@@ -1114,13 +1143,42 @@ class AdminAssetVulnerabilitiesAPIView(APIView):
                     if _key not in _status_lookup:
                         _status_lookup[_key] = fdoc.get("status", "open")
 
+                # Real bug report: a vuln closed on ONE port of this asset
+                # still shows as a separate "open" row for its other ports —
+                # same fix as Register/adminmitigationstrategy: a
+                # (plugin_name, host_name) pair is "closed" the moment ANY
+                # closed doc exists for it (matches AllVulnerabilitiesAPIView's
+                # own definition), not "every port of it is closed".
+                closed_plugins = {
+                    cdoc.get("plugin_name", "")
+                    for cdoc in db[FIX_VULN_CLOSED_COLLECTION].find(
+                        {"report_id": str(report_id), "host_name": host_name}
+                    )
+                }
+
                 out = []
+                # Real bug report: the same vulnerability on this asset but a
+                # different port (e.g. "SSL Certificate Cannot Be Trusted" on
+                # two ports) produced a separate row per port — one row per
+                # plugin_name here instead (host_name is fixed for this whole
+                # view already, so plugin_name alone is the dedup key).
+                seen_plugins = {}
                 for v in (host_entry.get("vulnerabilities") or []):
                     _pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                     if _pname in held_plugins or _pname in deleted_plugins:
                         continue
                     _port = str(v.get("port", ""))
-                    _vuln_status = _status_lookup.get((_pname, host_name, _port), "open")
+                    if _pname in closed_plugins:
+                        _vuln_status = "closed"
+                    else:
+                        _vuln_status = _status_lookup.get((_pname, host_name, _port), "open")
+
+                    existing_item = seen_plugins.get(_pname)
+                    if existing_item is not None:
+                        if existing_item["status"] != "closed" and _vuln_status == "closed":
+                            existing_item["status"] = "closed"
+                        continue
+
                     item = {
                         "asset": host_name,
                         "exposure": member_type,
@@ -1133,6 +1191,7 @@ class AdminAssetVulnerabilitiesAPIView(APIView):
                         "description": _join_description(v),
                         "status": _vuln_status,
                     }
+                    seen_plugins[_pname] = item
                     out.append(item)
 
                 serializer = AssetHostVulnSerializer(out, many=True)
