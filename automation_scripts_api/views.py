@@ -581,16 +581,31 @@ def _ai_automation_stats_rows(db, report_ids, download_role=None):
     # UserVulnerabilityCardListAPIView) directly here too, since this
     # queries vulnerability_cards straight from Mongo rather than through
     # that API layer.
-    from upload_report.views import _true_severity_lookup
+    from upload_report.views import _true_severity_lookup, _get_hidden_card_excludes
     severity_lookup = {}
+    # Real bug report: this endpoint (the website's Script tab / Slack-
+    # Teams "stats" source) queried vulnerability_cards directly with no
+    # hold/delete check at all — not even the Freemium locked_hosts one
+    # the card-list API views already had — so a held/deleted vulnerability
+    # (or a whole held/deleted asset) kept showing its automation script
+    # here regardless. Same _get_hidden_card_excludes helper, computed
+    # per report_id since this endpoint can span more than one report.
+    hidden_by_report = {}
     for rid in report_ids:
         severity_lookup.update(_true_severity_lookup(db, rid))
+        hidden_by_report[rid] = _get_hidden_card_excludes(db, rid)
 
     rows = []
     for card in db[VULN_CARD_COLLECTION].find(
         {"report_id": {"$in": list(report_ids)}, "automation_card.automation_status": {"$in": ["full", "partial"]}},
-        {"_id": 0, "card_id": 1, "vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "automation_card": 1, "vaptcode_analysis": 1},
+        {"_id": 0, "report_id": 1, "card_id": 1, "vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "automation_card": 1, "vaptcode_analysis": 1},
     ):
+        card_host = (card.get("host_name") or "").strip()
+        card_vuln = (card.get("vulnerability_name") or "").strip()
+        hidden_hosts, hidden_pairs = hidden_by_report.get(card.get("report_id"), (set(), set()))
+        if card_host in hidden_hosts or (card_vuln, card_host) in hidden_pairs:
+            continue
+
         automation = card.get("automation_card") or {}
         severity = (
             severity_lookup.get((card.get("vulnerability_name"), card.get("host_name")))
