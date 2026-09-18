@@ -3076,6 +3076,48 @@ def _get_locked_host_names(db, report_id) -> set:
     }
 
 
+def _get_hidden_card_excludes(db, report_id):
+    """
+    Real bug report: a vulnerability (or a whole asset) held/deleted from
+    Register/All Assets kept showing up in the Script tab (vulnerability
+    card list) regardless — this view had never checked hold_vulnerabilities/
+    deleted_vulnerabilities/hold_assets/deleted_assets at all, only the
+    Freemium locked_hosts case (_get_locked_host_names above). Live
+    lookup at read time, same as that one — a card reappears here the
+    moment it's unheld, no separate cache-bust needed.
+
+    Returns (hidden_host_names, hidden_vuln_pairs):
+      hidden_host_names — host_name in either hold_assets or
+        deleted_assets for this report (the WHOLE asset was held/deleted,
+        so every one of its cards should disappear).
+      hidden_vuln_pairs — (vulnerability_name, host_name) tuples in either
+        hold_vulnerabilities or deleted_vulnerabilities (one specific
+        finding held/deleted, not the whole asset).
+    """
+    report_id = str(report_id)
+    hidden_host_names = {
+        (d.get("host_name") or "").strip()
+        for d in db["hold_assets"].find({"report_id": report_id}, {"host_name": 1})
+        if d.get("host_name")
+    }
+    hidden_host_names |= {
+        (d.get("host_name") or "").strip()
+        for d in db["deleted_assets"].find({"report_id": report_id}, {"host_name": 1})
+        if d.get("host_name")
+    }
+    hidden_vuln_pairs = {
+        ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+        for d in db["hold_vulnerabilities"].find({"report_id": report_id}, {"plugin_name": 1, "host_name": 1})
+        if d.get("plugin_name")
+    }
+    hidden_vuln_pairs |= {
+        ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
+        for d in db["deleted_vulnerabilities"].find({"report_id": report_id}, {"plugin_name": 1, "host_name": 1})
+        if d.get("plugin_name")
+    }
+    return hidden_host_names, hidden_vuln_pairs
+
+
 def _true_severity_lookup(db, report_id) -> dict:
     """
     {(plugin_name, host_name): severity} straight from the raw Nessus scan
@@ -3161,6 +3203,7 @@ class VulnerabilityCardListView(APIView):
                 query = {"report_id": report_id}
 
             locked_host_names = _get_locked_host_names(db, report_id)
+            hidden_host_names, hidden_vuln_pairs = _get_hidden_card_excludes(db, report_id)
             severity_lookup = _true_severity_lookup(db, report_id)
 
             cursor = db[VULN_CARD_COLLECTION].find(
@@ -3177,6 +3220,8 @@ class VulnerabilityCardListView(APIView):
             cards = [
                 c for c in cursor
                 if (c.get("host_name") or "").strip() not in locked_host_names
+                and (c.get("host_name") or "").strip() not in hidden_host_names
+                and ((c.get("vulnerability_name") or "").strip(), (c.get("host_name") or "").strip()) not in hidden_vuln_pairs
             ]
 
             # Same Freemium script-content lock as VulnerabilityCardDetailView
@@ -3288,6 +3333,7 @@ class UserVulnerabilityCardListAPIView(APIView):
             # automation_scripts_api's _find_vuln_card) — a member never
             # sees another organization's cards regardless of team name.
             locked_host_names = _get_locked_host_names(db, report_id)
+            hidden_host_names, hidden_vuln_pairs = _get_hidden_card_excludes(db, report_id)
             severity_lookup = _true_severity_lookup(db, report_id)
 
             cursor = db[VULN_CARD_COLLECTION].find(
@@ -3299,6 +3345,8 @@ class UserVulnerabilityCardListAPIView(APIView):
                 c for c in cursor
                 if (c.get("assigned_team") or "").strip().lower() in teams_lower
                 and (c.get("host_name") or "").strip() not in locked_host_names
+                and (c.get("host_name") or "").strip() not in hidden_host_names
+                and ((c.get("vulnerability_name") or "").strip(), (c.get("host_name") or "").strip()) not in hidden_vuln_pairs
             ]
 
             # Same Freemium script-content lock as VulnerabilityCardListView
