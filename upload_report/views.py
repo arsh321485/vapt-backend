@@ -1725,7 +1725,30 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     or " ".join(vuln.get("description_points", []))
                 ).strip()
                 if not vuln_description:
-                    continue
+                    # Real bug report: some Nessus HTML export templates (a
+                    # flat "plugin-row" summary table — see
+                    # upload_report/parsers.py's parse_nessus_html) give
+                    # severity/CVSS/plugin name per finding but no synopsis/
+                    # description text at all. Requiring a description here
+                    # silently dropped every single one of those
+                    # vulnerabilities from card generation — no card, no
+                    # assigned_team, which then zeroed out every team's
+                    # asset/vuln counts for the whole report. Same principle
+                    # already applied to custom-report AI extraction: only
+                    # plugin_name is genuinely required — a real
+                    # vulnerability doesn't stop being real just because
+                    # this particular export format left description
+                    # blank. Synthesize a minimal one from whatever IS
+                    # available so the mitigation agent still has
+                    # something to reason from, instead of skipping it.
+                    _fallback_bits = [vuln_plugin_name]
+                    _risk = (vuln.get("risk_factor") or vuln.get("severity") or "").strip()
+                    if _risk:
+                        _fallback_bits.append(f"Severity: {_risk}")
+                    _cvss = (vuln.get("cvss_v3_base_score") or "").strip()
+                    if _cvss:
+                        _fallback_bits.append(f"CVSS v3.0: {_cvss}")
+                    vuln_description = " — ".join(_fallback_bits)
 
                 # Get first plugin_output for AI context (new format: plugin_outputs array)
                 plugin_outputs = vuln.get("plugin_outputs")
