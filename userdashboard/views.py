@@ -284,6 +284,16 @@ class UserTotalAssetsAPIView(APIView):
 
                 # Count unique hosts per team from nessus doc (with host-ip fallback)
                 by_team = {t: set() for t in active_teams}
+                # Real bug report: an asset with zero vulnerabilities (or
+                # whose only vulnerabilities were all held/deleted) never
+                # matches any team's plugin_team_map, so it never got added
+                # to ANY team's bucket — a clean IP was invisible to every
+                # team, even after being explicitly assigned to one, and
+                # the admin-side total (which counts every scoped asset,
+                # vulnerable or not) never matched this team-member total.
+                # A clean asset isn't "owned" by whichever team happened to
+                # find something on it — it belongs to all of them equally.
+                clean_hosts = set()
                 for host in (nessus_doc.get("vulnerabilities_by_host") or []):
                     host_info = host.get("host_information") or {}
                     h_name = (
@@ -294,14 +304,21 @@ class UserTotalAssetsAPIView(APIView):
                         h_name = h_name.strip()
                     if not h_name:
                         continue
+                    has_active_vuln = False
                     for v in (host.get("vulnerabilities") or []):
                         pname = (
                             v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                         ).strip()
                         if (pname, h_name) in excluded_vuln_keys:
                             continue
+                        has_active_vuln = True
                         for matched in plugin_team_map.get(pname, set()):
                             by_team[matched].add(h_name)
+                    if not has_active_vuln:
+                        clean_hosts.add(h_name)
+
+                for t in active_teams:
+                    by_team[t] |= clean_hosts
 
                 by_team_count = {t: len(hosts) for t, hosts in by_team.items()}
                 # total_assets = unique hosts across all teams (host in multiple teams counted once)
@@ -399,6 +416,12 @@ class UserAvgScoreAPIView(APIView):
                 by_team = {t: set() for t in active_teams}
                 cvss_vals = []
 
+                # Real bug report: same fix as UserTotalAssetsAPIView — a
+                # clean asset (zero active vulnerabilities) never matched
+                # any team here either, so this view's own total_assets
+                # disagreed with UserTotalAssetsAPIView's (both feed the
+                # same dashboard summary) for the exact same report.
+                clean_hosts = set()
                 for host in (nessus_doc.get("vulnerabilities_by_host") or []):
                     host_info = host.get("host_information") or {}
                     h_name = (
@@ -408,14 +431,16 @@ class UserAvgScoreAPIView(APIView):
                     if isinstance(h_name, str):
                         h_name = h_name.strip()
 
+                    has_active_vuln = False
                     for v in (host.get("vulnerabilities") or []):
                         pname = (
                             v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                         ).strip()
+                        if (pname, h_name) in excluded_vuln_keys:
+                            continue
+                        has_active_vuln = True
                         matched_teams = plugin_team_map.get(pname, set())
                         if not matched_teams:
-                            continue
-                        if (pname, h_name) in excluded_vuln_keys:
                             continue
 
                         # Collect CVSS score for this vulnerability
@@ -430,6 +455,12 @@ class UserAvgScoreAPIView(APIView):
                         if h_name:
                             for matched in matched_teams:
                                 by_team[matched].add(h_name)
+
+                    if h_name and not has_active_vuln:
+                        clean_hosts.add(h_name)
+
+                for t in active_teams:
+                    by_team[t] |= clean_hosts
 
                 # "0, not null" when there's no scored vulnerability data —
                 # same fix as admindashboard's AdminAvgScoreAPIView.

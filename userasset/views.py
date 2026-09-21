@@ -311,7 +311,25 @@ class UserAssetsAPIView(APIView):
                         and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _deleted_vuln_set
                     ]
                     if not team_vulns:
-                        continue
+                        # Real bug report: a host with zero active
+                        # vulnerabilities (or whose only findings were all
+                        # held/deleted) never matched team_plugins, so it
+                        # was skipped for every team — a clean IP stayed
+                        # invisible to all teams even after being explicitly
+                        # assigned to one. A clean asset isn't "owned" by
+                        # whichever team happened to find something on it —
+                        # show it to every team, but only when it's
+                        # genuinely clean (no active vulnerabilities at all,
+                        # not just none for this specific team).
+                        has_any_active_vuln = any(
+                            ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name)
+                            not in _held_vuln_set
+                            and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name)
+                            not in _deleted_vuln_set
+                            for v in host.get("vulnerabilities", [])
+                        )
+                        if has_any_active_vuln:
+                            continue
 
                     if host_name not in assets:
                         assets[host_name] = {
@@ -532,7 +550,20 @@ class UserReportAssetsAPIView(APIView):
                         and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _deleted_vuln_set
                     ]
                     if not team_vulns:
-                        continue
+                        # Real bug report: same fix as UserAssetsAPIView — a
+                        # genuinely clean host (zero active vulnerabilities
+                        # of ANY team's, not just none for this team) should
+                        # be visible to every team, not invisible to all of
+                        # them.
+                        has_any_active_vuln = any(
+                            ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name)
+                            not in _held_vuln_set
+                            and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name)
+                            not in _deleted_vuln_set
+                            for v in host.get("vulnerabilities", [])
+                        )
+                        if has_any_active_vuln:
+                            continue
 
                     if host_name not in assets:
                         assets[host_name] = {
