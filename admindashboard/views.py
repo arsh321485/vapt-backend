@@ -19,6 +19,7 @@ from .serializers import (
 from .utils import MongoContext, safe_float_from, estimate_score_from_risk_factor
 from .utils import MongoContext, parse_timeline_to_hours, humanize_hours
 from vaptfix.mongo_client import ensure_performance_indexes
+from upload_report.team_utils import infer_assigned_team as _infer_assigned_team
 
 NESSUS_COLLECTION = "nessus_reports"
 SUPPORT_REQUEST_COLLECTION = "support_requests"
@@ -1038,17 +1039,43 @@ class AdminAssetsByTeamAPIView(APIView):
                 report_id = doc.get("report_id") or str(doc.get("_id", ""))
                 team_names_lower = {name.lower(): name for name in TEAM_NAMES}
 
-                # Step 1: Build vuln_name -> assigned_team map from vulnerability_cards
+                # Step 1: Build vuln_name -> assigned_team map from
+                # vulnerability_cards. Falls back to
+                # team_utils.infer_assigned_team() for any plugin with no
+                # card yet (or a card with no/invalid team) — this class's
+                # own docstring documented the "grows as cards generate" gap
+                # as an accepted growing pain; the fallback removes it, same
+                # as every other team-scoped view in the app now does.
+                from upload_report.team_utils import infer_assigned_team
+
                 plugin_team_map = {}
+                _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
                     {"vulnerability_name": 1, "assigned_team": 1}
                 ):
                     pname = (card.get("vulnerability_name") or "").strip()
+                    if not pname:
+                        continue
+                    _card_covered.add(pname)
                     raw_team = (card.get("assigned_team") or "").strip()
-                    matched_team = team_names_lower.get(raw_team.lower())
-                    if pname and matched_team:
+                    matched_team = team_names_lower.get(raw_team.lower()) or team_names_lower.get(
+                        infer_assigned_team(pname).lower()
+                    )
+                    if matched_team:
                         plugin_team_map[pname] = matched_team
+
+                for _host in (doc.get("vulnerabilities_by_host") or []):
+                    for _v in (_host.get("vulnerabilities") or []):
+                        _pname = (
+                            _v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or ""
+                        ).strip()
+                        if not _pname or _pname in _card_covered:
+                            continue
+                        _card_covered.add(_pname)
+                        _matched_team = team_names_lower.get(infer_assigned_team(_pname).lower())
+                        if _matched_team:
+                            plugin_team_map[_pname] = _matched_team
 
                 # Real bug report: held/deleted individual vulnerabilities were
                 # never excluded here — a host whose ONLY vuln for a given team
@@ -1848,7 +1875,14 @@ class AdminDistributionByTeamAPIView(APIView):
                         if key in closed_vuln_keys or key in held_vuln_keys or key in deleted_vuln_keys:
                             continue
                         raw_team = vuln_team_map.get(key, "")
-                        matched_team = team_names_lower.get(raw_team.lower())
+                        # Real bug report: no card yet (raw_team == "") meant
+                        # every one of this report's not-yet-generated
+                        # vulnerabilities landed in "Unassigned" instead of
+                        # their real team, until AI card-generation caught
+                        # up — same fallback now applied everywhere else.
+                        matched_team = team_names_lower.get(raw_team.lower()) or team_names_lower.get(
+                            _infer_assigned_team(plugin_name).lower()
+                        )
                         if matched_team:
                             counts[matched_team] += 1
                         else:
@@ -2016,7 +2050,13 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                             continue
 
                         raw_team = vuln_team_map.get(key, "")
-                        team_key = team_names_lower.get(raw_team.lower(), "") or "Unassigned"
+                        # Same fallback as AdminDistributionByTeamAPIView:
+                        # no card yet must not mean "Unassigned" — infer the
+                        # team deterministically until AI card-generation
+                        # catches up and writes the real assigned_team.
+                        team_key = team_names_lower.get(raw_team.lower()) or team_names_lower.get(
+                            _infer_assigned_team(plugin_name).lower()
+                        ) or "Unassigned"
 
                         bucket = teams[team_key]
                         if key in closed_vuln_keys:
@@ -2081,6 +2121,8 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                     )
 
                 report_id = doc.get("report_id") or str(doc.get("_id", ""))
+
+                team_names_lower_detail = {name.lower(): name for name in TEAM_NAMES}
 
                 # ── plugin_name → risk_factor from nessus ───────────────────────
                 plugin_risk = {}
@@ -2226,6 +2268,12 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                         else:
                             vuln_status = active_status_by_key.get((plugin_name, h_name), "open")
                         assigned_team = (info.get("assigned_team") or "").strip()
+                        if not team_names_lower_detail.get(assigned_team.lower()):
+                            # No card yet — infer deterministically so the
+                            # downloadable report never shows "Unassigned"
+                            # just because AI card-generation hasn't caught
+                            # up yet.
+                            assigned_team = _infer_assigned_team(plugin_name)
 
                         vulnerabilities.append({
                             "vulnerability_name": plugin_name,

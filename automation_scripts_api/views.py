@@ -1301,6 +1301,72 @@ def admin_view_ai_automation(request, card_id):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def user_view_ai_automation(request, card_id):
+    """
+    Member-side, read-only view of the AI automation-feasibility result for
+    one vulnerability card. Team-scoped like user_download_ai_automation_script,
+    but returns the same descriptive shape admin_view_ai_automation does
+    (status, what can/can't be automated, considerations — script content
+    stripped out) instead of only a download-or-404 pair.
+
+    Real bug report: no user-side status endpoint existed at all, so the
+    frontend's "Checking AI automation feasibility..." step had nothing to
+    poll and fell back to blind-retrying user_download_ai_automation_script
+    — which 404s identically whether the card's automation_card genuinely
+    doesn't exist YET (still mid AI generation, right after upload) or a
+    real "not_possible" verdict. Both looked the same to the frontend:
+    "Automation Possible: No [0%]", even for a vulnerability nobody has
+    checked yet. This distinguishes the two: no automation_card at all ->
+    matched: False / status: "pending" ("still checking"); a genuine
+    result (possible or not) -> matched: True with the real
+    automation_status.
+
+    GET /api/user/automation-scripts/ai/<card_id>/view/
+    """
+    if request.user.is_staff or request.user.is_superuser:
+        return Response(
+            {"error": "Admins cannot use this endpoint. Use the admin view endpoint instead."},
+            status=403,
+        )
+
+    admin_id, _admin_email, teams = _resolve_admin_and_teams(request)
+    if not admin_id:
+        return Response({"error": "You are not linked to any admin account."}, status=403)
+
+    card = _find_vuln_card(card_id, admin_id)
+    if not card:
+        return Response({"error": "Vulnerability card not found."}, status=404)
+
+    # Same team-isolation as user_download_ai_automation_script — a member
+    # of a different team under the same admin must not see this card.
+    card_team = (card.get("assigned_team") or "").strip().lower()
+    member_teams = {t.strip().lower() for t in (teams or [])}
+    if not card_team or card_team not in member_teams:
+        return Response({"error": "You do not have access to this vulnerability card."}, status=403)
+
+    automation = card.get("automation_card") or {}
+    if not automation:
+        return Response({
+            "matched": False,
+            "status": "pending",
+            "card_id": card_id,
+            "message": "AI automation analysis for this vulnerability is still in progress.",
+        }, status=200)
+
+    premium_required, message = _premium_required_message(admin_id)
+    safe = {k: v for k, v in automation.items() if k not in ("fix_script", "verify_script")}
+    return Response({
+        "matched": True,
+        "status": automation.get("automation_status", ""),
+        "card_id": card_id,
+        "premium_required": premium_required,
+        "message": message if premium_required else None,
+        **safe,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def user_download_ai_automation_script(request, card_id):
     """
     Member-side download of the AI-generated fix/verify script attached to

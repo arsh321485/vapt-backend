@@ -1016,6 +1016,18 @@ class FixVulnerabilityCreateAPIView(APIView):
                     "vulnerability_name": plugin_name_req,
                 })
             assigned_team = (vuln_card_doc or {}).get("assigned_team") or ""
+            if not assigned_team:
+                # Real bug report: this wrote a PERMANENTLY EMPTY
+                # assigned_team into the new fix_vulnerabilities doc
+                # whenever no card existed yet (still mid AI card-
+                # generation) — and it was NEVER backfilled later even
+                # after the card generated, permanently excluding the
+                # record from every assigned_team-filtered query (e.g.
+                # UserClosedVulnerabilitiesAPIView's {"assigned_team":
+                # {"$in": active_teams}}). Infer deterministically instead
+                # of ever persisting an empty value.
+                from upload_report.team_utils import infer_assigned_team
+                assigned_team = infer_assigned_team(plugin_name_req)
 
             # Get vendor_fix_available from vulnerability_cards (stored as "Yes"/"No")
             _vfa_raw = (vuln_card_doc or {}).get("vendor_fix_available", "No")

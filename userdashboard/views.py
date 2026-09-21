@@ -255,16 +255,44 @@ class UserTotalAssetsAPIView(APIView):
 
                 # Build plugin_name -> set of matched_teams from vulnerability_cards
                 # Using setdefault+set so one plugin can belong to multiple teams
+                #
+                # Real bug report: only ever read vulnerability_cards.assigned_
+                # team (the AI's own classification, written by a slow
+                # background job that can take many minutes on a large
+                # report) — a plugin without a card yet was completely absent
+                # here, so its hosts never counted toward any team's asset
+                # total until AI generation caught up. Falls back to
+                # team_utils.infer_assigned_team() (deterministic keyword
+                # match, no AI call) for any plugin with no card, or a card
+                # with no/invalid team.
+                from upload_report.team_utils import infer_assigned_team
+
                 plugin_team_map = {}
+                _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
                     {"vulnerability_name": 1, "assigned_team": 1}
                 ):
-                    pname    = (card.get("vulnerability_name") or "").strip()
+                    pname = (card.get("vulnerability_name") or "").strip()
+                    if not pname:
+                        continue
+                    _card_covered.add(pname)
                     raw_team = (card.get("assigned_team") or "").strip()
-                    matched  = teams_lower.get(raw_team.lower())
-                    if pname and matched:
+                    matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+                    if matched:
                         plugin_team_map.setdefault(pname, set()).add(matched)
+
+                for _host in (nessus_doc.get("vulnerabilities_by_host") or []):
+                    for _v in (_host.get("vulnerabilities") or []):
+                        _pname = (
+                            _v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or ""
+                        ).strip()
+                        if not _pname or _pname in _card_covered:
+                            continue
+                        _card_covered.add(_pname)
+                        _matched = teams_lower.get(infer_assigned_team(_pname).lower())
+                        if _matched:
+                            plugin_team_map.setdefault(_pname, set()).add(_matched)
 
                 # Real bug report: this view never excluded held/deleted
                 # vulnerabilities, so a host whose ONLY finding for a given
@@ -387,17 +415,37 @@ class UserAvgScoreAPIView(APIView):
 
                 report_id = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
 
-                # Build plugin_name -> set of matched_teams from vulnerability_cards
+                # Build plugin_name -> set of matched_teams from vulnerability_cards.
+                # Same "no card yet" fallback as UserTotalAssetsAPIView — see
+                # that view's comment for the full real-bug-report context.
+                from upload_report.team_utils import infer_assigned_team
+
                 plugin_team_map = {}
+                _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
                     {"vulnerability_name": 1, "assigned_team": 1}
                 ):
-                    pname    = (card.get("vulnerability_name") or "").strip()
+                    pname = (card.get("vulnerability_name") or "").strip()
+                    if not pname:
+                        continue
+                    _card_covered.add(pname)
                     raw_team = (card.get("assigned_team") or "").strip()
-                    matched  = teams_lower.get(raw_team.lower())
-                    if pname and matched:
+                    matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+                    if matched:
                         plugin_team_map.setdefault(pname, set()).add(matched)
+
+                for _host in (nessus_doc.get("vulnerabilities_by_host") or []):
+                    for _v in (_host.get("vulnerabilities") or []):
+                        _pname = (
+                            _v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or ""
+                        ).strip()
+                        if not _pname or _pname in _card_covered:
+                            continue
+                        _card_covered.add(_pname)
+                        _matched = teams_lower.get(infer_assigned_team(_pname).lower())
+                        if _matched:
+                            plugin_team_map.setdefault(_pname, set()).add(_matched)
 
                 # Real bug report: avg_score never excluded held/deleted
                 # vulnerabilities, so removing a high-CVSS finding from All
@@ -549,17 +597,25 @@ class UserVulnerabilitiesAPIView(APIView):
                     for h in nessus_doc.get("vulnerabilities_by_host", [])
                 }
 
+                from upload_report.team_utils import infer_assigned_team
+
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                # (vulnerability_name, host_name) pairs already covered by a
+                # card, regardless of that card's team — used below to find
+                # pairs with NO card at all yet.
+                card_covered_pairs = set()
 
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
                     {"vulnerability_name": 1, "assigned_team": 1, "host_name": 1, "_id": 0},
                 ):
-                    raw_team = (card.get("assigned_team") or "").strip()
-                    if not teams_lower.get(raw_team.lower()):
-                        continue
                     pname     = (card.get("vulnerability_name") or "").strip()
                     card_host = (card.get("host_name") or "").strip()
+                    card_covered_pairs.add((pname, card_host))
+                    raw_team = (card.get("assigned_team") or "").strip()
+                    matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+                    if not matched:
+                        continue
                     if card_host and card_host not in active_host_names:
                         continue
                     # Skip if this (plugin, host) pair is closed/held/deleted
@@ -572,6 +628,32 @@ class UserVulnerabilitiesAPIView(APIView):
                     risk = plugin_risk.get(pname)
                     if risk in counts:
                         counts[risk] += 1
+
+                # Real bug report: same "no card yet" gap as every other
+                # team-scoped view — a vulnerability whose card hasn't been
+                # generated yet was completely absent from the loop above
+                # (it only ever iterates vulnerability_cards), so it never
+                # counted toward any team's severity totals until AI
+                # generation caught up. Scan the raw report directly for
+                # (vuln, host) pairs with no card at all and count them too,
+                # using the same keyword-based team inference as everywhere
+                # else in this fallback.
+                for host in nessus_doc.get("vulnerabilities_by_host", []):
+                    host_name = (host.get("host_name") or host.get("host") or "").strip()
+                    if host_name and host_name not in active_host_names:
+                        continue
+                    for v in host.get("vulnerabilities", []):
+                        pname = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
+                        if not pname or (pname, host_name) in card_covered_pairs:
+                            continue
+                        if (pname, host_name) in excluded_plugins:
+                            continue
+                        matched = teams_lower.get(infer_assigned_team(pname).lower())
+                        if not matched:
+                            continue
+                        risk = plugin_risk.get(pname)
+                        if risk in counts:
+                            counts[risk] += 1
 
                 data = {"report_id": report_id, **counts}
                 return Response(data)
@@ -611,17 +693,35 @@ class UserVulnerabilitiesFixedAPIView(APIView):
                 report_id   = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
                 plugin_risk = _build_plugin_risk_map(nessus_doc)
 
-                # Get plugin_names that belong to user's teams
+                # Get plugin_names that belong to user's teams. Falls back to
+                # team_utils.infer_assigned_team() for any plugin with no
+                # card yet (or a card with no/invalid team) — same "no card
+                # yet" gap as every other team-scoped view in this app; see
+                # UserTotalAssetsAPIView's comment for the full context.
+                from upload_report.team_utils import infer_assigned_team
+
                 team_plugins = set()
+                _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
                     {"vulnerability_name": 1, "assigned_team": 1, "_id": 0},
                 ):
+                    pname = (card.get("vulnerability_name") or "").strip()
+                    if not pname:
+                        continue
+                    _card_covered.add(pname)
                     raw_team = (card.get("assigned_team") or "").strip()
-                    if teams_lower.get(raw_team.lower()):
-                        pname = (card.get("vulnerability_name") or "").strip()
-                        if pname:
-                            team_plugins.add(pname)
+                    if teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower()):
+                        team_plugins.add(pname)
+
+                for _host in nessus_doc.get("vulnerabilities_by_host", []):
+                    for _v in _host.get("vulnerabilities", []):
+                        _pname = (_v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or "").strip()
+                        if not _pname or _pname in _card_covered:
+                            continue
+                        _card_covered.add(_pname)
+                        if teams_lower.get(infer_assigned_team(_pname).lower()):
+                            team_plugins.add(_pname)
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                 for vuln in db[FIX_VULN_CLOSED_COLLECTION].find(
@@ -897,19 +997,44 @@ class UserPatchManagementAPIView(APIView):
                     for t in active_teams
                 }
 
-                # Build plugin_name -> matched_team map from cards
+                # Build plugin_name -> matched_team map from cards. Falls
+                # back to team_utils.infer_assigned_team() for any plugin
+                # with no card yet (or a card with no/invalid team) — same
+                # "no card yet" gap as every other team-scoped view in this
+                # app; see UserTotalAssetsAPIView's comment for full context.
+                from upload_report.team_utils import infer_assigned_team
+
                 plugin_team_map = {}
+                _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find({"report_id": str(report_id)}):
+                    pname = (card.get("vulnerability_name") or "").strip()
+                    if not pname:
+                        continue
+                    _card_covered.add(pname)
                     raw_team = (card.get("assigned_team") or "").strip()
-                    matched  = teams_lower.get(raw_team.lower())
+                    matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
                     if not matched:
                         continue
-                    pname = (card.get("vulnerability_name") or "").strip()
-                    if pname:
-                        plugin_team_map[pname] = matched
+                    plugin_team_map[pname] = matched
                     risk = plugin_risk.get(pname)
                     if risk in team_data[matched]["vulnerabilities"]:
                         team_data[matched]["vulnerabilities"][risk] += 1
+
+                for _host in (nessus_doc.get("vulnerabilities_by_host") or []):
+                    for _v in (_host.get("vulnerabilities") or []):
+                        _pname = (
+                            _v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or ""
+                        ).strip()
+                        if not _pname or _pname in _card_covered:
+                            continue
+                        _card_covered.add(_pname)
+                        _matched = teams_lower.get(infer_assigned_team(_pname).lower())
+                        if not _matched:
+                            continue
+                        plugin_team_map[_pname] = _matched
+                        _risk = plugin_risk.get(_pname)
+                        if _risk in team_data[_matched]["vulnerabilities"]:
+                            team_data[_matched]["vulnerabilities"][_risk] += 1
 
                 # Count assets from nessus doc using host-ip fallback
                 for host in (nessus_doc.get("vulnerabilities_by_host") or []):

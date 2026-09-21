@@ -26,5 +26,9 @@ user_urlpatterns = [
     # AI-generated per-vulnerability-card automation — real download,
     # same plan gate + download_count bookkeeping as download/<plugin_id>/.
     path("ai/<str:card_id>/download/", views.user_download_ai_automation_script, name="user_ai_automation_download"),
+    # Read-only status/result check — lets the frontend poll for "still
+    # analyzing" vs. a real possible/not-possible verdict instead of
+    # blind-retrying the download endpoint above.
+    path("ai/<str:card_id>/view/", views.user_view_ai_automation, name="user_ai_automation_view"),
     path("", views.user_list_scripts, name="user_automation_list"),
 ]

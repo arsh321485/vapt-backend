@@ -45,6 +45,7 @@ _SLUG_TO_TEAM = {
 # ── Shared MongoDB connection pool ──────────────────────────────────────────
 from vaptfix.mongo_client import MongoContext
 from vaptfix.mongo_client import ensure_performance_indexes
+from upload_report.team_utils import infer_assigned_team
 
 
 def _normalize_iso(dt):
@@ -302,6 +303,11 @@ class MitigationStrategyByTeamAPIView(APIView):
                         # Normalize slug → Title Case (cards store "configuration-management",
                         # teams dict keys are "Configuration Management")
                         assigned_team = _SLUG_TO_TEAM.get(_raw_team.strip().lower(), _raw_team)
+                        if assigned_team not in TEAM_NAMES:
+                            # No card yet (still mid AI card-generation) — infer
+                            # deterministically instead of dumping into
+                            # "Unassigned" until generation catches up.
+                            assigned_team = infer_assigned_team(plugin_name)
 
                         dedup_key = (host_name, plugin_name)
                         existing_row = seen_host_vuln_row.get(dedup_key)
@@ -461,6 +467,10 @@ class VulnerabilityAssetCountAPIView(APIView):
                         "assets":      sorted(assets),
                     }
                     assigned_team = plugin_team_map.get(plugin_name, "")
+                    if assigned_team not in teams:
+                        # No card yet — infer deterministically instead of
+                        # dumping into "Unassigned" until AI generation catches up.
+                        assigned_team = infer_assigned_team(plugin_name)
                     if assigned_team in teams:
                         teams[assigned_team].append(entry)
                     else:

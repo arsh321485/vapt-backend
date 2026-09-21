@@ -158,21 +158,57 @@ def _load_latest_report(db, admin_id, admin_email):
 
 def _get_team_plugin_names(db, report_id, teams_lower):
     """
-    Returns a set of plugin_names assigned to the user's teams
-    from vulnerability_cards collection.
+    Returns (team_plugins_set, plugin_team_map) — covers EVERY plugin_name
+    present in the report, not just ones with a generated card.
+
+    Real bug report: this only ever read vulnerability_cards.assigned_team
+    (the AI's own classification, written by a slow background job that
+    can take many minutes on a large report) — a vulnerability without a
+    card yet was completely invisible to every team, so right after a big
+    upload the user Register list (and everything built on this helper)
+    showed wrong/incomplete data until AI generation fully caught up.
+    Falls back to team_utils.infer_assigned_team() (deterministic keyword
+    match, no AI call) whenever a plugin has no card, or a card with no/
+    invalid team — same fallback already proven correct elsewhere in the
+    app.
     """
+    from upload_report.team_utils import infer_assigned_team
+
     team_plugins = set()
     plugin_team_map = {}  # plugin_name -> matched_team (original case)
+    covered = set()
     for card in db[VULN_CARD_COLLECTION].find(
         {"report_id": str(report_id)},
         {"vulnerability_name": 1, "assigned_team": 1}
     ):
-        pname    = (card.get("vulnerability_name") or "").strip()
+        pname = (card.get("vulnerability_name") or "").strip()
+        if not pname:
+            continue
+        covered.add(pname.lower())
         raw_team = (card.get("assigned_team") or "").strip()
-        matched  = teams_lower.get(raw_team.lower())
-        if pname and matched:
+        matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+        if matched:
             team_plugins.add(pname)
             plugin_team_map[pname] = matched
+
+    # Fill in every plugin_name that has NO card at all yet.
+    nessus_doc = db[NESSUS_COLLECTION].find_one(
+        {"report_id": str(report_id)},
+        {"vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
+         "vulnerabilities_by_host.vulnerabilities.pluginname": 1,
+         "vulnerabilities_by_host.vulnerabilities.name": 1},
+    )
+    for host in (nessus_doc or {}).get("vulnerabilities_by_host", []):
+        for v in host.get("vulnerabilities", []):
+            pname = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
+            if not pname or pname.lower() in covered:
+                continue
+            covered.add(pname.lower())
+            matched = teams_lower.get(infer_assigned_team(pname).lower())
+            if matched:
+                team_plugins.add(pname)
+                plugin_team_map[pname] = matched
+
     return team_plugins, plugin_team_map
 
 

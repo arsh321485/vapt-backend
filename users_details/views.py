@@ -1935,19 +1935,44 @@ class ReportAssetsVulnsAPIView(APIView):
                 # that team from vulnerability_cards (case-insensitive match).
                 role_plugins = None
                 if role_filter:
+                    from upload_report.team_utils import infer_assigned_team
+
                     role_plugins = set()
+                    covered = set()
                     for card in db[VULN_CARD_COLLECTION].find(
                         {"report_id": report_id},
                         {"vulnerability_name": 1, "plugin_name": 1, "assigned_team": 1},
                     ):
+                        pname = (
+                            card.get("vulnerability_name")
+                            or card.get("plugin_name")
+                            or ""
+                        ).strip()
+                        if not pname:
+                            continue
+                        covered.add(pname.lower())
                         raw_team = (card.get("assigned_team") or "").strip()
                         if raw_team.lower() == role_filter.lower():
+                            role_plugins.add(pname.lower())
+
+                    # Real bug report: right after a big upload, this always
+                    # returned 0 assets/0 vulns for every team until AI card
+                    # generation (_auto_generate_cards_bg) finished — no card
+                    # yet meant no plugin_name ever matched role_filter, no
+                    # matter what. Infer the team for anything not yet
+                    # carded instead of leaving it invisible.
+                    for host in (doc.get("vulnerabilities_by_host") or []):
+                        for v in (host.get("vulnerabilities") or []):
                             pname = (
-                                card.get("vulnerability_name")
-                                or card.get("plugin_name")
+                                v.get("plugin_name")
+                                or v.get("pluginname")
+                                or v.get("name")
                                 or ""
                             ).strip()
-                            if pname:
+                            if not pname or pname.lower() in covered:
+                                continue
+                            covered.add(pname.lower())
+                            if infer_assigned_team(pname).lower() == role_filter.lower():
                                 role_plugins.add(pname.lower())
 
                 assets = []

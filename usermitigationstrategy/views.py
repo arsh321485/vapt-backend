@@ -12,6 +12,7 @@ from adminmitigationstrategy.views import (
     _qualifies_for_mitigation_strategy,
 )
 from vaptfix.mongo_client import MongoContext
+from upload_report.team_utils import infer_assigned_team
 
 NESSUS_COLLECTION          = "nessus_reports"
 FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
@@ -217,6 +218,11 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                         )
                         _raw_team = (card or {}).get("assigned_team", "") or ""
                         assigned_team = _normalize_team_name(_raw_team)
+                        if assigned_team not in _SLUG_TO_TEAM.values():
+                            # No card yet — infer deterministically instead of
+                            # silently dropping this row until AI generation
+                            # catches up and writes the real assigned_team.
+                            assigned_team = infer_assigned_team(plugin_name)
 
                         if assigned_team not in member_teams_normalized:
                             continue
@@ -371,6 +377,11 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                         continue
 
                     assigned_team = plugin_team_map.get(plugin_name, "")
+                    if assigned_team not in _SLUG_TO_TEAM.values():
+                        # No card yet — infer deterministically instead of
+                        # silently dropping this row until AI generation
+                        # catches up and writes the real assigned_team.
+                        assigned_team = infer_assigned_team(plugin_name)
                     if assigned_team not in member_teams_normalized:
                         continue
 
