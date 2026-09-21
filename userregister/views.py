@@ -3384,11 +3384,21 @@ class UserTicketByReportAPIView(APIView):
             ticket_coll = db[TICKETS_COLLECTION]
             tickets = list(ticket_coll.find({"report_id": report_id}).sort("created_at", -1))
             fix_map = _batch_fix_map(db, tickets)
+            # Real bug report: trusting fix_doc's own stored assigned_team
+            # here meant a fix doc created before its vulnerability_cards
+            # entry existed kept its create-time team guess FOREVER, never
+            # reconciled once the real AI card landed. Resolve the team
+            # live the same way every other team view in this file does.
+            _, plugin_team_map = _get_team_plugin_names(db, report_id, _normalize_teams(active_teams))
 
         results = []
         for doc in tickets:
             fix_doc = fix_map.get(doc.get("fix_vulnerability_id"), {})
-            if (fix_doc.get("assigned_team") or "").strip().lower() not in teams_lower_set:
+            resolved_team = (
+                plugin_team_map.get(doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
+                or (fix_doc.get("assigned_team") or "").strip()
+            )
+            if resolved_team.lower() not in teams_lower_set:
                 continue
             results.append(_ticket_row(doc, fix_doc))
 
@@ -3485,6 +3495,10 @@ class UserTicketOpenListAPIView(APIView):
                 )
 
             fix_map = _batch_fix_map(db, tickets)
+            # Same live-resolution fix as UserTicketByReportAPIView — don't
+            # trust a fix doc's own stored assigned_team, which can be a
+            # stale create-time guess never reconciled with the real card.
+            _, plugin_team_map = _get_team_plugin_names(db, report_id, _normalize_teams(active_teams))
 
         results = []
         for doc in tickets:
@@ -3493,7 +3507,11 @@ class UserTicketOpenListAPIView(APIView):
                 continue
             fix_doc = fix_map.get(fid, {})
             # Team filter — only show tickets for user's teams
-            if (fix_doc.get("assigned_team") or "").strip().lower() not in teams_lower_set:
+            resolved_team = (
+                plugin_team_map.get(doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
+                or (fix_doc.get("assigned_team") or "").strip()
+            )
+            if resolved_team.lower() not in teams_lower_set:
                 continue
             results.append(_ticket_row(doc, fix_doc))
 
@@ -3576,6 +3594,12 @@ class UserTicketClosedListAPIView(APIView):
                     if fid and fid not in closed_fix_map:
                         closed_fix_map[fid] = cdoc
 
+            # Same live-resolution fix as UserTicketByReportAPIView — don't
+            # trust a closed fix doc's own stored assigned_team, which can
+            # be a stale create-time guess never reconciled with the real
+            # card once it was generated.
+            _, plugin_team_map = _get_team_plugin_names(db, report_id, _normalize_teams(active_teams))
+
         results = []
         for doc in all_tickets:
             fid = doc.get("fix_vulnerability_id")
@@ -3583,7 +3607,11 @@ class UserTicketClosedListAPIView(APIView):
                 continue
             fix_doc = closed_fix_map.get(fid, {})
             # Team filter
-            if (fix_doc.get("assigned_team") or "").strip().lower() not in teams_lower_set:
+            resolved_team = (
+                plugin_team_map.get(doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
+                or (fix_doc.get("assigned_team") or "").strip()
+            )
+            if resolved_team.lower() not in teams_lower_set:
                 continue
             results.append({
                 "_id":                   str(doc["_id"]),
@@ -3598,7 +3626,7 @@ class UserTicketClosedListAPIView(APIView):
                 "created_at":            _normalize_iso(doc.get("created_at")),
                 "closed_at":             _normalize_iso(doc.get("closed_at")),
                 "close_comment":         doc.get("close_comment"),
-                "assigned_team":         fix_doc.get("assigned_team", ""),
+                "assigned_team":         resolved_team,
                 "assigned_team_members": fix_doc.get("assigned_team_members", []),
             })
 
@@ -3648,8 +3676,25 @@ class UserTicketDetailAPIView(APIView):
 
             fix_doc = db[FIX_VULN_COLLECTION].find_one({"_id": fix_obj_id}) or {}
 
-        # Team validation
-        assigned_team = (fix_doc.get("assigned_team") or "").strip()
+            # Team validation — real bug report: this gated access purely
+            # on the fix doc's own stored assigned_team, which can be a
+            # stale create-time keyword guess (written before the real AI
+            # card existed) that never gets reconciled — a member could be
+            # wrongly denied (or, if the guess drifted the other way,
+            # wrongly allowed) forever for a ticket that genuinely belongs
+            # to their team. Resolve the real team live off
+            # vulnerability_cards the same way every other team view does,
+            # falling back to the stored value only if that lookup can't
+            # resolve it at all.
+            report_id_for_ticket = ticket.get("report_id") or fix_doc.get("report_id") or ""
+            plugin_name_for_ticket = ticket.get("plugin_name") or fix_doc.get("plugin_name") or ""
+            assigned_team = (fix_doc.get("assigned_team") or "").strip()
+            if report_id_for_ticket and plugin_name_for_ticket:
+                _, plugin_team_map = _get_team_plugin_names(
+                    db, report_id_for_ticket, _normalize_teams(teams)
+                )
+                assigned_team = plugin_team_map.get(plugin_name_for_ticket) or assigned_team
+
         if assigned_team.lower() not in teams_lower_set:
             return Response(
                 {"detail": "You do not have permission to view this ticket"},
@@ -3751,12 +3796,22 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                         if p_name and h_name:
                             first_obs_map[(p_name, h_name)] = v.get("created_at")
 
-                # Step 3: Query fix_vulnerabilities_closed filtered by member's teams
+                # Real bug report: filtering this Mongo query directly on the
+                # closed doc's own stored assigned_team meant a doc created
+                # (via FixVulnerabilityCreateAPIView) before its
+                # vulnerability_cards entry existed kept whatever guess was
+                # written at create time FOREVER — never reconciled once the
+                # real AI card landed — permanently disagreeing with every
+                # other team view here (which all resolve team live off
+                # vulnerability_cards, with the same keyword fallback, on
+                # every request). Resolve the real team live the same way
+                # instead of trusting the stored field, so this always
+                # agrees with the rest of the app.
+                teams_lower = _normalize_teams(active_teams)
+                _, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
+
                 closed_cursor = db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {
-                        "report_id":     report_id,
-                        "assigned_team": {"$in": active_teams},
-                    },
+                    {"report_id": report_id},
                     sort=[("closed_at", pymongo.DESCENDING)],
                 )
 
@@ -3764,6 +3819,9 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                 for doc in closed_cursor:
                     host_name = doc.get("host_name", "")
                     plugin_name = doc.get("plugin_name", "")
+                    resolved_team = plugin_team_map.get(plugin_name) or doc.get("assigned_team", "")
+                    if resolved_team not in active_teams:
+                        continue
                     # Use stored OS first; fall back to nessus host_information; default Windows
                     os_value = doc.get("operating_system", "") or host_os_map.get(host_name, "") or "Windows"
                     # Same fields/sourcing as UserLatestVulnerabilityRegisterAPIView:
@@ -3778,7 +3836,7 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                         "os":                   os_value,
                         "port":                 doc.get("port", ""),
                         "risk_factor":          doc.get("risk_factor", ""),
-                        "assigned_team":        doc.get("assigned_team", ""),
+                        "assigned_team":        resolved_team,
                         "created_at":           _normalize_iso(doc.get("created_at")),
                         "closed_at":            _normalize_iso(doc.get("closed_at")),
                         "closed_by":            doc.get("closed_by", ""),
