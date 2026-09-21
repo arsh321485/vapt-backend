@@ -79,6 +79,16 @@ in the "hosts" array — do not collapse them into just one representative host 
 any of the listed hosts. A report with 3 distinct findings where one of them lists 12 affected
 hosts should produce far more than 3 total host/vulnerability entries.
 
+ALSO — separately from the per-finding "hosts" above — look for a scope/target/inventory
+list: a section like "Scope of Assessment", "Target(s)", "Assets Tested", "In-Scope Systems",
+or any table/list that enumerates every asset that was part of this assessment (commonly near
+the start of the document, often with a Description/IP or similar column). List EVERY
+identifier from that list under "all_assets" below, in the exact form it appears in the
+document — including ones that never show up in any specific finding's "Host(s) Affected"
+(a host can be tested and found clean, with zero findings, and still belongs here). If the
+document has no such scope/target list, leave "all_assets" as an empty list — do not invent one
+from the hosts mentioned in findings.
+
 Return ONLY a single JSON object, no markdown fences, no commentary, matching exactly this schema:
 
 {{
@@ -98,10 +108,11 @@ Return ONLY a single JSON object, no markdown fences, no commentary, matching ex
         }}
       ]
     }}
-  ]
+  ],
+  "all_assets": ["<every asset/host identifier from the document's own scope/target/inventory list, else empty list>"]
 }}
 
-If invalid, "hosts" must be an empty list.
+If invalid, "hosts" and "all_assets" must both be empty lists.
 
 DOCUMENT TEXT:
 ---
@@ -349,6 +360,34 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
             "valid": False,
             "reason": "No vulnerability findings with asset, severity, and description could be identified in this file.",
         }
+
+    # Real bug report: a host mentioned only in the document's own scope/
+    # target list (e.g. "Scope of Assessment") but with zero findings
+    # against it never appeared anywhere in "hosts" above (that array is
+    # built purely from per-finding write-ups), so it was silently dropped
+    # from vulnerabilities_by_host entirely — undercounting "Total Assets"
+    # against the file's own stated scope (e.g. 24 scoped IPs, only 7 of
+    # them counted, because only 7 had any finding). Nessus's own parser
+    # already includes a scanned-but-clean host (see
+    # parse_nessus_xml_streaming's ReportHost handling) — match that same
+    # behavior here using the model's separate "all_assets" list, adding
+    # any name not already covered by a finding as a clean (zero-
+    # vulnerability) asset instead of leaving it out.
+    covered_host_names = {h["host_name"] for h in vulnerabilities_by_host}
+    all_assets_raw = result.get("all_assets") or []
+    if isinstance(all_assets_raw, list):
+        for asset_name in all_assets_raw:
+            if not isinstance(asset_name, str):
+                continue
+            asset_name = asset_name.strip()
+            if not asset_name or asset_name in covered_host_names:
+                continue
+            covered_host_names.add(asset_name)
+            vulnerabilities_by_host.append({
+                "host_name": asset_name,
+                "host_information": {},
+                "vulnerabilities": [],
+            })
 
     return {
         "valid": True,
