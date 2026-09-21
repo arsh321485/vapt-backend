@@ -15,10 +15,39 @@ document (and downstream vulnerability_cards) are keyed off the shared
 """
 import datetime
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
 NESSUS_COLLECTION = "nessus_reports"
+
+
+def _normalize_plugin_name(name: str) -> str:
+    """
+    Case/whitespace-insensitive key for the merge dedup below.
+
+    Real bug report: re-uploading the SAME custom (AI-extracted) report
+    file on the same day kept inflating the vulnerability count (6 -> 15
+    -> 18 across repeated uploads of one unchanged PDF) even though the
+    exact-string dedup here was working as designed. The AI extraction
+    (custom_report_ai.py) re-parses the document fresh on every upload —
+    GPT-4o-mini's wording for the same underlying finding can vary
+    slightly between calls even at temperature=0 (extra/missing
+    whitespace, punctuation, capitalization), so the same vulnerability
+    came back as a *different* plugin_name string each time and the
+    exact-match set below never recognized it as something it already
+    had. Native Nessus/AWS reports don't hit this at all — their
+    plugin_name comes from the scanner's own fixed plugin catalog, always
+    byte-identical for the same finding. Collapsing whitespace/punctuation
+    and case before comparing (not changing what's stored, only what's
+    compared) catches the wording drift this specific report type can
+    produce — including trailing punctuation the AI adds inconsistently
+    between runs (e.g. "... Systems" vs "... Systems.", confirmed as a
+    real miss when only whitespace/case were normalized) — without
+    touching the intentional "no duplicate-file check" policy for
+    Premium/unlimited admins.
+    """
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
 
 
 def get_todays_report_id(admin) -> str | None:
@@ -82,15 +111,20 @@ def merge_hosts_into_report(db, target_report_id: str, new_hosts: list) -> dict:
             continue
 
         # Host already exists — merge in only genuinely new vulnerabilities
-        # (same plugin_name on this host = already have it, skip).
+        # (same plugin_name on this host = already have it, skip). Compared
+        # normalized (see _normalize_plugin_name) so re-uploading the same
+        # custom-report file doesn't inflate the count just because the AI
+        # worded an already-known finding slightly differently this time.
         target_host = by_host_name[host_name]
         existing_plugin_names = {
-            v.get("plugin_name") for v in (target_host.get("vulnerabilities") or []) if v.get("plugin_name")
+            _normalize_plugin_name(v.get("plugin_name"))
+            for v in (target_host.get("vulnerabilities") or []) if v.get("plugin_name")
         }
         for vuln in (new_host.get("vulnerabilities") or []):
-            if vuln.get("plugin_name") not in existing_plugin_names:
+            norm_name = _normalize_plugin_name(vuln.get("plugin_name"))
+            if norm_name and norm_name not in existing_plugin_names:
                 target_host.setdefault("vulnerabilities", []).append(vuln)
-                existing_plugin_names.add(vuln.get("plugin_name"))
+                existing_plugin_names.add(norm_name)
 
     total_hosts = len(existing_hosts)
     total_vulnerabilities = sum(len(h.get("vulnerabilities") or []) for h in existing_hosts)
