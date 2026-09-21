@@ -1230,7 +1230,85 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
                                     break
                     if table:
                         host_entry["host_information"] = _html_table_to_map(table)
-                
+
+                # Check for a "plugin-row" style vulnerability summary table —
+                # a DIFFERENT Nessus/Tenable HTML export template than the
+                # "toggleSection" accordion style handled below. Real bug
+                # report: a genuine, valid Nessus HTML export using this flat
+                # table layout (host sections + a table per host with
+                # Severity/CVSS v3.0/VPR Score/EPSS Score/Plugin/Name columns,
+                # rows tagged class="plugin-row"/"plugin-row-header") produced
+                # ZERO hosts/vulnerabilities — the whole file fell through to
+                # the generic-HTML fallback, because every extraction check in
+                # this function only recognized the toggleSection/section-
+                # wrapper/details-header markup. Explicit request: whatever
+                # formatting an admin's Nessus export uses, asset/vuln counts
+                # must come through accurately. This table doesn't carry full
+                # per-finding detail (synopsis/description/solution stay
+                # empty for rows found this way), but severity/CVSS/plugin
+                # ID/name are enough for an accurate count — the actual
+                # requirement here. Matches header columns BY THEIR OWN TEXT
+                # (not a hardcoded column position), so it stays correct even
+                # if this template reorders/adds columns in a future export.
+                if "table-wrapper" in (current.get("class") or []):
+                    plugin_table = current.find("table")
+                    header_row = (
+                        plugin_table.find("tr", class_="plugin-row-header")
+                        if plugin_table else None
+                    )
+                    if header_row:
+                        col_index = {}
+                        for i, cell in enumerate(header_row.find_all("td")):
+                            label = _clean_text(cell).strip().lower()
+                            if label:
+                                col_index[label] = i
+
+                        def _row_cell(cells, label):
+                            idx = col_index.get(label)
+                            if idx is None or idx >= len(cells):
+                                return ""
+                            return _clean_text(cells[idx])
+
+                        for data_row in plugin_table.find_all("tr", class_="plugin-row"):
+                            if total_vulns_seen >= HTML_PARSE_MAX_VULNS_TOTAL:
+                                truncated_due_to_limits = True
+                                break
+                            if len(host_entry["vulnerabilities"]) >= HTML_PARSE_MAX_VULNS_PER_HOST:
+                                truncated_due_to_limits = True
+                                break
+
+                            row_cells = data_row.find_all("td")
+                            plugin_name = _row_cell(row_cells, "name")
+                            if not plugin_name:
+                                continue
+
+                            plugin_id = None
+                            plugin_col = col_index.get("plugin")
+                            if plugin_col is not None and plugin_col < len(row_cells):
+                                plugin_link = row_cells[plugin_col].find("a")
+                                plugin_id = _clean_text(plugin_link) if plugin_link else (
+                                    _clean_text(row_cells[plugin_col]) or None
+                                )
+
+                            host_entry["vulnerabilities"].append({
+                                "plugin_id": plugin_id,
+                                "plugin_name": plugin_name,
+                                "synopsis": "",
+                                "description": "",
+                                "description_points": [],
+                                "see_also": [],
+                                "solution": "",
+                                "risk_factor": _row_cell(row_cells, "severity"),
+                                "cvss_v3_base_score": _row_cell(row_cells, "cvss v3.0"),
+                                "plugin_information": "",
+                                "port": "",
+                                "plugin_output": "",
+                                "plugin_output_url": None,
+                            })
+                            total_vulns_seen += 1
+                        if truncated_due_to_limits:
+                            break
+
                 # Check for vulnerability toggle divs (containing plugin ID and name)
                 onclick = current.get("onclick", "")
                 if "toggleSection" in onclick:
