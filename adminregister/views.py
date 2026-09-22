@@ -1194,11 +1194,28 @@ class FixVulnerabilityCreateAPIView(APIView):
             nessus_coll = db[NESSUS_COLLECTION]
             vuln_card_coll = db[VULN_CARD_COLLECTION]
 
-            # 1. Fetch all fix docs for this report + host + admin
+            # 1. Fetch all fix docs for this report + host.
+            #
+            # Real bug report: created_by is stamped once at record-creation
+            # time (either here via post(), or automatically by
+            # upload_report.views._auto_generate_cards_bg's own
+            # _ensure_fix_vulnerability_record call) and never updated when
+            # a report changes hands via magic-link claim — filtering by
+            # the CURRENT logged-in admin's id matched zero records for any
+            # report whose fix_vulnerabilities were created before the
+            # claim (or by a different backfill script run under a
+            # different admin), even though the report itself, and every
+            # one of its vulnerability_cards, belonged to this admin.
+            # Confirmed live across 3 separate reports: count=0 here while
+            # the same report's cards were fully generated and ready.
+            # Ownership for this report+host is already verified via the
+            # nessus_doc $or lookup right below — this collection's own
+            # post() duplicate-check is likewise scoped to report_id +
+            # host_name + plugin_name only, never created_by, so matching
+            # that same scope here is consistent, not a new relaxation.
             fix_docs = list(fix_coll.find({
                 "report_id": str(report_id),
                 "host_name": host_name,
-                "created_by": admin_id
             }).sort("created_at", -1))
 
             # 2. Load nessus report for this admin + report_id
@@ -1206,6 +1223,16 @@ class FixVulnerabilityCreateAPIView(APIView):
                 "report_id": str(report_id),
                 "$or": [{"admin_id": admin_id}, {"admin_email": admin_email}]
             })
+            # Explicit ownership gate — now that fix_docs above is no
+            # longer scoped by created_by (see its own comment), this is
+            # the only thing standing between this admin and another
+            # admin's fix_vulnerabilities rows for a guessed report_id/
+            # host_name.
+            if not nessus_doc:
+                return Response(
+                    {"detail": "Report not found or access denied."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
             # Build lookup: plugin_name -> vuln data (for the matching host only)
             nessus_vuln_lookup = {}
