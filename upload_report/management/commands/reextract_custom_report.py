@@ -149,6 +149,39 @@ class Command(BaseCommand):
             )
             self.stdout.write(self.style.SUCCESS(f"  updated nessus_reports for report_id={rid}"))
 
+            # Real bug report: running this command more than once on the
+            # same report (e.g. after a fix landed, or because a previous
+            # extraction attempt came back worse due to LLM recall
+            # variance) left every earlier attempt's vulnerability_cards
+            # sitting in Mongo forever — this command only ever ADDS new
+            # cards, it never removed ones for a (host_name, plugin_name)
+            # pair that the new extraction no longer produced. Confirmed
+            # real: a report re-extracted 3 times ended up with 23 cards in
+            # the database for a report that currently only has 10 real
+            # findings, so the Script tab and Register kept showing
+            # vulnerabilities that don't exist in the current data at all.
+            # Safe to delete here — a card is just generated automation/
+            # manual-fix content, cheap to regenerate if the same (host,
+            # vulnerability) pair ever reappears in a later extraction.
+            current_pairs = {
+                (h.get("host_name") or "", v.get("plugin_name") or "")
+                for h in result.get("vulnerabilities_by_host", [])
+                for v in h.get("vulnerabilities", [])
+            }
+            all_cards = list(db["vulnerability_cards"].find(
+                {"report_id": rid}, {"_id": 1, "host_name": 1, "vulnerability_name": 1}
+            ))
+            orphan_ids = [
+                c["_id"] for c in all_cards
+                if (c.get("host_name") or "", c.get("vulnerability_name") or "") not in current_pairs
+            ]
+            if orphan_ids:
+                db["vulnerability_cards"].delete_many({"_id": {"$in": orphan_ids}})
+                self.stdout.write(self.style.WARNING(
+                    f"  removed {len(orphan_ids)} orphaned vulnerability_cards from earlier "
+                    f"extraction attempt(s) — no longer present in the current extraction"
+                ))
+
             admin_email = doc.get("admin_email", "")
             admin_id = doc.get("admin_id", "")
             t = threading.Thread(
