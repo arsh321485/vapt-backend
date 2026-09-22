@@ -18,6 +18,7 @@ parse as the expected JSON, is treated as invalid. We never guess and never
 fabricate a finding that isn't clearly present in the document.
 """
 
+import datetime
 import json
 import logging
 import re
@@ -1169,11 +1170,117 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
                 f"recall attempts — giving up, storing what was found."
             )
 
+    final_total = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
     return {
         "valid": True,
         "type": "custom",
         "scan_info": {"source": "Custom file", "validated_by": "gpt-4o-mini"},
         "total_hosts": len(vulnerabilities_by_host),
-        "total_vulnerabilities": sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host),
+        "total_vulnerabilities": final_total,
         "vulnerabilities_by_host": vulnerabilities_by_host,
+        # Only True when the document states its own finding count AND
+        # extraction actually reached it — see validate_and_extract_custom_report_cached's
+        # docstring for why this, specifically, is the bar for caching a
+        # result and reusing it (without any new GPT call) the next time
+        # this exact file is uploaded again.
+        "recall_complete": stated_total is not None and final_total >= stated_total,
+        "stated_total": stated_total,
     }
+
+
+EXTRACTION_CACHE_COLLECTION = "custom_extraction_cache"
+
+
+def validate_and_extract_custom_report_cached(
+    parsed_data: Dict[str, Any], filename: str, file_hash: str
+) -> Dict[str, Any]:
+    """
+    Same contract as validate_and_extract_custom_report, but backed by a
+    file-content-hash cache so the SAME source file never needs a fresh,
+    non-deterministic GPT extraction more than once.
+
+    Real, repeatedly observed bug: GPT-4o-mini extraction of a prose
+    report (PDF/DOCX/DOC/HTML) genuinely varies run to run — the recall/
+    retry loop above recovers most of that variance, but not always (a
+    retry pass can itself come back empty by chance, stopping the loop
+    early). Confirmed live: the identical FGen PDF, re-uploaded a 4th
+    time by a different admin, came back with 14/22 vulnerabilities and
+    2 entire hosts missing, even though 3 EARLIER uploads of the exact
+    same file had already reached the full, verified 22/22. Every one of
+    those re-uploads was the SAME bytes on disk — there was never a
+    reason to ask the model to re-derive an answer we already had and
+    had already confirmed complete.
+
+    A result only ever enters the cache when validate_and_extract_custom_report
+    marked it recall_complete (the document states its own finding count
+    AND extraction reached it) — an incomplete run like the 14/22 one
+    above is never written to cache, so it can never poison later
+    uploads of the same file with a worse result than one already on
+    file. Once a verified-complete result exists for a given file_hash,
+    every later upload of that exact file reuses it directly — zero
+    extra GPT calls, zero risk of landing on a worse extraction than
+    last time.
+
+    file_hash is the sha256 the caller already computes for its own
+    duplicate-upload check (UploadReportView._save_file_and_hash /
+    admin.py's equivalent) — passed in rather than recomputed here.
+    """
+    from vaptfix.mongo_client import MongoContext
+
+    try:
+        with MongoContext() as db:
+            cached = db[EXTRACTION_CACHE_COLLECTION].find_one({"file_hash": file_hash})
+    except Exception:
+        logger.exception(
+            f"[CustomFileValidation] extraction-cache lookup failed for '{filename}' "
+            f"(file_hash={file_hash}) — falling back to a fresh extraction"
+        )
+        cached = None
+
+    if cached:
+        logger.info(
+            f"[CustomFileValidation] '{filename}' matches a previously verified-complete "
+            f"extraction (file_hash={file_hash}, {cached.get('total_vulnerabilities')} "
+            f"vulnerabilities) — reusing it, no GPT call made"
+        )
+        return {
+            "valid": True,
+            "type": "custom",
+            "scan_info": cached.get("scan_info", {"source": "Custom file", "validated_by": "gpt-4o-mini"}),
+            "total_hosts": cached.get("total_hosts", 0),
+            "total_vulnerabilities": cached.get("total_vulnerabilities", 0),
+            "vulnerabilities_by_host": cached.get("vulnerabilities_by_host", []),
+            "recall_complete": True,
+            "reused_from_cache": True,
+        }
+
+    result = validate_and_extract_custom_report(parsed_data, filename)
+
+    if result.get("valid") and result.get("recall_complete") and file_hash:
+        try:
+            with MongoContext() as db:
+                db[EXTRACTION_CACHE_COLLECTION].update_one(
+                    {"file_hash": file_hash},
+                    {"$set": {
+                        "file_hash": file_hash,
+                        "filename": filename,
+                        "scan_info": result.get("scan_info", {}),
+                        "total_hosts": result.get("total_hosts", 0),
+                        "total_vulnerabilities": result.get("total_vulnerabilities", 0),
+                        "vulnerabilities_by_host": result.get("vulnerabilities_by_host", []),
+                        "cached_at": datetime.datetime.utcnow(),
+                    }},
+                    upsert=True,
+                )
+            logger.info(
+                f"[CustomFileValidation] '{filename}' extraction verified complete "
+                f"({result.get('total_vulnerabilities')} vulnerabilities) — cached for "
+                f"file_hash={file_hash}"
+            )
+        except Exception:
+            logger.exception(
+                f"[CustomFileValidation] failed to write extraction cache for '{filename}' "
+                f"(file_hash={file_hash}) — continuing without caching this result"
+            )
+
+    return result

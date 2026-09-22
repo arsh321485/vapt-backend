@@ -806,9 +806,9 @@ class UploadReportView(APIView):
                     # native Nessus/AWS files, which already have that data from
                     # dispatch_parse, ever hit the old asset-limit check).
                     if parsed_data.get("type") in ("pdf", "csv", "excel", "html", "docx", "doc"):
-                        from .custom_report_ai import validate_and_extract_custom_report
-                        validation_result = validate_and_extract_custom_report(
-                            parsed_data, uploaded_file.name
+                        from .custom_report_ai import validate_and_extract_custom_report_cached
+                        validation_result = validate_and_extract_custom_report_cached(
+                            parsed_data, uploaded_file.name, file_hash
                         )
                         if not validation_result.get("valid"):
                             raise Exception(

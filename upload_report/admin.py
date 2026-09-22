@@ -538,7 +538,7 @@ class UploadReportAdmin(admin.ModelAdmin):
             print(f"MongoDB storage error: {e}")
             return False
 
-    def _validate_custom_if_needed(self, parsed_data, filename):
+    def _validate_custom_if_needed(self, parsed_data, filename, file_hash=""):
         """
         Anything that isn't a recognized Nessus/AWS export (pdf/csv/excel/
         html/docx/doc) needs the same GPT-4o-mini validate+extract step the
@@ -556,8 +556,8 @@ class UploadReportAdmin(admin.ModelAdmin):
         """
         if parsed_data.get("type") not in ("pdf", "csv", "excel", "html", "docx", "doc"):
             return parsed_data, None
-        from .custom_report_ai import validate_and_extract_custom_report
-        validation_result = validate_and_extract_custom_report(parsed_data, filename)
+        from .custom_report_ai import validate_and_extract_custom_report_cached
+        validation_result = validate_and_extract_custom_report_cached(parsed_data, filename, file_hash)
         if not validation_result.get("valid"):
             return parsed_data, (
                 validation_result.get("reason")
@@ -628,7 +628,9 @@ class UploadReportAdmin(admin.ModelAdmin):
                 print(f"[AdminUploadBG] Parse failed report_id={report_id}: {error_msg}", flush=True)
                 return
 
-            parsed_data, custom_error = self._validate_custom_if_needed(parsed_data, original_filename)
+            parsed_data, custom_error = self._validate_custom_if_needed(
+                parsed_data, original_filename, getattr(report_obj, "file_hash", "") or ""
+            )
             if custom_error:
                 report_obj.status = "Parse Error"
                 report_obj.save()
@@ -831,7 +833,9 @@ class UploadReportAdmin(admin.ModelAdmin):
                 parsed_data = dispatch_parse(file_path, uploaded_file.name)
 
                 if parsed_data and "error" not in parsed_data:
-                    parsed_data, custom_error = self._validate_custom_if_needed(parsed_data, uploaded_file.name)
+                    parsed_data, custom_error = self._validate_custom_if_needed(
+                        parsed_data, uploaded_file.name, obj.file_hash or ""
+                    )
                     if custom_error:
                         parsed_data = {"error": custom_error}
 
