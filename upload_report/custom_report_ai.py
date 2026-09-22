@@ -113,6 +113,15 @@ ONE asset — add only ONE identifier for that row, never both as if they were s
 the document has no such scope/target list, leave "all_assets" as an empty list — do not invent
 one from the hosts mentioned in findings.
 
+CAUTION — do not confuse a genuine scope/target list with an unrelated reference table that just
+happens to list URLs, e.g. a "Test Environment vs Production" mapping, a login-page/endpoint
+reference appendix, or a table of specific page URLs (anything ending in a path like "/login",
+"/sign_in", "/#/login", a specific form or endpoint) used elsewhere in the document for context.
+Only the document's own actual assessment-scope table counts. When a genuine scope entry and a
+finding's own host both point at the same domain (one as a bare domain, the other as a full page
+URL with a path), that is the SAME asset — use the bare domain form and do not add the page-URL
+form as if it were a second, separate entry.
+
 Return ONLY a single JSON object, no markdown fences, no commentary, matching exactly this schema:
 
 {{
@@ -789,6 +798,7 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
     # any name not already covered by a finding as a clean (zero-
     # vulnerability) asset instead of leaving it out.
     covered_host_names = {h["host_name"].lower() for h in vulnerabilities_by_host}
+    covered_host_normalized = {_normalize_host_token(h["host_name"]).lower() for h in vulnerabilities_by_host}
     all_assets_raw = result.get("all_assets") or []
     if isinstance(all_assets_raw, list):
         for asset_name in all_assets_raw:
@@ -804,7 +814,19 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
             asset_name = alias_map.get(asset_name.lower(), asset_name)
             if asset_name.lower() in covered_host_names:
                 continue
+            # Real bug report: a scope-list entry that's really just a
+            # specific PAGE on an already-covered host (e.g. "https://
+            # producers-demo.fgeninsurance.com/producers/sign_in" when
+            # "producers-demo.fgeninsurance.com" already has real findings)
+            # still got added as a second, empty "asset" — exact-string
+            # dedup above only ever caught it when the two strings matched
+            # exactly. Normalize to bare domain (strip scheme + path)
+            # before the real dedup check.
+            normalized = _normalize_host_token(asset_name).lower()
+            if normalized in covered_host_normalized:
+                continue
             covered_host_names.add(asset_name.lower())
+            covered_host_normalized.add(normalized)
             vulnerabilities_by_host.append({
                 "host_name": asset_name,
                 "host_information": {},
