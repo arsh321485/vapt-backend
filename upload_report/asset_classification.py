@@ -165,71 +165,6 @@ def _keyword_web_app_or_firewall(host_name: str, host_information: dict, vulnera
     return ""
 
 
-def _keyword_server(host_name: str, host_information: dict, vulnerabilities: list) -> str:
-    """
-    Server keyword pre-check, usable ahead of the GPT classifier — same
-    idea and same priority position as _keyword_web_app_or_firewall (run
-    after it, so a genuine web-app/firewall signal still wins), for the
-    "server" case classify_hosts_via_gpt's own prompt can also produce,
-    but not reliably: GPT is only given an OS-field string, or (when none
-    exists) the host's own finding titles as an OS-INFERENCE signal, and
-    is explicitly told to answer "other" whenever it "doesn't reasonably"
-    imply an OS — a real Nessus/AWS export commonly has plenty of hosts
-    with a genuine SERVER SOFTWARE finding but no OS-implying wording at
-    all (e.g. "Unauthenticated Apache ZooKeeper Instance Exposed",
-    "Outdated nginx Version Disclosed" — ZooKeeper/nginx don't tell you
-    Windows vs Linux, so GPT correctly, faithfully answers "other" for
-    what is nonetheless clearly a server, not a generic/unknown asset).
-    Confirmed live: dev-ofw.digitalinno.com (no host_information at all,
-    findings = exactly those two) landed on "other" this way even though
-    classify_asset_type's own local keyword fallback (_SERVER_SOFTWARE_
-    KEYWORDS/_SERVER_OS_KEYWORDS) would have confidently said "server" —
-    that fallback only ever runs when GPT is unreachable or malformed,
-    never when GPT responds with a low-confidence-but-received "other".
-
-    Deliberately scoped to ONLY the no-explicit-OS-field case (same
-    condition _os_signal_for_host uses to decide whether GPT gets a real
-    OS string or finding titles instead) — a host that DOES have an
-    explicit OS field still goes to GPT exactly as before. That's the
-    "OS se classify karte hain, OS nahi diya to GPT se karwate hain"
-    design: GPT is the one actually equipped to tell an unusual/obscure
-    firewall-appliance OS string (one not in the static _FIREWALL_
-    KEYWORDS list, which is exactly why get_asset_type_map_for_report
-    sends unmatched hosts to GPT in the first place instead of relying on
-    keywords alone) apart from a genuine general-purpose server OS — an
-    earlier version of this function short-circuited to "server" on ANY
-    non-empty os_str, which would have wrongly pre-empted that GPT call
-    for a firewall whose OS string doesn't happen to match the static
-    keyword list yet.
-    """
-    host_information = host_information or {}
-    os_str = (
-        host_information.get("operating-system")
-        or host_information.get("os")
-        or host_information.get("OS")
-        or host_information.get("operating_system")
-        or host_information.get("system-type")
-        or ""
-    ).strip()
-    if os_str:
-        return ""  # explicit OS present — let GPT decide, as designed
-
-    name_lower = (host_name or "").strip().lower()
-    host_info_text = " ".join(str(v) for v in host_information.values() if v)
-    combined_text = (
-        name_lower + " " + host_info_text.lower() + " " + " ".join(
-            f"{v.get('plugin_name', '')} {v.get('description', '')}".lower()
-            for v in (vulnerabilities or [])
-        )
-    )
-    if (
-        any(k.lower() in combined_text for k in _SERVER_SOFTWARE_KEYWORDS)
-        or any(k.lower() in combined_text for k in _SERVER_OS_KEYWORDS)
-    ):
-        return "server"
-    return ""
-
-
 def classify_asset_type(host_name: str, host_information: dict = None, vulnerabilities: list = None) -> str:
     host_information = host_information or {}
     vulnerabilities = vulnerabilities or []
@@ -333,9 +268,9 @@ _CLASSIFY_PROMPT = """You are classifying network scan hosts into device categor
 For each host below, pick exactly ONE category:
 - "firewall" — the OS/platform indicates a firewall, VPN gateway, or network security appliance (examples: FortiOS, PAN-OS, Cisco ASA, SonicOS, pfSense, Check Point GAiA, Cisco Meraki MX)
 - "server" — the OS/platform indicates a general-purpose server/workstation OS (examples: Windows Server, Windows 10/11, Ubuntu, Red Hat/RHEL, CentOS, Debian, macOS, ESXi, Solaris)
-- "other" — the OS/platform is unknown, unclear, or doesn't clearly match either category above — never guess
+- "other" — genuinely nothing usable to go on (e.g. a bare IP with no OS field and no informative findings) — never guess
 
-Each host's "signal" is either a structured OS string, or (when no OS field was detected) a list of that host's vulnerability finding TITLES — infer the likely OS/platform from those titles when you reasonably can (e.g. a title mentioning "OpenSSH" or "Ubuntu" implies Linux; "Microsoft Windows Unsupported Version Detection" implies Windows). If the signal gives you nothing usable, classify as "other".
+Each host's "signal" is either a structured OS string, or (when no OS field was detected) a list of that host's vulnerability finding TITLES. When working from titles, you do NOT need to pin down the exact OS — you only need to decide whether this is a general-purpose server running some service, as opposed to a firewall appliance or something with no signal at all. A title naming ANY server-side software or network service — a web server (nginx, Apache, IIS, Tomcat), a database (MySQL, PostgreSQL, MongoDB), SSH/OpenSSH, FTP, SMB, a message broker or coordination service (ZooKeeper, Kafka, RabbitMQ, Redis), or any other backend daemon — is enough on its own to classify "server", even if it doesn't tell you Windows vs Linux specifically (e.g. "Unauthenticated Apache ZooKeeper Instance Exposed" -> server; "Outdated nginx Version Disclosed" -> server; "Outdated OpenSSH Version Disclosed" -> server). Only fall back to "other" when the titles genuinely give you nothing — no OS hint AND no named server software/service at all.
 
 Hosts:
 {hosts_json}
@@ -519,17 +454,13 @@ def get_asset_type_map_for_report(db, report_id: str, hosts: list) -> dict:
             result[name] = keyword_type
             newly_stored[name] = keyword_type
             continue
-        # Real bug report: see _keyword_server's own docstring — a host
-        # with a confident server-software signal but no OS-implying
-        # wording (e.g. ZooKeeper/nginx findings, no host_information)
-        # was reaching GPT and getting a faithful but wrong "other" back,
-        # when the same signal already available locally would have said
-        # "server" with no API call needed at all.
-        server_type = _keyword_server(name, h.get("host_information"), h.get("vulnerabilities"))
-        if server_type:
-            result[name] = server_type
-            newly_stored[name] = server_type
-            continue
+        # Real requirement: when a host has no explicit OS field, GPT is
+        # still the one that should classify it — from the host's own
+        # finding titles as its signal (see _os_signal_for_host and
+        # _CLASSIFY_PROMPT, which now explicitly teaches it that a title
+        # naming server-side software/services like nginx/OpenSSH/
+        # ZooKeeper implies "server" even with no OS name attached) —
+        # not a local keyword shortcut that skips the model entirely.
         to_classify.append(h)
 
     if to_classify:
