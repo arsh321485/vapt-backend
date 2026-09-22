@@ -659,6 +659,63 @@ def _apply_host_aliases(vulnerabilities_by_host: list, alias_map: Dict[str, str]
     return [merged[c] for c in order]
 
 
+def _merge_by_normalized_domain(vulnerabilities_by_host: list) -> list:
+    """
+    Final safety-net merge pass — groups host entries purely by their
+    normalized bare-domain form (strip scheme + path), independent of
+    whatever alias_map an earlier step built. Real bug report: a LATER
+    recall-pass iteration can introduce a host_name variant (e.g.
+    "https://producers-demo.fgeninsurance.com", when the first pass had
+    already settled on the bare "producers-demo.fgeninsurance.com") that
+    the alias_map built from the FIRST pass's own text scan never saw —
+    _apply_host_aliases only ever does an exact-key lookup against that
+    fixed, one-time map, so a brand new variant slips straight past it.
+    This instead re-derives the grouping fresh from whatever host_name
+    strings are actually present right now, every time it's called — no
+    dependency on when or how each variant was introduced.
+
+    Canonical picked per group: prefer a member with NO scheme prefix
+    (bare domain — matches how these reports' own summary tables usually
+    label an asset), longest among those; falls back to the longest
+    member overall if every member in the group has a scheme prefix.
+    Dedupes vulnerabilities by plugin_name while merging (same finding
+    reported under two written forms of the same host is one finding, not
+    two).
+    """
+    groups: Dict[str, list] = {}
+    order: list = []
+    for h in vulnerabilities_by_host:
+        key = _normalize_host_token(h.get("host_name") or "").lower()
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(h)
+
+    merged: list = []
+    for key in order:
+        members = groups[key]
+        if len(members) == 1:
+            merged.append(members[0])
+            continue
+        bare = [m for m in members if not re.match(r"^https?://", m.get("host_name") or "", re.IGNORECASE)]
+        pool = bare or members
+        canonical_host = max(pool, key=lambda m: len(m.get("host_name") or ""))["host_name"]
+        host_information: Dict[str, Any] = {}
+        vulns: list = []
+        seen_pairs = set()
+        for m in members:
+            if not host_information and m.get("host_information"):
+                host_information = m["host_information"]
+            for v in m.get("vulnerabilities") or []:
+                pkey = (v.get("plugin_name") or "").strip().lower()
+                if pkey in seen_pairs:
+                    continue
+                seen_pairs.add(pkey)
+                vulns.append(v)
+        merged.append({"host_name": canonical_host, "host_information": host_information, "vulnerabilities": vulns})
+    return merged
+
+
 def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: str = "") -> Dict[str, Any]:
     """
     One single GPT call: validate + extract a single already-sized-to-fit
@@ -992,6 +1049,7 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
     # enough here).
     alias_map = _resolve_alias_groups(chunk_result.get("alias_map") or {}, _extract_ip_hostname_aliases(truncated))
     vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
+    vulnerabilities_by_host = _merge_by_normalized_domain(vulnerabilities_by_host)
 
     # Real bug report: a single extraction pass over a long prose document
     # can silently skip a genuine finding — confirmed on a real PDF (7
@@ -1023,6 +1081,8 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         added_before = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
         _merge_missed_findings(vulnerabilities_by_host, missed_hosts, filename)
         vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
+        # Safety net beyond the fixed alias_map — see its own docstring.
+        vulnerabilities_by_host = _merge_by_normalized_domain(vulnerabilities_by_host)
         added_after = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
 
         if stated_total is None:
