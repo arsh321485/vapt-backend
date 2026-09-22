@@ -21,7 +21,7 @@ fabricate a finding that isn't clearly present in the document.
 import json
 import logging
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from django.conf import settings
 
@@ -211,6 +211,30 @@ DOCUMENT TEXT:
 {document_text}
 ---
 """
+
+
+_STATED_TOTAL_RE = re.compile(
+    r"Total\s+Number\s+of\s+Distinct\s+Vulnerabilities\s+Discovered\s*[:\-]?\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_stated_total(document_text: str) -> Optional[int]:
+    """
+    Best-effort extraction of the document's OWN claimed total finding
+    count (e.g. "Total Number of Distinct Vulnerabilities Discovered: 22"
+    — the exact phrase both real SecureITLab pentest report templates
+    tested against this session use). Returns None if the document doesn't
+    state one anywhere recognizable — extraction still proceeds normally,
+    just without this extra guardrail.
+    """
+    m = _STATED_TOTAL_RE.search(document_text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
 
 
 def _find_missed_findings(document_text: str, filename: str, vulnerabilities_by_host: list) -> list:
@@ -971,20 +995,56 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
 
     # Real bug report: a single extraction pass over a long prose document
     # can silently skip a genuine finding — confirmed on a real PDF (7
-    # findings per the document's own stated total, only 6 extracted). One
-    # cheap follow-up pass, scoped to only what's missing against the same
-    # text, closes most of that gap. Best-effort/additive only — see
-    # _find_missed_findings's own docstring.
-    missed_hosts = _find_missed_findings(truncated, filename, vulnerabilities_by_host)
-    # Canonicalize the recall pass's own host names through the SAME alias
-    # map before merging — it's a fresh, independent LLM call, so nothing
-    # stops it from writing an asset in yet another form (e.g. the IP where
-    # the first pass settled on the hostname).
-    for h in missed_hosts or []:
-        if isinstance(h, dict) and h.get("host_name"):
-            h["host_name"] = alias_map.get(h["host_name"].strip().lower(), h["host_name"])
-    _merge_missed_findings(vulnerabilities_by_host, missed_hosts, filename)
-    vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
+    # findings per the document's own stated total, only 6 extracted). A
+    # single follow-up pass helps but isn't reliable enough on its own —
+    # confirmed on a real report where a SECOND independent extraction
+    # attempt (re-running this whole function from scratch) came back with
+    # LESS coverage than the first, not more (6 hosts' worth of findings
+    # that the first run found cleanly went missing the second time). LLM
+    # recall genuinely varies run to run; one retry is not a fix.
+    #
+    # Guardrail: when the document states its own total finding count (see
+    # _extract_stated_total), keep running the same "what's missing" recall
+    # pass — each one only asking about whatever's STILL not covered —
+    # until the extracted total reaches that stated number or a retry cap
+    # is hit. Every retry is strictly additive (see _merge_missed_findings),
+    # so this can only recover findings, never lose ones already found.
+    stated_total = _extract_stated_total(truncated)
+    max_recall_attempts = 3
+    for attempt in range(1, max_recall_attempts + 1):
+        missed_hosts = _find_missed_findings(truncated, filename, vulnerabilities_by_host)
+        # Canonicalize the recall pass's own host names through the SAME
+        # alias map before merging — it's a fresh, independent LLM call, so
+        # nothing stops it from writing an asset in yet another form (e.g.
+        # the IP where an earlier pass settled on the hostname).
+        for h in missed_hosts or []:
+            if isinstance(h, dict) and h.get("host_name"):
+                h["host_name"] = alias_map.get(h["host_name"].strip().lower(), h["host_name"])
+        added_before = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
+        _merge_missed_findings(vulnerabilities_by_host, missed_hosts, filename)
+        vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
+        added_after = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
+
+        if stated_total is None:
+            break  # no ground truth to check against — one pass is all we do
+        if added_after >= stated_total:
+            break
+        if added_after == added_before:
+            # This pass found nothing new — another identical retry is
+            # unlikely to either; stop rather than spend more calls for
+            # nothing.
+            logger.warning(
+                f"[CustomFileValidation] '{filename}' still short of the document's "
+                f"stated total ({added_after}/{stated_total}) after attempt {attempt}, "
+                f"but this pass found nothing new — stopping retries."
+            )
+            break
+        if attempt == max_recall_attempts:
+            logger.warning(
+                f"[CustomFileValidation] '{filename}' still short of the document's "
+                f"stated total ({added_after}/{stated_total}) after {max_recall_attempts} "
+                f"recall attempts — giving up, storing what was found."
+            )
 
     return {
         "valid": True,
