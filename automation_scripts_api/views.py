@@ -762,16 +762,24 @@ def admin_list_scripts(request):
 def admin_download_stats(request):
     """
     Columns: Vulnerability Name | Severity | No. of Times Downloaded | Team
-    Scoped to the plugin_ids present across ALL of the admin's uploaded
-    reports (not just the latest — see _load_all_reports_plugin_ids) —
-    `automation_scripts` itself is a global collection shared across every
-    admin/report, so without this filter every admin sees every script ever
-    loaded, not just the ones relevant to their own data.
 
-    "No. of Times Downloaded" is this admin's OWN team's total (summed
-    across every UserDetail under this admin from script_user_downloads),
-    not the global all-admins-on-the-platform counter stored on
-    automation_scripts.download_count.
+    Real bug report: this used to ALSO merge in "curated" automation_scripts
+    library rows (see _build_stats), matched purely by plugin_id/vulnerability
+    NAME against a static ~63-script library — completely independent of
+    whether THIS report's own vulnerability_cards.automation_card had
+    actually finished generating for that specific finding. A freshly
+    uploaded report's vulnerability whose name happened to match a generic
+    curated-library script (e.g. "ICMP Timestamp Request", "SSL Medium
+    Strength Cipher Suites") showed up — and counted — here immediately,
+    even though its own per-report AI automation_card was still pending/
+    not yet generated, making it look like automation was already ready for
+    that particular finding when it wasn't. Explicit product request: the
+    Script tab must only count/list a vulnerability once ITS OWN
+    automation_card has actually reached "full"/"partial" (see
+    _ai_automation_stats_rows, which already gates on exactly that) — never
+    a moment before. The curated-library matching is dropped from this
+    response entirely; a finding still awaiting its own card should read as
+    "in progress" wherever it's shown, not as an already-available script.
     """
     admin_id = str(request.user.id)
     admin_email = getattr(request.user, "email", None)
@@ -785,12 +793,6 @@ def admin_download_stats(request):
     from billing.enforcement import is_freemium, _is_unlimited_admin
     premium_required = is_freemium(request.user) and not _is_unlimited_admin(request.user)
 
-    member_emails = []
-    if UserDetail:
-        member_emails = list(
-            UserDetail.objects.filter(admin_id=admin_id).values_list("email", flat=True)
-        )
-
     with MongoContext() as db:
         report_id, uploaded_at, report_ids, plugin_ids, vuln_names = _load_all_reports_plugin_ids(db, admin_id, admin_email)
 
@@ -800,44 +802,8 @@ def admin_download_stats(request):
                 status=404,
             )
 
-        docs = list(db["automation_scripts"].find(
-            {"plugin_id": {"$in": list(plugin_ids)}},
-            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1}
-        ))
-        # AWS/custom report vulnerabilities don't carry a real Nessus
-        # plugin_id (AWS: its own finding ID; custom: always None) — match
-        # those by vulnerability name instead, against the same library.
-        seen_keys = {(d.get("plugin_id"), (d.get("os") or "").strip().lower()) for d in docs}
-        for d in _fetch_scripts_by_name(vuln_names):
-            key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
-            if key not in seen_keys:
-                seen_keys.add(key)
-                docs.append({"plugin_id": d.get("plugin_id"), "vulnerability": d.get("vulnerability"), "severity": d.get("severity"), "download_count": d.get("download_count") or 0, "os": d.get("os")})
-        docs.sort(key=lambda d: d.get("download_count", 0), reverse=True)
-
-        all_plugin_ids = list({d.get("plugin_id") for d in docs if d.get("plugin_id") is not None})
-
-        team_count_by_key = {}
-        if member_emails and all_plugin_ids:
-            for row in db["script_user_downloads"].find(
-                {"plugin_id": {"$in": all_plugin_ids}, "user_email": {"$in": member_emails}},
-                {"_id": 0, "plugin_id": 1, "os": 1, "download_count": 1},
-            ):
-                key = (row["plugin_id"], (row.get("os") or "").strip().lower())
-                team_count_by_key[key] = team_count_by_key.get(key, 0) + row.get("download_count", 0)
-
-    # Replace the global counter with this admin's own team's total before
-    # formatting, matched by (plugin_id, os) since a plugin_id can have
-    # multiple OS variants.
-    for d in docs:
-        key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
-        d["download_count"] = team_count_by_key.get(key, 0)
-
-    curated_stats = _build_stats(docs, report_id=report_ids)
-    with MongoContext() as db:
         ai_rows = _ai_automation_stats_rows(db, report_ids)
-    stats = _merge_ai_and_curated_stats(curated_stats, ai_rows)
-    stats.sort(key=lambda s: s["download_count"], reverse=True)
+    stats = sorted(ai_rows, key=lambda s: s.get("download_count", 0), reverse=True)
     return Response({
         "report_id": str(report_id),
         "count": len(stats),
@@ -1066,15 +1032,21 @@ def user_download_script(request, plugin_id):
 def user_download_stats(request):
     """
     Columns: Vulnerability Name | Severity | No. of Times Downloaded | Team
-    Scoped to the plugin_ids present across ALL of the member's admin's
-    uploaded reports, then further filtered to the member's own assigned team(s).
-    ?team=Patch+Management — narrow to one specific team when the member
-    belongs to more than one (same convention as register/latest/vulns/).
+    Scoped to the member's own assigned team(s). ?team=Patch+Management —
+    narrow to one specific team when the member belongs to more than one
+    (same convention as register/latest/vulns/).
 
     "No. of Times Downloaded" here is THIS member's own downloads only —
     admin_download_stats (the admin's own view) is the one that shows the
     whole team's combined total; a member's Scripts tab shows just what
     they personally downloaded, not everyone's combined count.
+
+    Real bug report: see admin_download_stats' own docstring — the curated
+    automation_scripts library matching (by plugin_id/vulnerability name,
+    independent of this report's own AI card generation) used to be merged
+    in here too, so a finding could count/appear before its own
+    automation_card had actually reached "full"/"partial". Dropped entirely;
+    only _ai_automation_stats_rows (already gated on that) feeds this now.
     """
     admin_id, admin_email, teams = _resolve_admin_and_teams(request)
     if not admin_id or not teams:
@@ -1095,8 +1067,6 @@ def user_download_stats(request):
     active_teams = [selected_team] if selected_team and selected_team in teams else teams
     teams_lower = {t.lower() for t in active_teams}
 
-    member_emails = [request.user.email] if getattr(request.user, "email", None) else []
-
     with MongoContext() as db:
         report_id, uploaded_at, report_ids, plugin_ids, vuln_names = _load_all_reports_plugin_ids(db, admin_id, admin_email)
 
@@ -1106,50 +1076,11 @@ def user_download_stats(request):
                 status=404,
             )
 
-        docs = list(db["automation_scripts"].find(
-            {"plugin_id": {"$in": list(plugin_ids)}},
-            {"_id": 0, "plugin_id": 1, "vulnerability": 1, "severity": 1, "download_count": 1, "os": 1}
-        ))
-        # AWS/custom report vulnerabilities don't carry a real Nessus
-        # plugin_id — match those by vulnerability name against the library.
-        seen_keys = {(d.get("plugin_id"), (d.get("os") or "").strip().lower()) for d in docs}
-        for d in _fetch_scripts_by_name(vuln_names):
-            key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
-            if key not in seen_keys:
-                seen_keys.add(key)
-                docs.append({"plugin_id": d.get("plugin_id"), "vulnerability": d.get("vulnerability"), "severity": d.get("severity"), "download_count": d.get("download_count") or 0, "os": d.get("os")})
-        docs.sort(key=lambda d: d.get("download_count", 0), reverse=True)
-
-        all_plugin_ids = list({d.get("plugin_id") for d in docs if d.get("plugin_id") is not None})
-
-        own_count_by_key = {}
-        if member_emails and all_plugin_ids:
-            for row in db["script_user_downloads"].find(
-                {"plugin_id": {"$in": all_plugin_ids}, "user_email": {"$in": member_emails}},
-                {"_id": 0, "plugin_id": 1, "os": 1, "download_count": 1},
-            ):
-                key = (row["plugin_id"], (row.get("os") or "").strip().lower())
-                own_count_by_key[key] = own_count_by_key.get(key, 0) + row.get("download_count", 0)
-    logger.info(
-        f"[ScriptStats:user] email={member_emails} plugin_ids={all_plugin_ids} "
-        f"own_download_rows_matched={len(own_count_by_key)} keys={list(own_count_by_key.keys())}"
-    )
-
-    # Replace the global counter with just THIS member's own count before
-    # formatting, matched by (plugin_id, os) since a plugin_id can have
-    # multiple OS variants.
-    for d in docs:
-        key = (d.get("plugin_id"), (d.get("os") or "").strip().lower())
-        d["download_count"] = own_count_by_key.get(key, 0)
-
-    curated_stats = [s for s in _build_stats(docs, report_id=report_ids) if s["team"].lower() in teams_lower]
-    with MongoContext() as db:
         ai_rows = [
             r for r in _ai_automation_stats_rows(db, report_ids, download_role="user")
             if (r.get("team") or "").lower() in teams_lower
         ]
-    stats = _merge_ai_and_curated_stats(curated_stats, ai_rows)
-    stats.sort(key=lambda s: s["download_count"], reverse=True)
+    stats = sorted(ai_rows, key=lambda s: s.get("download_count", 0), reverse=True)
     return Response({
         "report_id": str(report_id),
         "teams": active_teams,

@@ -20,7 +20,18 @@ class FixVulnerabilityCreateSerializer(serializers.Serializer):
     """
     Serializer for creating a fix vulnerability with required and optional fields.
     """
-    id = serializers.CharField(required=True)
+    # Real bug report: this was required=True, but the view never actually
+    # validates/matches on it (see FixVulnerabilityCreateAPIView.post's own
+    # "do NOT use 'id' field" comment — the real lookup is host_name +
+    # plugin_name against the latest report). Some pages that can trigger
+    # Manual/Automated Fix (e.g. the Assets tab) never had a register-
+    # sourced id to send at all, so this requirement silently blocked the
+    # create call from ever firing — "Generating manual fix steps..."
+    # stayed stuck forever with no error, since the request was never even
+    # sent. Optional now; the view fills in a fresh UUID when omitted,
+    # exactly like LatestSuperAdminVulnerabilityRegisterAPIView already
+    # does for its own "id" field.
+    id = serializers.CharField(required=False, allow_blank=True, default="")
     plugin_name = serializers.CharField(required=True)
     risk_factor = serializers.CharField(required=True)
     port = serializers.CharField(required=False, allow_blank=True, default="")

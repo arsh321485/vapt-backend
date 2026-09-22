@@ -843,7 +843,11 @@ class FixVulnerabilityCreateAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         validated = serializer.validated_data
 
-        id_req = validated["id"]
+        # "id" is client-supplied but never matched against anything (see
+        # the "do NOT use 'id' field" note at the duplicate-check below) —
+        # it's only ever stored/echoed back. A caller with no register-
+        # sourced id to send (e.g. the Assets tab) can safely omit it.
+        id_req = validated.get("id") or str(uuid.uuid4())
         plugin_name_req = validated["plugin_name"]
         risk_factor_req = validated["risk_factor"]
         port_req = validated.get("port", "")

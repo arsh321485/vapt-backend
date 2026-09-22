@@ -79,15 +79,39 @@ in the "hosts" array — do not collapse them into just one representative host 
 any of the listed hosts. A report with 3 distinct findings where one of them lists 12 affected
 hosts should produce far more than 3 total host/vulnerability entries.
 
+CRITICAL — one physical asset is very often WRITTEN multiple different ways across the same
+document; do not let that turn one asset into several. The same target may appear as a bare IP
+("119.92.208.117"), as a hostname/URL ("sas.dos1.ph", "https://sas.dos1.ph/N/"), or as a combined
+"IP / hostname" pair on one line — sometimes even a different combination per finding. These are
+NOT different assets, they are the same asset written differently. Resolve this BEFORE extracting:
+  - Look for the document's own per-asset summary table (e.g. "Security Issues per Host/IP(s)",
+    "Security Issues per URL(s)", "Vulnerabilities Per Host", or similar) — whatever identifier
+    THAT table uses for a given asset is the canonical host_name for it.
+  - Use that SAME canonical host_name for every finding affecting that asset, even when a
+    particular finding's own "Host/IP(s) Affected" line only gives the IP, only the hostname/URL,
+    or a differently-formatted variant of the same target.
+  - If there is no such summary table to anchor on, pick whichever single written form is used
+    most often for that target across the findings, and use it consistently everywhere.
+  - Never create a second, near-duplicate host entry just because one finding happened to use a
+    different written form of a target you've already used elsewhere in this same extraction.
+  - Safety net — a long document makes it easy to slip and use a different written form of the
+    same asset somewhere later in this same response without realizing it. Because of that, ALSO
+    list every asset that has more than one written form ANYWHERE in the document under
+    "host_aliases" below (canonical form + every alternate IP/hostname/URL form seen for it) — this
+    lets those get merged back together even if "hosts" itself isn't perfectly consistent.
+
 ALSO — separately from the per-finding "hosts" above — look for a scope/target/inventory
 list: a section like "Scope of Assessment", "Target(s)", "Assets Tested", "In-Scope Systems",
 or any table/list that enumerates every asset that was part of this assessment (commonly near
-the start of the document, often with a Description/IP or similar column). List EVERY
-identifier from that list under "all_assets" below, in the exact form it appears in the
-document — including ones that never show up in any specific finding's "Host(s) Affected"
-(a host can be tested and found clean, with zero findings, and still belongs here). If the
-document has no such scope/target list, leave "all_assets" as an empty list — do not invent one
-from the hosts mentioned in findings.
+the start of the document, often with a Description/IP or similar column). List EVERY DISTINCT
+ASSET from that list under "all_assets" below, using for each one the SAME canonical host_name
+you resolved above — including ones that never show up in any specific finding's "Host(s)
+Affected" (a host can be tested and found clean, with zero findings, and still belongs here). If
+one row of that list gives BOTH a hostname/item name AND an IP for what is clearly the same single
+entry (e.g. an "ITEM" column and an "IP" column side by side for one S.No.), that is still exactly
+ONE asset — add only ONE identifier for that row, never both as if they were separate assets. If
+the document has no such scope/target list, leave "all_assets" as an empty list — do not invent
+one from the hosts mentioned in findings.
 
 Return ONLY a single JSON object, no markdown fences, no commentary, matching exactly this schema:
 
@@ -109,16 +133,179 @@ Return ONLY a single JSON object, no markdown fences, no commentary, matching ex
       ]
     }}
   ],
-  "all_assets": ["<every asset/host identifier from the document's own scope/target/inventory list, else empty list>"]
+  "all_assets": ["<every asset/host identifier from the document's own scope/target/inventory list, else empty list>"],
+  "host_aliases": [
+    {{
+      "canonical": "<the exact host_name string you used for this asset in 'hosts'/'all_assets' above>",
+      "also_known_as": ["<every OTHER IP/hostname/URL form of this SAME asset seen anywhere in the document, even ones you did not use as a host_name>"]
+    }}
+  ]
 }}
 
-If invalid, "hosts" and "all_assets" must both be empty lists.
+If invalid, "hosts", "all_assets", and "host_aliases" must all be empty lists. If no asset in this
+document has more than one written form, "host_aliases" is an empty list too — most reports need
+one.
 
 DOCUMENT TEXT:
 ---
 {document_text}
 ---
 """
+
+
+RECALL_CHECK_PROMPT = """You previously extracted vulnerability findings from the document below. \
+Below is the list of vulnerability/finding names (plugin_name) already extracted, one per \
+host/finding pair:
+
+{already_extracted}
+
+A single extraction pass over a long document can sometimes miss a genuine finding entirely, with \
+no error or warning. Re-read the FULL document text below carefully and look specifically for any \
+vulnerability/security finding whose NAME is not already covered by the list above for at least \
+one of its affected hosts (a finding already listed for every host it affects should NOT be \
+repeated; if that SAME finding name also affects an additional host not already paired with it \
+above, that host/finding pair IS missing and must be included). Pay particular attention to \
+whether the document itself states a total finding count or a per-severity breakdown (e.g. "Total \
+Number of Distinct Vulnerabilities Discovered", a Critical/High/Medium/Low count, or a per-asset \
+summary table) — if the count implied by the list above doesn't match what the document claims, \
+look again for the gap, most often a whole finding subsection that got skipped.
+
+Use the exact same host_name convention already used above — if a finding you find here affects a \
+host already named in that list, reuse that exact same host_name string; never introduce a \
+different written form (IP vs hostname vs URL) of an asset already covered above.
+
+Return ONLY a JSON object with any MISSED host/finding pairs, in this exact schema — nothing else, \
+no markdown fences, no commentary:
+
+{{
+  "hosts": [
+    {{
+      "host_name": "<asset/host identifier>",
+      "operating_system": "<OS/platform string if stated, else \\"\\">",
+      "vulnerabilities": [
+        {{
+          "plugin_name": "<vulnerability/finding name>",
+          "description": "<what the finding says>",
+          "risk_factor": "<Critical|High|Medium|Low|Info>",
+          "solution": "<suggested fix/mitigation text if present, else \\"\\">",
+          "cvss_v3_base_score": "<score if present, else \\"\\">"
+        }}
+      ]
+    }}
+  ]
+}}
+
+If nothing was missed, return exactly {{"hosts": []}}.
+
+DOCUMENT TEXT:
+---
+{document_text}
+---
+"""
+
+
+def _find_missed_findings(document_text: str, filename: str, vulnerabilities_by_host: list) -> list:
+    """
+    Second, self-check GPT pass over a prose (pdf/docx/doc/html) document —
+    real bug report: a single extraction call over a long report can skip a
+    genuine finding entirely with no error or signal (confirmed on a real
+    PDF: the model returned 6 of the document's own 7 findings — one
+    "Missing Security Headers" Low finding just never appeared, silently,
+    even though its text was present and well within MAX_INPUT_CHARS).
+
+    Re-reads the SAME document text, given what the first pass already
+    found, and asks only for whatever's missing. Best-effort and additive
+    only: any failure here (LLM error, unparseable response, empty result)
+    just means nothing gets added — it never removes or changes what the
+    first pass already found.
+    """
+    if not document_text:
+        return []
+    already_lines = []
+    for h in vulnerabilities_by_host:
+        host_name = h.get("host_name") or ""
+        for v in h.get("vulnerabilities") or []:
+            already_lines.append(f"- {host_name}: {v.get('plugin_name')}")
+    already_extracted = "\n".join(already_lines) or "(none)"
+
+    try:
+        llm = _get_validation_llm()
+        prompt = RECALL_CHECK_PROMPT.format(already_extracted=already_extracted, document_text=document_text)
+        response = llm.invoke(prompt)
+        raw_content = getattr(response, "content", "") or ""
+    except Exception as exc:
+        logger.warning(f"[CustomFileValidation] '{filename}' recall-check LLM call failed (non-fatal): {exc}")
+        return []
+
+    try:
+        cleaned = _strip_json_fences(raw_content)
+        result = json.loads(cleaned)
+    except Exception as exc:
+        logger.warning(
+            f"[CustomFileValidation] '{filename}' recall-check response unparseable (non-fatal): {exc}"
+        )
+        return []
+
+    missed_hosts = (result or {}).get("hosts") if isinstance(result, dict) else None
+    return missed_hosts if isinstance(missed_hosts, list) else []
+
+
+def _merge_missed_findings(vulnerabilities_by_host: list, missed_hosts: list, filename: str) -> None:
+    """Mutates vulnerabilities_by_host in place, adding any genuinely-new host/finding pairs
+    _find_missed_findings turned up. Never touches or duplicates anything already present."""
+    if not missed_hosts:
+        return
+    host_index = {h["host_name"]: h for h in vulnerabilities_by_host}
+    existing_pairs = {
+        ((h.get("host_name") or "").strip().lower(), (v.get("plugin_name") or "").strip().lower())
+        for h in vulnerabilities_by_host for v in h.get("vulnerabilities") or []
+    }
+    added = 0
+    for h in missed_hosts:
+        if not isinstance(h, dict):
+            continue
+        host_name = (h.get("host_name") or "").strip()
+        if not host_name:
+            continue
+        for v in h.get("vulnerabilities") or []:
+            if not isinstance(v, dict):
+                continue
+            plugin_name = (v.get("plugin_name") or "").strip()
+            if not plugin_name:
+                continue
+            key = (host_name.lower(), plugin_name.lower())
+            if key in existing_pairs:
+                continue
+            existing_pairs.add(key)
+            description = (v.get("description") or "").strip()
+            new_vuln = {
+                "plugin_id": None,
+                "plugin_name": plugin_name,
+                "synopsis": "",
+                "description": description,
+                "description_points": [description],
+                "solution": (v.get("solution") or "").strip(),
+                "see_also": [],
+                "risk_factor": (v.get("risk_factor") or "").strip().title(),
+                "cvss_v3_base_score": str(v.get("cvss_v3_base_score") or ""),
+                "plugin_information": "",
+                "plugin_output": "",
+                "plugin_output_url": None,
+            }
+            if host_name in host_index:
+                host_index[host_name]["vulnerabilities"].append(new_vuln)
+            else:
+                os_str = (h.get("operating_system") or "").strip()
+                new_host = {
+                    "host_name": host_name,
+                    "host_information": {"operating-system": os_str} if os_str else {},
+                    "vulnerabilities": [new_vuln],
+                }
+                vulnerabilities_by_host.append(new_host)
+                host_index[host_name] = new_host
+            added += 1
+    if added:
+        logger.info(f"[CustomFileValidation] '{filename}' recall-check pass added {added} missed finding(s)")
 
 
 def _get_validation_llm():
@@ -149,12 +336,31 @@ def _get_validation_llm():
     return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=16384, timeout=90, max_retries=1)
 
 
+_BROKEN_HYPHEN_RE = re.compile(r"(\w) -(\w)")
+
+
+def _fix_broken_hyphens(text: str) -> str:
+    """
+    PyPDF2 (and some DOCX renders) routinely insert a stray space right
+    before a hyphen inside a compound word at certain kerning/rendering
+    boundaries — e.g. a Scope table's "maynilad-csat.dos1.ph" comes out as
+    "maynilad -csat.dos1.ph". Confirmed real: that single stray space split
+    one hostname into what looked like two different tokens downstream,
+    contributing to the same asset getting extracted as two separate hosts.
+    Only collapses "<word char> -<word char>" (hyphen immediately followed
+    by another word char, no space after it) — a real em/en-dash range like
+    "2020 - 2021" always has a space AFTER the hyphen too and is untouched.
+    """
+    return _BROKEN_HYPHEN_RE.sub(r"\1-\2", text)
+
+
 def _extract_document_text(parsed_data: Dict[str, Any]) -> str:
     """Pull the best available raw text out of whatever the generic parsers produced."""
     report_type = parsed_data.get("type")
 
     if report_type in ("pdf", "docx", "doc"):
-        return parsed_data.get("text_full") or parsed_data.get("text_preview") or ""
+        text = parsed_data.get("text_full") or parsed_data.get("text_preview") or ""
+        return _fix_broken_hyphens(text)
 
     if report_type == "html":
         return parsed_data.get("text_preview") or ""
@@ -213,6 +419,211 @@ def _iter_row_chunks(columns, rows, max_chars: int = MAX_INPUT_CHARS):
 
     if chunk_lines:
         yield header + "\n" + "\n".join(chunk_lines)
+
+
+_IP_TOKEN_RE = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
+_HOSTNAME_TOKEN_RE = re.compile(
+    r'\bhttps?://[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|\b[a-zA-Z0-9][a-zA-Z0-9-]*(?:\.[a-zA-Z0-9][a-zA-Z0-9-]*)+\b'
+)
+
+
+def _normalize_host_token(token: str) -> str:
+    """Strip a URL down to its bare domain (scheme + path removed) for alias matching."""
+    t = re.sub(r'^https?://', '', token.strip(), flags=re.IGNORECASE)
+    return t.split('/')[0].rstrip('.')
+
+
+def _looks_like_real_ip(candidate: str) -> bool:
+    """
+    Real bug report: the bare _IP_TOKEN_RE pattern also matches numbered
+    section headings like "2.6.2.5" (right before a finding's title, e.g.
+    "2.6.2.5 ASP.NET Verbose Error Messages Disclosure") — dot-separated
+    digit groups are structurally identical to an IPv4 address. A genuine
+    target IP in these reports (119.92.208.117, 139.135.69.221, ...) almost
+    always has at least two octets in double digits or more; a section
+    number's octets are consistently tiny (single digits). Cheap enough
+    to reduce false-positive "aliases" without needing real IP knowledge.
+    """
+    octets = candidate.split(".")
+    if len(octets) != 4:
+        return False
+    return sum(1 for o in octets if int(o) >= 10) >= 2
+
+
+def _extract_ip_hostname_aliases(document_text: str) -> Dict[str, str]:
+    """
+    Deterministic, regex-based pre-scan of the raw document text for lines
+    that pair a bare IP with a hostname/URL for the SAME target — e.g.
+    "119.92.208.117 / sas.dos1.ph", "sas.dos1.ph  119.92.208.117" (a Scope
+    table row), "119.92.208.117 / https://sas.dos1.ph".
+
+    Real bug report: asking the model to self-report every alias it used
+    (VALIDATION_PROMPT's "host_aliases" field) isn't reliable on its own —
+    confirmed on a real PDF where the model still used 3+ different written
+    forms of the SAME asset across one response despite that instruction, a
+    long document makes perfect self-consistency within one generation
+    unreliable. A line that plainly contains exactly one IP and exactly one
+    hostname/URL token next to each other is almost never a coincidence —
+    this is a much stronger, ground-truth signal straight from the source
+    text, so it's applied on top of (and overrides on conflict) whatever
+    the model itself reported.
+
+    Only fires when a line has EXACTLY one IP and EXACTLY one hostname-like
+    token — a line with more than one of either is ambiguous and skipped
+    rather than guessed at. Hostname is preferred as the canonical display
+    form (matches how these reports' own per-asset summary tables usually
+    label an asset), with the IP folded into it as an alias.
+    """
+    alias_map: Dict[str, str] = {}
+    canonical_by_ip: Dict[str, str] = {}
+    for line in document_text.splitlines():
+        ips = [ip for ip in _IP_TOKEN_RE.findall(line) if _looks_like_real_ip(ip)]
+        hosts = [h for h in _HOSTNAME_TOKEN_RE.findall(line) if not _IP_TOKEN_RE.fullmatch(h)]
+        if len(ips) != 1 or len(hosts) != 1:
+            continue
+        ip = ips[0]
+        host = _normalize_host_token(hosts[0])
+        if not host or host == ip:
+            continue
+        canonical = canonical_by_ip.setdefault(ip, host)
+        alias_map[ip.lower()] = canonical
+        alias_map[host.lower()] = canonical
+    return alias_map
+
+
+def _build_alias_map(host_aliases_raw) -> Dict[str, str]:
+    """
+    Turns the model's "host_aliases" list into {alias_lower: canonical}
+    (canonical maps to itself too), for deterministic code-level merging —
+    see _apply_host_aliases. Never trust the model to have been perfectly
+    self-consistent across "hosts" on its own; this is the safety net.
+    """
+    alias_map: Dict[str, str] = {}
+    if not isinstance(host_aliases_raw, list):
+        return alias_map
+    for entry in host_aliases_raw:
+        if not isinstance(entry, dict):
+            continue
+        canonical = (entry.get("canonical") or "").strip()
+        if not canonical:
+            continue
+        alias_map[canonical.lower()] = canonical
+        also_known_as = entry.get("also_known_as") or []
+        if not isinstance(also_known_as, list):
+            continue
+        for alias in also_known_as:
+            if not isinstance(alias, str):
+                continue
+            alias = alias.strip()
+            if alias:
+                alias_map[alias.lower()] = canonical
+    return alias_map
+
+
+def _resolve_alias_groups(*alias_maps: Dict[str, str]) -> Dict[str, str]:
+    """
+    Combines any number of alias maps (alias_lower -> canonical, e.g. the
+    model's own self-reported "host_aliases" and the regex pre-scan) into
+    ONE consistent grouping via union-find.
+
+    Real bug report: naively merging two partial alias maps by just
+    overwriting/preferring one source breaks as soon as the two sources
+    describe the SAME asset from different, non-overlapping angles — e.g.
+    the model links "sas.dos1.ph" <-> "https://sas.dos1.ph" while the regex
+    scan separately links "119.92.208.117" <-> "sas.dos1.ph"; neither map
+    alone connects the IP to the https:// form, but the two together
+    should, and a first "prefer whichever source's canonical string is
+    longer" attempt at this picked winners per-key independently, which
+    silently discarded the one link that actually mattered. Union-find
+    treats every (alias, canonical) pair from every source as "these are
+    the same asset," regardless of which direction any one source
+    expressed it — so any chain of overlapping pairs across sources
+    collapses into a single group.
+
+    Picks, for each resulting group, the longest non-IP member as the
+    display canonical (falls back to the longest member if the whole group
+    is bare IPs) — a hostname/URL is more identifying/readable than a bare
+    IP, and the longest form is least likely to be a truncated extraction
+    artifact (e.g. a stray space before a hyphen turning "maynilad-csat.
+    dos1.ph" into just "csat.dos1.ph" for one source but not the other).
+    """
+    parent: Dict[str, str] = {}
+    display: Dict[str, str] = {}
+
+    def _register(token: str) -> str:
+        key = token.lower()
+        parent.setdefault(key, key)
+        if key not in display or len(token) > len(display[key]):
+            display[key] = token
+        return key
+
+    def _find(key: str) -> str:
+        parent.setdefault(key, key)
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def _union(a: str, b: str) -> None:
+        ka, kb = _register(a), _register(b)
+        ra, rb = _find(ka), _find(kb)
+        if ra != rb:
+            parent[ra] = rb
+
+    for amap in alias_maps:
+        for alias, canonical in amap.items():
+            _union(alias, canonical)
+
+    groups: Dict[str, set] = {}
+    for amap in alias_maps:
+        for token in list(amap.keys()) + list(amap.values()):
+            key = _register(token)
+            groups.setdefault(_find(key), set()).add(key)
+
+    resolved: Dict[str, str] = {}
+    for members in groups.values():
+        non_ip = [m for m in members if not _IP_TOKEN_RE.fullmatch(m)]
+        pool = non_ip or list(members)
+        canonical_key = max(pool, key=lambda k: len(display.get(k, k)))
+        canonical = display.get(canonical_key, canonical_key)
+        for m in members:
+            resolved[m] = canonical
+    return resolved
+
+
+def _apply_host_aliases(vulnerabilities_by_host: list, alias_map: Dict[str, str]) -> list:
+    """
+    Deterministically merges any host bucket whose host_name is a known
+    alias of another into that other (canonical) bucket — real bug report:
+    the model's own "hosts" array wasn't reliably self-consistent across a
+    long response (e.g. used "sas.dos1.ph" for one finding and
+    "119.92.208.117" — the SAME physical asset per the document's own
+    tables — for another), so prompt instructions alone weren't enough to
+    stop the same asset splitting into 2+ entries. Dedupes by
+    (host, plugin_name) while merging so nothing doubles up.
+    """
+    if not alias_map:
+        return vulnerabilities_by_host
+    merged: Dict[str, Dict[str, Any]] = {}
+    order: list = []
+    seen_pairs = set()
+    for h in vulnerabilities_by_host:
+        host_name = (h.get("host_name") or "").strip()
+        canonical = alias_map.get(host_name.lower(), host_name)
+        bucket = merged.get(canonical)
+        if not bucket:
+            bucket = {"host_name": canonical, "host_information": h.get("host_information") or {}, "vulnerabilities": []}
+            merged[canonical] = bucket
+            order.append(canonical)
+        elif not bucket.get("host_information") and h.get("host_information"):
+            bucket["host_information"] = h["host_information"]
+        for v in h.get("vulnerabilities") or []:
+            key = (canonical.lower(), (v.get("plugin_name") or "").strip().lower())
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            bucket["vulnerabilities"].append(v)
+    return [merged[c] for c in order]
 
 
 def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: str = "") -> Dict[str, Any]:
@@ -361,6 +772,10 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
             "reason": "No vulnerability findings with asset, severity, and description could be identified in this file.",
         }
 
+    alias_map = _build_alias_map(result.get("host_aliases"))
+    vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
+    total_vulnerabilities = sum(len(h["vulnerabilities"]) for h in vulnerabilities_by_host)
+
     # Real bug report: a host mentioned only in the document's own scope/
     # target list (e.g. "Scope of Assessment") but with zero findings
     # against it never appeared anywhere in "hosts" above (that array is
@@ -373,16 +788,23 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
     # behavior here using the model's separate "all_assets" list, adding
     # any name not already covered by a finding as a clean (zero-
     # vulnerability) asset instead of leaving it out.
-    covered_host_names = {h["host_name"] for h in vulnerabilities_by_host}
+    covered_host_names = {h["host_name"].lower() for h in vulnerabilities_by_host}
     all_assets_raw = result.get("all_assets") or []
     if isinstance(all_assets_raw, list):
         for asset_name in all_assets_raw:
             if not isinstance(asset_name, str):
                 continue
             asset_name = asset_name.strip()
-            if not asset_name or asset_name in covered_host_names:
+            if not asset_name:
                 continue
-            covered_host_names.add(asset_name)
+            # Canonicalize through the same alias map — a scope-list entry
+            # for an asset already covered by a real finding (just written
+            # differently, e.g. the "ITEM" form when findings used the IP)
+            # must not create a second, empty duplicate of it.
+            asset_name = alias_map.get(asset_name.lower(), asset_name)
+            if asset_name.lower() in covered_host_names:
+                continue
+            covered_host_names.add(asset_name.lower())
             vulnerabilities_by_host.append({
                 "host_name": asset_name,
                 "host_information": {},
@@ -394,6 +816,7 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
         "reason": (result or {}).get("reason") or "",
         "vulnerabilities_by_host": vulnerabilities_by_host,
         "total_vulnerabilities": total_vulnerabilities,
+        "alias_map": alias_map,
     }
 
 
@@ -517,11 +940,35 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         return chunk_result
 
     vulnerabilities_by_host = chunk_result.get("vulnerabilities_by_host") or []
+    # Combine the model's own self-reported aliases with the deterministic
+    # regex pre-scan into one consistent grouping (see
+    # _resolve_alias_groups's own docstring for why a naive merge isn't
+    # enough here).
+    alias_map = _resolve_alias_groups(chunk_result.get("alias_map") or {}, _extract_ip_hostname_aliases(truncated))
+    vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
+
+    # Real bug report: a single extraction pass over a long prose document
+    # can silently skip a genuine finding — confirmed on a real PDF (7
+    # findings per the document's own stated total, only 6 extracted). One
+    # cheap follow-up pass, scoped to only what's missing against the same
+    # text, closes most of that gap. Best-effort/additive only — see
+    # _find_missed_findings's own docstring.
+    missed_hosts = _find_missed_findings(truncated, filename, vulnerabilities_by_host)
+    # Canonicalize the recall pass's own host names through the SAME alias
+    # map before merging — it's a fresh, independent LLM call, so nothing
+    # stops it from writing an asset in yet another form (e.g. the IP where
+    # the first pass settled on the hostname).
+    for h in missed_hosts or []:
+        if isinstance(h, dict) and h.get("host_name"):
+            h["host_name"] = alias_map.get(h["host_name"].strip().lower(), h["host_name"])
+    _merge_missed_findings(vulnerabilities_by_host, missed_hosts, filename)
+    vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
+
     return {
         "valid": True,
         "type": "custom",
         "scan_info": {"source": "Custom file", "validated_by": "gpt-4o-mini"},
         "total_hosts": len(vulnerabilities_by_host),
-        "total_vulnerabilities": chunk_result.get("total_vulnerabilities") or 0,
+        "total_vulnerabilities": sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host),
         "vulnerabilities_by_host": vulnerabilities_by_host,
     }
