@@ -731,11 +731,29 @@ class UserFixVulnerabilityCreateAPIView(APIView):
                 # Team plugin filter
                 _, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
 
-                fix_docs = list(fix_coll.find({
-                    "report_id": str(report_id),
-                    "host_name": host_name,
-                    "created_by": user_id,
-                }).sort("created_at", -1))
+                # Real bug report: "created_by": user_id required THIS
+                # exact team member to have personally created the record
+                # — but fix_vulnerabilities records are shared, report-wide
+                # tracking entries (assigned_team-scoped, not per-viewer),
+                # the same way the admin-side equivalent
+                # (adminregister.views.FixVulnerabilityCreateAPIView) reads
+                # them. A record auto-created alongside card generation
+                # (upload_report.views._auto_generate_cards_bg's own
+                # _ensure_fix_vulnerability_record call) is stamped
+                # created_by=admin_id, not any specific member's user_id —
+                # every team member's Manual Fix/Automated Fix tab showed
+                # "Generating..." forever for such a vulnerability, since
+                # this query could never match it. Scope by report_id +
+                # host_name only, same as the admin-side query; team
+                # isolation is enforced below via plugin_team_map instead
+                # of via who happened to create the row.
+                fix_docs = [
+                    d for d in fix_coll.find({
+                        "report_id": str(report_id),
+                        "host_name": host_name,
+                    }).sort("created_at", -1)
+                    if (d.get("plugin_name") or "") in plugin_team_map
+                ]
 
                 nessus_doc = nessus_coll.find_one({
                     "report_id": str(report_id),
@@ -757,11 +775,25 @@ class UserFixVulnerabilityCreateAPIView(APIView):
                             if pname and pname not in nessus_vuln_lookup:
                                 nessus_vuln_lookup[pname] = vuln
 
+                # Real bug report: this matched by vulnerability_name alone,
+                # with no host_name filter — for a finding that appears on
+                # MULTIPLE hosts in the same report (e.g. "TLS Security
+                # Controls Not Properly Enforced" on 8 different hosts),
+                # vuln_card_lookup[vname] ends up holding whichever host's
+                # card MongoDB's cursor happened to return last, not
+                # necessarily this (report_id, host_name)'s own card — so
+                # the Manual Fix tab could show a DIFFERENT host's steps, or
+                # none at all if that other host's card build is still
+                # missing mitigation_table. Same fix already applied to the
+                # admin-side equivalent (adminregister.views.
+                # FixVulnerabilityCreateAPIView.get) — scope to this exact
+                # host too.
                 plugin_names = [d.get("plugin_name", "") for d in fix_docs if d.get("plugin_name")]
                 vuln_card_lookup = {}
                 if plugin_names:
                     for card in vuln_card_coll.find({
                         "report_id": str(report_id),
+                        "host_name": host_name,
                         "vulnerability_name": {"$in": plugin_names}
                     }):
                         vname = card.get("vulnerability_name", "")
