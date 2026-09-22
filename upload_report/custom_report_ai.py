@@ -226,18 +226,32 @@ _STATED_TOTAL_PATTERNS = [
         r"Vulnerability\s+Occurrences\s*/\s*Findings)\s*[:\-]?\s*(\d+)",
         re.IGNORECASE,
     ),
+    # Natural-language executive-summary phrasing, e.g. "a total of 22
+    # vulnerabilities were identified/discovered/found", "we identified 22
+    # vulnerabilities" — no fixed "Total:" label at all, just prose.
+    re.compile(
+        r"(?:a\s+total\s+of\s+|identified\s+|discovered\s+|found\s+)(\d+)\s+"
+        r"(?:distinct\s+|total\s+)?vulnerabilit(?:y|ies)",
+        re.IGNORECASE,
+    ),
 ]
 
 # A per-host severity-breakdown table's own "Total" row, e.g.
 # "Total   0   2   5   15   22" (Critical/High/Medium/Low/Total columns) —
 # matched separately from _STATED_TOTAL_PATTERNS (regex backtracking makes
 # "capture the LAST number on the line" unreliable as a single pattern);
-# instead find the whole line, then take its last number in plain code.
-# Fallback only: tried after the more specific phrasings above so a stray
-# unrelated "Total ... N" line elsewhere doesn't win over an explicit
-# statement. Requires 3+ numbers on the line (a real severity-breakdown
-# row, not just "Total: 5" which pattern #2 above already handles).
-_STATED_TOTAL_ROW_RE = re.compile(r"^\s*Total\b((?:[^\S\n]*\d+){3,})\s*$", re.IGNORECASE | re.MULTILINE)
+# instead find "Total" and grab a short window of text after it, then pull
+# out every number in plain code and take the last one. Deliberately
+# tolerant of the numbers landing on separate lines (not just separated by
+# spaces on one line) — confirmed real: PyPDF2's text extraction for a
+# table can break each cell onto its own line rather than keeping a row on
+# one line, so a strict single-line pattern silently never matched a real
+# table that was plainly there in the source PDF. Fallback only: tried
+# after the more specific phrasings above so a stray unrelated "Total ...
+# N" elsewhere doesn't win over an explicit statement. Requires 3+ numbers
+# in the window (a real severity-breakdown row, not just "Total: 5" which
+# pattern #2 above already handles on its own).
+_STATED_TOTAL_ROW_RE = re.compile(r"\bTotal\b\s*((?:[^A-Za-z]*?\d+){3,}[^A-Za-z]{0,20})", re.IGNORECASE)
 
 
 def _extract_stated_total(document_text: str) -> Optional[int]:
