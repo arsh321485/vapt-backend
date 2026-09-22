@@ -750,8 +750,23 @@ def _parse_automation_card(raw_text: str) -> dict:
         try:
             ast.parse(src)
         except SyntaxError as exc:
-            invalid_reason = f"AI-generated {label} was not valid Python ({exc.msg} at line {exc.lineno}) and was withheld for safety."
-            logger.warning(f"[MitigationCrew] automation card {label} failed ast.parse: {exc}")
+            # Real bug report: the raw ast.parse() SyntaxError (e.g.
+            # "AI-generated fix_script was not valid Python (unicode error)
+            # 'unicodeescape' codec can't decode bytes in position 44-45:
+            # truncated \UXXXXXXXX escape at line 7) and was withheld for
+            # safety.") was surfacing verbatim as the user-facing "why isn't
+            # automation available" message — it reads like a crash/error
+            # report, not a status explanation, on every surface that shows
+            # reason_not_possible (asset Fix tab, Slack, Teams, stats API).
+            # The full technical detail is still logged below for
+            # debugging; only a clean, generic reason reaches the user.
+            invalid_reason = (
+                "Automated fix could not be safely generated for this "
+                "vulnerability. Please use the manual fix steps instead."
+            )
+            logger.warning(
+                f"[MitigationCrew] automation card {label} failed ast.parse: {exc}"
+            )
             break
 
     if invalid_reason:

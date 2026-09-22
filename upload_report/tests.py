@@ -173,7 +173,10 @@ class ParseAutomationCardTests(unittest.TestCase):
         self.assertEqual(card["fix_script"], "")
         self.assertEqual(card["verify_script"], "")
         self.assertTrue(card["generation_invalid"])
-        self.assertIn("not valid Python", card["reason_not_possible"])
+        # User-facing reason must be a clean, generic message — not the raw
+        # ast.parse() SyntaxError text (that's logged separately for devs).
+        self.assertNotIn("not valid Python", card["reason_not_possible"])
+        self.assertIn("manual fix steps", card["reason_not_possible"])
 
     def test_non_python_script_is_withheld_even_when_llm_mislabels_language(self):
         # Real bug report: "language" is a hard "always python" product
