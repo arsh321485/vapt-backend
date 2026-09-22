@@ -1191,10 +1191,35 @@ def user_get_feedback(request, plugin_id):
 # already used for the manual mitigation card itself.
 
 def _find_vuln_card(card_id, admin_id):
+    """
+    Real bug report: vulnerability_cards.admin_id is a copy written at card-
+    generation time and never updated again — when a report gets handed off
+    to a different admin account (e.g. a magic-link claim reassigns
+    nessus_reports.admin_id to the new client's account), every card
+    generated before that handoff still carries the ORIGINAL uploader's
+    admin_id. Matching on that stale, per-card copy made this 404 "not
+    found or access denied" for the new (real, current) owner, even though
+    the card plainly belongs to their own report — the automation-script
+    detail panel silently never loaded (frontend fell back to a generic
+    "still syncing" placeholder) despite the backend's automation_status
+    for that card already being "full".
+
+    Look the card up by card_id alone, then verify ownership against
+    nessus_reports' admin_id for that card's report_id — the single source
+    of truth for "who owns this report right now" everywhere else in the
+    app already uses (e.g. FixVulnerabilityCreateAPIView) — instead of
+    trusting the card's own possibly-stale copy.
+    """
     with MongoContext() as db:
-        return db[VULN_CARD_COLLECTION].find_one(
-            {"card_id": card_id, "admin_id": str(admin_id)}, {"_id": 0}
+        card = db[VULN_CARD_COLLECTION].find_one({"card_id": card_id}, {"_id": 0})
+        if not card:
+            return None
+        report = db[NESSUS_COLLECTION].find_one(
+            {"report_id": card.get("report_id")}, {"admin_id": 1}
         )
+        if not report or str(report.get("admin_id")) != str(admin_id):
+            return None
+        return card
 
 
 @api_view(["GET"])
