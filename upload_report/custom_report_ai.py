@@ -214,13 +214,11 @@ DOCUMENT TEXT:
 
 
 _STATED_TOTAL_PATTERNS = [
-    # "Total Number of Distinct Vulnerabilities Discovered: 22" — the
-    # phrasing confirmed on 2 real SecureITLab report templates.
-    re.compile(r"Total\s+Number\s+of\s+Distinct\s+Vulnerabilities\s+Discovered\s*[:\-]?\s*(\d+)", re.IGNORECASE),
     # "Vulnerability occurrences/findings: 22", "Total Findings: 22",
-    # "Total Vulnerabilities: 22" — common alternate phrasings across other
-    # report templates for the same idea (raw finding-instance count, not
-    # distinct types).
+    # "Total Vulnerabilities: 22" — real finding-INSTANCE count (one per
+    # host a finding affects), which is what total_vulnerabilities actually
+    # needs to reach. Deliberately does NOT match "distinct" here — see the
+    # dedicated distinct-count pattern at the bottom of this list for why.
     re.compile(
         r"(?:Total\s+(?:Number\s+of\s+)?(?:Vulnerabilit(?:y|ies)(?:\s*/\s*\w+)?|Findings)|"
         r"Vulnerability\s+Occurrences\s*/\s*Findings)\s*[:\-]?\s*(\d+)",
@@ -228,49 +226,61 @@ _STATED_TOTAL_PATTERNS = [
     ),
     # Natural-language executive-summary phrasing, e.g. "a total of 22
     # vulnerabilities were identified/discovered/found", "we identified 22
-    # vulnerabilities" — no fixed "Total:" label at all, just prose.
+    # vulnerabilities" — no fixed "Total:" label at all, just prose. Also
+    # excludes "distinct" for the same reason as the pattern above.
     re.compile(
         r"(?:a\s+total\s+of\s+|identified\s+|discovered\s+|found\s+)(\d+)\s+"
-        r"(?:distinct\s+|total\s+)?vulnerabilit(?:y|ies)",
+        r"total\s+vulnerabilit(?:y|ies)",
         re.IGNORECASE,
     ),
+    # LAST resort — real bug report: "Total Number of Distinct
+    # Vulnerabilities Discovered: N" states a count of DISTINCT
+    # vulnerability TYPES, not finding instances. A finding that affects
+    # several hosts is one "distinct vulnerability" but multiple instances
+    # (e.g. confirmed real: one report's own table showed 10 distinct
+    # types but 22 actual instances across hosts, since some findings hit
+    # many hosts each). Trusting this as the retry-loop's target made the
+    # loop stop as soon as instances reached the (too-low) distinct count
+    # — often on the very first pass, since instances >= distinct types
+    # whenever ANY finding spans more than one host — silently never
+    # retrying to reach the real, higher instance total. Only used if
+    # nothing else below (the table's own instance-level "Total" row, tried
+    # FIRST in _extract_stated_total, or the phrasings above) is present.
+    re.compile(r"Total\s+Number\s+of\s+Distinct\s+Vulnerabilities\s+Discovered\s*[:\-]?\s*(\d+)", re.IGNORECASE),
 ]
 
 # A per-host severity-breakdown table's own "Total" row, e.g.
 # "Total   0   2   5   15   22" (Critical/High/Medium/Low/Total columns) —
-# matched separately from _STATED_TOTAL_PATTERNS (regex backtracking makes
-# "capture the LAST number on the line" unreliable as a single pattern);
-# instead find "Total" and grab a short window of text after it, then pull
-# out every number in plain code and take the last one. Deliberately
-# tolerant of the numbers landing on separate lines (not just separated by
-# spaces on one line) — confirmed real: PyPDF2's text extraction for a
-# table can break each cell onto its own line rather than keeping a row on
-# one line, so a strict single-line pattern silently never matched a real
-# table that was plainly there in the source PDF. Fallback only: tried
-# after the more specific phrasings above so a stray unrelated "Total ...
-# N" elsewhere doesn't win over an explicit statement. Requires 3+ numbers
-# in the window (a real severity-breakdown row, not just "Total: 5" which
-# pattern #2 above already handles on its own).
+# this is the single most reliable source of the TRUE instance-level grand
+# total when the document has one, since it's the literal sum of every
+# host's own row — tried FIRST, ahead of every phrase-based pattern (see
+# _STATED_TOTAL_PATTERNS' own docstring on the "distinct" vs "instance"
+# distinction this exists to get right). Matched separately from
+# _STATED_TOTAL_PATTERNS (regex backtracking makes "capture the LAST
+# number on the line" unreliable as a single pattern); instead find
+# "Total" and grab a short window of text after it, then pull out every
+# number in plain code and take the last one. Deliberately tolerant of the
+# numbers landing on separate lines (not just separated by spaces on one
+# line) — confirmed real: PyPDF2's text extraction for a table can break
+# each cell onto its own line rather than keeping a row on one line, so a
+# strict single-line pattern silently never matched a real table that was
+# plainly there in the source PDF. Requires 3+ numbers in the window (a
+# real severity-breakdown row, not just "Total: 5").
 _STATED_TOTAL_ROW_RE = re.compile(r"\bTotal\b\s*((?:[^A-Za-z]*?\d+){3,}[^A-Za-z]{0,20})", re.IGNORECASE)
 
 
 def _extract_stated_total(document_text: str) -> Optional[int]:
     """
-    Best-effort extraction of the document's OWN claimed total finding
-    count — tries several common report-template phrasings in order (most
-    specific first) since different pentest report templates word this
+    Best-effort extraction of the document's OWN claimed total finding-
+    INSTANCE count (not distinct vulnerability types — see
+    _STATED_TOTAL_PATTERNS' own docstring). Tries the table's own "Total"
+    row first (the most reliable instance-level source when present), then
+    several common report-template phrasings in order (most reliable
+    first), since different pentest report templates word this
     differently. Returns None if the document doesn't state one anywhere
     recognizable — extraction still proceeds normally, just without this
     extra guardrail.
     """
-    for pattern in _STATED_TOTAL_PATTERNS:
-        m = pattern.search(document_text)
-        if m:
-            try:
-                return int(m.group(1))
-            except ValueError:
-                continue
-
     row_match = _STATED_TOTAL_ROW_RE.search(document_text)
     if row_match:
         numbers = re.findall(r"\d+", row_match.group(1))
@@ -279,6 +289,14 @@ def _extract_stated_total(document_text: str) -> Optional[int]:
                 return int(numbers[-1])
             except ValueError:
                 pass
+
+    for pattern in _STATED_TOTAL_PATTERNS:
+        m = pattern.search(document_text)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                continue
     return None
 
 
