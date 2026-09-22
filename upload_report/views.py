@@ -3081,6 +3081,25 @@ class GenerateVulnerabilityCardView(APIView):
                     upsert=True,
                 )
 
+                # Same fix_vulnerabilities coverage guarantee
+                # _auto_generate_cards_bg gives the bulk-upload path — this
+                # endpoint is a second, independent place a card can be
+                # created (single-vuln Mode A, or an admin re-running Mode B
+                # by hand), so it needs the same call or a card made only
+                # through here could end up in the exact same "Manual Fix
+                # stuck on Generating..." state.
+                try:
+                    _ensure_fix_vulnerability_record(
+                        db, report_id, vuln_host_name, vuln_plugin_name,
+                        vuln.get("risk_factor") or "Medium", str(request.user.id),
+                    )
+                except Exception:
+                    logger.exception(
+                        f"[GenerateVulnerabilityCardView] fix_vulnerabilities backfill "
+                        f"failed for '{vuln_plugin_name}' on '{vuln_host_name}' "
+                        f"(report_id={report_id})"
+                    )
+
                 cards_generated.append({
                     "card_id": card_id,
                     "report_id": report_id,
@@ -3295,6 +3314,22 @@ class RunMitigationView(APIView):
             {"$set": document},
             upsert=True,
         )
+
+        # Same fix_vulnerabilities coverage guarantee as
+        # _auto_generate_cards_bg/GenerateVulnerabilityCardView — a card
+        # made only through this endpoint needs one too, or it ends up in
+        # the same "Manual Fix stuck on Generating..." state.
+        try:
+            _ensure_fix_vulnerability_record(
+                db, report_id, found_host, plugin_name,
+                found_vuln.get("risk_factor") or found_vuln.get("severity") or "Medium",
+                str(request.user.id),
+            )
+        except Exception:
+            logger.exception(
+                f"[RunMitigationView] fix_vulnerabilities backfill failed for "
+                f"'{plugin_name}' on '{found_host}' (report_id={report_id})"
+            )
 
         return Response(
             {
