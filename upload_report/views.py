@@ -1878,7 +1878,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 cached += 1
                 continue
 
-            # ── Step 2: Check if any card for this plugin_name + description + OS exists in DB ──
+            # ── Step 2: Check if any card for this plugin_name + OS exists in DB ──
             # Real bug report: this used to match ANY prior card regardless
             # of whether it had an automation_card — cards generated before
             # the Automation Engineer agent existed never have one, so any
@@ -1897,9 +1897,22 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             # a cache hit at all (nothing it generates ever gets an
             # automation_card), forcing a full GPT re-generation of the
             # MANUAL steps too on every single upload, for no reason.
+            #
+            # Real bug report: matching on the exact "description" string
+            # too meant the SAME source file, re-uploaded/re-extracted
+            # multiple times, almost never cache-hit at all — GPT's own
+            # extraction wording for a finding's description varies slightly
+            # run to run (confirmed live: one real finding had 3 different
+            # description strings across 5 uploads of the identical PDF, all
+            # describing the exact same vulnerability), so the exact-match
+            # silently missed the cache and paid for a full, unnecessary
+            # fresh GPT generation every time. vulnerability_name is already
+            # specific enough on its own (e.g. "Unauthenticated Apache
+            # ZooKeeper Instance Exposed (Backing Kafka Cluster)") to
+            # identify a genuine, unique finding — description is no longer
+            # part of the match.
             cache_query = {
                 "vulnerability_name": vuln_plugin_name,
-                "description": vuln.get("description", ""),
                 "os_category": vuln_os_category,
             }
             if run_automation:
