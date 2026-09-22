@@ -40,6 +40,7 @@ FIX_VULN_CLOSED_COLLECTION = "fix_vulnerabilities_closed"
 DELETED_ASSETS_COLLECTION  = "deleted_assets"
 HOLD_VULNS_COLLECTION      = "hold_vulnerabilities"
 DELETED_VULNS_COLLECTION   = "deleted_vulnerabilities"
+VULN_CARD_COLLECTION       = "vulnerability_cards"
 
 # ---------------------- Mongo Context ----------------------
 from vaptfix.mongo_client import MongoContext
@@ -1283,6 +1284,23 @@ class AllVulnerabilitiesAPIView(APIView):
                     ],
                 )
 
+                # Real bug report: the frontend's "Automation Script: In
+                # Progress" badge had no real signal to read at all on this
+                # list — a vulnerability whose AI automation_card had
+                # already reached "full" still showed "In Progress" for
+                # every one of its assets, forever, since this response
+                # never carried automation_status at all. One query for the
+                # whole report (same batched-lookup pattern as asset_type_map
+                # above), keyed by (plugin_name, host_name).
+                automation_status_by_key = {
+                    (c.get("vulnerability_name") or "", c.get("host_name") or ""):
+                        (c.get("automation_card") or {}).get("automation_status")
+                    for c in db[VULN_CARD_COLLECTION].find(
+                        {"report_id": str(report_id)},
+                        {"vulnerability_name": 1, "host_name": 1, "automation_card.automation_status": 1},
+                    )
+                }
+
                 vuln_map = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -1309,6 +1327,12 @@ class AllVulnerabilitiesAPIView(APIView):
                                 # categories a finding actually affects without
                                 # opening the per-asset drill-down.
                                 "asset_type_counts": {"other": 0, "web_app": 0, "firewall": 0, "server": 0},
+                                # "pending" = automation_card hasn't finished
+                                # generating yet for that asset (null/missing
+                                # status) — this is the true "In Progress"
+                                # count, as opposed to "not_possible" (AI
+                                # already decided no automation applies).
+                                "automation_status_counts": {"full": 0, "partial": 0, "not_possible": 0, "pending": 0},
                             }
 
                         entry = vuln_map[plugin_name]
@@ -1321,6 +1345,10 @@ class AllVulnerabilitiesAPIView(APIView):
                             entry["open_count"] += 1
                         asset_type = asset_type_map.get(host_name, "other")
                         entry["asset_type_counts"][asset_type] += 1
+                        _astatus = automation_status_by_key.get((plugin_name, host_name)) or "pending"
+                        if _astatus not in entry["automation_status_counts"]:
+                            _astatus = "pending"
+                        entry["automation_status_counts"][_astatus] += 1
 
                 # Real request: how many DISTINCT vulnerabilities affect at
                 # least one asset of each category — the tab-bar filter
@@ -1393,6 +1421,24 @@ class VulnAssetListAPIView(APIView):
                     if _hn not in _fix_status:
                         _fix_status[_hn] = fdoc.get("status", "open")
 
+                # Real bug report: the frontend's "Automation Script: In
+                # Progress" badge had no real signal to read at all — this
+                # endpoint never exposed automation_card.automation_status,
+                # so a vulnerability whose AI script had already finished
+                # ("full") still showed "In Progress" forever, even though
+                # the same page's own Automated Fix tab (which reads
+                # vulnerability_cards directly for its script details)
+                # already proved the script was ready. One batched query
+                # per (report_id, plugin_name) — same access pattern as
+                # _fix_status above.
+                automation_status_by_host = {
+                    (c.get("host_name") or ""): (c.get("automation_card") or {}).get("automation_status")
+                    for c in db[VULN_CARD_COLLECTION].find(
+                        {"report_id": str(report_id), "vulnerability_name": plugin_name},
+                        {"host_name": 1, "automation_card.automation_status": 1},
+                    )
+                }
+
                 asset_type_map = get_asset_type_map_for_report(
                     db, report_id,
                     [
@@ -1427,6 +1473,11 @@ class VulnAssetListAPIView(APIView):
                             "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
                             "status": vuln_status,
                             "asset_type": asset_type_map.get(host_name, "other"),
+                            # "full"/"partial" -> script ready, "not_possible"
+                            # -> genuinely no automation for this finding,
+                            # null/missing -> AI card hasn't finished yet
+                            # (this is the "In Progress" case).
+                            "automation_status": automation_status_by_host.get(host_name),
                         })
                         break
 

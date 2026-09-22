@@ -1504,6 +1504,20 @@ class UserAllVulnerabilitiesAPIView(APIView):
                     ],
                 )
 
+                # Real bug report: see the admin-side AllVulnerabilitiesAPIView's
+                # own comment — this response never carried automation_status,
+                # so the frontend's "In Progress" badge had nothing real to
+                # read and never reflected an AI automation_card that had
+                # already reached "full"/"partial".
+                automation_status_by_key = {
+                    (c.get("vulnerability_name") or "", c.get("host_name") or ""):
+                        (c.get("automation_card") or {}).get("automation_status")
+                    for c in db[VULN_CARD_COLLECTION].find(
+                        {"report_id": str(report_id)},
+                        {"vulnerability_name": 1, "host_name": 1, "automation_card.automation_status": 1},
+                    )
+                }
+
                 vuln_map = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -1528,6 +1542,7 @@ class UserAllVulnerabilitiesAPIView(APIView):
                                 # Same asset-category segregation (Assets/Web App/
                                 # Firewall/Server) as the admin-side endpoint.
                                 "asset_type_counts": {"other": 0, "web_app": 0, "firewall": 0, "server": 0},
+                                "automation_status_counts": {"full": 0, "partial": 0, "not_possible": 0, "pending": 0},
                             }
 
                         entry = vuln_map[plugin_name]
@@ -1540,6 +1555,10 @@ class UserAllVulnerabilitiesAPIView(APIView):
                             entry["open_count"] += 1
                         asset_type = asset_type_map.get(host_name, "other")
                         entry["asset_type_counts"][asset_type] += 1
+                        _astatus = automation_status_by_key.get((plugin_name, host_name)) or "pending"
+                        if _astatus not in entry["automation_status_counts"]:
+                            _astatus = "pending"
+                        entry["automation_status_counts"][_astatus] += 1
 
                 # How many DISTINCT (already team-filtered) vulnerabilities
                 # affect at least one asset of each category — same as the
@@ -1624,6 +1643,16 @@ class UserVulnAssetListAPIView(APIView):
                     if _hn not in _fix_status:
                         _fix_status[_hn] = fdoc.get("status", "open")
 
+                # See the admin-side VulnAssetListAPIView's own comment —
+                # same "In Progress" badge fix, team-scoped endpoint here.
+                automation_status_by_host = {
+                    (c.get("host_name") or ""): (c.get("automation_card") or {}).get("automation_status")
+                    for c in db[VULN_CARD_COLLECTION].find(
+                        {"report_id": str(report_id), "vulnerability_name": plugin_name},
+                        {"host_name": 1, "automation_card.automation_status": 1},
+                    )
+                }
+
                 asset_type_map = get_asset_type_map_for_report(
                     db, report_id,
                     [
@@ -1658,6 +1687,7 @@ class UserVulnAssetListAPIView(APIView):
                             "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
                             "status": vuln_status,
                             "asset_type": asset_type_map.get(host_name, "other"),
+                            "automation_status": automation_status_by_host.get(host_name),
                         })
                         break
 
