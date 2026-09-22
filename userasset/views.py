@@ -1984,3 +1984,107 @@ class UserVulnHoldListByReportAPIView(APIView):
         except Exception as exc:
             import traceback; traceback.print_exc()
             return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class UserVulnDeleteListByReportAPIView(APIView):
+    """
+    GET /api/user/asset/report/<report_id>/vulnerability/delete-list/
+    Returns deleted vulnerabilities for the report, filtered to user's team.
+
+    Real bug report: the frontend has been polling this exact URL (a
+    "Deleted" list view, the same idea as UserVulnHoldListByReportAPIView's
+    own "hold-list") every few seconds and getting a 404 every single time
+    — this endpoint was simply never built, on either the user or the
+    admin side, even though the DELETED_VULNS_COLLECTION data it would
+    read already exists and is already written to by UserBulkVulnDeleteAPIView.
+    Mirrors UserVulnHoldListByReportAPIView exactly, just reading
+    deleted_at/deleted_by instead of held_at/held_by.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            teams, admin_user = _get_user_context(request.user.email)
+            if not teams or not admin_user:
+                return Response(
+                    {"detail": "User is not linked to any team."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            selected_team = request.query_params.get("team", "").strip()
+            active_teams  = [selected_team] if selected_team and selected_team in teams else teams
+
+            teams_lower = _normalize_teams(active_teams)
+
+            with MongoContext() as db:
+                coll = db[NESSUS_COLLECTION]
+                doc  = coll.find_one({"report_id": str(report_id)})
+                if not doc:
+                    return Response({"detail": "Report not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                admin_id    = str(admin_user.id)
+                admin_email = getattr(admin_user, "email", None)
+                if doc.get("admin_id") != admin_id and doc.get("admin_email") != admin_email:
+                    return Response(
+                        {"detail": "Access denied. Report does not belong to your admin."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+                team_plugins, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
+
+                deleted_docs = list(db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)}))
+
+                if not deleted_docs:
+                    return Response({
+                        "report_id": str(report_id),
+                        "teams": teams,
+                        "total": 0,
+                        "vulnerabilities": [],
+                    }, status=status.HTTP_200_OK)
+
+                vuln_lookup = {}
+                for host in (doc.get("vulnerabilities_by_host") or []):
+                    hn = (host.get("host_name") or "").strip()
+                    for v in (host.get("vulnerabilities") or []):
+                        pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if pname:
+                            vuln_lookup[(hn, pname)] = v
+
+                vuln_map = {}
+                for deleted in deleted_docs:
+                    pname = deleted.get("plugin_name", "")
+                    hn    = deleted.get("host_name", "")
+
+                    if pname.lower() not in team_plugins:
+                        continue
+
+                    vuln = vuln_lookup.get((hn, pname), {})
+
+                    if pname not in vuln_map:
+                        vuln_map[pname] = {
+                            "plugin_name":   pname,
+                            "severity":      (vuln.get("risk_factor") or vuln.get("severity") or "").title(),
+                            "cvss_score":    str(vuln.get("cvss_v3_base_score") or vuln.get("cvss") or ""),
+                            "assigned_team": plugin_team_map.get(pname, ""),
+                            "asset_count":   0,
+                            "hosts":         [],
+                        }
+
+                    vuln_map[pname]["asset_count"] += 1
+                    vuln_map[pname]["hosts"].append({
+                        "host_name":  hn,
+                        "deleted_at": _iso(deleted.get("deleted_at")),
+                        "deleted_by": deleted.get("deleted_by", ""),
+                    })
+
+                result = list(vuln_map.values())
+                return Response({
+                    "report_id": str(report_id),
+                    "teams": teams,
+                    "total": len(result),
+                    "vulnerabilities": result,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
