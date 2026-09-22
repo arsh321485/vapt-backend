@@ -2765,12 +2765,27 @@ class GenerateVulnerabilityCardView(APIView):
 
             for vuln in vulns_to_process:
                 vuln_plugin_name = vuln["plugin_name"]
+                vuln_host_name = vuln.get("host_name", "") or ""
 
                 # Deduplication check
+                #
+                # Real bug report: this only matched (report_id,
+                # vulnerability_name) — no host_name — so the SAME
+                # vulnerability on a SECOND host was treated as "already
+                # exists" and silently skipped instead of getting its own
+                # card, and (worse, once host_name is included in the
+                # match below) a genuinely new host could still collide
+                # with an unrelated card. Every other card-generation path
+                # in this app (_auto_generate_cards_bg, _find_vuln_card,
+                # the Register/Script tab lookups) keys a card by the full
+                # (report_id, vulnerability_name, host_name) triple — match
+                # that here too, or this view creates cards that violate
+                # the uniqueness every other consumer assumes.
                 if not force_regenerate:
                     existing = db[VULN_CARD_COLLECTION].find_one({
                         "report_id": report_id,
                         "vulnerability_name": vuln_plugin_name,
+                        "host_name": vuln_host_name,
                     })
                     if existing:
                         skipped_count += 1
@@ -2818,6 +2833,19 @@ class GenerateVulnerabilityCardView(APIView):
                     "admin_email": getattr(request.user, "email", ""),
                     "admin_id": str(request.user.id),
                     "vulnerability_name": vuln_plugin_name,
+                    # Real bug report: host_name was never persisted here at
+                    # all, even though it's available (vuln.get("host_name")
+                    # is passed to tool._run above) — every consumer that
+                    # keys a card by (report_id, vulnerability_name,
+                    # host_name) (Register, Script tab, _find_vuln_card,
+                    # _auto_generate_cards_bg's own "already_exists" check)
+                    # would never recognize a card from this endpoint as the
+                    # one for its host, so a later, correctly-formed card
+                    # generation pass for the same finding would create a
+                    # SECOND document instead of recognizing this one —
+                    # exactly the "duplicate record, one stub" bug pattern
+                    # reported against the bulk vulnerability-cards endpoint.
+                    "host_name": vuln_host_name,
                     "os_category": vuln.get("os_category", "windows"),
                     "description": vuln["description"],
                     "plugin_output": vuln.get("plugin_output", "") or None,
@@ -2843,9 +2871,35 @@ class GenerateVulnerabilityCardView(APIView):
                     "vaptcode_os_profile": result.get("vaptcode_os_profile", {}),
                     "vaptcode_analysis":   result.get("vaptcode_analysis", {}),
                     "vaptcode_summary":    result.get("vaptcode_summary", {}),
+                    "backup_card":         result.get("backup_card", {}),
+                    # Real bug report: this endpoint's tool._run() call
+                    # generates an automation_card (run_automation defaults
+                    # to True) but it was silently discarded here — never
+                    # written into the stored document — so a card created
+                    # through this endpoint could never show automation
+                    # status/content regardless of what the AI actually
+                    # produced.
+                    "automation_card":     result.get("automation_card", {}),
                 }
 
-                db[VULN_CARD_COLLECTION].insert_one(document)
+                # Real bug report: insert_one here meant calling this
+                # endpoint twice for the same (report_id, vulnerability_name,
+                # host_name) — e.g. force_regenerate=True, or a retried
+                # request racing the dedup check above — created a genuine
+                # SECOND document instead of replacing the first. Upsert on
+                # the same (report_id, vulnerability_name, host_name) triple
+                # _auto_generate_cards_bg already uses as its own uniqueness
+                # key, so this endpoint can never leave two records behind
+                # for the same finding+host.
+                db[VULN_CARD_COLLECTION].update_one(
+                    {
+                        "report_id": report_id,
+                        "vulnerability_name": vuln_plugin_name,
+                        "host_name": vuln_host_name,
+                    },
+                    {"$set": document},
+                    upsert=True,
+                )
 
                 cards_generated.append({
                     "card_id": card_id,
@@ -3240,12 +3294,37 @@ class VulnerabilityCardListView(APIView):
                 },
             ).sort("created_at", -1)
 
-            cards = [
+            filtered = [
                 c for c in cursor
                 if (c.get("host_name") or "").strip() not in locked_host_names
                 and (c.get("host_name") or "").strip() not in hidden_host_names
                 and ((c.get("vulnerability_name") or "").strip(), (c.get("host_name") or "").strip()) not in hidden_vuln_pairs
             ]
+
+            # Safety net — real bug report: this returned every matching
+            # document with no dedup at all, so if two records ever exist
+            # for the same (vulnerability_name, host_name) — e.g. a stub
+            # missing automation_card alongside the real, complete one, the
+            # exact shape GenerateVulnerabilityCardView's own dedup gap
+            # used to be able to produce — a consumer expecting one record
+            # per finding+host could end up reading the empty stub instead
+            # of the complete card. Cursor is already sorted by created_at
+            # descending; keep the first record seen per (vulnerability_name,
+            # host_name), but let a LATER (older) record win that one over
+            # an earlier (newer) one if the newer one has no automation_card
+            # and the older one does — a stub should never shadow real
+            # content just for being more recent.
+            cards_by_key: dict = {}
+            order: list = []
+            for c in filtered:
+                key = ((c.get("vulnerability_name") or "").strip(), (c.get("host_name") or "").strip())
+                existing = cards_by_key.get(key)
+                if existing is None:
+                    cards_by_key[key] = c
+                    order.append(key)
+                elif not (existing.get("automation_card") or {}) and (c.get("automation_card") or {}):
+                    cards_by_key[key] = c
+            cards = [cards_by_key[k] for k in order]
 
             # Same Freemium script-content lock as VulnerabilityCardDetailView
             # — every card in one report_id belongs to the same admin, so
