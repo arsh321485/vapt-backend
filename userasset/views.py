@@ -40,7 +40,7 @@ def _clear_user_dashboard_cache(user_id, teams):
 
 from .serializers import UserAssetSerializer, UserAssetVulnSerializer
 from vaptfix.mongo_client import MongoContext
-from upload_report.asset_classification import classify_asset_type, get_asset_type_map_for_report
+from upload_report.asset_classification import classify_asset_type, get_asset_type_map_for_report, classify_finding_type
 
 NESSUS_COLLECTION          = "nessus_reports"
 VULN_CARD_COLLECTION       = "vulnerability_cards"
@@ -1553,7 +1553,8 @@ class UserAllVulnerabilitiesAPIView(APIView):
                             entry["held_count"] += 1
                         else:
                             entry["open_count"] += 1
-                        asset_type = asset_type_map.get(host_name, "other")
+                        host_asset_type = asset_type_map.get(host_name, "other")
+                        asset_type = classify_finding_type(plugin_name, host_asset_type)
                         entry["asset_type_counts"][asset_type] += 1
                         _astatus = automation_status_by_key.get((plugin_name, host_name)) or "pending"
                         if _astatus not in entry["automation_status_counts"]:

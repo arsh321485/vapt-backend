@@ -105,6 +105,25 @@ _SERVER_SOFTWARE_KEYWORDS = [
     "redis server", "docker", "kubernetes", "hyper-v", "kvm", "proxmox",
 ]
 
+# Infrastructure/service-protocol findings, checked against a single
+# FINDING's own title only (see classify_finding_type) — deliberately
+# separate from _SERVER_SOFTWARE_KEYWORDS/_SERVER_OS_KEYWORDS above
+# (those exist for HOST-level classify_asset_type/_keyword_server, where
+# a bare "ssh"/"tls"/"cipher" match against combined free-text description
+# would be too false-positive-prone). A finding's own TITLE saying "SSH"/
+# "TLS 1.0"/"Terrapin"/etc. is unambiguous — these are the underlying
+# transport/service-layer findings ("Outdated OpenSSH Version Disclosed",
+# "SSH Terrapin Prefix Truncation Weakness", "Deprecated TLS 1.0/1.1 and
+# Associated Weak Cipher Suites", "Weak SSH Configuration (Weak MAC
+# Algorithms Enabled)") that real classification feedback said must count
+# as "server", not inherit whatever the host's overall type is.
+_SERVER_FINDING_KEYWORDS = [
+    "ssh", "openssh", "terrapin", "zookeeper", "kafka", "ftp", "telnet",
+    "rdp", "remote desktop", "smb", "samba", "snmp", "cipher suite",
+    "weak cipher", "tls 1.0", "tls 1.1", "sslv2", "sslv3", "ssl 2.0", "ssl 3.0",
+    "weak mac algorithm",
+]
+
 
 def _title_signal_text(host_name: str, host_information: dict, vulnerabilities: list) -> str:
     """Host name + host_information values + each finding's own TITLE only
@@ -143,6 +162,59 @@ def _keyword_web_app_or_firewall(host_name: str, host_information: dict, vulnera
         return "firewall"
     if any(k.lower() in title_text for k in _WEB_APP_VULN_KEYWORDS):
         return "web_app"
+    return ""
+
+
+def _keyword_server(host_name: str, host_information: dict, vulnerabilities: list) -> str:
+    """
+    Server keyword pre-check, usable ahead of the GPT classifier — same
+    idea and same priority position as _keyword_web_app_or_firewall (run
+    after it, so a genuine web-app/firewall signal still wins), for the
+    "server" case classify_hosts_via_gpt's own prompt can also produce,
+    but not reliably: GPT is only given an OS-field string, or (when none
+    exists) the host's own finding titles as an OS-INFERENCE signal, and
+    is explicitly told to answer "other" whenever it "doesn't reasonably"
+    imply an OS — a real Nessus/AWS export commonly has plenty of hosts
+    with a genuine SERVER SOFTWARE finding but no OS-implying wording at
+    all (e.g. "Unauthenticated Apache ZooKeeper Instance Exposed",
+    "Outdated nginx Version Disclosed" — ZooKeeper/nginx don't tell you
+    Windows vs Linux, so GPT correctly, faithfully answers "other" for
+    what is nonetheless clearly a server, not a generic/unknown asset).
+    Confirmed live: dev-ofw.digitalinno.com (no host_information at all,
+    findings = exactly those two) landed on "other" this way even though
+    classify_asset_type's own local keyword fallback (_SERVER_SOFTWARE_
+    KEYWORDS/_SERVER_OS_KEYWORDS) would have confidently said "server" —
+    that fallback only ever runs when GPT is unreachable or malformed,
+    never when GPT responds with a low-confidence-but-received "other".
+    Same combined_text scope classify_asset_type's own Server check uses
+    (title text AND each finding's free-text description — OS/software
+    mentions in prose are a desired signal here, unlike the Firewall/Web
+    App checks). Returns "server" on a confident match, else "" —
+    callers should fall through to GPT in that case.
+    """
+    host_information = host_information or {}
+    name_lower = (host_name or "").strip().lower()
+    host_info_text = " ".join(str(v) for v in host_information.values() if v)
+    combined_text = (
+        name_lower + " " + host_info_text.lower() + " " + " ".join(
+            f"{v.get('plugin_name', '')} {v.get('description', '')}".lower()
+            for v in (vulnerabilities or [])
+        )
+    )
+    os_str = (
+        host_information.get("operating-system")
+        or host_information.get("os")
+        or host_information.get("OS")
+        or host_information.get("operating_system")
+        or host_information.get("system-type")
+        or ""
+    ).strip().lower()
+    if (
+        os_str
+        or any(k.lower() in combined_text for k in _SERVER_SOFTWARE_KEYWORDS)
+        or any(k.lower() in combined_text for k in _SERVER_OS_KEYWORDS)
+    ):
+        return "server"
     return ""
 
 
@@ -435,6 +507,17 @@ def get_asset_type_map_for_report(db, report_id: str, hosts: list) -> dict:
             result[name] = keyword_type
             newly_stored[name] = keyword_type
             continue
+        # Real bug report: see _keyword_server's own docstring — a host
+        # with a confident server-software signal but no OS-implying
+        # wording (e.g. ZooKeeper/nginx findings, no host_information)
+        # was reaching GPT and getting a faithful but wrong "other" back,
+        # when the same signal already available locally would have said
+        # "server" with no API call needed at all.
+        server_type = _keyword_server(name, h.get("host_information"), h.get("vulnerabilities"))
+        if server_type:
+            result[name] = server_type
+            newly_stored[name] = server_type
+            continue
         to_classify.append(h)
 
     if to_classify:
@@ -468,6 +551,47 @@ def get_asset_type_map_for_report(db, report_id: str, hosts: list) -> dict:
             logger.exception(f"[AssetClassification] failed to persist asset_type_map for report_id={report_id}")
 
     return result
+
+
+def classify_finding_type(plugin_name: str, host_asset_type: str) -> str:
+    """
+    Classifies a single VULNERABILITY FINDING (not the host it's on) into
+    the same "web_app"/"firewall"/"server"/"other" taxonomy the Assets tab
+    uses — for the All Vulnerabilities tab's per-vulnerability asset_type_
+    counts breakdown (adminasset/userasset views.py).
+
+    Real bug report: that breakdown used to just inherit the HOST's own
+    overall classification for every one of its findings — wrong the
+    moment one host has a mix of both natures, which is common (e.g. a
+    web-app host's scan also turns up its underlying OpenSSH/nginx/TLS-
+    config issues). Confirmed on a real report: producers-demo.fgeninsurance.com
+    (correctly host-classified "web_app" — it IS a web application) has 8
+    findings; only 2 (IDOR, TLS Security Controls) are genuinely web-app-
+    nature, the other 6 (OpenSSH, SSH Terrapin, Apache HTTP Server,
+    deprecated TLS/cipher suites, nginx, weak SSH MAC algorithms) are
+    infrastructure/service findings that should count as "server" — under
+    the old host-inherited logic, all 8 counted as "web_app".
+
+    Same priority order as classify_asset_type (firewall, then web_app,
+    then server), checked against the finding's own TITLE only (never
+    free-text description — same false-positive discipline as everywhere
+    else in this module). A finding with no confident signal of its own
+    (e.g. a generic "SSL Certificate Expired") falls back to the host's
+    overall type — still a reasonable default for a genuinely ambiguous
+    finding.
+    """
+    title = (plugin_name or "").strip().lower()
+    if any(k.lower() in title for k in _FIREWALL_KEYWORDS):
+        return "firewall"
+    if any(k.lower() in title for k in _WEB_APP_VULN_KEYWORDS):
+        return "web_app"
+    if (
+        any(k.lower() in title for k in _SERVER_SOFTWARE_KEYWORDS)
+        or any(k.lower() in title for k in _SERVER_OS_KEYWORDS)
+        or any(k.lower() in title for k in _SERVER_FINDING_KEYWORDS)
+    ):
+        return "server"
+    return host_asset_type or "other"
 
 
 def classify_report_assets_background(report_id: str):
