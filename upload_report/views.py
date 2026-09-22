@@ -5,10 +5,35 @@ import datetime
 import time
 import threading
 import logging
+import difflib
 from typing import Optional, Dict, Any, List
 import hashlib
 
 logger = logging.getLogger(__name__)
+
+
+def _descriptions_similar(a: str, b: str, threshold: float = 0.6) -> bool:
+    """
+    Fuzzy match for the vulnerability-card cache lookup — real bug report:
+    GPT's own extraction wording for a finding's description varies
+    slightly run to run (confirmed live: one real finding had 3 different
+    description strings across 5 uploads of the identical source PDF, all
+    describing the exact same vulnerability), so an exact-string match
+    almost never cache-hit on a re-uploaded/re-extracted file. A pure
+    "ignore description entirely" fix is too loose the other way — two
+    genuinely DIFFERENT findings can share the same vulnerability_name
+    (e.g. a generic plugin name with different specifics per instance) and
+    would then wrongly share one's mitigation/automation content. This
+    normalizes whitespace and compares similarity (not exact equality) so
+    reworded-but-same-finding descriptions still match, while a
+    meaningfully different description falls through to a fresh
+    generation instead of reusing the wrong content.
+    """
+    a_norm = " ".join((a or "").lower().split())
+    b_norm = " ".join((b or "").lower().split())
+    if not a_norm or not b_norm:
+        return False
+    return difflib.SequenceMatcher(None, a_norm, b_norm).ratio() >= threshold
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -1906,18 +1931,24 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             # description strings across 5 uploads of the identical PDF, all
             # describing the exact same vulnerability), so the exact-match
             # silently missed the cache and paid for a full, unnecessary
-            # fresh GPT generation every time. vulnerability_name is already
-            # specific enough on its own (e.g. "Unauthenticated Apache
-            # ZooKeeper Instance Exposed (Backing Kafka Cluster)") to
-            # identify a genuine, unique finding — description is no longer
-            # part of the match.
+            # fresh GPT generation every time. Dropping description from the
+            # match entirely is too loose the other way — two genuinely
+            # DIFFERENT findings can share one vulnerability_name — so
+            # instead: query every (vulnerability_name, os_category)
+            # candidate, then pick the newest one whose description is
+            # FUZZY-similar (see _descriptions_similar) to this run's own,
+            # rather than requiring byte-exact equality.
             cache_query = {
                 "vulnerability_name": vuln_plugin_name,
                 "os_category": vuln_os_category,
             }
             if run_automation:
                 cache_query["automation_card"] = {"$exists": True, "$nin": [{}, None]}
-            cached_card = db[VULN_CARD_COLLECTION].find_one(cache_query, sort=[("created_at", -1)])
+            cached_card = None
+            for candidate in db[VULN_CARD_COLLECTION].find(cache_query).sort("created_at", -1).limit(20):
+                if _descriptions_similar(candidate.get("description", ""), vuln.get("description", "")):
+                    cached_card = candidate
+                    break
 
             if cached_card:
                 # Reuse mitigation data from existing card — no GPT call needed
