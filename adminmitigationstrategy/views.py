@@ -199,7 +199,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                 vuln_cards = {}
                 for card in vuln_card_coll.find(
                     {"report_id": report_id},
-                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1},
+                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "automation_card.automation_status": 1},
                 ):
                     key = (
                         card.get("vulnerability_name", ""),
@@ -324,17 +324,26 @@ class MitigationStrategyByTeamAPIView(APIView):
                                 existing_row["status"] = "closed"
                             continue
 
+                        # Real bug report: this list never carried
+                        # automation_status either — same "In Progress"
+                        # badge gap already fixed on the Register/Assets
+                        # endpoints. Always present (None -> JSON null) so
+                        # the frontend can tell "not generated yet" apart
+                        # from "this endpoint hasn't been updated".
+                        automation_status = ((card or {}).get("automation_card") or {}).get("automation_status")
+
                         row = {
-                            "id":            str(uuid.uuid4()),
-                            "host_name":     host_name,
-                            "os":            os_value,
-                            "plugin_name":   plugin_name,
-                            "asset_count":   plugin_asset_counts.get(plugin_name, 0),
-                            "risk_factor":   risk_factor,
-                            "port":          port,
-                            "protocol":      protocol,
-                            "status":        vuln_status,
-                            "assigned_team": assigned_team,
+                            "id":                str(uuid.uuid4()),
+                            "host_name":         host_name,
+                            "os":                os_value,
+                            "plugin_name":       plugin_name,
+                            "asset_count":       plugin_asset_counts.get(plugin_name, 0),
+                            "risk_factor":       risk_factor,
+                            "port":              port,
+                            "protocol":          protocol,
+                            "status":            vuln_status,
+                            "assigned_team":     assigned_team,
+                            "automation_status": automation_status,
                         }
                         seen_host_vuln_row[dedup_key] = row
 

@@ -376,6 +376,24 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                     for fdoc in closed_coll.find({"report_id": str(report_id)})
                 }
 
+                # Real bug report: the Register list never carried
+                # automation_status at all — the frontend's "Automation
+                # Script: In Progress" badge had nothing real to read here
+                # either (same gap as adminasset.AllVulnerabilitiesAPIView,
+                # already fixed there). ALWAYS present per row below — None
+                # (-> JSON null) when the AI card hasn't reached "full"/
+                # "partial" yet, never an omitted key, so the frontend can
+                # tell "not generated yet" apart from "this endpoint hasn't
+                # been updated" for a row it doesn't recognize.
+                automation_status_by_key = {
+                    (c.get("vulnerability_name") or "", c.get("host_name") or ""):
+                        (c.get("automation_card") or {}).get("automation_status")
+                    for c in db[VULN_CARD_COLLECTION].find(
+                        {"report_id": str(report_id)},
+                        {"vulnerability_name": 1, "host_name": 1, "automation_card.automation_status": 1},
+                    )
+                }
+
                 rows = []
                 # Real bug report: the same vulnerability found on multiple
                 # ports of the same asset (e.g. "SSL Certificate Cannot Be
@@ -468,6 +486,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             "fix_vulnerability_id": str(_fix["_id"]) if _fix.get("_id") else None,
                             "operating_system": host_os,
                             "plugin_id": v.get("plugin_id"),
+                            "automation_status": automation_status_by_key.get((plugin_name, host_name)),
                         }
                         _seen_vuln_asset_rows[dedup_key] = row
                         rows.append(row)

@@ -234,17 +234,23 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                                 existing_row["status"] = "closed"
                             continue
 
+                        # Real bug report: same "In Progress" badge gap as
+                        # the admin-side by-team endpoint — always present
+                        # (None -> JSON null), never an omitted key.
+                        automation_status = ((card or {}).get("automation_card") or {}).get("automation_status")
+
                         row = {
-                            "id":            str(uuid.uuid4()),
-                            "host_name":     host_name,
-                            "os":            os_value,
-                            "plugin_name":   plugin_name,
-                            "asset_count":   plugin_asset_counts.get(plugin_name, 0),
-                            "risk_factor":   risk_factor,
-                            "port":          port,
-                            "protocol":      protocol,
-                            "status":        vuln_status,
-                            "assigned_team": assigned_team,
+                            "id":                str(uuid.uuid4()),
+                            "host_name":         host_name,
+                            "os":                os_value,
+                            "plugin_name":       plugin_name,
+                            "asset_count":       plugin_asset_counts.get(plugin_name, 0),
+                            "risk_factor":       risk_factor,
+                            "port":              port,
+                            "protocol":          protocol,
+                            "status":            vuln_status,
+                            "assigned_team":     assigned_team,
+                            "automation_status": automation_status,
                         }
                         seen_host_vuln_row[dedup_key] = row
                         teams[assigned_team].append(row)

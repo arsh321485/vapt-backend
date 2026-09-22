@@ -313,6 +313,19 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                     for fdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": str(report_id)})
                 }
 
+                # Real bug report: same "In Progress" badge gap as the
+                # admin-side register list — always present (None -> JSON
+                # null) so the frontend can tell "not generated yet" apart
+                # from "this endpoint hasn't been updated".
+                automation_status_by_key = {
+                    (c.get("vulnerability_name") or "", c.get("host_name") or ""):
+                        (c.get("automation_card") or {}).get("automation_status")
+                    for c in db[VULN_CARD_COLLECTION].find(
+                        {"report_id": str(report_id)},
+                        {"vulnerability_name": 1, "host_name": 1, "automation_card.automation_status": 1},
+                    )
+                }
+
                 # Step 3: Build rows — only team-assigned vulnerabilities
                 rows = []
                 # Same dedup as the admin-side register list: one row per
@@ -386,6 +399,7 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                             "first_observation": _normalize_iso(first_obs),
                             "second_observation": _normalize_iso(second_obs),
                             "status": vuln_status,
+                            "automation_status": automation_status_by_key.get((plugin_name, host_name)),
                         }
                         _seen_vuln_asset_rows[dedup_key] = row
                         rows.append(row)
