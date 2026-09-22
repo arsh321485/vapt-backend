@@ -3272,12 +3272,31 @@ class VulnerabilityCardListView(APIView):
             return Response({"error": str(exc)}, status=500)
 
         try:
-            query = {
-                "report_id": report_id,
-                "admin_email": getattr(request.user, "email", ""),
-            }
-            if request.user.is_superuser:
-                query = {"report_id": report_id}
+            # Real bug report: this matched cards by their OWN stored
+            # admin_email — a copy written once at card-generation time and
+            # never updated again. When a report gets handed off to a
+            # different admin account (e.g. a magic-link claim reassigns
+            # nessus_reports.admin_id/admin_email to the new client), every
+            # card generated before that handoff still carries the
+            # ORIGINAL uploader's admin_email, so this query matched ZERO
+            # cards for the new (real, current) owner — the bulk
+            # vulnerability-cards list came back completely empty, not
+            # just one card's detail, even though the report's own
+            # automation generation had genuinely finished. Verify
+            # ownership against nessus_reports' CURRENT admin for this
+            # report_id instead — the single source of truth for "who
+            # owns this report right now" everywhere else in the app
+            # already uses (e.g. FixVulnerabilityCreateAPIView,
+            # automation_scripts_api._find_vuln_card) — then query cards
+            # by report_id alone, since ownership is already confirmed.
+            if not request.user.is_superuser:
+                owning_report = db[NESSUS_COLLECTION].find_one(
+                    {"report_id": report_id}, {"admin_id": 1}
+                )
+                if not owning_report or str(owning_report.get("admin_id")) != str(request.user.id):
+                    return Response({"error": "Access denied: report belongs to a different admin"}, status=403)
+
+            query = {"report_id": report_id}
 
             locked_host_names = _get_locked_host_names(db, report_id)
             hidden_host_names, hidden_vuln_pairs = _get_hidden_card_excludes(db, report_id)
@@ -3434,12 +3453,30 @@ class UserVulnerabilityCardListAPIView(APIView):
             # convention as every other user_* endpoint (e.g.
             # automation_scripts_api's _find_vuln_card) — a member never
             # sees another organization's cards regardless of team name.
+            #
+            # Real bug report: this used to filter cards by their OWN
+            # stored admin_id — a copy written once at card-generation
+            # time and never updated again, so a report handed off via a
+            # magic-link claim (which reassigns nessus_reports.admin_id to
+            # the new client) left every pre-handoff card carrying the
+            # ORIGINAL uploader's admin_id. This query then matched ZERO
+            # cards for the member's actual current admin, even though
+            # generation had genuinely finished — same root cause already
+            # fixed for VulnerabilityCardListView (admin side) and
+            # automation_scripts_api._find_vuln_card. Verify the report's
+            # CURRENT admin_id from nessus_reports instead, then query
+            # cards by report_id alone (team-filtering below already scopes
+            # the result further).
+            owning_report = db[NESSUS_COLLECTION].find_one({"report_id": report_id}, {"admin_id": 1})
+            if not owning_report or str(owning_report.get("admin_id")) != str(admin.id):
+                return Response({"error": "Access denied: report belongs to a different admin"}, status=403)
+
             locked_host_names = _get_locked_host_names(db, report_id)
             hidden_host_names, hidden_vuln_pairs = _get_hidden_card_excludes(db, report_id)
             severity_lookup = _true_severity_lookup(db, report_id)
 
             cursor = db[VULN_CARD_COLLECTION].find(
-                {"report_id": report_id, "admin_id": str(admin.id)},
+                {"report_id": report_id},
                 {"mitigation_table": 0, "contextual_analysis": 0, "raw_ai_response": 0, "_id": 0},
             ).sort("created_at", -1)
 
@@ -3516,16 +3553,32 @@ class VulnerabilityCardDetailView(APIView):
             return Response({"error": str(exc)}, status=500)
 
         try:
-            query = {"card_id": card_id}
-            if not request.user.is_superuser:
-                query["admin_email"] = getattr(request.user, "email", "")
-
-            card = db[VULN_CARD_COLLECTION].find_one(query, {"_id": 0})
+            # Real bug report: matching by the card's own stored
+            # admin_email (a copy written once at card-generation time,
+            # never updated again) meant a report handed off via a
+            # magic-link claim — which reassigns nessus_reports.admin_id/
+            # admin_email to the new client — made every pre-handoff card
+            # 404 "not found or access denied" for the new (real, current)
+            # owner. Same root cause already fixed for
+            # VulnerabilityCardListView/UserVulnerabilityCardListAPIView
+            # above and automation_scripts_api._find_vuln_card — look the
+            # card up by card_id alone, then verify ownership against
+            # nessus_reports' CURRENT admin_id for that card's report_id.
+            card = db[VULN_CARD_COLLECTION].find_one({"card_id": card_id}, {"_id": 0})
             if not card:
                 return Response(
                     {"error": "Vulnerability card not found or access denied"},
                     status=404,
                 )
+            if not request.user.is_superuser:
+                owning_report = db[NESSUS_COLLECTION].find_one(
+                    {"report_id": card.get("report_id")}, {"admin_id": 1}
+                )
+                if not owning_report or str(owning_report.get("admin_id")) != str(request.user.id):
+                    return Response(
+                        {"error": "Vulnerability card not found or access denied"},
+                        status=404,
+                    )
 
             # Same locked-host exclusion as VulnerabilityCardListView — a
             # card for a currently-locked (Freemium-overflow) host must
