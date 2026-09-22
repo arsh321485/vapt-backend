@@ -213,28 +213,59 @@ DOCUMENT TEXT:
 """
 
 
-_STATED_TOTAL_RE = re.compile(
-    r"Total\s+Number\s+of\s+Distinct\s+Vulnerabilities\s+Discovered\s*[:\-]?\s*(\d+)",
-    re.IGNORECASE,
-)
+_STATED_TOTAL_PATTERNS = [
+    # "Total Number of Distinct Vulnerabilities Discovered: 22" — the
+    # phrasing confirmed on 2 real SecureITLab report templates.
+    re.compile(r"Total\s+Number\s+of\s+Distinct\s+Vulnerabilities\s+Discovered\s*[:\-]?\s*(\d+)", re.IGNORECASE),
+    # "Vulnerability occurrences/findings: 22", "Total Findings: 22",
+    # "Total Vulnerabilities: 22" — common alternate phrasings across other
+    # report templates for the same idea (raw finding-instance count, not
+    # distinct types).
+    re.compile(
+        r"(?:Total\s+(?:Number\s+of\s+)?(?:Vulnerabilit(?:y|ies)(?:\s*/\s*\w+)?|Findings)|"
+        r"Vulnerability\s+Occurrences\s*/\s*Findings)\s*[:\-]?\s*(\d+)",
+        re.IGNORECASE,
+    ),
+]
+
+# A per-host severity-breakdown table's own "Total" row, e.g.
+# "Total   0   2   5   15   22" (Critical/High/Medium/Low/Total columns) —
+# matched separately from _STATED_TOTAL_PATTERNS (regex backtracking makes
+# "capture the LAST number on the line" unreliable as a single pattern);
+# instead find the whole line, then take its last number in plain code.
+# Fallback only: tried after the more specific phrasings above so a stray
+# unrelated "Total ... N" line elsewhere doesn't win over an explicit
+# statement. Requires 3+ numbers on the line (a real severity-breakdown
+# row, not just "Total: 5" which pattern #2 above already handles).
+_STATED_TOTAL_ROW_RE = re.compile(r"^\s*Total\b((?:[^\S\n]*\d+){3,})\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def _extract_stated_total(document_text: str) -> Optional[int]:
     """
     Best-effort extraction of the document's OWN claimed total finding
-    count (e.g. "Total Number of Distinct Vulnerabilities Discovered: 22"
-    — the exact phrase both real SecureITLab pentest report templates
-    tested against this session use). Returns None if the document doesn't
-    state one anywhere recognizable — extraction still proceeds normally,
-    just without this extra guardrail.
+    count — tries several common report-template phrasings in order (most
+    specific first) since different pentest report templates word this
+    differently. Returns None if the document doesn't state one anywhere
+    recognizable — extraction still proceeds normally, just without this
+    extra guardrail.
     """
-    m = _STATED_TOTAL_RE.search(document_text)
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except ValueError:
-        return None
+    for pattern in _STATED_TOTAL_PATTERNS:
+        m = pattern.search(document_text)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                continue
+
+    row_match = _STATED_TOTAL_ROW_RE.search(document_text)
+    if row_match:
+        numbers = re.findall(r"\d+", row_match.group(1))
+        if numbers:
+            try:
+                return int(numbers[-1])
+            except ValueError:
+                pass
+    return None
 
 
 def _find_missed_findings(document_text: str, filename: str, vulnerabilities_by_host: list) -> list:
