@@ -65,6 +65,14 @@ _WEB_APP_VULN_KEYWORDS = [
     # bare "header" keyword.
     "security header", "security headers", "x-frame-options", "x-content-type-options",
     "referrer-policy", "permissions-policy",
+    # Real bug report: a genuine "Web Application Testing" report's own
+    # findings — "Sensitive Information Accessible Through Browser Cache
+    # After Logout", "TLS Security Controls Not Properly Enforced"
+    # (missing Secure-cookie-attribute/HSTS, both browser/session-layer
+    # concerns) — matched nothing above, so those hosts fell through to
+    # GPT, which can only answer "server"/"other" (never "web_app"),
+    # misclassifying application endpoints as generic assets.
+    "browser cache", "session cookie", "secure attribute", "tls security control",
 ]
 
 # Real bug fix: this list existed but was never actually referenced inside
@@ -96,6 +104,46 @@ _SERVER_SOFTWARE_KEYWORDS = [
     "microsoft sql server", "mssql", "oracle database", "mongodb server",
     "redis server", "docker", "kubernetes", "hyper-v", "kvm", "proxmox",
 ]
+
+
+def _title_signal_text(host_name: str, host_information: dict, vulnerabilities: list) -> str:
+    """Host name + host_information values + each finding's own TITLE only
+    (never free-text description) — see classify_asset_type's own docstring
+    for why titles-only avoids false positives from prose mentioning a
+    keyword in passing. Shared so the Firewall/Web App keyword checks stay
+    identical whether run inside classify_asset_type or as a pre-GPT check
+    in get_asset_type_map_for_report."""
+    name_lower = (host_name or "").strip().lower()
+    host_info_text = " ".join(str(v) for v in (host_information or {}).values() if v)
+    plugin_names_text = " ".join((v.get("plugin_name") or "") for v in (vulnerabilities or [])).lower()
+    return name_lower + " " + host_info_text.lower() + " " + plugin_names_text
+
+
+def _keyword_web_app_or_firewall(host_name: str, host_information: dict, vulnerabilities: list) -> str:
+    """
+    Firewall/Web-App keyword pre-check, usable ahead of the GPT classifier —
+    real bug report: _CLASSIFY_PROMPT (below) only ever asks GPT to pick
+    "firewall" | "server" | "other", never "web_app" — that category is
+    otherwise ONLY ever assigned via the URL-prefix shortcut in
+    get_asset_type_map_for_report. A host whose EXTRACTED name happens to
+    come back as a bare domain (e.g. "travel-test.fgeninsurance.com" instead
+    of "https://travel-test.fgeninsurance.com" — real, confirmed: the exact
+    same source PDF produced both forms for the same asset across two
+    separate extraction runs) could never be classified "web_app" even
+    though its findings (cookies, HSTS, XSS, ...) plainly describe a web
+    application — GPT structurally cannot return that answer for it, so it
+    always landed on "server" or "other" instead, purely because of which
+    written form the extraction happened to settle on for that run. Returns
+    "firewall" or "web_app" when a confident keyword match exists (same
+    priority order and keyword lists as classify_asset_type), else "" —
+    callers should fall through to GPT/further classification in that case.
+    """
+    title_text = _title_signal_text(host_name, host_information, vulnerabilities)
+    if any(k.lower() in title_text for k in _FIREWALL_KEYWORDS):
+        return "firewall"
+    if any(k.lower() in title_text for k in _WEB_APP_VULN_KEYWORDS):
+        return "web_app"
+    return ""
 
 
 def classify_asset_type(host_name: str, host_information: dict = None, vulnerabilities: list = None) -> str:
@@ -356,6 +404,7 @@ def get_asset_type_map_for_report(db, report_id: str, hosts: list) -> dict:
 
     result = {}
     to_classify = []
+    newly_stored = {}
     for h in hosts:
         name = (h.get("host_name") or "").strip()
         if not name:
@@ -368,11 +417,28 @@ def get_asset_type_map_for_report(db, report_id: str, hosts: list) -> dict:
         if name in stored:
             result[name] = stored[name]
             continue
+        # Real bug report: GPT (classify_hosts_via_gpt below) can only ever
+        # return "firewall"/"server"/"other" — never "web_app" — so a host
+        # whose extracted name is a bare domain (not URL-prefixed) could
+        # never land on Web App no matter how clearly its findings describe
+        # one (cookies, HSTS, XSS, ...). See _keyword_web_app_or_firewall's
+        # own docstring for the real report where the exact same asset got
+        # "web_app" via the URL-prefix shortcut in one extraction run and
+        # "server"/"other" in another, purely because of which written form
+        # the extraction settled on. Decide Firewall/Web App from the
+        # findings themselves first — same keyword lists/priority
+        # classify_asset_type already uses — before ever reaching GPT, so
+        # classification is consistent regardless of which form a host's
+        # name happens to be stored in.
+        keyword_type = _keyword_web_app_or_firewall(name, h.get("host_information"), h.get("vulnerabilities"))
+        if keyword_type:
+            result[name] = keyword_type
+            newly_stored[name] = keyword_type
+            continue
         to_classify.append(h)
 
     if to_classify:
         gpt_result = classify_hosts_via_gpt(to_classify)
-        newly_stored = {}
         for h in to_classify:
             name = (h.get("host_name") or "").strip()
             atype = gpt_result.get(name)
@@ -388,18 +454,18 @@ def get_asset_type_map_for_report(db, report_id: str, hosts: list) -> dict:
             result[name] = atype
             newly_stored[name] = atype
 
-        if newly_stored:
-            try:
-                merged = dict(stored)
-                merged.update(newly_stored)
-                db["nessus_reports"].update_one(
-                    {"report_id": report_id},
-                    {"$set": {"asset_type_map": [
-                        {"host_name": k, "asset_type": v} for k, v in merged.items()
-                    ]}},
-                )
-            except Exception:
-                logger.exception(f"[AssetClassification] failed to persist asset_type_map for report_id={report_id}")
+    if newly_stored:
+        try:
+            merged = dict(stored)
+            merged.update(newly_stored)
+            db["nessus_reports"].update_one(
+                {"report_id": report_id},
+                {"$set": {"asset_type_map": [
+                    {"host_name": k, "asset_type": v} for k, v in merged.items()
+                ]}},
+            )
+        except Exception:
+            logger.exception(f"[AssetClassification] failed to persist asset_type_map for report_id={report_id}")
 
     return result
 
