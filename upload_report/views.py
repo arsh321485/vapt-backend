@@ -3296,6 +3296,31 @@ def _freemium_automation_placeholder() -> dict:
     }
 
 
+def _pending_automation_placeholder() -> dict:
+    """
+    Real bug report: a paid (non-Freemium) admin's card can also have
+    automation_card == {} simply because generation hasn't reached it yet
+    (still running in the background, or queued for retry) — same raw {}
+    on the wire as _freemium_automation_placeholder was written to fix for
+    the Freemium case, but this branch fell through with no placeholder at
+    all, so the frontend had no way to tell "still generating" apart from
+    a genuine AI "not possible" verdict and rendered both as "Automation
+    Not Possible" (confirmed live: "TLS Security Controls Not Properly
+    Enforced" showed this generic text while its card had no
+    automation_card yet at all — not a real not_possible result).
+    automation_scripts_api.user_view_ai_automation already makes this same
+    distinction correctly (status="pending") for its own card_id-based
+    endpoint; this gives VulnerabilityCardListView/DetailView callers the
+    same signal.
+    """
+    return {
+        "automation_status": None,
+        "automation_possible": None,
+        "premium_required": False,
+        "message": "AI automation analysis for this vulnerability is still in progress.",
+    }
+
+
 class VulnerabilityCardListView(APIView):
     """
     GET /api/admin/upload_report/vulnerability-cards/?report_id=<id>
@@ -3426,6 +3451,8 @@ class VulnerabilityCardListView(APIView):
                     }
                 elif premium_required:
                     card["automation_card"] = _freemium_automation_placeholder()
+                else:
+                    card["automation_card"] = _pending_automation_placeholder()
 
             return Response(
                 {
@@ -3561,6 +3588,8 @@ class UserVulnerabilityCardListAPIView(APIView):
                     }
                 elif premium_required:
                     card["automation_card"] = _freemium_automation_placeholder()
+                else:
+                    card["automation_card"] = _pending_automation_placeholder()
 
             return Response(
                 {
@@ -3668,6 +3697,8 @@ class VulnerabilityCardDetailView(APIView):
                 }
             elif premium_required:
                 card["automation_card"] = _freemium_automation_placeholder()
+            else:
+                card["automation_card"] = _pending_automation_placeholder()
 
             return Response(
                 {
