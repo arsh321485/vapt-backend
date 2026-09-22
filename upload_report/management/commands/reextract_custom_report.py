@@ -149,6 +149,19 @@ class Command(BaseCommand):
             )
             self.stdout.write(self.style.SUCCESS(f"  updated nessus_reports for report_id={rid}"))
 
+            # Real bug report: this only ever updated nessus_reports (Mongo)
+            # — the Django UploadReport.parsed_count field (set once at
+            # upload time, shown as "PARSED COUNT" on the Upload Reports
+            # admin list) was never touched, so it stayed stuck at the
+            # ORIGINAL, pre-re-extraction number forever. Confirmed real:
+            # a report re-extracted from 16 to 24 vulnerabilities still
+            # showed "16" in the admin list — the magic-link/client
+            # dashboard (reads Mongo directly) correctly showed the new
+            # number, but this one admin-facing field silently never
+            # caught up, looking like the fix hadn't taken effect at all.
+            UploadReport.objects.filter(_id=ObjectId(rid)).update(parsed_count=new_vulns)
+            self.stdout.write(self.style.SUCCESS(f"  updated UploadReport.parsed_count -> {new_vulns}"))
+
             # Real bug report: running this command more than once on the
             # same report (e.g. after a fix landed, or because a previous
             # extraction attempt came back worse due to LLM recall
