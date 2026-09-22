@@ -1224,13 +1224,27 @@ class FixVulnerabilityCreateAPIView(APIView):
                         if pname and pname not in nessus_vuln_lookup:
                             nessus_vuln_lookup[pname] = vuln
 
-            # 3. Batch-load vulnerability cards for this report + admin
+            # 3. Batch-load vulnerability cards for this report + host.
+            #
+            # Real bug report (same class already fixed for
+            # VulnerabilityCardListView/VulnerabilityCardDetailView in
+            # upload_report/views.py): vulnerability_cards.admin_email is
+            # written ONCE at card-generation time and never updated when a
+            # report changes hands via magic-link claim. Filtering by the
+            # CURRENT logged-in user's email here matched zero cards for any
+            # report generated under the previous owner's email, so
+            # steps_to_fix always came back [] and the Manual Fix tab stayed
+            # stuck on "Generating manual fix steps..." forever even though
+            # the card (with a fully populated mitigation_table) already
+            # existed. Ownership for this report+host is already established
+            # via fix_docs being scoped to created_by=admin_id above, so
+            # querying cards by report_id + host_name alone is safe.
             plugin_names = [doc.get("plugin_name", "") for doc in fix_docs if doc.get("plugin_name")]
             vuln_card_lookup = {}
             if plugin_names:
                 for card in vuln_card_coll.find({
                     "report_id": str(report_id),
-                    "admin_email": admin_email,
+                    "host_name": host_name,
                     "vulnerability_name": {"$in": plugin_names}
                 }):
                     vname = card.get("vulnerability_name", "")
