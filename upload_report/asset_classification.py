@@ -186,13 +186,34 @@ def _keyword_server(host_name: str, host_information: dict, vulnerabilities: lis
     KEYWORDS/_SERVER_OS_KEYWORDS) would have confidently said "server" —
     that fallback only ever runs when GPT is unreachable or malformed,
     never when GPT responds with a low-confidence-but-received "other".
-    Same combined_text scope classify_asset_type's own Server check uses
-    (title text AND each finding's free-text description — OS/software
-    mentions in prose are a desired signal here, unlike the Firewall/Web
-    App checks). Returns "server" on a confident match, else "" —
-    callers should fall through to GPT in that case.
+
+    Deliberately scoped to ONLY the no-explicit-OS-field case (same
+    condition _os_signal_for_host uses to decide whether GPT gets a real
+    OS string or finding titles instead) — a host that DOES have an
+    explicit OS field still goes to GPT exactly as before. That's the
+    "OS se classify karte hain, OS nahi diya to GPT se karwate hain"
+    design: GPT is the one actually equipped to tell an unusual/obscure
+    firewall-appliance OS string (one not in the static _FIREWALL_
+    KEYWORDS list, which is exactly why get_asset_type_map_for_report
+    sends unmatched hosts to GPT in the first place instead of relying on
+    keywords alone) apart from a genuine general-purpose server OS — an
+    earlier version of this function short-circuited to "server" on ANY
+    non-empty os_str, which would have wrongly pre-empted that GPT call
+    for a firewall whose OS string doesn't happen to match the static
+    keyword list yet.
     """
     host_information = host_information or {}
+    os_str = (
+        host_information.get("operating-system")
+        or host_information.get("os")
+        or host_information.get("OS")
+        or host_information.get("operating_system")
+        or host_information.get("system-type")
+        or ""
+    ).strip()
+    if os_str:
+        return ""  # explicit OS present — let GPT decide, as designed
+
     name_lower = (host_name or "").strip().lower()
     host_info_text = " ".join(str(v) for v in host_information.values() if v)
     combined_text = (
@@ -201,17 +222,8 @@ def _keyword_server(host_name: str, host_information: dict, vulnerabilities: lis
             for v in (vulnerabilities or [])
         )
     )
-    os_str = (
-        host_information.get("operating-system")
-        or host_information.get("os")
-        or host_information.get("OS")
-        or host_information.get("operating_system")
-        or host_information.get("system-type")
-        or ""
-    ).strip().lower()
     if (
-        os_str
-        or any(k.lower() in combined_text for k in _SERVER_SOFTWARE_KEYWORDS)
+        any(k.lower() in combined_text for k in _SERVER_SOFTWARE_KEYWORDS)
         or any(k.lower() in combined_text for k in _SERVER_OS_KEYWORDS)
     ):
         return "server"
