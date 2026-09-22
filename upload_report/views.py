@@ -1640,6 +1640,103 @@ def _ensure_where_to_run_fields(mitigation_table, operating_system_hint: str = "
     return enriched
 
 
+def _ensure_fix_vulnerability_record(db, report_id, host_name, plugin_name, risk_factor, admin_id) -> bool:
+    """
+    Create a fix_vulnerabilities "Fix Now" tracking record for exactly one
+    (report_id, host_name, plugin_name) if one doesn't already exist
+    (open or closed) — returns True if a new record was created, False if
+    one already existed or no matching vulnerability could be found.
+
+    A trimmed-down version of FixVulnerabilityCreateAPIView.post()'s own
+    document-building logic (adminregister/views.py) — that endpoint stays
+    exactly as-is (still the on-demand path a logged-in admin's own
+    request hits); this is the same document shape, built from trusted
+    internal data instead of a request, for _auto_generate_cards_bg's own
+    call site to use unconditionally. See that call site's comment for why.
+    """
+    fix_coll = db[FIX_VULN_COLLECTION]
+    closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+    nessus_coll = db[NESSUS_COLLECTION]
+
+    match_query = {"report_id": str(report_id), "host_name": host_name, "plugin_name": plugin_name}
+    if fix_coll.find_one(match_query) or closed_coll.find_one(match_query):
+        return False
+
+    nessus_doc = nessus_coll.find_one({"report_id": str(report_id)})
+    if not nessus_doc:
+        return False
+
+    selected_vuln = None
+    for host in nessus_doc.get("vulnerabilities_by_host", []):
+        if (host.get("host_name") or host.get("host")) != host_name:
+            continue
+        for v in host.get("vulnerabilities", []):
+            vname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+            if vname == str(plugin_name):
+                selected_vuln = v
+                break
+        if selected_vuln:
+            break
+    if not selected_vuln:
+        return False
+
+    vuln_card_doc = db[VULN_CARD_COLLECTION].find_one({
+        "report_id": str(report_id),
+        "vulnerability_name": plugin_name,
+        "host_name": host_name,
+    })
+
+    assigned_team = (vuln_card_doc or {}).get("assigned_team") or ""
+    if not assigned_team:
+        from .team_utils import infer_assigned_team
+        assigned_team = infer_assigned_team(plugin_name)
+
+    _vfa_raw = (vuln_card_doc or {}).get("vendor_fix_available", "No")
+    vendor_fix_available = (
+        _vfa_raw.strip().lower() == "yes" if isinstance(_vfa_raw, str) else bool(_vfa_raw)
+    )
+
+    if assigned_team:
+        from adminregister.views import get_team_members
+        assigned_team_members = get_team_members(db=db, team_name=assigned_team, admin_id=admin_id)
+    else:
+        assigned_team_members = []
+
+    description = selected_vuln.get("description", "")
+    description_points = selected_vuln.get("description_points", [])
+    if isinstance(description_points, list):
+        description_points = "\n".join(description_points)
+
+    plugin_outputs = selected_vuln.get("plugin_outputs", [])
+    affected_ports = [po.get("plugin_output") for po in plugin_outputs if po.get("plugin_output")]
+    file_path = [po.get("plugin_output_url") for po in plugin_outputs if po.get("plugin_output_url")]
+
+    doc = {
+        "report_id": str(report_id),
+        "host_name": host_name,
+        "id": str(uuid.uuid4()),
+        "plugin_name": plugin_name,
+        "risk_factor": risk_factor,
+        "port": selected_vuln.get("port", ""),
+        "protocol": selected_vuln.get("protocol", ""),
+        "description": description,
+        "description_points": description_points,
+        "synopsis": selected_vuln.get("synopsis", ""),
+        "solution": selected_vuln.get("solution", ""),
+        "status": selected_vuln.get("status", "open"),
+        "vulnerability_type": (vuln_card_doc or {}).get("vulnerability_type") or "",
+        "affected_ports_ranges": affected_ports,
+        "file_path": file_path,
+        "vendor_fix_available": vendor_fix_available,
+        "assigned_team": assigned_team,
+        "assigned_team_members": assigned_team_members,
+        "created_at": datetime.datetime.utcnow(),
+        "created_by": admin_id,
+    }
+    fix_coll.insert_one(doc)
+    return True
+
+
 def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
     """
     Background thread: auto-generate vulnerability cards after file upload.
@@ -1794,6 +1891,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "os_category": _detect_os(operating_system),
                     "plugin_output": first_plugin_output,
                     "plugin_output_url": first_plugin_output_url,
+                    "risk_factor": (vuln.get("risk_factor") or vuln.get("severity") or "Medium").strip() or "Medium",
                 })
 
         # Record the ACTUAL denominator for completion tracking. Neither
@@ -2134,6 +2232,44 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 f"pre-existing card(s) for report_id={report_id}"
             )
             _run_existing_card_automation_backfill(existing_cards_missing_automation)
+
+        # Real, repeatedly observed bug: the frontend's Manual Fix/
+        # Automated Fix tabs show "Generating..." forever unless a
+        # fix_vulnerabilities "Fix Now" tracking record exists for that
+        # exact (report_id, host_name, plugin_name) — but that record was
+        # only ever created ON DEMAND, by FixVulnerabilityCreateAPIView,
+        # triggered from a specific frontend interaction. For a report
+        # reached via magic-link claim (or any vulnerability the frontend
+        # never individually "activates"), that trigger simply never
+        # fires, leaving it stuck indefinitely even though its
+        # vulnerability_cards content (mitigation_table, automation_card)
+        # is fully generated and ready. Confirmed live across several
+        # reports: 21/22 and 4/22 vulnerabilities missing this record
+        # after a magic-link claim, each requiring manual backfill.
+        # Guarantee coverage here instead, for every vulnerability this
+        # run processed (whether newly generated or already existing) —
+        # idempotent (_ensure_fix_vulnerability_record no-ops if a record
+        # already exists), so this is safe to run on every pass.
+        fix_created = 0
+        for vuln in vulns_to_process:
+            try:
+                if _ensure_fix_vulnerability_record(
+                    db, report_id, vuln.get("host_name", ""), vuln["plugin_name"],
+                    vuln.get("risk_factor") or "Medium", admin_id,
+                ):
+                    fix_created += 1
+            except Exception:
+                logger.exception(
+                    f"[AutoGenCards] fix_vulnerabilities backfill failed for "
+                    f"'{vuln.get('plugin_name')}' on '{vuln.get('host_name')}' "
+                    f"(report_id={report_id})"
+                )
+        if fix_created:
+            print(
+                f"[AutoGenCards] Created {fix_created} missing fix_vulnerabilities "
+                f"record(s) for report_id={report_id}",
+                flush=True,
+            )
 
         # Verify actual count in MongoDB
         actual_count = db[VULN_CARD_COLLECTION].count_documents({"report_id": report_id})
