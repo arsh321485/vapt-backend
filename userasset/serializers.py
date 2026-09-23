@@ -15,6 +15,10 @@ class UserAssetSerializer(serializers.Serializer):
     )
     assigned_teams = serializers.ListField(child=serializers.CharField(), required=False)
     asset_type = serializers.CharField(required=False, allow_null=True)
+    # Every category this host qualifies for — see adminasset's
+    # AdminAssetSerializer for the full explanation. asset_type above
+    # stays the host's own single primary badge.
+    categories = serializers.ListField(child=serializers.CharField(), required=False)
 
 
 class UserAssetVulnSerializer(serializers.Serializer):

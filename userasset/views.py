@@ -602,6 +602,22 @@ class UserReportAssetsAPIView(APIView):
                             continue
 
                     if host_name not in assets:
+                        _host_asset_type = asset_type_map.get(host_name, "other")
+                        # Real bug report: see adminasset.views.ReportAssetsAPIView's
+                        # own comment — a host with a mix of natures (e.g. a
+                        # web app whose scan also found underlying OpenSSH/
+                        # Apache/nginx issues) only ever showed under its
+                        # single host-level asset_type. "categories" lists
+                        # every category this host qualifies for, from ALL
+                        # of its vulnerabilities (not just this team's,
+                        # same scope asset_type itself already uses above).
+                        _categories = sorted({
+                            classify_finding_type(
+                                v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                                _host_asset_type,
+                            )
+                            for v in host.get("vulnerabilities", [])
+                        }) or [_host_asset_type]
                         assets[host_name] = {
                             "asset": host_name,
                             "first_seen": uploaded_at,
@@ -613,7 +629,8 @@ class UserReportAssetsAPIView(APIView):
                             # Classified from ALL of this host's vulnerabilities
                             # (not just this team's) so it matches adminasset's
                             # AdminAssetsAPIView exactly — see UserAssetsAPIView.
-                            "asset_type": asset_type_map.get(host_name, "other"),
+                            "asset_type": _host_asset_type,
+                            "categories": _categories,
                         }
 
                     entry = assets[host_name]
@@ -629,8 +646,12 @@ class UserReportAssetsAPIView(APIView):
                         elif risk.startswith("low"):
                             entry["severity_counts"]["low"] += 1
 
-                final = [
-                    {
+                asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
+                final = []
+                for a in assets.values():
+                    for cat in a.get("categories") or [a.get("asset_type")]:
+                        asset_type_totals[cat] = asset_type_totals.get(cat, 0) + 1
+                    final.append({
                         "asset": a["asset"],
                         "member_type": a["member_type"],
                         "first_seen": _iso(a["first_seen"]),
@@ -639,9 +660,8 @@ class UserReportAssetsAPIView(APIView):
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
                         "asset_type": a.get("asset_type"),
-                    }
-                    for a in assets.values()
-                ]
+                        "categories": a.get("categories"),
+                    })
 
                 serializer = UserAssetSerializer(final, many=True)
                 return Response({
@@ -649,6 +669,7 @@ class UserReportAssetsAPIView(APIView):
                     "member_type": member_type,
                     "teams": teams,
                     "total_assets": len(final),
+                    "asset_type_totals": asset_type_totals,
                     "assets": serializer.data
                 }, status=status.HTTP_200_OK)
 

@@ -217,8 +217,37 @@ class ReportAssetsAPIView(APIView):
                     ],
                 )
 
+                # Real bug report: a host with a mix of both natures (e.g.
+                # producers-demo.fgeninsurance.com — genuinely a web
+                # application, but its scan also turns up its underlying
+                # OpenSSH/Apache/nginx/TLS-config issues) only ever showed
+                # under ONE tab here (its single host-level asset_type,
+                # "web_app") even though "Outdated Apache HTTP Server
+                # Version" — a finding ON this exact host — correctly
+                # shows under "Server" on the All Vulnerabilities tab
+                # (see classify_finding_type). Same inconsistency already
+                # fixed there: a vulnerability affecting more than one
+                # category counts toward each; a host should too. asset
+                # ["categories"] lists every category this host actually
+                # qualifies for (its own findings' individual nature, via
+                # classify_finding_type, falling back to the host's own
+                # asset_type for a finding with no signal of its own) —
+                # "asset_type" is kept unchanged as the host's own single
+                # primary badge.
+                asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
                 final = []
                 for a in assets.values():
+                    host_asset_type = asset_type_map.get(a["asset"], "other")
+                    categories = sorted({
+                        classify_finding_type(
+                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                            host_asset_type,
+                        )
+                        for v in a["_vulns_for_classification"]
+                    }) or [host_asset_type]
+                    for cat in categories:
+                        asset_type_totals[cat] = asset_type_totals.get(cat, 0) + 1
+
                     final.append({
                         "asset": a["asset"],
                         "member_type": a["member_type"],
@@ -227,7 +256,8 @@ class ReportAssetsAPIView(APIView):
                         "total_vulnerabilities": a["total_vulnerabilities"],
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
-                        "asset_type": asset_type_map.get(a["asset"], "other"),
+                        "asset_type": host_asset_type,
+                        "categories": categories,
                     })
 
                 serializer = AdminAssetSerializer(final, many=True)
@@ -236,6 +266,7 @@ class ReportAssetsAPIView(APIView):
                     "report_id": report_id,
                     "member_type": member_type,
                     "total_assets": len(final),
+                    "asset_type_totals": asset_type_totals,
                     "assets": serializer.data
                 }, status=200)
 

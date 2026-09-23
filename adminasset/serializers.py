@@ -6,9 +6,15 @@ class AdminAssetSerializer(serializers.Serializer):
     total_vulnerabilities = serializers.IntegerField()
     severity_counts = serializers.DictField(child=serializers.IntegerField())
     host_information = serializers.DictField(child=serializers.CharField(allow_blank=True), required=False, allow_null=True)
-    # "web_app" | "firewall" | "server" | "other" — drives the Assets/Web App/
-    # Firewall/Server tabs on the frontend. See upload_report/asset_classification.py.
+    # "web_app" | "firewall" | "server" | "other" — this host's own single
+    # primary badge. See upload_report/asset_classification.py.
     asset_type = serializers.CharField(required=False)
+    # Every category this host actually qualifies for, based on its own
+    # findings' individual nature (a host with a mix of natures — e.g. a
+    # web app whose scan also found underlying OpenSSH/Apache/nginx
+    # issues — appears in more than one). Drives the Assets/Web App/
+    # Firewall/Server TAB MEMBERSHIP; asset_type above is just the badge.
+    categories = serializers.ListField(child=serializers.CharField(), required=False)
 
     
 class AssetHostVulnSerializer(serializers.Serializer):
