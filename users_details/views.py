@@ -1934,6 +1934,19 @@ class ReportAssetsVulnsAPIView(APIView):
                 # If a role is requested, build a set of plugin_names assigned to
                 # that team from vulnerability_cards (case-insensitive match).
                 role_plugins = None
+                # Real bug report: "Vulnerability-Free Assets" was first
+                # built as "no vulns matching THIS role" — which wrongly
+                # caught assets whose vulns are all owned by a DIFFERENT
+                # team (e.g. viewing Configuration Management would flag a
+                # host as "vulnerability-free" even though every finding on
+                # it is already assigned to Patch Management). Track each
+                # plugin's REAL assigned_team (actual card value only, never
+                # infer_assigned_team's always-picks-something heuristic —
+                # that would make almost nothing ever qualify) so a host is
+                # only "vulnerability-free" when it truly has zero findings,
+                # or every finding on it is unassigned to any team — never
+                # when it simply belongs to someone else's team.
+                assigned_team_map = {}
                 if role_filter:
                     from upload_report.team_utils import infer_assigned_team
 
@@ -1952,6 +1965,8 @@ class ReportAssetsVulnsAPIView(APIView):
                             continue
                         covered.add(pname.lower())
                         raw_team = (card.get("assigned_team") or "").strip()
+                        if raw_team:
+                            assigned_team_map[pname.lower()] = raw_team
                         if raw_team.lower() == role_filter.lower():
                             role_plugins.add(pname.lower())
 
@@ -1990,6 +2005,7 @@ class ReportAssetsVulnsAPIView(APIView):
                     )
 
                     vulns = []
+                    host_has_other_team_vuln = False
                     for v in (host.get("vulnerabilities") or []):
                         plugin_name = (
                             v.get("plugin_name")
@@ -2010,6 +2026,11 @@ class ReportAssetsVulnsAPIView(APIView):
                             continue
                         # Filter by role if requested
                         if role_plugins is not None and plugin_name.lower() not in role_plugins:
+                            if assigned_team_map.get(plugin_name.lower()):
+                                # Actually owned by a DIFFERENT real team —
+                                # this host isn't "vulnerability-free", it
+                                # just isn't this role's problem.
+                                host_has_other_team_vuln = True
                             continue
                         # "id" is a stable value for a "Select All" checkbox
                         # UI to submit back — host_name + plugin_name is
@@ -2024,14 +2045,17 @@ class ReportAssetsVulnsAPIView(APIView):
 
                     # Skip hosts that have no matching vulns when filtering by
                     # role — kept out of the main (team-scoped) "assets" list
-                    # as before, but tracked separately so the frontend can
-                    # still show this team has zero exposure on this asset
-                    # instead of the host just silently disappearing.
+                    # as before. Only tracked in vulnerability_free_assets
+                    # when the host is genuinely free of any team's claim
+                    # (zero findings, or findings nobody has assigned to any
+                    # team yet) — a host whose findings all belong to some
+                    # OTHER real team is left out of both lists entirely.
                     if role_plugins is not None and not vulns:
-                        vulnerability_free_assets.append({
-                            "host_name": host_name,
-                            "os": os_name,
-                        })
+                        if not host_has_other_team_vuln:
+                            vulnerability_free_assets.append({
+                                "host_name": host_name,
+                                "os": os_name,
+                            })
                         continue
 
                     assets.append({
