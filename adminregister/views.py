@@ -2322,6 +2322,24 @@ class FixVulnerabilityStepsAPIView(APIView):
                     }},
                 )
 
+                # Real bug report: closing a vulnerability from the ADMIN
+                # side never auto-closed a support request raised against
+                # it — only userregister's equivalent handler did this
+                # (SUPPORT_REQUEST_COLLECTION.update_many below). Confirmed
+                # live: user side showed a support request correctly
+                # auto-closed after the team member closed their own
+                # vulnerability, but the same never happened when an admin
+                # closed it themselves.
+                db[SUPPORT_REQUEST_COLLECTION].update_many(
+                    {"vulnerability_id": fix_vuln_id, "status": "open"},
+                    {"$set": {
+                        "status": "closed",
+                        "closed_at": datetime.utcnow(),
+                        "closed_by": "system_auto",
+                        "close_comment": "Auto-closed: vulnerability patched",
+                    }},
+                )
+
                 _clear_admin_dashboard_cache(admin_id)
 
                 return Response(

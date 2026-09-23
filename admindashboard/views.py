@@ -535,26 +535,28 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
 
                 report_id = str(report_doc.get("report_id") or report_doc.get("_id", ""))
 
-                card_by_host = {}
-                card_by_name = {}
-                for card in db[VULN_CARD_COLLECTION].find(
-                    {"report_id": report_id},
-                    {
-                        "vulnerability_name": 1,
-                        "host_name": 1,
-                        "mitigation_table": 1,
-                        "risk_factor": 1,
-                        "assigned_team": 1,
-                    },
-                ):
-                    vuln_name = (card.get("vulnerability_name") or "").strip()
-                    host_name = (card.get("host_name") or "").strip()
-                    if not vuln_name:
-                        continue
-                    if host_name:
-                        card_by_host[(vuln_name, host_name)] = card
-                    if vuln_name not in card_by_name:
-                        card_by_name[vuln_name] = card
+                # Real bug report: this ran 5 MongoDB round-trips back to
+                # back (~1.8-1.9s baseline, confirmed live) even though this
+                # view can never cache (see the "always live" note below) —
+                # the 3 collection reads below (cards, fix_docs, closed_docs)
+                # are all independent of each other (none reads a value the
+                # others produce), only the steps_coll.aggregate afterward
+                # actually needs fix_docs' ids first. Fetching them
+                # concurrently instead of sequentially turns 3 round-trips
+                # into the time of the single slowest one.
+                from concurrent.futures import ThreadPoolExecutor as _TPE
+
+                def _fetch_cards():
+                    return list(db[VULN_CARD_COLLECTION].find(
+                        {"report_id": report_id},
+                        {
+                            "vulnerability_name": 1,
+                            "host_name": 1,
+                            "mitigation_table": 1,
+                            "risk_factor": 1,
+                            "assigned_team": 1,
+                        },
+                    ))
 
                 # report_id above is already scoped to a report this admin
                 # currently owns (_load_latest_report_meta_for_admin) — no
@@ -565,31 +567,54 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                 # bug fixed in AdminVulnerabilitiesFixedAPIView/
                 # AdminDistributionByTeamAPIView), so it silently dropped
                 # every record created/closed before the claim.
-                fix_docs = list(
-                    db[FIX_VULN_COLLECTION].find(
-                        {"report_id": report_id},
-                        {
-                            "_id": 1,
-                            "plugin_name": 1,
-                            "host_name": 1,
-                            "steps_to_fix": 1,
-                            "risk_factor": 1,
-                            "severity": 1,
-                            "assigned_team": 1,
-                            "created_at": 1,
-                        },
+                def _fetch_fix_docs():
+                    return list(
+                        db[FIX_VULN_COLLECTION].find(
+                            {"report_id": report_id},
+                            {
+                                "_id": 1,
+                                "plugin_name": 1,
+                                "host_name": 1,
+                                "steps_to_fix": 1,
+                                "risk_factor": 1,
+                                "severity": 1,
+                                "assigned_team": 1,
+                                "created_at": 1,
+                            },
+                        )
                     )
-                )
-                closed_docs = list(
-                    db[FIX_VULN_CLOSED_COLLECTION].find(
-                        {"report_id": report_id},
-                        {
-                            "fix_vulnerability_id": 1,
-                            "plugin_name": 1,
-                            "host_name": 1,
-                        },
+
+                def _fetch_closed_docs():
+                    return list(
+                        db[FIX_VULN_CLOSED_COLLECTION].find(
+                            {"report_id": report_id},
+                            {
+                                "fix_vulnerability_id": 1,
+                                "plugin_name": 1,
+                                "host_name": 1,
+                            },
+                        )
                     )
-                )
+
+                with _TPE(max_workers=3) as _executor:
+                    _cards_future = _executor.submit(_fetch_cards)
+                    _fix_docs_future = _executor.submit(_fetch_fix_docs)
+                    _closed_docs_future = _executor.submit(_fetch_closed_docs)
+                    cards_list = _cards_future.result()
+                    fix_docs = _fix_docs_future.result()
+                    closed_docs = _closed_docs_future.result()
+
+                card_by_host = {}
+                card_by_name = {}
+                for card in cards_list:
+                    vuln_name = (card.get("vulnerability_name") or "").strip()
+                    host_name = (card.get("host_name") or "").strip()
+                    if not vuln_name:
+                        continue
+                    if host_name:
+                        card_by_host[(vuln_name, host_name)] = card
+                    if vuln_name not in card_by_name:
+                        card_by_name[vuln_name] = card
 
                 steps_coll = db[FIX_VULN_STEPS_COLLECTION]
                 closed_fix_ids = set()
@@ -2501,31 +2526,40 @@ class AdminDashboardSummaryAPIView(APIView):
             "support_requests":      AdminSupportRequestsAPIView,
         }
 
+        # Real bug report: this whole endpoint hit ~3s cold (confirmed live)
+        # because billing's get_admin_asset_breakdown_counts (~1.3s alone —
+        # 3 separate MongoContext round-trips, each re-resolving the admin's
+        # User row) used to run SEQUENTIALLY after the 7-view thread pool
+        # below had already finished, stacking its time on top instead of
+        # overlapping it. Submitted into the same pool now so it runs
+        # concurrently with the other 7 queries instead of adding to them.
+        from billing.asset_service import get_admin_asset_breakdown_counts
+
         results = {}
-        with ThreadPoolExecutor(max_workers=7) as executor:
+        with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {key: executor.submit(cls().get, request) for key, cls in views_map.items()}
+            breakdown_future = executor.submit(get_admin_asset_breakdown_counts, str(request.user.id))
             for key, future in futures.items():
                 try:
                     results[key] = future.result().data
                 except Exception as exc:
                     results[key] = {"error": str(exc)}
 
+            # Explicit billing breakdown, always present (not gated behind
+            # freemium_upgrade.eligible, which only turns true once every
+            # visible finding is closed) — the pricing/Review-plan page needs
+            # to know the full original file size right after upload, not
+            # only once the admin has worked through their 5 visible assets.
+            try:
+                results.update(breakdown_future.result())
+            except Exception as exc:
+                logger.warning(f"[AdminDashboardSummary] asset breakdown counts failed: {exc}")
+
         try:
             results["freemium_upgrade"] = _freemium_upgrade_prompt(request.user)
         except Exception as exc:
             logger.warning(f"[AdminDashboardSummary] freemium_upgrade check failed: {exc}")
             results["freemium_upgrade"] = {"eligible": False}
-
-        # Explicit billing breakdown, always present (not gated behind
-        # freemium_upgrade.eligible, which only turns true once every
-        # visible finding is closed) — the pricing/Review-plan page needs
-        # to know the full original file size right after upload, not only
-        # once the admin has worked through their 5 visible assets.
-        try:
-            from billing.asset_service import get_admin_asset_breakdown_counts
-            results.update(get_admin_asset_breakdown_counts(str(request.user.id)))
-        except Exception as exc:
-            logger.warning(f"[AdminDashboardSummary] asset breakdown counts failed: {exc}")
 
         cache.set(cache_key, results, 300)
         return Response(results, status=status.HTTP_200_OK)
