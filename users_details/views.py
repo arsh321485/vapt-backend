@@ -1976,6 +1976,7 @@ class ReportAssetsVulnsAPIView(APIView):
                                 role_plugins.add(pname.lower())
 
                 assets = []
+                vulnerability_free_assets = []
                 for host in (doc.get("vulnerabilities_by_host") or []):
                     host_name = (host.get("host_name") or "").strip()
                     if not host_name:
@@ -2021,8 +2022,16 @@ class ReportAssetsVulnsAPIView(APIView):
                             "cvss_score":  str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
                         })
 
-                    # Skip hosts that have no matching vulns when filtering by role
+                    # Skip hosts that have no matching vulns when filtering by
+                    # role — kept out of the main (team-scoped) "assets" list
+                    # as before, but tracked separately so the frontend can
+                    # still show this team has zero exposure on this asset
+                    # instead of the host just silently disappearing.
                     if role_plugins is not None and not vulns:
+                        vulnerability_free_assets.append({
+                            "host_name": host_name,
+                            "os": os_name,
+                        })
                         continue
 
                     assets.append({
@@ -2047,6 +2056,8 @@ class ReportAssetsVulnsAPIView(APIView):
                         "all_asset_ids": all_asset_ids,
                         "all_vulnerability_ids": all_vulnerability_ids,
                         "assets": assets,
+                        "vulnerability_free_assets_count": len(vulnerability_free_assets),
+                        "vulnerability_free_assets": vulnerability_free_assets,
                     },
                     status=status.HTTP_200_OK,
                 )
