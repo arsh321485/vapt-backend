@@ -491,9 +491,21 @@ class UserHoldAssetsAPIView(APIView):
                 fallback_type      = doc.get("member_type")
                 team_plugins, _    = _get_team_plugin_names(db, report_id, teams_lower)
                 held_coll          = db[HOLD_COLLECTION]
+                held_docs          = list(held_coll.find({"report_id": str(report_id)}))
+
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": d.get("host_name"),
+                         "host_information": (d.get("host_entry") or {}).get("host_information"),
+                         "vulnerabilities": (d.get("host_entry") or {}).get("vulnerabilities")}
+                        for d in held_docs
+                        if d.get("host_name")
+                    ],
+                )
 
                 results = []
-                for held_doc in held_coll.find({"report_id": str(report_id)}):
+                for held_doc in held_docs:
                     host_entry = held_doc.get("host_entry") or {}
                     vulns      = host_entry.get("vulnerabilities", [])
 
@@ -507,6 +519,7 @@ class UserHoldAssetsAPIView(APIView):
 
                     results.append({
                         "asset": held_doc.get("host_name"),
+                        "asset_type": asset_type_map.get(held_doc.get("host_name"), "other"),
                         "member_type": held_doc.get("member_type") or fallback_type,
                         "total_vulnerabilities": len(team_vulns),
                         "severity_counts": _severity_counts(team_vulns),
@@ -728,9 +741,21 @@ class UserHoldAssetsByReportAPIView(APIView):
                 fallback_type   = report_doc.get("member_type")
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
                 held_coll       = db[HOLD_COLLECTION]
+                held_docs       = list(held_coll.find({"report_id": str(report_id)}))
+
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": d.get("host_name"),
+                         "host_information": (d.get("host_entry") or {}).get("host_information"),
+                         "vulnerabilities": (d.get("host_entry") or {}).get("vulnerabilities")}
+                        for d in held_docs
+                        if d.get("host_name")
+                    ],
+                )
 
                 results = []
-                for held_doc in held_coll.find({"report_id": str(report_id)}):
+                for held_doc in held_docs:
                     host_entry = held_doc.get("host_entry") or {}
                     vulns      = host_entry.get("vulnerabilities", [])
                     team_vulns = [
@@ -742,6 +767,7 @@ class UserHoldAssetsByReportAPIView(APIView):
 
                     results.append({
                         "asset": held_doc.get("host_name"),
+                        "asset_type": asset_type_map.get(held_doc.get("host_name"), "other"),
                         "member_type": held_doc.get("member_type") or fallback_type,
                         "total_vulnerabilities": len(team_vulns),
                         "severity_counts": _severity_counts(team_vulns),
@@ -1986,6 +2012,20 @@ class UserVulnHoldListByReportAPIView(APIView):
                         if pname:
                             vuln_lookup[(hn, pname)] = v
 
+                # Vuln-level hold only marks the (host, plugin) pair — the
+                # host itself is still present in vulnerabilities_by_host,
+                # so its asset_type resolves the same way UserReportAssetsAPIView does.
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 vuln_map = {}
                 for held in held_docs:
                     pname = held.get("plugin_name", "")
@@ -2009,6 +2049,7 @@ class UserVulnHoldListByReportAPIView(APIView):
                     vuln_map[pname]["asset_count"] += 1
                     vuln_map[pname]["hosts"].append({
                         "host_name": hn,
+                        "asset_type": asset_type_map.get(hn, "other"),
                         "held_at":   _iso(held.get("held_at")),
                         "held_by":   held.get("held_by", ""),
                     })
