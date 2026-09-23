@@ -523,10 +523,6 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        cache_key = f"admin_inprocess_timeline_{request.user.id}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
         try:
             admin_id = str(request.user.id)
             admin_email = request.user.email
@@ -687,7 +683,19 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                 items = [v["item"] for v in dedup_items.values()]
                 items.sort(key=lambda x: (-x["progress_percent"], x["vulnerability_name"], x["asset"]))
                 data = {"report_id": report_id, "total": len(items), "items": items}
-                cache.set(cache_key, data, 300)
+                # Real, repeatedly reported bug: this used to cache for 300s
+                # (5 min), and even after every write path that changes
+                # this data was made to bust admin_inprocess_timeline_*, a
+                # step touched through some other trigger (Slack, Teams,
+                # or simply a request that landed within the cache window)
+                # could still leave this looking stale for up to the full
+                # TTL — "in progress" is exactly the kind of frequently-
+                # changing count where that's most noticeable. The user-
+                # side equivalent (UserInProcessRemediationTimelineAPIView)
+                # has never cached this at all, which is why it always
+                # looked instant by comparison. Drop the cache here too —
+                # always live, same as the user side, instead of chasing
+                # every possible write path that could touch this data.
                 return Response(data, status=status.HTTP_200_OK)
 
         except Exception as e:
