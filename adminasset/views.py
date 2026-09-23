@@ -1026,8 +1026,24 @@ class AdminAssetsAPIView(APIView):
                     ],
                 )
 
+                # See ReportAssetsAPIView's own comment for the full
+                # explanation — same "a mixed-nature host only ever showed
+                # under one tab" gap, same fix, in this endpoint's separate
+                # (non-report_id-scoped, "latest report") implementation.
+                asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
                 final = []
                 for a in assets.values():
+                    host_asset_type = asset_type_map.get(a["asset"], "other")
+                    categories = sorted({
+                        classify_finding_type(
+                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                            host_asset_type,
+                        )
+                        for v in a["_vulns_for_classification"]
+                    }) or [host_asset_type]
+                    for cat in categories:
+                        asset_type_totals[cat] = asset_type_totals.get(cat, 0) + 1
+
                     final.append({
                         "asset": a["asset"],
                         "member_type": a["member_type"],
@@ -1036,7 +1052,8 @@ class AdminAssetsAPIView(APIView):
                         "total_vulnerabilities": a["total_vulnerabilities"],
                         "severity_counts": a["severity_counts"],
                         "host_information": a["host_information"],
-                        "asset_type": asset_type_map.get(a["asset"], "other"),
+                        "asset_type": host_asset_type,
+                        "categories": categories,
                     })
 
                 serializer = AdminAssetSerializer(final, many=True)
@@ -1053,6 +1070,7 @@ class AdminAssetsAPIView(APIView):
                     "report_id": report_id,
                     "member_type": member_type,
                     "total_assets": len(final),
+                    "asset_type_totals": asset_type_totals,
                     "assets": serializer.data,
                     **counts,
                 }

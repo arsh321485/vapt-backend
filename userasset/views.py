@@ -368,6 +368,20 @@ class UserAssetsAPIView(APIView):
                             continue
 
                     if host_name not in assets:
+                        _host_asset_type = asset_type_map.get(host_name, "other")
+                        # See adminasset.views.ReportAssetsAPIView's own
+                        # comment — a mixed-nature host only ever showed
+                        # under one tab; "categories" lists every category
+                        # this host qualifies for, from ALL of its
+                        # vulnerabilities (same ALL-not-just-team scope
+                        # asset_type itself already uses below).
+                        _categories = sorted({
+                            classify_finding_type(
+                                v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                                _host_asset_type,
+                            )
+                            for v in host.get("vulnerabilities", [])
+                        }) or [_host_asset_type]
                         assets[host_name] = {
                             "asset": host_name,
                             "first_seen": uploaded_at,
@@ -386,7 +400,8 @@ class UserAssetsAPIView(APIView):
                             # AdminAssetsAPIView — asset_type is a property of
                             # the asset itself, so it must match admin exactly
                             # regardless of which team is viewing it.
-                            "asset_type": asset_type_map.get(host_name, "other"),
+                            "asset_type": _host_asset_type,
+                            "categories": _categories,
                         }
 
                     entry = assets[host_name]
@@ -402,8 +417,12 @@ class UserAssetsAPIView(APIView):
                         elif risk.startswith("low"):
                             entry["severity_counts"]["low"] += 1
 
-                final = [
-                    {
+                asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
+                final = []
+                for a in assets.values():
+                    for cat in a.get("categories") or [a.get("asset_type")]:
+                        asset_type_totals[cat] = asset_type_totals.get(cat, 0) + 1
+                    final.append({
                         "asset": a["asset"],
                         "member_type": a["member_type"],
                         "first_seen": _iso(a["first_seen"]),
@@ -413,9 +432,8 @@ class UserAssetsAPIView(APIView):
                         "host_information": a["host_information"],
                         "assigned_teams": a.get("assigned_teams", []),
                         "asset_type": a.get("asset_type"),
-                    }
-                    for a in assets.values()
-                ]
+                        "categories": a.get("categories"),
+                    })
 
                 serializer = UserAssetSerializer(final, many=True)
                 return Response({
@@ -423,6 +441,7 @@ class UserAssetsAPIView(APIView):
                     "member_type": member_type,
                     "teams": teams,
                     "total_assets": len(final),
+                    "asset_type_totals": asset_type_totals,
                     "assets": serializer.data
                 }, status=status.HTTP_200_OK)
 
