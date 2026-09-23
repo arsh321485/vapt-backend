@@ -1519,14 +1519,21 @@ class AdminVulnerabilitiesFixedAPIView(APIView):
 
                 closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
 
-                # Build query for closed (fixed) vulnerabilities
-                closed_query = {
-                    "status": "closed",
-                    "$or": [
-                        {"created_by": admin_id},  # legacy/admin-created closures
-                        {"admin_id": admin_id},    # user-created closures under this admin
-                    ],
-                }
+                # Real bug report: created_by/admin_id on a closed-vuln doc
+                # is stamped once at CLOSE time (whoever closed it, and
+                # under whichever admin they belonged to then) and never
+                # updated when a report changes hands via magic-link claim
+                # — this $or matched neither field for a report claimed
+                # after the vulnerability was closed, undercounting
+                # "Fixed" on the admin dashboard (confirmed live: 0 here
+                # vs the correct 1 on the equivalent user-side dashboard
+                # endpoint, UserVulnerabilitiesFixedAPIView, which has
+                # never filtered by admin/created_by — status+report_id
+                # only). report_id is already scoped to a report this
+                # admin currently owns (_load_latest_report_for_admin
+                # above already resolved it that way), so no separate
+                # per-document admin check is needed here either.
+                closed_query = {"status": "closed"}
                 if report_id:
                     closed_query["report_id"] = str(report_id)
 
