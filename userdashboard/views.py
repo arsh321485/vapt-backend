@@ -1127,22 +1127,18 @@ class UserInProcessRemediationTimelineAPIView(APIView):
                         card_by_name[vuln_name] = card
 
                 steps_coll = db[FIX_VULN_STEPS_COLLECTION]
-                # Include both admin-created and team-user-created records
-                # for this admin/report, then apply team filter below.
-                fix_docs = list(db[FIX_VULN_COLLECTION].find({
-                    "report_id": report_id,
-                    "$or": [
-                        {"created_by": admin_id},
-                        {"admin_id": admin_id},
-                    ],
-                }))
-                closed_docs = list(db[FIX_VULN_CLOSED_COLLECTION].find({
-                    "report_id": report_id,
-                    "$or": [
-                        {"created_by": admin_id},
-                        {"admin_id": admin_id},
-                    ],
-                }))
+                # report_id above is already scoped to a report this admin
+                # (the one this team member belongs to) currently owns
+                # (_load_latest_report) — no separate created_by/admin_id
+                # filter needed, and matching one is actively wrong: that
+                # field is stamped once at record-creation/close time and
+                # never updated when the report later changes hands via
+                # magic-link claim (same bug fixed in
+                # AdminVulnerabilitiesFixedAPIView and elsewhere), so it
+                # silently dropped every record created/closed before the
+                # claim.
+                fix_docs = list(db[FIX_VULN_COLLECTION].find({"report_id": report_id}))
+                closed_docs = list(db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": report_id}))
 
                 closed_fix_ids = set()
                 closed_keys = set()

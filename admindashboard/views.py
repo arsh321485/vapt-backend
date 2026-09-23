@@ -560,18 +560,18 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                     if vuln_name not in card_by_name:
                         card_by_name[vuln_name] = card
 
-                # Include both:
-                # 1) admin-created records (created_by = admin_id)
-                # 2) user-created records under this admin (admin_id = admin_id)
+                # report_id above is already scoped to a report this admin
+                # currently owns (_load_latest_report_meta_for_admin) — no
+                # separate created_by/admin_id filter needed here, and
+                # matching one is actively wrong: that field is stamped
+                # once at record-creation/close time and never updated
+                # when a report changes hands via magic-link claim (same
+                # bug fixed in AdminVulnerabilitiesFixedAPIView/
+                # AdminDistributionByTeamAPIView), so it silently dropped
+                # every record created/closed before the claim.
                 fix_docs = list(
                     db[FIX_VULN_COLLECTION].find(
-                        {
-                            "report_id": report_id,
-                            "$or": [
-                                {"created_by": admin_id},
-                                {"admin_id": admin_id},
-                            ],
-                        },
+                        {"report_id": report_id},
                         {
                             "_id": 1,
                             "plugin_name": 1,
@@ -586,13 +586,7 @@ class AdminInProcessRemediationTimelineAPIView(APIView):
                 )
                 closed_docs = list(
                     db[FIX_VULN_CLOSED_COLLECTION].find(
-                        {
-                            "report_id": report_id,
-                            "$or": [
-                                {"created_by": admin_id},
-                                {"admin_id": admin_id},
-                            ],
-                        },
+                        {"report_id": report_id},
                         {
                             "fix_vulnerability_id": 1,
                             "plugin_name": 1,
@@ -1812,12 +1806,21 @@ class AdminDistributionByTeamAPIView(APIView):
                 # Normalize team names for case-insensitive matching
                 team_names_lower = {name.lower(): name for name in TEAM_NAMES}
 
-                # Build set of closed (plugin_name, host_name) pairs — per-host match only
-                admin_id = str(request.user.id)
+                # Build set of closed (plugin_name, host_name) pairs — per-host match only.
+                #
+                # Real bug report: created_by/admin_id on a closed-vuln doc
+                # is stamped once at close time and never updated when the
+                # report changes hands via magic-link claim (same bug fixed
+                # in AdminVulnerabilitiesFixedAPIView) — this $or matched
+                # neither field for a report claimed after closure, so
+                # closed_vuln_keys came back empty and the closed
+                # vulnerability was still counted as active/open in the
+                # team distribution below. report_id is already scoped to
+                # a report this admin currently owns
+                # (_load_latest_report_for_admin above), so no separate
+                # per-document admin check is needed.
                 closed_vuln_keys = set()
-                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
-                ):
+                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": report_id}):
                     pname = (doc_c.get("plugin_name") or "").strip()
                     hname = (doc_c.get("host_name") or "").strip()
                     if pname:
@@ -1980,11 +1983,12 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                                 plugin_risk[pname] = None
 
                 # ── closed (plugin_name, host_name) pairs — per-host match only ──
-                # Match both admin-closed (created_by=admin) and user-closed (admin_id=admin)
+                # report_id is already scoped to a report this admin
+                # currently owns — same fix as AdminDistributionByTeamAPIView,
+                # see its own comment for why a created_by/admin_id filter
+                # here is both redundant and wrong.
                 closed_vuln_keys = set()
-                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
-                ):
+                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": report_id}):
                     pname = (doc_c.get("plugin_name") or "").strip()
                     hname = (doc_c.get("host_name") or "").strip()
                     if pname:
@@ -2160,11 +2164,14 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                                 plugin_risk[pname] = None
 
                 # ── closed (plugin_name, host_name) pairs — per-host match only ──
-                # Match both admin-closed (created_by=admin) and user-closed (admin_id=admin)
+                # report_id is already scoped to a report this admin
+                # currently owns — same fix as AdminDistributionByTeamAPIView,
+                # see its own comment for why a created_by/admin_id filter
+                # here is both redundant and wrong (confirmed live: this is
+                # the "download-data" report's own vulnerabilities_detail
+                # list, and a closed vuln was still showing as open in it).
                 closed_vuln_keys = set()
-                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]}
-                ):
+                for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": report_id}):
                     pname = (doc_c.get("plugin_name") or "").strip()
                     hname = (doc_c.get("host_name") or "").strip()
                     if pname:
@@ -2196,7 +2203,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                 # yet showed as plain "open" — indistinguishable from untouched.
                 active_status_by_key = {}
                 for doc_a in db[FIX_VULN_COLLECTION].find(
-                    {"report_id": report_id, "$or": [{"created_by": admin_id}, {"admin_id": admin_id}]},
+                    {"report_id": report_id},
                     {"plugin_name": 1, "host_name": 1, "status": 1},
                 ):
                     pname = (doc_a.get("plugin_name") or "").strip()

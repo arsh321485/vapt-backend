@@ -1283,13 +1283,19 @@ class AllVulnerabilitiesAPIView(APIView):
                 if not is_valid:
                     return error_response
 
-                admin_id = doc.get("admin_id") or str(request.user.id)
-
+                # Real bug report: created_by is stamped once at close time
+                # and never updated when a report changes hands via
+                # magic-link claim — this filter matched nothing for a
+                # report claimed after closure, so closed_set came back
+                # empty and a closed vulnerability kept showing up in this
+                # list (the loop below only skips a (plugin_name,
+                # host_name) pair that's actually IN closed_set). report_id
+                # is already scoped to a report this admin currently owns
+                # (validate_report_ownership above), so no separate
+                # per-document admin check is needed.
                 closed_set = {
                     (c.get("plugin_name", ""), c.get("host_name", ""))
-                    for c in db[FIX_VULN_CLOSED_COLLECTION].find(
-                        {"report_id": str(report_id), "created_by": admin_id}
-                    )
+                    for c in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": str(report_id)})
                 }
                 held_set = {
                     (h.get("plugin_name", ""), h.get("host_name", ""))
