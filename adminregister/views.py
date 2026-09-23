@@ -2289,12 +2289,15 @@ class FixVulnerabilityStepsAPIView(APIView):
             # admin_vulnerabilities_*, admin_inprocess_timeline_* — all
             # covered by _clear_admin_dashboard_cache), so an admin who
             # closed a vulnerability themselves saw stale counts for up to
-            # the cache's full 5-minute TTL — while the exact same close
-            # triggered from the user/team-member side (userregister.views'
-            # own step-update handler) already clears this same cache
-            # right here, so it always looked instant from there. Same fix,
-            # same placement.
-            _clear_admin_dashboard_cache(admin_id)
+            # the cache's full 5-minute TTL. Real bug report (round 2): an
+            # earlier version of this fix called the bust HERE — before the
+            # auto-close block below (which inserts closed_doc, deletes the
+            # open fix doc, and auto-closes linked tickets) had actually
+            # run — so a request landing in that window could repopulate
+            # the cache with the PRE-close state, and nothing cleared it
+            # again afterward. Moved to fire after every mutation instead,
+            # right before each return below (same fix applied to
+            # userregister.views' equivalent handler).
 
             # AUTO CLOSE when all steps completed
             if completed_steps >= total_steps:
@@ -2318,6 +2321,8 @@ class FixVulnerabilityStepsAPIView(APIView):
                         "close_comment": "Auto-closed: vulnerability patched",
                     }},
                 )
+
+                _clear_admin_dashboard_cache(admin_id)
 
                 return Response(
                     {
@@ -2345,6 +2350,8 @@ class FixVulnerabilityStepsAPIView(APIView):
                 if next_internal and next_internal in steps_dict
                 else None
             )
+
+            _clear_admin_dashboard_cache(admin_id)
 
             return Response(
                 {

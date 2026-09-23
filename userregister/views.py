@@ -1624,9 +1624,21 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         "status": "completed",
                     })
 
+                # Real bug report: this used to bust the admin dashboard
+                # cache right here — BEFORE the auto-close block below
+                # (which inserts the closed_doc, deletes the open fix doc,
+                # and auto-closes linked tickets/support requests) had run
+                # at all. If any other request repopulated the cache in
+                # that window, it captured the PRE-close state, and
+                # nothing cleared it again afterward — so a support
+                # request auto-closed by this exact call could still show
+                # as open/pending on the admin dashboard indefinitely
+                # (confirmed live: admin showed 2 pending/0 closed while
+                # the same report's support_requests collection already
+                # had 1 closed doc). Only compute the admin id here now;
+                # the actual cache-bust happens after every mutation this
+                # request makes, right before each return below.
                 _admin_id_cache = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
-                if _admin_id_cache:
-                    _clear_admin_dashboard_cache(_admin_id_cache)
 
                 # A step was just touched (from Slack OR the web dashboard —
                 # this endpoint is the single shared code path for both) —
@@ -1722,6 +1734,8 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         if complete_all
                         else "All steps completed. Vulnerability closed."
                     )
+                    if _admin_id_cache:
+                        _clear_admin_dashboard_cache(_admin_id_cache)
                     return Response(
                         {
                             "message": _msg,
@@ -1750,6 +1764,9 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     if next_internal and next_internal in steps_dict
                     else None
                 )
+
+                if _admin_id_cache:
+                    _clear_admin_dashboard_cache(_admin_id_cache)
 
                 return Response(
                     {
