@@ -2283,6 +2283,19 @@ class FixVulnerabilityStepsAPIView(APIView):
                 "status": "completed",
             })
 
+            # Real bug report: a step being touched (or a full auto-close,
+            # right below) here never busted the admin dashboard's cached
+            # summary/vulnerabilities-fixed views (admin_dashboard_summary_*,
+            # admin_vulnerabilities_*, admin_inprocess_timeline_* — all
+            # covered by _clear_admin_dashboard_cache), so an admin who
+            # closed a vulnerability themselves saw stale counts for up to
+            # the cache's full 5-minute TTL — while the exact same close
+            # triggered from the user/team-member side (userregister.views'
+            # own step-update handler) already clears this same cache
+            # right here, so it always looked instant from there. Same fix,
+            # same placement.
+            _clear_admin_dashboard_cache(admin_id)
+
             # AUTO CLOSE when all steps completed
             if completed_steps >= total_steps:
                 closed_doc = fix_doc.copy()
