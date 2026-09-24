@@ -397,7 +397,7 @@ def classify_hosts_via_gpt(hosts: list) -> dict:
 HOST_CLASSIFICATION_OVERRIDE_COLLECTION = "host_classification_overrides"
 
 
-def get_category_overrides_for_report(db, admin_id: str) -> dict:
+def get_category_overrides_for_report(db, admin_id: str = None) -> dict:
     """
     Manual per-host "Assets" tab override — real request: one specific host
     (dev-ofw.digitalinno.com) has only infra-software findings (nginx,
@@ -413,22 +413,29 @@ def get_category_overrides_for_report(db, admin_id: str) -> dict:
     report_id) — confirmed broken the moment the admin re-uploaded the same
     file: the override didn't carry over (a fresh classification pass ran
     again and put the host straight back on "Server"), even though nothing
-    about the host or its findings had changed. An admin's decision that a
-    specific host is a web application is a property of THAT HOST, not of
-    one specific report upload — persisted in its own admin_id-scoped
-    collection (host_classification_overrides) instead, so it's found and
-    applied to this host under ANY report this admin ever has, past or
-    future, uploaded once or re-uploaded a hundred times.
+    about the host or its findings had changed.
+
+    Real bug report (round 3): the very next version scoped it to
+    admin_id instead — still broken, because dev-ofw.digitalinno.com turned
+    out to be a shared test host uploaded under SIX different admin
+    accounts (same file, different logins), and the override had only been
+    added for one of them; every other admin's own report still put it on
+    "Server". A host's real-world identity (a specific machine at a
+    specific domain) doesn't depend on which of this team's admin accounts
+    happened to upload the scan that found it — so this is now a fully
+    global, host_name-only override: whichever admin's report contains
+    dev-ofw.digitalinno.com, this applies. admin_id is accepted (and still
+    stored on new override docs, for auditing who set it) but no longer
+    filtered on.
 
     Returns {host_name: [category, ...]} — callers should replace their
     normally-computed `categories` list with this whenever the host has an
     entry, and use its first element as `asset_type` too. Empty until an
-    override is added directly in Mongo for this admin.
+    override is added directly in Mongo.
     """
-    admin_id = str(admin_id)
     return {
         row.get("host_name"): row.get("categories") or []
-        for row in db[HOST_CLASSIFICATION_OVERRIDE_COLLECTION].find({"admin_id": admin_id})
+        for row in db[HOST_CLASSIFICATION_OVERRIDE_COLLECTION].find({})
         if row.get("host_name") and row.get("categories")
     }
 
