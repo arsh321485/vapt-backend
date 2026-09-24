@@ -275,8 +275,30 @@ class Util:
         confirmation gate before the admin's entire VaptFix data (reports,
         team, vulnerabilities, everything) is permanently deleted; ignoring
         this email leaves the account and its data exactly as they are.
+
+        Real bug report: this first used _get_logo()'s inline
+        data:image/png;base64,... <img> — invisible in the actual sent
+        email (confirmed live) because Gmail and most other clients strip
+        inline data-URI images for security, unlike the OTHER VaptFix
+        emails (send_admin_welcome_email etc.), which embed the logo as a
+        genuine CID email ATTACHMENT instead — that survives every major
+        client's stripping. Same CID approach here now, matching every
+        other VaptFix email's logo.
         """
-        _, logo_html = Util._get_logo(settings.BASE_DIR)
+        logo_b64 = None
+        logo_path = os.path.join(str(settings.BASE_DIR), "users", "static", "users", "logo.png")
+        if os.path.exists(logo_path):
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        if logo_b64:
+            logo_html = '<img src="cid:vaptfix_logo" alt="VAPTFIX" style="height:42px; display:block; margin:0 auto;" />'
+        else:
+            logo_html = (
+                '<div style="font-size:20px; color:#ffffff; font-weight:700; letter-spacing:0.5px;">'
+                'VAPTFIX'
+                '</div>'
+            )
 
         html_content = f"""
         <!DOCTYPE html>
@@ -346,6 +368,7 @@ class Util:
             "to_email": user_email,
             "subject": "Confirm: Permanently delete your VaptFix account? – VAPTFIX",
             "html_content": html_content,
+            "inline_logo_b64": logo_b64,
         }
         return Util.send_mail(data)
 
