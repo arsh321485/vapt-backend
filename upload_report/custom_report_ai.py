@@ -70,6 +70,31 @@ Never invent findings that are not clearly present in the text, and never output
 twice for the same host unless the document itself repeats it with genuinely different specifics
 (e.g. a different port). If a field is not stated, leave it "".
 
+Do NOT create a separate vulnerability entry out of any of these — they are supporting detail for
+a finding already covered elsewhere, never a new finding of their own: a screenshot or its caption,
+an "Evidence" section restating the same issue, a "Recommendation"/"Remediation"/solution write-up,
+a References/CVE-list appendix entry, or the same finding's description repeated in a different
+section of the document (e.g. once in a findings table, again on its own detail page).
+
+KEEP THESE THREE METRICS CONCEPTUALLY SEPARATE — this is the single most common source of a wrong
+total on this platform:
+  1. assets_in_scope — every asset/host/URL that was actually TESTED, including ones with ZERO
+     findings. This maps to "all_assets" below, not "hosts" (a clean asset never appears in
+     "hosts" at all, since "hosts" only ever holds asset+finding pairs).
+  2. distinct_vulnerabilities — the count of unique vulnerability TYPES (e.g. "Outdated OpenSSH
+     Version Disclosed" is one distinct vulnerability even when it's found on 5 different hosts).
+  3. vulnerability_occurrences — the count of individual asset+finding PAIRS (that same distinct
+     vulnerability found on 5 hosts is 5 occurrences). This is what "hosts" below must sum to —
+     every single entry inside every host's "vulnerabilities" array is one occurrence.
+
+Worked example: a report that tested 16 assets, found 10 distinct vulnerability types, and those
+10 types occurred 22 times total across those assets (some on just one host, others repeated on
+several) has assets_in_scope=16, distinct_vulnerabilities=10, vulnerability_occurrences=22 — three
+different, all-correct numbers at once. Never collapse these into one count, and never let the
+smaller "distinct" number make you stop early — "hosts" needs every OCCURRENCE, not just one row
+per distinct type. If the document has its own "Security Issues per URL/Host", "Findings by Host",
+or severity-breakdown table, that table's own total is the occurrence count "hosts" must match.
+
 IMPORTANT — one finding can affect many hosts. Pentest reports are often organized by FINDING
 (one write-up per vulnerability), not by host, and that write-up may list several affected
 assets together — e.g. under a heading like "Affected Host(s)", "Affected IP(s)", "Affected
@@ -123,6 +148,14 @@ finding's own host both point at the same domain (one as a bare domain, the othe
 URL with a path), that is the SAME asset — use the bare domain form and do not add the page-URL
 form as if it were a second, separate entry.
 
+FINAL CHECK — before returning JSON, review the ENTIRE document one more time: Executive Summary,
+Scope, Findings Summary, individual Security Issues, any "Security Issues per URL/Host" or
+severity-breakdown table, and Appendices. Confirm: every in-scope asset is in "all_assets"
+(including zero-finding ones), every distinct vulnerability type found anywhere in the document is
+represented, every occurrence (each asset+finding pair) is its own separate entry in "hosts", no
+entry was created from a screenshot/evidence/recommendation/reference/repeated description, no
+finding is duplicated, and nothing has been invented.
+
 Return ONLY a single JSON object, no markdown fences, no commentary, matching exactly this schema:
 
 {{
@@ -174,11 +207,16 @@ no error or warning. Re-read the FULL document text below carefully and look spe
 vulnerability/security finding whose NAME is not already covered by the list above for at least \
 one of its affected hosts (a finding already listed for every host it affects should NOT be \
 repeated; if that SAME finding name also affects an additional host not already paired with it \
-above, that host/finding pair IS missing and must be included). Pay particular attention to \
-whether the document itself states a total finding count or a per-severity breakdown (e.g. "Total \
-Number of Distinct Vulnerabilities Discovered", a Critical/High/Medium/Low count, or a per-asset \
-summary table) — if the count implied by the list above doesn't match what the document claims, \
-look again for the gap, most often a whole finding subsection that got skipped.
+above, that host/finding pair IS missing and must be included). Remember the difference between a \
+DISTINCT vulnerability (one unique finding type) and a vulnerability OCCURRENCE (that same type on \
+one specific host) — you are looking for missing OCCURRENCES, including an already-seen finding \
+name on a host it isn't paired with yet above, not just entirely new finding names. Pay particular \
+attention to whether the document itself states a total finding/occurrence count or a per-severity \
+breakdown (e.g. "Total Number of Vulnerabilities/Findings", "Vulnerability Occurrences", a \
+Critical/High/Medium/Low count, a "Security Issues per URL/Host" table, or a per-asset summary \
+table) — if the count implied by the list above doesn't match what the document claims, look again \
+for the gap, most often a whole finding subsection that got skipped, or a finding that recurs on \
+more hosts than are currently paired with it above.
 
 Use the exact same host_name convention already used above — if a finding you find here affects a \
 host already named in that list, reuse that exact same host_name string; never introduce a \
