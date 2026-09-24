@@ -8481,6 +8481,96 @@ def _disconnect_slack_for_admin(user):
     return had_password
 
 
+def _delete_all_admin_data(user):
+    """
+    Full, permanent "Uninstall" — real product requirement: disconnecting
+    Slack alone (see _disconnect_slack_for_admin above) leaves every report
+    this admin ever uploaded, every team member they added, every
+    vulnerability/fix/support-request tied to those reports, and the
+    admin's own login itself untouched. Uninstalling must delete ALL of it,
+    permanently, from BOTH entry points (the website's confirmed
+    "Uninstall" button, and Slack's own app_uninstalled event — see
+    SlackConfirmUninstallView/uninstall_utils.py for how the Slack path
+    still gates this behind an explicit yes, just via an email link instead
+    of an in-app popup, since Slack's own removal screen can't show ours).
+
+    Deliberately does NOT touch:
+      - billing/subscription records — real payment/Stripe data; deleting
+        those needs its own explicit, separate decision (cancellation,
+        refund, invoice-retention/legal implications), not a side effect
+        of a Slack-uninstall cleanup path.
+      - custom_extraction_cache — keyed by uploaded file content hash, not
+        by admin; shared across whichever admin next uploads the same
+        file, not this admin's exclusive data.
+      - vulnerability_cards — explicit product decision: the AI-generated
+        mitigation cards must survive an uninstall, unlike every other
+        per-report collection wiped below.
+
+    Most of this admin's data lives in per-REPORT collections that key off
+    report_id, not admin_id directly (admin_id on an individual finding/fix
+    doc goes stale the moment a report changes hands via magic-link claim —
+    same reason every dashboard view in this app resolves ownership through
+    report_id, never a stamped admin_id/email on the leaf record). Resolve
+    every report_id this admin owns FIRST, then cascade-delete by that.
+    """
+    from vaptfix.mongo_client import MongoContext
+    from users_details.models import UserDetail
+    from risk_criteria.models import RiskCriteria
+
+    admin_id = str(user.id)
+    admin_email = user.email
+    deleted_counts = {}
+
+    with MongoContext() as db:
+        owner_query = {"$or": [{"admin_id": admin_id}, {"admin_email": admin_email}]}
+        report_ids = [
+            str(r.get("report_id") or r.get("_id"))
+            for r in db["nessus_reports"].find(owner_query, {"report_id": 1})
+        ]
+
+        per_report_collections = [
+            # Real request: vulnerability_cards is deliberately excluded —
+            # the AI-generated mitigation cards must survive an uninstall,
+            # unlike every other per-report collection here.
+            "fix_vulnerabilities",
+            "fix_vulnerabilities_closed",
+            "fix_vulnerability_steps",
+            "fix_step_feedback",
+            "hold_assets",
+            "deleted_assets",
+            "hold_vulnerabilities",
+            "deleted_vulnerabilities",
+            "support_requests",
+            "tickets",
+        ]
+        if report_ids:
+            for coll_name in per_report_collections:
+                res = db[coll_name].delete_many({"report_id": {"$in": report_ids}})
+                deleted_counts[coll_name] = res.deleted_count
+
+        deleted_counts["nessus_reports"] = db["nessus_reports"].delete_many(owner_query).deleted_count
+        deleted_counts["host_classification_overrides"] = db["host_classification_overrides"].delete_many(
+            {"admin_id": admin_id}
+        ).deleted_count
+        deleted_counts["timeline_extension_requests"] = db["timeline_extension_requests"].delete_many(
+            {"admin_id": admin_id}
+        ).deleted_count
+        deleted_counts["notifications_notification"] = db["notifications_notification"].delete_many(
+            {"admin_id": admin_id}
+        ).deleted_count
+
+    deleted_counts["UserDetail"] = UserDetail.objects.filter(admin=user).delete()[0]
+    deleted_counts["RiskCriteria"] = RiskCriteria.objects.filter(admin=user).delete()[0]
+
+    logger.warning(
+        f"[SlackUninstall] PERMANENTLY deleted all data for admin={admin_email} "
+        f"admin_id={admin_id} report_count={len(report_ids)} counts={deleted_counts}"
+    )
+
+    user.delete()
+    return deleted_counts
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class SlackEventsView(APIView):
     """
@@ -8666,8 +8756,33 @@ class SlackEventsView(APIView):
                 logger.info(f"[SlackEvent] {etype}: team_id={tid}")
                 admin = User.objects.filter(slack_team_id=tid).first()
                 if admin:
+                    admin_email_for_confirm = admin.email
+                    admin_id_for_confirm = str(admin.id)
                     _disconnect_slack_for_admin(admin)
-                    logger.info(f"[SlackEvent] {etype} cleanup done for admin={admin.email}")
+                    logger.info(f"[SlackEvent] {etype} cleanup done for admin={admin_email_for_confirm}")
+
+                    # Real requirement: Slack's own removal screen can't
+                    # show VaptFix's confirmation popup — the app is
+                    # already gone by the time this event arrives. To
+                    # still require an explicit "yes" before permanently
+                    # deleting this admin's account/reports/team/etc. (see
+                    # _delete_all_admin_data), send a one-time confirm
+                    # link by email instead; nothing is deleted unless they
+                    # click it (see users/uninstall_utils.py).
+                    try:
+                        from .uninstall_utils import create_uninstall_confirmation
+                        from .utils import Util
+                        token = create_uninstall_confirmation(admin_id_for_confirm)
+                        # This runs in a background thread (no `request` in
+                        # scope) — same BACKEND_BASE_URL setting the OAuth
+                        # callback falls back to when building absolute URLs.
+                        base_url = getattr(settings, "BACKEND_BASE_URL", "https://vaptbackend.secureitlab.com")
+                        confirm_url = f"{base_url.rstrip('/')}/api/admin/users/slack/confirm-uninstall/?token={token}"
+                        ok, err = Util.send_slack_uninstall_confirmation_email(admin_email_for_confirm, confirm_url)
+                        if not ok:
+                            logger.warning(f"[SlackUninstall] confirmation email failed for {admin_email_for_confirm}: {err}")
+                    except Exception:
+                        logger.exception(f"[SlackUninstall] failed to send confirmation email for {admin_email_for_confirm}")
                 else:
                     logger.warning(f"[SlackEvent] {etype}: no admin found for team_id={tid}")
 
@@ -9268,6 +9383,95 @@ class SlackDisconnectView(APIView):
             # login_provider is deliberately left as "slack" in this case).
             "password_required": not had_password,
         }, status=status.HTTP_200_OK)
+
+
+class SlackUninstallView(APIView):
+    """
+    POST /api/admin/users/slack/uninstall/
+    Body: {"confirm": true}
+
+    The real "Uninstall" the customer's confirmation popup ("Are you sure?
+    This will permanently delete your account and ALL your data — reports,
+    team members, vulnerabilities, everything. This cannot be undone.")
+    leads to — distinct from the lighter SlackDisconnectView above, which
+    only breaks the Slack link and keeps every report/team-member/etc.
+    Requires an explicit confirm:true in the body (the frontend only sends
+    this after the admin clicks "Yes" in that popup) so a stray/accidental
+    POST can never trigger a permanent wipe.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        if not request.data.get("confirm"):
+            return Response(
+                {"detail": "Set confirm:true to permanently delete your account and all data."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        admin_email = user.email
+        deleted_counts = _delete_all_admin_data(user)
+        return Response({
+            "message": f"Account and all data for {admin_email} permanently deleted.",
+            "deleted": deleted_counts,
+        }, status=status.HTTP_200_OK)
+
+
+class SlackConfirmUninstallView(APIView):
+    """
+    GET /api/admin/users/slack/confirm-uninstall/?token=<token>
+
+    The click-target of the confirmation email sent when Slack itself
+    reports VaptFix was removed (SlackEventsView._handle_event's
+    app_uninstalled/tokens_revoked branch) — see uninstall_utils.py's own
+    docstring for why this exists instead of an in-app popup for that path.
+    No login required (Slack disconnect may have already been the admin's
+    only way to sign in); the one-time token IS the authorization, exactly
+    like the existing report-claim magic links (invite_utils.py).
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        from .uninstall_utils import consume_uninstall_confirmation
+
+        token = request.GET.get("token", "")
+        admin_id = consume_uninstall_confirmation(token)
+        if not admin_id:
+            return self._html_response(
+                "This link is invalid or has expired. Nothing was deleted.",
+                success=False,
+            )
+
+        admin = User.objects.filter(id=admin_id).first()
+        if not admin:
+            return self._html_response(
+                "This account no longer exists. Nothing further to delete.",
+                success=False,
+            )
+
+        admin_email = admin.email
+        _delete_all_admin_data(admin)
+        return self._html_response(
+            f"Your VaptFix account ({admin_email}) and all of its data have been "
+            f"permanently deleted.",
+            success=True,
+        )
+
+    def _html_response(self, message, success):
+        color = "#12b76a" if success else "#d92d20"
+        html = f"""
+        <html><head><title>VaptFix</title></head>
+        <body style="font-family:Arial, sans-serif; background:#eef0f6; display:flex;
+                     align-items:center; justify-content:center; height:100vh; margin:0;">
+          <div style="background:#fff; border-radius:16px; padding:40px; max-width:480px;
+                      text-align:center; box-shadow:0 12px 30px rgba(18,22,33,0.10);">
+            <h2 style="color:{color}; margin-top:0;">VaptFix</h2>
+            <p style="color:#333; font-size:15px; line-height:1.6;">{message}</p>
+          </div>
+        </body></html>
+        """
+        return HttpResponse(html)
 
 
 class SlackMemberLoginView(APIView):

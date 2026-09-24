@@ -266,6 +266,90 @@ class Util:
         return Util.send_mail(data)
 
     @staticmethod
+    def send_slack_uninstall_confirmation_email(user_email, confirm_url):
+        """
+        Sent when VaptFix was removed from the customer's Slack workspace
+        (SlackEventsView's app_uninstalled/tokens_revoked handling) — Slack
+        access is already cut off by the time this goes out, but nothing
+        else is deleted yet. Clicking the link is the one and only
+        confirmation gate before the admin's entire VaptFix data (reports,
+        team, vulnerabilities, everything) is permanently deleted; ignoring
+        this email leaves the account and its data exactly as they are.
+        """
+        _, logo_html = Util._get_logo(settings.BASE_DIR)
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0; padding:0; background-color:#eef0f6; font-family:Arial, sans-serif;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef0f6; padding:36px 0;">
+            <tr>
+              <td align="center">
+                <table width="480" cellpadding="0" cellspacing="0"
+                       style="background:#ffffff; border-radius:22px; overflow:hidden;
+                              box-shadow:0 12px 30px rgba(18, 22, 33, 0.10);">
+                  <tr>
+                    <td style="background-color:#23124d; padding:20px 30px; text-align:center;">
+                      {logo_html}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:34px 34px 20px 34px;">
+                      <h1 style="color:#1f2040; margin:0 0 16px 0; font-size:26px; line-height:1.25; text-align:center;">
+                        We noticed VaptFix was removed from your Slack workspace
+                      </h1>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        Your Slack integration has already been disconnected. Your VaptFix
+                        account and all its data (reports, team members, vulnerabilities,
+                        everything) are still safe and untouched.
+                      </p>
+                      <p style="color:#444; font-size:15px; line-height:1.6;">
+                        If you also want to permanently delete your entire VaptFix account
+                        and all of its data, click the button below. <strong>This cannot be
+                        undone.</strong>
+                      </p>
+                      <table cellpadding="0" cellspacing="0" style="margin:26px auto;">
+                        <tr>
+                          <td style="background-color:#d92d20; border-radius:8px;">
+                            <a href="{confirm_url}"
+                               style="display:inline-block; padding:14px 28px; color:#ffffff;
+                                      font-size:15px; font-weight:700; text-decoration:none;">
+                              Yes, permanently delete my account &amp; data
+                            </a>
+                          </td>
+                        </tr>
+                      </table>
+                      <p style="color:#888; font-size:13px; line-height:1.6;">
+                        If you didn't mean to remove VaptFix, or want to keep your data, you
+                        don't need to do anything — this link expires in 48 hours and nothing
+                        will be deleted unless you click it.
+                      </p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:18px 34px 24px 34px; text-align:center;">
+                      <p style="color:#9a9dad; font-size:12px; letter-spacing:1.2px; margin:0;">
+                        &copy; 2026 VAPTFIX. All rights reserved.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+        """
+
+        data = {
+            "to_email": user_email,
+            "subject": "Confirm: Permanently delete your VaptFix account? – VAPTFIX",
+            "html_content": html_content,
+        }
+        return Util.send_mail(data)
+
+    @staticmethod
     def _get_logo(base_dir):
         """Helper: load logo as base64 or return fallback HTML."""
         logo_b64 = None
