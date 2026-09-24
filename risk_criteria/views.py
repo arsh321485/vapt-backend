@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 from bson import ObjectId
 from django.shortcuts import get_object_or_404
 from django.http import Http404
+from django.core.cache import cache
 from .models import RiskCriteria
 from .serializers import (
     RiskCriteriaSerializer,
@@ -19,6 +20,32 @@ from .utils import parse_days
 
 logger = logging.getLogger(__name__)
 TIMELINE_EXTENSION_COLLECTION = "timeline_extension_requests"
+
+
+def _clear_admin_dashboard_cache(admin_id):
+    """
+    Real bug report: Mean Time to Remediate (and the Mitigation Timeline
+    chips) showed "N/A" on the Slack dashboard even after the admin had
+    genuinely set their Risk Criteria — AdminMeanTimeRemediateAPIView
+    itself computed the right answer fine when called fresh, but nothing
+    here ever busted admin_dashboard_summary_{admin_id} (the 300s cache
+    AdminDashboardSummaryAPIView wraps every dashboard metric in,
+    including this one), so the very FIRST snapshot — taken right after
+    upload, before risk criteria existed, and cached as "Risk criteria not
+    found" — kept being served for up to 5 minutes after the admin set it.
+    Same cache-key list adminasset/adminregister/userregister already use.
+    """
+    for key in (
+        f"admin_total_assets_{admin_id}",
+        f"admin_avg_score_{admin_id}",
+        f"admin_vulnerabilities_{admin_id}",
+        f"admin_inprocess_timeline_{admin_id}",
+        f"admin_dashboard_summary_{admin_id}",
+        f"mitigation_by_team_v2_{admin_id}",
+        f"admin_register_list_{admin_id}",
+        f"admin_asset_list_{admin_id}",
+    ):
+        cache.delete(key)
 
 def _normalize_severity(value: str):
     sev = (value or "").strip().lower()
@@ -101,6 +128,7 @@ class RiskCriteriaCreateView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         # admin is always the authenticated user — not taken from request body
         risk_criteria = serializer.save(admin=request.user)
+        _clear_admin_dashboard_cache(str(request.user.id))
         data = RiskCriteriaSerializer(risk_criteria).data
         return Response(
             {
@@ -200,6 +228,7 @@ class RiskCriteriaUpdateView(generics.UpdateAPIView):
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         risk_criteria = serializer.save()
+        _clear_admin_dashboard_cache(str(request.user.id))
 
         try:
             from notifications.utils import create_notification
@@ -256,6 +285,7 @@ class RiskCriteriaDeleteView(generics.DestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         instance.delete()
+        _clear_admin_dashboard_cache(str(request.user.id))
         return Response(
             {"message": "Risk Criteria deleted successfully"},
             status=status.HTTP_200_OK,
