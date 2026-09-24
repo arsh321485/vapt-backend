@@ -394,6 +394,35 @@ def classify_hosts_via_gpt(hosts: list) -> dict:
     return result
 
 
+def get_category_overrides_for_report(db, report_id: str) -> dict:
+    """
+    Manual per-host "Assets" tab override — real request: one specific host
+    (dev-ofw.digitalinno.com) has only infra-software findings (nginx,
+    ZooKeeper) that the shared keyword rules correctly classify as "server"
+    for every host with the same findings — but this particular host is a
+    known web application, and should show ONLY under the Web App tab, not
+    Server. Deliberately NOT a change to classify_finding_type/
+    classify_asset_type (that would flip every host with an nginx/ZooKeeper
+    finding, not just this one) — persisted separately on the report doc
+    ("category_overrides", same [{"host_name","categories"}] list shape as
+    asset_type_map, for the same dots-in-host_name reason) so it only
+    affects a host explicitly listed here, replacing that host's normal
+    categories computation entirely. Empty for every report until an entry
+    is added directly in Mongo.
+
+    Returns {host_name: [category, ...]} — callers should replace their
+    normally-computed `categories` list with this whenever the host has an
+    entry, and use its first element as `asset_type` too.
+    """
+    report_id = str(report_id)
+    doc = db["nessus_reports"].find_one({"report_id": report_id}, {"category_overrides": 1})
+    return {
+        row.get("host_name"): row.get("categories") or []
+        for row in ((doc or {}).get("category_overrides") or [])
+        if row.get("host_name") and row.get("categories")
+    }
+
+
 def get_asset_type_map_for_report(db, report_id: str, hosts: list) -> dict:
     """
     The main entry point every read call site should use instead of calling

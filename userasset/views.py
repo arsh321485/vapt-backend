@@ -40,7 +40,7 @@ def _clear_user_dashboard_cache(user_id, teams):
 
 from .serializers import UserAssetSerializer, UserAssetVulnSerializer
 from vaptfix.mongo_client import MongoContext
-from upload_report.asset_classification import classify_asset_type, get_asset_type_map_for_report, classify_finding_type
+from upload_report.asset_classification import classify_asset_type, get_asset_type_map_for_report, classify_finding_type, get_category_overrides_for_report
 
 NESSUS_COLLECTION          = "nessus_reports"
 VULN_CARD_COLLECTION       = "vulnerability_cards"
@@ -331,6 +331,7 @@ class UserAssetsAPIView(APIView):
                         if (h.get("host_name") or "").strip()
                     ],
                 )
+                category_overrides = get_category_overrides_for_report(db, report_id)
 
                 assets = {}
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -375,13 +376,17 @@ class UserAssetsAPIView(APIView):
                         # this host qualifies for, from ALL of its
                         # vulnerabilities (same ALL-not-just-team scope
                         # asset_type itself already uses below).
-                        _categories = sorted({
-                            classify_finding_type(
-                                v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
-                                _host_asset_type,
-                            )
-                            for v in host.get("vulnerabilities", [])
-                        }) or [_host_asset_type]
+                        if host_name in category_overrides:
+                            _categories = category_overrides[host_name]
+                            _host_asset_type = _categories[0]
+                        else:
+                            _categories = sorted({
+                                classify_finding_type(
+                                    v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                                    _host_asset_type,
+                                )
+                                for v in host.get("vulnerabilities", [])
+                            }) or [_host_asset_type]
                         assets[host_name] = {
                             "asset": host_name,
                             "first_seen": uploaded_at,
@@ -602,6 +607,7 @@ class UserReportAssetsAPIView(APIView):
                         if (h.get("host_name") or "").strip()
                     ],
                 )
+                category_overrides = get_category_overrides_for_report(db, report_id)
 
                 assets = {}
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -643,13 +649,17 @@ class UserReportAssetsAPIView(APIView):
                         # every category this host qualifies for, from ALL
                         # of its vulnerabilities (not just this team's,
                         # same scope asset_type itself already uses above).
-                        _categories = sorted({
-                            classify_finding_type(
-                                v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
-                                _host_asset_type,
-                            )
-                            for v in host.get("vulnerabilities", [])
-                        }) or [_host_asset_type]
+                        if host_name in category_overrides:
+                            _categories = category_overrides[host_name]
+                            _host_asset_type = _categories[0]
+                        else:
+                            _categories = sorted({
+                                classify_finding_type(
+                                    v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                                    _host_asset_type,
+                                )
+                                for v in host.get("vulnerabilities", [])
+                            }) or [_host_asset_type]
                         assets[host_name] = {
                             "asset": host_name,
                             "first_seen": uploaded_at,

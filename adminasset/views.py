@@ -26,7 +26,7 @@ def _clear_dashboard_cache(user_id):
         cache.delete(key)
 
 from .serializers import AdminAssetSerializer,AssetHostVulnSerializer,HoldAssetSerializer,HoldAssetListSerializer
-from upload_report.asset_classification import classify_asset_type, get_asset_type_map_for_report, classify_finding_type
+from upload_report.asset_classification import classify_asset_type, get_asset_type_map_for_report, classify_finding_type, get_category_overrides_for_report
 # Import User for organisation_name lookup
 try:
     from users.models import User
@@ -216,6 +216,7 @@ class ReportAssetsAPIView(APIView):
                         for a in assets.values()
                     ],
                 )
+                category_overrides = get_category_overrides_for_report(db, report_id)
 
                 # Real bug report: a host with a mix of both natures (e.g.
                 # producers-demo.fgeninsurance.com — genuinely a web
@@ -238,13 +239,17 @@ class ReportAssetsAPIView(APIView):
                 final = []
                 for a in assets.values():
                     host_asset_type = asset_type_map.get(a["asset"], "other")
-                    categories = sorted({
-                        classify_finding_type(
-                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
-                            host_asset_type,
-                        )
-                        for v in a["_vulns_for_classification"]
-                    }) or [host_asset_type]
+                    if a["asset"] in category_overrides:
+                        categories = category_overrides[a["asset"]]
+                        host_asset_type = categories[0]
+                    else:
+                        categories = sorted({
+                            classify_finding_type(
+                                v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                                host_asset_type,
+                            )
+                            for v in a["_vulns_for_classification"]
+                        }) or [host_asset_type]
                     for cat in categories:
                         asset_type_totals[cat] = asset_type_totals.get(cat, 0) + 1
 
@@ -1044,6 +1049,7 @@ class AdminAssetsAPIView(APIView):
                         for a in assets.values()
                     ],
                 )
+                category_overrides = get_category_overrides_for_report(db, report_id)
 
                 # See ReportAssetsAPIView's own comment for the full
                 # explanation — same "a mixed-nature host only ever showed
@@ -1053,13 +1059,17 @@ class AdminAssetsAPIView(APIView):
                 final = []
                 for a in assets.values():
                     host_asset_type = asset_type_map.get(a["asset"], "other")
-                    categories = sorted({
-                        classify_finding_type(
-                            v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
-                            host_asset_type,
-                        )
-                        for v in a["_vulns_for_classification"]
-                    }) or [host_asset_type]
+                    if a["asset"] in category_overrides:
+                        categories = category_overrides[a["asset"]]
+                        host_asset_type = categories[0]
+                    else:
+                        categories = sorted({
+                            classify_finding_type(
+                                v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
+                                host_asset_type,
+                            )
+                            for v in a["_vulns_for_classification"]
+                        }) or [host_asset_type]
                     for cat in categories:
                         asset_type_totals[cat] = asset_type_totals.get(cat, 0) + 1
 
