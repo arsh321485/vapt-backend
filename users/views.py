@@ -8438,6 +8438,49 @@ class JiraTransitionIssueView(APIView):
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _disconnect_slack_for_admin(user):
+    """
+    Shared cleanup for BOTH Slack disconnect paths — the VaptFix-side
+    "Disconnect Slack" button (SlackDisconnectView) and Slack's own
+    app_uninstalled/tokens_revoked event (SlackEventsView._handle_event
+    below) — one place defines what "disconnected" means instead of two
+    independently-maintained copies that could drift apart.
+
+    VaptFix's Slack integration has no separate "installation" table and
+    no per-customer webhook/event subscription to remove — the Events API
+    endpoint (SlackEventsView) is a single shared URL for the whole Slack
+    App, not something created per-install. The connection IS just these
+    fields on the admin's own User row (set in the OAuth callback, see
+    SlackOAuthCallbackView), plus each team member's own Slack link on
+    their UserDetail row (see _save_slack_member_to_user_detail). Once the
+    bot token is gone, no further Slack API call can succeed for this
+    admin regardless of anything else.
+
+    Returns True if the admin had a usable password (so login_provider
+    was safely reset to "email"); False if Slack was their ONLY way to
+    sign in (login_provider deliberately left as "slack" — the credentials
+    are still cleared either way, but forcing login_provider to "email"
+    here would lock them out with no way back in until they reconnect).
+    """
+    from users_details.models import UserDetail
+
+    had_password = user.has_usable_password()
+    user.slack_user_id = None
+    user.slack_team_id = None
+    user.slack_bot_token = None
+    if had_password and user.login_provider == 'slack':
+        user.login_provider = 'email'
+    user.save()
+
+    UserDetail.objects.filter(admin=user).update(slack_member_id=None, slack_channel_ids=[])
+
+    logger.info(
+        f"[SlackDisconnect] Cleaned up Slack integration for admin={user.email} "
+        f"had_password={had_password}"
+    )
+    return had_password
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class SlackEventsView(APIView):
     """
@@ -8606,6 +8649,27 @@ class SlackEventsView(APIView):
                     self._reply_to_mention(admin.slack_bot_token, channel, thread_ts, slack_user_id)
                 else:
                     logger.warning(f"[SlackEvent] app_mention: no admin/bot_token for team_id={team_id}")
+
+            elif etype in ("app_uninstalled", "tokens_revoked"):
+                # Real feature request: a customer removing VaptFix from
+                # Slack's OWN "Manage apps" page (instead of using VaptFix's
+                # "Disconnect Slack" button) previously left the admin's
+                # slack_bot_token sitting in the DB looking "Connected"
+                # forever — Slack has already revoked it, so every call
+                # using it would just start failing, with nothing in
+                # VaptFix ever reflecting that the integration is actually
+                # gone. Slack sends exactly one of these two events the
+                # moment that happens; team_id is all that's needed to find
+                # the admin and run the SAME cleanup the manual Disconnect
+                # button uses (see _disconnect_slack_for_admin above).
+                tid = team_id or event.get("team", "")
+                logger.info(f"[SlackEvent] {etype}: team_id={tid}")
+                admin = User.objects.filter(slack_team_id=tid).first()
+                if admin:
+                    _disconnect_slack_for_admin(admin)
+                    logger.info(f"[SlackEvent] {etype} cleanup done for admin={admin.email}")
+                else:
+                    logger.warning(f"[SlackEvent] {etype}: no admin found for team_id={tid}")
 
             else:
                 logger.info(f"[SlackEvent] Unhandled event type={etype}")
@@ -9145,6 +9209,65 @@ class SlackInstallView(APIView):
             f"&state={state}"
         )
         return redirect(auth_url)
+
+
+class SlackStatusView(APIView):
+    """
+    GET /api/admin/users/slack/status/
+    Current admin's Slack connection status — for the Settings/Integrations
+    page's Slack card ("Connected: <workspace name>" vs "Not Connected").
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        connected = bool(user.slack_team_id and user.slack_bot_token)
+        workspace_name = None
+        if connected:
+            try:
+                resp = _http_get(
+                    "https://slack.com/api/team.info",
+                    headers={"Authorization": f"Bearer {user.slack_bot_token}"},
+                    timeout=10,
+                )
+                data = resp.json() if resp else {}
+                if data.get("ok"):
+                    workspace_name = (data.get("team") or {}).get("name")
+            except Exception:
+                logger.warning("[SlackStatus] team.info lookup failed", exc_info=True)
+        return Response({
+            "connected": connected,
+            "slack_team_id": user.slack_team_id,
+            "workspace_name": workspace_name,
+        }, status=status.HTTP_200_OK)
+
+
+class SlackDisconnectView(APIView):
+    """
+    POST /api/admin/users/slack/disconnect/
+    VaptFix-side "Disconnect Slack" — the customer's own explicit control
+    from inside VaptFix, sharing its actual cleanup with Slack's own
+    app_uninstalled event (SlackEventsView._handle_event) via the same
+    _disconnect_slack_for_admin() helper, so both paths always agree on
+    what "disconnected" means.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        if not user.slack_team_id and not user.slack_bot_token:
+            return Response({"detail": "Slack is not connected."}, status=status.HTTP_400_BAD_REQUEST)
+
+        had_password = _disconnect_slack_for_admin(user)
+        return Response({
+            "message": "Slack disconnected successfully.",
+            # True when Slack was this admin's ONLY way to sign in — the
+            # frontend should prompt them to set a password now, before
+            # they lose access on their next logout (see
+            # _disconnect_slack_for_admin's own docstring for why
+            # login_provider is deliberately left as "slack" in this case).
+            "password_required": not had_password,
+        }, status=status.HTTP_200_OK)
 
 
 class SlackMemberLoginView(APIView):
