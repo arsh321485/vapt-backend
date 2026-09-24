@@ -216,7 +216,7 @@ class ReportAssetsAPIView(APIView):
                         for a in assets.values()
                     ],
                 )
-                category_overrides = get_category_overrides_for_report(db, report_id)
+                category_overrides = get_category_overrides_for_report(db, doc.get("admin_id") or str(request.user.id))
 
                 # Real bug report: a host with a mix of both natures (e.g.
                 # producers-demo.fgeninsurance.com — genuinely a web
@@ -1049,7 +1049,7 @@ class AdminAssetsAPIView(APIView):
                         for a in assets.values()
                     ],
                 )
-                category_overrides = get_category_overrides_for_report(db, report_id)
+                category_overrides = get_category_overrides_for_report(db, admin_id)
 
                 # See ReportAssetsAPIView's own comment for the full
                 # explanation — same "a mixed-nature host only ever showed

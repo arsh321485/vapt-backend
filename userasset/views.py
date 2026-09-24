@@ -331,7 +331,7 @@ class UserAssetsAPIView(APIView):
                         if (h.get("host_name") or "").strip()
                     ],
                 )
-                category_overrides = get_category_overrides_for_report(db, report_id)
+                category_overrides = get_category_overrides_for_report(db, str(admin_user.id))
 
                 assets = {}
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -607,7 +607,7 @@ class UserReportAssetsAPIView(APIView):
                         if (h.get("host_name") or "").strip()
                     ],
                 )
-                category_overrides = get_category_overrides_for_report(db, report_id)
+                category_overrides = get_category_overrides_for_report(db, str(admin_user.id))
 
                 assets = {}
                 for host in doc.get("vulnerabilities_by_host", []):
