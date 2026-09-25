@@ -2590,5 +2590,12 @@ class AdminDashboardSummaryAPIView(APIView):
             logger.warning(f"[AdminDashboardSummary] freemium_upgrade check failed: {exc}")
             results["freemium_upgrade"] = {"eligible": False}
 
-        cache.set(cache_key, results, 300)
+        # Real bug report: a team member closing a vulnerability (system_auto,
+        # all_steps_completed) correctly busts this cache right away, but a
+        # 300s TTL meant any OTHER request that repopulated it in between
+        # (e.g. the admin's own dashboard, polled every few seconds) could
+        # re-cache pre-close data that then sat stale for up to 5 more
+        # minutes — Register/Team Performance's own 60s caches made this
+        # summary look comparatively slow. Shortened to match.
+        cache.set(cache_key, results, 30)
         return Response(results, status=status.HTTP_200_OK)
