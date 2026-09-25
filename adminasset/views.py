@@ -756,6 +756,14 @@ class HoldAssetsByReportAPIView(APIView):
                         if d.get("host_name")
                     ],
                 )
+                # Real bug report: a host with a manual classification
+                # override (get_category_overrides_for_report — see its own
+                # docstring, e.g. dev-ofw.digitalinno.com) showed correctly
+                # under Web App on the "All Assets" tab, but flipped back to
+                # "Server" the moment it was held — this hold-list response
+                # was never checking the override at all, only the raw
+                # keyword/GPT asset_type_map.
+                category_overrides = get_category_overrides_for_report(db, (report_doc or {}).get("admin_id") or str(request.user.id))
 
                 results = []
 
@@ -781,9 +789,11 @@ class HoldAssetsByReportAPIView(APIView):
                         elif risk.startswith("low"):
                             severity_counts["low"] += 1
 
+                    _asset_name = doc.get("host_name")
+                    _override_cats = category_overrides.get(_asset_name)
                     results.append({
-                        "asset": doc.get("host_name"),
-                        "asset_type": asset_type_map.get(doc.get("host_name"), "other"),
+                        "asset": _asset_name,
+                        "asset_type": (_override_cats[0] if _override_cats else asset_type_map.get(_asset_name, "other")),
                         # ✅ fallback logic
                         "member_type": doc.get("member_type") or fallback_member_type,
                         "total_vulnerabilities": len(vulns),
@@ -1275,6 +1285,11 @@ class AdminHoldAssetsAPIView(APIView):
                         if d.get("host_name")
                     ],
                 )
+                # See HoldAssetsByReportAPIView's own comment — a manually
+                # overridden host (get_category_overrides_for_report) must
+                # keep its override even while held, not fall back to the
+                # raw keyword/GPT asset_type_map.
+                category_overrides = get_category_overrides_for_report(db, admin_id)
 
                 results = []
 
@@ -1300,9 +1315,11 @@ class AdminHoldAssetsAPIView(APIView):
                         elif risk.startswith("low"):
                             severity_counts["low"] += 1
 
+                    _asset_name = held_doc.get("host_name")
+                    _override_cats = category_overrides.get(_asset_name)
                     results.append({
-                        "asset": held_doc.get("host_name"),
-                        "asset_type": asset_type_map.get(held_doc.get("host_name"), "other"),
+                        "asset": _asset_name,
+                        "asset_type": (_override_cats[0] if _override_cats else asset_type_map.get(_asset_name, "other")),
                         "member_type": held_doc.get("member_type") or fallback_member_type,
                         "total_vulnerabilities": len(vulns),
                         "severity_counts": severity_counts,

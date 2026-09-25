@@ -508,6 +508,10 @@ class UserHoldAssetsAPIView(APIView):
                         if d.get("host_name")
                     ],
                 )
+                # See adminasset.views.HoldAssetsByReportAPIView's own
+                # comment — a manually overridden host must keep its
+                # override while held too, not fall back to raw asset_type_map.
+                category_overrides = get_category_overrides_for_report(db, admin_id)
 
                 results = []
                 for held_doc in held_docs:
@@ -522,9 +526,11 @@ class UserHoldAssetsAPIView(APIView):
                     if not team_vulns:
                         continue
 
+                    _asset_name = held_doc.get("host_name")
+                    _override_cats = category_overrides.get(_asset_name)
                     results.append({
-                        "asset": held_doc.get("host_name"),
-                        "asset_type": asset_type_map.get(held_doc.get("host_name"), "other"),
+                        "asset": _asset_name,
+                        "asset_type": (_override_cats[0] if _override_cats else asset_type_map.get(_asset_name, "other")),
                         "member_type": held_doc.get("member_type") or fallback_type,
                         "total_vulnerabilities": len(team_vulns),
                         "severity_counts": _severity_counts(team_vulns),
@@ -763,6 +769,10 @@ class UserHoldAssetsByReportAPIView(APIView):
                         if d.get("host_name")
                     ],
                 )
+                # See adminasset.views.HoldAssetsByReportAPIView's own
+                # comment — a manually overridden host must keep its
+                # override while held too, not fall back to raw asset_type_map.
+                category_overrides = get_category_overrides_for_report(db, report_doc.get("admin_id") or str(admin_user.id))
 
                 results = []
                 for held_doc in held_docs:
@@ -775,9 +785,11 @@ class UserHoldAssetsByReportAPIView(APIView):
                     if not team_vulns:
                         continue
 
+                    _asset_name = held_doc.get("host_name")
+                    _override_cats = category_overrides.get(_asset_name)
                     results.append({
-                        "asset": held_doc.get("host_name"),
-                        "asset_type": asset_type_map.get(held_doc.get("host_name"), "other"),
+                        "asset": _asset_name,
+                        "asset_type": (_override_cats[0] if _override_cats else asset_type_map.get(_asset_name, "other")),
                         "member_type": held_doc.get("member_type") or fallback_type,
                         "total_vulnerabilities": len(team_vulns),
                         "severity_counts": _severity_counts(team_vulns),

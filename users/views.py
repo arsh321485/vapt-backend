@@ -8516,6 +8516,8 @@ def _delete_all_admin_data(user):
     from vaptfix.mongo_client import MongoContext
     from users_details.models import UserDetail
     from risk_criteria.models import RiskCriteria
+    from upload_report.models import UploadReport
+    from django.db.models import Q
 
     admin_id = str(user.id)
     admin_email = user.email
@@ -8561,6 +8563,16 @@ def _delete_all_admin_data(user):
 
     deleted_counts["UserDetail"] = UserDetail.objects.filter(admin=user).delete()[0]
     deleted_counts["RiskCriteria"] = RiskCriteria.objects.filter(admin=user).delete()[0]
+    # Real bug report: this row (visible directly in MongoDB Compass as the
+    # "upload_reports" collection) never got cleaned up — UploadReport.admin
+    # is a djongo ForeignKey(on_delete=SET_NULL), but djongo's FK emulation
+    # doesn't reliably fire that cascade on delete, so the row (and its
+    # admin_id/admin_email/file/file_hash) was silently surviving user.delete()
+    # below. Matched on admin OR admin_email, same fallback every other
+    # admin-owned lookup in this app already uses.
+    deleted_counts["UploadReport"] = UploadReport.objects.filter(
+        Q(admin=user) | Q(admin_email=admin_email)
+    ).delete()[0]
 
     logger.warning(
         f"[SlackUninstall] PERMANENTLY deleted all data for admin={admin_email} "
