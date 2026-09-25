@@ -2232,12 +2232,25 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                 # here is both redundant and wrong (confirmed live: this is
                 # the "download-data" report's own vulnerabilities_detail
                 # list, and a closed vuln was still showing as open in it).
+                #
+                # Real bug report (round 2): a vulnerability closed BEFORE
+                # its whole asset was later put on hold ($pull's the host
+                # entirely out of vulnerabilities_by_host) disappeared from
+                # this list completely — not shown even as "closed" — since
+                # the main loop below only produces rows by iterating
+                # vulnerabilities_by_host, which a held host no longer
+                # appears in. Keep the full closed docs (not just the key
+                # set) so a supplemental pass after the main loop can
+                # synthesize a row for exactly this case.
                 closed_vuln_keys = set()
+                _closed_docs_by_key = {}
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": report_id}):
                     pname = (doc_c.get("plugin_name") or "").strip()
                     hname = (doc_c.get("host_name") or "").strip()
                     if pname:
-                        closed_vuln_keys.add((pname, hname))
+                        key = (pname, hname)
+                        closed_vuln_keys.add(key)
+                        _closed_docs_by_key[key] = doc_c
 
                 # Real bug report: this view (source of the "download-data"
                 # report's vulnerabilities_detail list) never checked
@@ -2296,7 +2309,8 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
 
                 # ── build one row per (vulnerability, host, port) from nessus ─────
                 vulnerabilities = []
-                seen = set()    # avoid duplicate (plugin_name, host_name, port) rows
+                seen = set()      # avoid duplicate (plugin_name, host_name, port) rows
+                seen_vh = set()   # (plugin_name, host_name) pairs reached at all, for the supplemental pass below
 
                 for host in doc.get("vulnerabilities_by_host", []):
                     h_name = (host.get("host_name") or host.get("host") or "").strip()
@@ -2311,6 +2325,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             continue
                         if (plugin_name, h_name) in excluded_vuln_keys:
                             continue
+                        seen_vh.add((plugin_name, h_name))
 
                         port = v.get("port", "")
                         row_key = (plugin_name, h_name, str(port))
@@ -2360,6 +2375,32 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             "found_date":         found_date.isoformat() if hasattr(found_date, "isoformat") else str(found_date) if found_date else None,
                             "status":             vuln_status,
                         })
+
+                # Supplemental pass — see closed_vuln_keys's own comment
+                # above. Any closed pair the main loop never reached (its
+                # host is no longer in vulnerabilities_by_host) still needs
+                # its own row here, synthesized straight from the closed doc.
+                for key, doc_c in _closed_docs_by_key.items():
+                    if key in seen_vh or key in excluded_vuln_keys:
+                        continue
+                    pname, hname = key
+                    risk_factor = (doc_c.get("risk_factor") or "").strip().title()
+                    if not risk_factor or risk_factor.lower() == "info":
+                        continue
+                    info = card_by_host.get(key) or card_by_name.get(pname) or {}
+                    found_date = info.get("found_date") or doc_c.get("closed_at") or doc_c.get("created_at")
+                    assigned_team = (info.get("assigned_team") or "").strip()
+                    if not team_names_lower_detail.get(assigned_team.lower()):
+                        assigned_team = _infer_assigned_team(pname)
+                    vulnerabilities.append({
+                        "vulnerability_name": pname,
+                        "assets":             hname,
+                        "port":               doc_c.get("port", ""),
+                        "assigned_team":      assigned_team,
+                        "risk_factor":        risk_factor,
+                        "found_date":         found_date.isoformat() if hasattr(found_date, "isoformat") else str(found_date) if found_date else None,
+                        "status":             "closed",
+                    })
 
                 return Response(
                     {
