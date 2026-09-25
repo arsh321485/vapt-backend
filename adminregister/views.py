@@ -371,10 +371,22 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 # "closed", or a real closed fix silently reverts to "open"
                 # here purely because dedup collapsed it under a still-open
                 # port of the very same vulnerability.
-                closed_vuln_host_set = {
-                    (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""))
-                    for fdoc in closed_coll.find({"report_id": str(report_id)})
-                }
+                closed_vuln_host_set = set()
+                # Real bug report: a vulnerability closed BEFORE its whole
+                # asset was later put on hold (AssetHoldAPIView $pull's the
+                # host entirely out of vulnerabilities_by_host) vanished
+                # from Register completely — not shown even as "closed" —
+                # because the main loop below only ever produces rows by
+                # iterating vulnerabilities_by_host, which the held host no
+                # longer appears in at all. Keep the full closed docs (not
+                # just the (plugin_name, host_name) set) so a supplemental
+                # pass after the main loop can synthesize a row for exactly
+                # this case — a closed pair the main loop never reached.
+                _closed_docs_by_key = {}
+                for fdoc in closed_coll.find({"report_id": str(report_id)}):
+                    _key = (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""))
+                    closed_vuln_host_set.add(_key)
+                    _closed_docs_by_key[_key] = fdoc
 
                 # Real bug report: the Register list never carried
                 # automation_status at all — the frontend's "Automation
@@ -490,6 +502,37 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                         }
                         _seen_vuln_asset_rows[dedup_key] = row
                         rows.append(row)
+
+                # Supplemental pass — see closed_vuln_host_set's own comment
+                # above. Any closed pair the main loop above never reached
+                # (its host is no longer in vulnerabilities_by_host because
+                # the whole asset was held/unheld-then-held-again after the
+                # fix was closed) still needs its own row here, synthesized
+                # straight from the closed doc itself.
+                for _key, _fdoc in _closed_docs_by_key.items():
+                    if _key in _seen_vuln_asset_rows or _key in _held_vuln_set or _key in _deleted_vuln_set:
+                        continue
+                    _pname, _hname = _key
+                    _risk_raw = (_fdoc.get("risk_factor") or "").strip().title()
+                    if _risk_raw.lower() == "info" or not _risk_raw:
+                        continue
+                    row = {
+                        "id": str(uuid.uuid4()),
+                        "vul_name": _pname,
+                        "asset": _hname,
+                        "severity": _risk_raw,
+                        "port": _fdoc.get("port", ""),
+                        "protocol": _fdoc.get("protocol", ""),
+                        "first_observation": _normalize_iso(_fdoc.get("created_at") or uploaded_at),
+                        "second_observation": _normalize_iso(_fdoc.get("closed_at")),
+                        "status": "closed",
+                        "fix_vulnerability_id": _fdoc.get("fix_vulnerability_id"),
+                        "operating_system": None,
+                        "plugin_id": _fdoc.get("plugin_id"),
+                        "automation_status": automation_status_by_key.get(_key),
+                    }
+                    _seen_vuln_asset_rows[_key] = row
+                    rows.append(row)
 
                 # Current user's admin info
                 current_admin_id = str(request.user.id)

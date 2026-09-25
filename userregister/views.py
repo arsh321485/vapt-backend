@@ -308,10 +308,21 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                 # definition of "closed", which is per (plugin_name,
                 # host_name) with no per-port requirement, not "every port
                 # of this pair must be closed".
-                closed_vuln_host_set = {
-                    (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""))
-                    for fdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": str(report_id)})
-                }
+                closed_vuln_host_set = set()
+                # Real bug report: see adminregister's identical fix — a
+                # vulnerability closed BEFORE its whole asset was later put
+                # on hold ($pull's the host entirely out of
+                # vulnerabilities_by_host) vanished from Register
+                # completely, since the main loop below only produces rows
+                # by iterating vulnerabilities_by_host. Keep the full closed
+                # docs so a supplemental pass after the main loop can
+                # synthesize a row for a closed pair the main loop never
+                # reached.
+                _closed_docs_by_key = {}
+                for fdoc in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": str(report_id)}):
+                    _key = (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""))
+                    closed_vuln_host_set.add(_key)
+                    _closed_docs_by_key[_key] = fdoc
 
                 # Real bug report: same "In Progress" badge gap as the
                 # admin-side register list — always present (None -> JSON
@@ -403,6 +414,36 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                         }
                         _seen_vuln_asset_rows[dedup_key] = row
                         rows.append(row)
+
+                # Supplemental pass — see closed_vuln_host_set's own comment
+                # above. Any closed pair the main loop never reached (its
+                # host is no longer in vulnerabilities_by_host) still needs
+                # its own row here, synthesized straight from the closed doc.
+                for _key, _fdoc in _closed_docs_by_key.items():
+                    if _key in _seen_vuln_asset_rows or _key in _held_vuln_set or _key in _deleted_vuln_set:
+                        continue
+                    _pname, _hname = _key
+                    _assigned_team = plugin_team_map.get(_pname)
+                    if not _assigned_team:
+                        continue
+                    _risk_raw = (_fdoc.get("risk_factor") or "").strip().title()
+                    if _risk_raw.lower() == "info" or not _risk_raw:
+                        continue
+                    row = {
+                        "id": str(uuid.uuid4()),
+                        "vul_name": _pname,
+                        "asset": _hname,
+                        "severity": _risk_raw,
+                        "port": _fdoc.get("port", ""),
+                        "protocol": _fdoc.get("protocol", ""),
+                        "assigned_team": _assigned_team,
+                        "first_observation": _normalize_iso(_fdoc.get("created_at") or uploaded_at),
+                        "second_observation": _normalize_iso(_fdoc.get("closed_at")),
+                        "status": "closed",
+                        "automation_status": automation_status_by_key.get(_key),
+                    }
+                    _seen_vuln_asset_rows[_key] = row
+                    rows.append(row)
 
                 _payload = {
                     "report_id": str(report_id),

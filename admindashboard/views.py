@@ -2020,12 +2020,25 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                 # currently owns — same fix as AdminDistributionByTeamAPIView,
                 # see its own comment for why a created_by/admin_id filter
                 # here is both redundant and wrong.
+                #
+                # Real bug report: a vulnerability closed BEFORE its whole
+                # asset was later put on hold ($pull's the host entirely out
+                # of vulnerabilities_by_host) never got counted as "closed"
+                # here — the main loop below only reaches a (plugin_name,
+                # host_name) pair by iterating vulnerabilities_by_host,
+                # which no longer has a held host's entry. Keep the full
+                # closed docs (not just the key set) so a supplemental pass
+                # after the main loop can add this stat for exactly the
+                # pairs the main loop never reached.
                 closed_vuln_keys = set()
+                _closed_docs_by_key = {}
                 for doc_c in db[FIX_VULN_CLOSED_COLLECTION].find({"report_id": report_id}):
                     pname = (doc_c.get("plugin_name") or "").strip()
                     hname = (doc_c.get("host_name") or "").strip()
                     if pname:
-                        closed_vuln_keys.add((pname, hname))
+                        key = (pname, hname)
+                        closed_vuln_keys.add(key)
+                        _closed_docs_by_key[key] = doc_c
 
                 held_vuln_keys = {
                     ((d.get("plugin_name") or "").strip(), (d.get("host_name") or "").strip())
@@ -2073,6 +2086,7 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                 # active_host_names check is needed (unlike the old
                 # vulnerability_cards-based approach, whose cards are a
                 # static snapshot never updated by hold/delete).
+                _seen_keys = set()
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or host.get("host") or "").strip()
                     for v in host.get("vulnerabilities", []):
@@ -2083,6 +2097,7 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                             continue
 
                         key = (plugin_name, host_name)
+                        _seen_keys.add(key)
                         if key in held_vuln_keys or key in deleted_vuln_keys:
                             continue
 
@@ -2115,6 +2130,20 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                         bucket["total"] += 1
                         bucket["open"] += 1
                         bucket["by_risk"][risk_label] += 1
+
+                # Supplemental pass — see closed_vuln_keys's own comment
+                # above. Any closed pair the main loop never reached (its
+                # host is no longer in vulnerabilities_by_host) still needs
+                # to count toward its team's "closed" stat.
+                for key, doc_c in _closed_docs_by_key.items():
+                    if key in _seen_keys or key in held_vuln_keys or key in deleted_vuln_keys:
+                        continue
+                    plugin_name, _host_name = key
+                    raw_team = vuln_team_map.get(key, "")
+                    team_key = team_names_lower.get(raw_team.lower()) or team_names_lower.get(
+                        _infer_assigned_team(plugin_name).lower()
+                    ) or "Unassigned"
+                    teams[team_key]["closed"] += 1
 
                 return Response(
                     {
