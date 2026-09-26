@@ -15475,13 +15475,19 @@ class SlackSlashCommandView(APIView):
         """Content for the 'Fix' sub-tabs — All Assets, All Vulnerabilities,
         and Common Vulns (mitigation-strategy by-team API)."""
         if sub_action_id == "fix_sub_vulns":
-            data = self._call_api(
-                "/api/admin/adminregister/register/latest/vulns/", team_id,
+            # Real feature: grouped-by-finding list (matching the website's
+            # AllVulnerabilitiesAPIView) with classification + bulk Hold/
+            # Unhold/Delete — see _format_grouped_vulns_list's own
+            # docstring for why this is a separate data source/formatter
+            # from the flat vd_data list below.
+            report_id, _ = self._fetch_asset_classification_map(team_id, user_id)
+            if not report_id:
+                return self._text_block("❌ No reports found for your account yet.")
+            vuln_data = self._call_api(
+                f"/api/admin/adminasset/report/{report_id}/vulnerabilities/", team_id,
                 slack_user_id=user_id,
             )
-            return self._format_vulndata_list(
-                data, show_filters=True, pg_action_id="fix_vuln_pg", origin="fixvulns",
-            )
+            return self._format_grouped_vulns_list(vuln_data)
 
         if sub_action_id == "fix_sub_common":
             return self._common_vulns_tab_blocks(team_id, user_id)
@@ -15493,7 +15499,12 @@ class SlackSlashCommandView(APIView):
         )
         rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
         all_host_names = self._fetch_all_asset_host_names(team_id, user_id)
-        return self._format_asset_list(rows, all_host_names=all_host_names)
+        report_id, class_map = self._fetch_asset_classification_map(team_id, user_id)
+        _, held_map = self._fetch_held_assets(team_id, user_id)
+        return self._format_asset_list(
+            rows, all_host_names=all_host_names,
+            class_map=class_map, held_map=held_map, report_id=report_id,
+        )
 
     def _norm_vuln_sev(self, v):
         return (v.get("severity") or v.get("risk_factor") or "").strip().lower()
@@ -15634,7 +15645,7 @@ class SlackSlashCommandView(APIView):
                 entry[sev] += 1
         return sorted(assets.items(), key=lambda kv: kv[0])
 
-    def _numbered_pagination_block(self, offset, page_size, total, base_action_id, value_prefix=""):
+    def _numbered_pagination_block(self, offset, page_size, total, base_action_id, value_prefix="", value_suffix=""):
         """
         Design-style pagination (‹ 1 2 3 › instead of plain Previous/Next
         text) — used for the Fix tab's asset/vuln lists. Each page-number
@@ -15643,7 +15654,8 @@ class SlackSlashCommandView(APIView):
         earlier Prev/Next "invalid_blocks" bug), so the page number is
         baked into the action_id itself: f"{base_action_id}_p{page_num}".
         `value_prefix` lets callers carry extra context (e.g. "host|") —
-        the actual offset is appended after it.
+        the actual offset is appended after it. `value_suffix` carries
+        further context AFTER the offset (e.g. "|<class_filter>").
         """
         total_pages = max(1, -(-total // page_size)) if total else 1
         current_page = offset // page_size + 1
@@ -15658,7 +15670,7 @@ class SlackSlashCommandView(APIView):
                 # target page — two buttons sharing an action_id is exactly
                 # what caused the earlier "invalid_blocks" silent-failure bug.
                 "action_id": f"{base_action_id}_prevp{current_page - 1}",
-                "value": f"{value_prefix}{(current_page - 2) * page_size}",
+                "value": f"{value_prefix}{(current_page - 2) * page_size}{value_suffix}",
             })
 
         window = 5
@@ -15669,7 +15681,7 @@ class SlackSlashCommandView(APIView):
                 "type": "button",
                 "text": {"type": "plain_text", "text": str(p), "emoji": True},
                 "action_id": f"{base_action_id}_p{p}",
-                "value": f"{value_prefix}{(p - 1) * page_size}",
+                "value": f"{value_prefix}{(p - 1) * page_size}{value_suffix}",
                 **({"style": "primary"} if p == current_page else {}),
             })
 
@@ -15678,7 +15690,7 @@ class SlackSlashCommandView(APIView):
                 "type": "button",
                 "text": {"type": "plain_text", "text": "›", "emoji": True},
                 "action_id": f"{base_action_id}_nextp{current_page + 1}",
-                "value": f"{value_prefix}{current_page * page_size}",
+                "value": f"{value_prefix}{current_page * page_size}{value_suffix}",
             })
 
         return {"type": "actions", "elements": elements} if elements else None
@@ -15710,14 +15722,91 @@ class SlackSlashCommandView(APIView):
             logger.exception(f"[SlackCmd] _fetch_all_asset_host_names failed for team_id={team_id}")
             return []
 
-    def _format_asset_list(self, rows, offset=0, sev_filter="all", st_filter="all", all_host_names=None):
+    def _fetch_asset_classification_map(self, team_id, user_id=None):
+        """
+        Real feature: Slack's own Hold/Unhold/Delete + Assets/Web App/
+        Firewall/Server classification on the "All Assets"/"All
+        Vulnerabilities" tabs — same data the website's Assets page already
+        shows (AdminAssetsAPIView), fetched once per render.
+        Returns (report_id, {host_name: {"asset_type": ..., "categories": [...]}}).
+        Best-effort — returns (None, {}) on any failure.
+        """
+        try:
+            data = self._call_api("/api/admin/adminasset/assets/", team_id, slack_user_id=user_id)
+            report_id = data.get("report_id")
+            class_map = {
+                a.get("asset"): {
+                    "asset_type": a.get("asset_type") or "other",
+                    "categories": a.get("categories") or [a.get("asset_type") or "other"],
+                }
+                for a in (data.get("assets") or []) if a.get("asset")
+            }
+            return report_id, class_map
+        except Exception:
+            logger.exception(f"[SlackCmd] _fetch_asset_classification_map failed for team_id={team_id}")
+            return None, {}
+
+    def _fetch_held_assets(self, team_id, user_id=None):
+        """
+        Currently on-hold assets for the latest report (AdminHoldAssetsAPIView)
+        — used to render the "🔒 Assets On Hold" section and its Unhold
+        buttons. Returns (report_id, {host_name: asset_dict}).
+        """
+        try:
+            data = self._call_api("/api/admin/adminasset/assets/hold-list/", team_id, slack_user_id=user_id)
+            report_id = data.get("report_id")
+            held_map = {a.get("asset"): a for a in (data.get("assets") or []) if a.get("asset")}
+            return report_id, held_map
+        except Exception:
+            logger.exception(f"[SlackCmd] _fetch_held_assets failed for team_id={team_id}")
+            return None, {}
+
+    # Shared classification filter row for both the All Assets and All
+    # Vulnerabilities tabs — same 4 categories the website's Assets page
+    # tabs use (upload_report/asset_classification.py's taxonomy), "other"
+    # labeled "Assets" to match the website's own tab name for that bucket.
+    _CLASS_FILTER_BUTTONS = [
+        ("all", "All"),
+        ("web_app", "Web App"),
+        ("firewall", "Firewall"),
+        ("server", "Server"),
+        ("other", "Assets"),
+    ]
+
+    def _class_filter_blocks(self, class_filter, class_prefix, value_prefix=""):
+        """One actions row of classification-tab buttons. `value_prefix` lets
+        callers carry other active filter state (e.g. "sev|st|0|") ahead of
+        the classification key itself, which always goes LAST in the
+        value — same position _handle_action's branches for this button
+        row read it from."""
+        return [{
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label, "emoji": True},
+                    "action_id": f"{class_prefix}{k}",
+                    "value": f"{value_prefix}{k}",
+                    **({"style": "primary"} if k == class_filter else {}),
+                }
+                for (k, label) in self._CLASS_FILTER_BUTTONS
+            ],
+        }]
+
+    def _format_asset_list(self, rows, offset=0, sev_filter="all", st_filter="all", all_host_names=None,
+                            class_filter="all", class_map=None, held_map=None, report_id=None):
         PAGE_SIZE = 5
         sev_filter = (sev_filter or "all").strip().lower()
         st_filter = (st_filter or "all").strip().lower()
+        class_filter = (class_filter or "all").strip().lower()
+        class_map = class_map or {}
+        held_map = held_map or {}
         if sev_filter not in ("all", "critical", "high", "medium", "low"):
             sev_filter = "all"
         if st_filter not in ("all", "open", "closed", "in_progress", "open_review"):
             st_filter = "all"
+        if class_filter not in ("all", "web_app", "firewall", "server", "other"):
+            class_filter = "all"
 
         _, st_counts = self._asset_sev_status_counts(rows, sev_filter, st_filter)
         filtered_rows = self._filter_vuln_rows(rows, sev_filter, st_filter)
@@ -15740,6 +15829,17 @@ class SlackSlashCommandView(APIView):
                 # (e.g. "...58.86"), which is backwards for a list meant to
                 # highlight what needs attention first.
                 assets = sorted(assets + extra, key=lambda kv: (kv[1]["total"] == 0, kv[0]))
+
+        # Real feature: Assets/Web App/Firewall/Server classification tabs,
+        # same taxonomy the website's Assets page already uses
+        # (upload_report/asset_classification.py) — class_map comes from
+        # AdminAssetsAPIView (_fetch_asset_classification_map), keyed by
+        # host_name, same as this list's own rows.
+        if class_filter != "all":
+            assets = [
+                (host, c) for (host, c) in assets
+                if class_filter in (class_map.get(host, {}).get("categories") or ["other"])
+            ]
         count = len(assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = assets[offset:offset + PAGE_SIZE]
@@ -15749,9 +15849,13 @@ class SlackSlashCommandView(APIView):
             {"type": "header", "text": {"type": "plain_text", "text": "🖥 All Assets", "emoji": True}},
             self._ctx("Every asset in your latest report. Click one to see its vulnerabilities."),
         ]
+        blocks.extend(self._class_filter_blocks(
+            class_filter, "fix_asset_class_", value_prefix=f"{sev_filter}|{st_filter}|0|",
+        ))
         blocks.extend(self._sev_status_filter_blocks(
             sev_filter, st_filter, {}, st_counts,
             sev_prefix="fix_asset_sev_", st_prefix="fix_asset_st_",
+            extra_value=f"|{class_filter}",
         ))
         blocks.append({
             "type": "section",
@@ -15762,36 +15866,211 @@ class SlackSlashCommandView(APIView):
         })
         blocks.append({"type": "divider"})
         if not page_items:
-            return blocks + self._text_block("No assets found.")
-
-        for host, c in page_items:
-            ctx_els = self._sev_count_context_elements(c)
-            if ctx_els:
-                blocks.append({"type": "context", "elements": ctx_els})
-            else:
+            blocks += self._text_block("No assets found.")
+        else:
+            for host, c in page_items:
+                ctx_els = self._sev_count_context_elements(c)
+                if ctx_els:
+                    blocks.append({"type": "context", "elements": ctx_els})
+                else:
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": "_No open vulnerabilities_"}],
+                    })
+                atype = (class_map.get(host, {}).get("asset_type") or "other").replace("_", " ").title()
                 blocks.append({
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": "_No open vulnerabilities_"}],
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"🖥 `{host}`  |  *{c['total']} Vulns*  |  _{atype}_",
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": "view_fix_asset",
+                        "value": f"{host}|{sev_filter}|{st_filter}|{offset}|0",
+                        "style": "primary",
+                    },
                 })
+                # Real feature: Hold/Delete actions matching the website's
+                # Assets page — calls AssetHoldAPIView/AssetDeleteAPIView
+                # (adminasset/views.py) via the same _call_api HTTP pattern
+                # every other Slack action already uses. report_id is
+                # required to build those per-report endpoint URLs.
+                if report_id:
+                    blocks.append({
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "⏸ Hold", "emoji": True},
+                                "action_id": "asset_hold",
+                                "value": f"{report_id}|{host}",
+                                "confirm": {
+                                    "title": {"type": "plain_text", "text": "Hold this asset?"},
+                                    "text": {"type": "plain_text",
+                                             "text": f"`{host}` will be removed from active remediation tracking until unheld."},
+                                    "confirm": {"type": "plain_text", "text": "Yes, hold"},
+                                    "deny": {"type": "plain_text", "text": "Cancel"},
+                                },
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "🗑 Delete", "emoji": True},
+                                "style": "danger",
+                                "action_id": "asset_delete",
+                                "value": f"{report_id}|{host}",
+                                "confirm": {
+                                    "title": {"type": "plain_text", "text": "Delete this asset?"},
+                                    "text": {"type": "plain_text",
+                                             "text": f"This permanently removes `{host}` from this report. This cannot be undone."},
+                                    "confirm": {"type": "plain_text", "text": "Yes, delete"},
+                                    "deny": {"type": "plain_text", "text": "Cancel"},
+                                },
+                            },
+                        ],
+                    })
+                blocks.append({"type": "divider"})
+
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, "fix_asset_pg",
+            value_prefix=f"{sev_filter}|{st_filter}|", value_suffix=f"|{class_filter}",
+        )
+        if pg_block:
+            blocks.append(pg_block)
+
+        # Real feature: held assets are $pull'ed out of the report entirely
+        # (see AssetHoldAPIView), so they'd otherwise vanish from Slack too
+        # — shown here separately, matching the website's own "Mitigation
+        # on Hold" panel, with an Unhold button to bring one back.
+        if held_map:
+            blocks.append({"type": "divider"})
+            blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Assets On Hold", "emoji": True}})
+            for host, info in held_map.items():
+                atype = (info.get("asset_type") or "other").replace("_", " ").title()
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"🖥 `{host}`  |  *{info.get('total_vulnerabilities', 0)} Vulns*  |  _{atype}_",
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "▶️ Unhold", "emoji": True},
+                        "action_id": "asset_unhold",
+                        "value": f"{report_id}|{host}",
+                        "style": "primary",
+                    },
+                })
+                blocks.append({"type": "divider"})
+
+        return blocks
+
+    def _format_grouped_vulns_list(self, data, offset=0, class_filter="all"):
+        """
+        Slack's own dedicated "All Vulnerabilities" tab — grouped by
+        plugin_name (matching the website's AllVulnerabilitiesAPIView),
+        with Assets/Web App/Firewall/Server classification and bulk
+        Hold/Unhold/Delete per finding (applied to every asset it currently
+        affects — see vuln_hold/vuln_unhold/vuln_delete in _handle_action).
+
+        Deliberately a SEPARATE function from _format_vulndata_list, which
+        stays a flat per-finding list unchanged — that one is shared by two
+        OTHER call sites (the generic "Vulnerability Data" view and the
+        team-scoped Common Vulns list) that must keep their existing shape.
+
+        `data` is AllVulnerabilitiesAPIView's own response
+        ({"report_id", "asset_type_totals", "vulnerabilities": [...]});
+        each entry already carries "asset_type_counts" (per-category finding
+        counts) — no separate classification fetch needed here.
+        """
+        PAGE_SIZE = 5
+        report_id = data.get("report_id")
+        class_filter = (class_filter or "all").strip().lower()
+        if class_filter not in ("all", "web_app", "firewall", "server", "other"):
+            class_filter = "all"
+
+        vulns = data.get("vulnerabilities") or []
+        if class_filter != "all":
+            vulns = [v for v in vulns if (v.get("asset_type_counts") or {}).get(class_filter, 0) > 0]
+
+        count = len(vulns)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = vulns[offset:offset + PAGE_SIZE]
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🛡 All Vulnerabilities", "emoji": True}},
+            self._ctx("Every distinct vulnerability in your latest report, grouped by finding."),
+        ]
+        blocks.extend(self._class_filter_blocks(class_filter, "fix_vuln_class_"))
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Total:* {count} vulnerabilities — showing {offset + 1 if page_items else 0}-{end_num}",
+            },
+        })
+        blocks.append({"type": "divider"})
+        if not page_items:
+            blocks += self._text_block("No vulnerabilities found.")
+            return blocks
+
+        for v in page_items:
+            pname = v.get("plugin_name") or "Unknown"
+            sev = (v.get("severity") or "").strip() or "—"
+            total_assets = v.get("total_assets", 0)
+            open_c = v.get("open_count", 0)
+            held_c = v.get("held_count", 0)
             blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"🖥 `{host}`  |  *{c['total']} Vulns*",
-                },
-                "accessory": {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "View", "emoji": True},
-                    "action_id": "view_fix_asset",
-                    "value": f"{host}|{sev_filter}|{st_filter}|{offset}|0",
-                    "style": "primary",
+                    "text": f"*{pname}*\n{sev}  •  {total_assets} asset(s)  •  {open_c} open, {held_c} held",
                 },
             })
+            if report_id:
+                action_elements = [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "⏸ Hold All", "emoji": True},
+                        "action_id": "vuln_hold",
+                        "value": f"{report_id}|{pname}",
+                        "confirm": {
+                            "title": {"type": "plain_text", "text": "Hold this vulnerability?"},
+                            "text": {"type": "plain_text",
+                                     "text": f"Holds \"{pname}\" on every asset it's currently open on."},
+                            "confirm": {"type": "plain_text", "text": "Yes, hold"},
+                            "deny": {"type": "plain_text", "text": "Cancel"},
+                        },
+                    },
+                ]
+                if held_c:
+                    action_elements.append({
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "▶️ Unhold All", "emoji": True},
+                        "action_id": "vuln_unhold",
+                        "value": f"{report_id}|{pname}",
+                    })
+                action_elements.append({
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🗑 Delete All", "emoji": True},
+                    "style": "danger",
+                    "action_id": "vuln_delete",
+                    "value": f"{report_id}|{pname}",
+                    "confirm": {
+                        "title": {"type": "plain_text", "text": "Delete this vulnerability?"},
+                        "text": {"type": "plain_text",
+                                 "text": f"Permanently removes \"{pname}\" from every asset it affects. This cannot be undone."},
+                        "confirm": {"type": "plain_text", "text": "Yes, delete"},
+                        "deny": {"type": "plain_text", "text": "Cancel"},
+                    },
+                })
+                blocks.append({"type": "actions", "elements": action_elements})
             blocks.append({"type": "divider"})
 
         pg_block = self._numbered_pagination_block(
-            offset, PAGE_SIZE, count, "fix_asset_pg",
-            value_prefix=f"{sev_filter}|{st_filter}|",
+            offset, PAGE_SIZE, count, "fix_vulng_pg", value_suffix=f"|{class_filter}",
         )
         if pg_block:
             blocks.append(pg_block)
@@ -23654,34 +23933,157 @@ class SlackInteractivityView(APIView):
                 )
                 return
 
-            # ── Fix All Assets — severity / status filters + pagination ──────
+            # ── Fix All Assets — severity / status / classification filters + pagination ──
             if (
                 action_id.startswith("fix_asset_sev_")
                 or action_id.startswith("fix_asset_st_")
                 or action_id.startswith("fix_asset_pg_")
+                or action_id.startswith("fix_asset_class_")
                 or action_id.startswith("view_fix_assets_pg_")
             ):
                 parts = value.split("|")
                 if action_id.startswith("view_fix_assets_pg_") and value.isdigit():
                     # Legacy pagination value was plain offset
-                    sev_filter, st_filter, page_offset = "all", "all", int(value)
+                    sev_filter, st_filter, page_offset, class_filter = "all", "all", int(value), "all"
+                elif action_id.startswith("fix_asset_class_"):
+                    # value: sev|st|0|<new_class> — classification key is
+                    # always LAST (see _class_filter_blocks's own docstring).
+                    sev_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
+                    st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                    page_offset = 0
+                    class_filter = parts[3] if len(parts) > 3 and parts[3] else "all"
                 else:
                     sev_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
                     st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
                     page_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                    class_filter = parts[3] if len(parts) > 3 and parts[3] else "all"
                 data = slash._call_api(
                     "/api/admin/adminregister/register/latest/vulns/",
                     team_id, slack_user_id=slack_user_id,
                 )
                 rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
                 all_host_names = slash._fetch_all_asset_host_names(team_id, slack_user_id)
+                report_id, class_map = slash._fetch_asset_classification_map(team_id, slack_user_id)
+                _, held_map = slash._fetch_held_assets(team_id, slack_user_id)
                 content = slash._format_asset_list(
                     rows, offset=page_offset, sev_filter=sev_filter, st_filter=st_filter,
-                    all_host_names=all_host_names,
+                    all_host_names=all_host_names, class_filter=class_filter,
+                    class_map=class_map, held_map=held_map, report_id=report_id,
                 )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_fix")
                     + slash._fix_subnav_block(active_sub="fix_sub_assets")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            # ── Fix All Assets — Hold / Unhold / Delete ───────────────────────
+            if action_id in ("asset_hold", "asset_unhold", "asset_delete"):
+                parts = value.split("|", 1)
+                asset_report_id = parts[0] if parts else ""
+                host = parts[1] if len(parts) > 1 else ""
+                encoded_host = quote(host, safe="")
+                if action_id == "asset_hold":
+                    slash._call_api(
+                        f"/api/admin/adminasset/report/{asset_report_id}/assets/{encoded_host}/hold/",
+                        team_id, method="post", slack_user_id=slack_user_id,
+                    )
+                elif action_id == "asset_unhold":
+                    slash._call_api(
+                        f"/api/admin/adminasset/report/{asset_report_id}/assets/{encoded_host}/unhold/",
+                        team_id, method="post", slack_user_id=slack_user_id,
+                    )
+                else:
+                    slash._call_api(
+                        f"/api/admin/adminasset/report/{asset_report_id}/assets/{encoded_host}/",
+                        team_id, method="delete", slack_user_id=slack_user_id,
+                    )
+                # Re-render the Assets tab from scratch (default filters) so
+                # the admin sees the result immediately, same as every other
+                # mutation in this file re-renders its own view afterward.
+                data = slash._call_api(
+                    "/api/admin/adminregister/register/latest/vulns/",
+                    team_id, slack_user_id=slack_user_id,
+                )
+                rows = data.get("rows") or data.get("results") or (data if isinstance(data, list) else [])
+                all_host_names = slash._fetch_all_asset_host_names(team_id, slack_user_id)
+                report_id, class_map = slash._fetch_asset_classification_map(team_id, slack_user_id)
+                _, held_map = slash._fetch_held_assets(team_id, slack_user_id)
+                content = slash._format_asset_list(
+                    rows, all_host_names=all_host_names,
+                    class_map=class_map, held_map=held_map, report_id=report_id,
+                )
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_assets")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            # ── All Vulnerabilities (grouped) — classification + pagination ──
+            if action_id.startswith("fix_vuln_class_") or action_id.startswith("fix_vulng_pg_"):
+                parts = value.split("|")
+                if action_id.startswith("fix_vuln_class_"):
+                    page_offset, class_filter = 0, parts[0] if parts and parts[0] else "all"
+                else:
+                    page_offset = int(parts[0]) if parts and parts[0].isdigit() else 0
+                    class_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                report_id, _ = slash._fetch_asset_classification_map(team_id, slack_user_id)
+                vuln_data = slash._call_api(
+                    f"/api/admin/adminasset/report/{report_id}/vulnerabilities/",
+                    team_id, slack_user_id=slack_user_id,
+                ) if report_id else {}
+                content = slash._format_grouped_vulns_list(vuln_data, offset=page_offset, class_filter=class_filter)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_vulns")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            # ── All Vulnerabilities (grouped) — bulk Hold / Unhold / Delete ───
+            if action_id in ("vuln_hold", "vuln_unhold", "vuln_delete"):
+                parts = value.split("|", 1)
+                vuln_report_id = parts[0] if parts else ""
+                plugin_name = parts[1] if len(parts) > 1 else ""
+                encoded_plugin = quote(plugin_name, safe="")
+                assets_data = slash._call_api(
+                    f"/api/admin/adminasset/report/{vuln_report_id}/vulnerability/{encoded_plugin}/assets/",
+                    team_id, slack_user_id=slack_user_id,
+                )
+                asset_rows = assets_data.get("assets") or []
+                if action_id == "vuln_hold":
+                    host_names = [a.get("host_name") for a in asset_rows if a.get("status") not in ("held", "deleted")]
+                    endpoint, http_method = "hold", "post"
+                elif action_id == "vuln_unhold":
+                    host_names = [a.get("host_name") for a in asset_rows if a.get("status") == "held"]
+                    endpoint, http_method = "unhold", "post"
+                else:
+                    host_names = [a.get("host_name") for a in asset_rows if a.get("status") != "deleted"]
+                    endpoint, http_method = "delete", "delete"
+                host_names = [h for h in host_names if h]
+                if host_names:
+                    slash._call_api(
+                        f"/api/admin/adminasset/report/{vuln_report_id}/vulnerability/{encoded_plugin}/{endpoint}/",
+                        team_id, method=http_method, json_body={"host_names": host_names}, slack_user_id=slack_user_id,
+                    )
+                vuln_data = slash._call_api(
+                    f"/api/admin/adminasset/report/{vuln_report_id}/vulnerabilities/",
+                    team_id, slack_user_id=slack_user_id,
+                )
+                content = slash._format_grouped_vulns_list(vuln_data)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_vulns")
                     + content
                 )
                 self._post_response_url(
