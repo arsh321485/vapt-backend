@@ -760,6 +760,24 @@ class UploadReportView(APIView):
             # acquire/wait/release sequence is now logged so a real
             # journalctl trace can confirm or rule out this lock entirely,
             # instead of reasoning about it blind again.
+            #
+            # Real bug report (round 4): journalctl access from the reporting
+            # side kept coming back empty even right after a fresh failing
+            # test, with no way to tell whether that meant "this code never
+            # ran" or just "logs weren't checked correctly". A Mongo write is
+            # something anyone with DB access can verify directly, with no
+            # dependency on server log access at all — same shared cluster
+            # every other fix in this file has already been confirmed
+            # against.
+            try:
+                _get_mongo_client_and_db()[1]["merge_lock_trace"].insert_one({
+                    "ts": datetime.datetime.utcnow(),
+                    "admin_id": str(target_admin.id),
+                    "admin_email": getattr(target_admin, "email", None),
+                    "event": "entered_lock_block",
+                })
+            except Exception:
+                logger.exception("[MergeUpload] trace write failed (entered_lock_block)")
             _lock_wait_start = time.perf_counter()
             for _attempt in range(360):  # up to 180s — matches the lock's own timeout below
                 if _merge_cache.add(_merge_lock_key, True, timeout=180):
@@ -777,6 +795,18 @@ class UploadReportView(APIView):
                 f"[MergeUpload] key={_merge_lock_key} todays_report_id={todays_report_id} "
                 f"lock_held={_merge_lock_held}"
             )
+            try:
+                _get_mongo_client_and_db()[1]["merge_lock_trace"].insert_one({
+                    "ts": datetime.datetime.utcnow(),
+                    "admin_id": str(target_admin.id),
+                    "admin_email": getattr(target_admin, "email", None),
+                    "event": "lock_acquired",
+                    "lock_held": _merge_lock_held,
+                    "waited_ms": _lock_wait_ms,
+                    "todays_report_id": todays_report_id,
+                })
+            except Exception:
+                logger.exception("[MergeUpload] trace write failed (lock_acquired)")
             if todays_report_id and _merge_lock_held:
                 # An anchor already exists (from an earlier request today,
                 # possibly one still processing its OTHER files) — this
@@ -967,6 +997,20 @@ class UploadReportView(APIView):
                             f"parsed_type={parsed_data.get('type')!r} is_structured={is_structured} "
                             f"todays_report_id={todays_report_id} is_merge={is_merge}"
                         )
+                        try:
+                            _get_mongo_client_and_db()[1]["merge_lock_trace"].insert_one({
+                                "ts": datetime.datetime.utcnow(),
+                                "admin_id": str(target_admin.id),
+                                "admin_email": getattr(target_admin, "email", None),
+                                "event": "is_merge_decision",
+                                "file": uploaded_file.name,
+                                "parsed_type": parsed_data.get("type"),
+                                "is_structured": is_structured,
+                                "todays_report_id": todays_report_id,
+                                "is_merge": is_merge,
+                            })
+                        except Exception:
+                            logger.exception("[MergeUpload] trace write failed (is_merge_decision)")
 
                         if is_merge:
                             # Same-day merge — fold this file's hosts/vulns into
