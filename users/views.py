@@ -1,3 +1,4 @@
+import math
 from django.forms import ValidationError
 from .renderers import UserRenderer
 from rest_framework import status, generics, permissions
@@ -10405,12 +10406,13 @@ _DASHBOARD_HTML_HEAD = """<!DOCTYPE html>
     :root {
       --slack-text: #1d1c1d;
       --slack-sub: #616061;
-      --slack-border: #e8e8e8;
+      --slack-border: #e3e6ea;
       --accent: rgb(14, 106, 111);
-      --critical: #58120a;
-      --high: #dd231c;
-      --medium: #f09f0e;
-      --low: #18b985;
+      --critical: #7a1010;
+      --high: #e0282e;
+      --medium: #f0a00c;
+      --low: #1dbf8a;
+      --radius: 14px;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -10429,11 +10431,10 @@ _DASHBOARD_HTML_HEAD = """<!DOCTYPE html>
     .dash {
       width: 100%;
       max-width: 740px;
+      background: #fafbfc;
       border: 1px solid var(--slack-border);
-      border-radius: 16px;
+      border-radius: var(--radius);
       overflow: hidden;
-      box-shadow: 0 2px 8px rgba(0,0,0,.05);
-      background: #fff;
     }
 
     .dash-top {
@@ -10441,182 +10442,64 @@ _DASHBOARD_HTML_HEAD = """<!DOCTYPE html>
       background: #fff;
       border-bottom: 1px solid var(--slack-border);
     }
-    .dash-top h2 { font-size: 19px; font-weight: 900; }
+    .dash-top h2 { font-size: 19px; font-weight: 900; display: flex; align-items: center; gap: 8px; }
     .dash-top p { font-size: 13px; color: var(--slack-sub); margin-top: 2px; }
 
-    .bento {
-      display: grid;
-      grid-template-columns: repeat(6, 1fr);
-      grid-template-rows: auto auto auto;
-      gap: 12px;
-      padding: 16px;
-      background: #f4f6f8;
-    }
+    .dash-bd { padding: 18px; display: grid; gap: 14px; }
 
-    .bento-card {
+    .card {
       background: #fff;
-      border-radius: 12px;
       border: 1px solid var(--slack-border);
+      border-radius: 12px;
       padding: 16px 18px;
-      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+      box-shadow: 0 1px 3px rgba(15,23,42,.06);
     }
 
-    .bento-card.span2 { grid-column: span 2; }
-    .bento-card.span3 { grid-column: span 3; }
-    .bento-card.span6 { grid-column: span 6; }
+    .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 
-    .bento-label {
-      font-size: 11px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: .05em; color: var(--slack-sub); margin-bottom: 6px;
+    .lbl {
+      font-size: 11.5px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .05em; color: #4a4a4a;
     }
+    .big { font-size: 28px; font-weight: 900; line-height: 1.1; margin: 6px 0 4px; }
+    .sub { font-size: 12.5px; color: var(--slack-sub); }
 
-    .bento-value { font-size: 28px; font-weight: 900; line-height: 1.1; }
-    .bento-sub { font-size: 12px; color: var(--slack-sub); margin-top: 4px; }
+    .risk { display: flex; align-items: center; gap: 14px; }
+    .risk .big { font-size: 22px; }
+    .risk .big small { font-size: 14px; font-weight: 400; color: var(--slack-sub); }
+    .ring { position: relative; flex-shrink: 0; }
+    .ring .c { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; font-weight: 900; }
 
-    .gauge-wrap { display: flex; align-items: center; gap: 16px; }
+    .ttl { font-size: 14.5px; font-weight: 900; display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+    .ttl .frac { font-size: 12.5px; font-weight: 400; color: var(--slack-sub); }
 
-    .gauge {
-      width: 80px; height: 80px; border-radius: 50%;
-      display: grid; place-items: center; position: relative; flex-shrink: 0;
-    }
+    .bars { display: grid; grid-template-columns: repeat(4, 1fr); align-items: end; height: 170px; gap: 10px; padding-top: 6px; }
+    .bar { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+    .bar .v { font-size: 12.5px; font-weight: 900; background: #f1f2f4; border-radius: 10px; padding: 1px 9px; margin-bottom: 6px; }
+    .bar .b { width: 36px; max-width: 100%; border-radius: 7px 7px 3px 3px; }
+    .bar .n { font-size: 12px; font-weight: 700; color: var(--slack-sub); margin-top: 8px; }
 
-    .gauge::after {
-      content: ""; width: 58px; height: 58px; border-radius: 50%; background: #fff;
-    }
-
-    .gauge span {
-      position: absolute; font-size: 18px; font-weight: 900; z-index: 1;
-    }
-
-    .gauge-info .bento-value { font-size: 22px; }
-
-    .chart-card .chart-title {
-      font-size: 14px; font-weight: 900; margin-bottom: 14px;
-    }
-    .chart-card .chart-sub {
-      display: inline-block;
-      font-size: 12px; font-weight: 400; color: var(--slack-sub); margin-left: 6px;
-    }
-
-    .vbars {
-      display: flex;
-      align-items: flex-end;
-      justify-content: space-around;
-      height: 160px;
-      padding-top: 10px;
-    }
-
-    .vcol {
-      display: flex; flex-direction: column; align-items: center;
-      gap: 6px; flex: 1;
-    }
-
-    .vcol .num {
-      font-size: 13px; font-weight: 900;
-      background: #f0f0f0;
-      padding: 2px 8px; border-radius: 10px;
-    }
-
-    .vcol .col {
-      width: 36px;
-      border-radius: 8px 8px 4px 4px;
-    }
-
-    .vcol .col.critical { background: var(--critical); box-shadow: 0 4px 12px rgba(224,30,90,.3); }
-    .vcol .col.high { background: var(--high); box-shadow: 0 4px 12px rgba(232,145,45,.3); }
-    .vcol .col.medium { background: var(--medium); box-shadow: 0 4px 12px rgba(236,178,46,.3); }
-    .vcol .col.low { background: var(--low); box-shadow: 0 4px 12px rgba(46,182,125,.3); }
-
-    .vcol .lbl {
-      font-size: 11px; font-weight: 700; color: var(--slack-sub);
-    }
-
-    .donut-wrap {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 14px;
-      padding-top: 4px;
-    }
-
-    .donut {
-      width: 118px;
-      height: 118px;
-      border-radius: 50%;
-      display: grid;
-      place-items: center;
-      position: relative;
-      flex-shrink: 0;
-    }
-
-    .donut::after {
-      content: "";
-      width: 74px;
-      height: 74px;
-      border-radius: 50%;
-      background: #fff;
-    }
-
-    .donut-center {
-      position: absolute;
-      text-align: center;
-      z-index: 1;
-      line-height: 1.15;
-    }
-
-    .donut-center .big { font-size: 26px; font-weight: 900; }
-    .donut-center .small { font-size: 11px; color: var(--slack-sub); font-weight: 700; }
-
-    .donut-legend {
-      width: 100%;
-      display: flex;
-      flex-direction: column;
-      gap: 7px;
-    }
-
-    .legend-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13px;
-    }
-
-    .legend-row .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-    .legend-row .dot.critical { background: var(--critical); }
-    .legend-row .dot.high { background: var(--high); }
-    .legend-row .dot.medium { background: var(--medium); }
-    .legend-row .dot.low { background: var(--low); }
-
-    .legend-row .name { flex: 1; font-weight: 700; }
-    .legend-row .pct { font-weight: 900; color: var(--slack-sub); min-width: 36px; text-align: right; }
+    .fixed { display: flex; flex-direction: column; align-items: center; }
+    .legend { list-style: none; width: 100%; margin-top: 14px; display: grid; gap: 7px; }
+    .legend li { display: flex; align-items: center; gap: 9px; font-size: 13.5px; font-weight: 700; }
+    .legend li span.d { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .legend li b { margin-left: auto; color: var(--slack-sub); }
 
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
-
     .chip {
-      display: flex; align-items: center; gap: 6px;
-      padding: 8px 12px; border-radius: 8px;
+      display: flex; align-items: center; gap: 7px;
       font-size: 13px; font-weight: 700;
-      border: 1px solid var(--slack-border);
-      background: #fafbfc;
+      border: 1px solid var(--slack-border); border-radius: 8px;
+      padding: 8px 12px; background: #fafbfc;
     }
+    .chip .d { width: 8px; height: 8px; border-radius: 50%; }
+    .chip.over { border-color: #f3b4b4; background: #fff5f5; color: #8a1111; }
 
-    .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
-    .chip .dot.red { background: var(--critical); }
-    .chip .dot.yellow { background: var(--medium); }
-
-    .chip.danger { border-color: #f5c6cb; background: #fff5f5; }
-
-    .support-row { display: flex; gap: 12px; }
-
-    .support-stat {
-      flex: 1; text-align: center;
-      padding: 12px; border-radius: 10px;
-      background: linear-gradient(135deg, #f8f9ff, #fff);
-      border: 1px solid #e0e7ff;
-    }
-
-    .support-stat .num { font-size: 24px; font-weight: 900; color: var(--accent); }
-    .support-stat .txt { font-size: 11px; color: var(--slack-sub); font-weight: 700; margin-top: 2px; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+    .stat { background: #f6f9fc; border: 1px solid var(--slack-border); border-radius: 10px; padding: 12px; text-align: center; }
+    .stat .big { font-size: 22px; margin: 0; color: var(--accent); }
+    .stat .sub { margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -10627,28 +10510,68 @@ def _dashboard_bar_height(n, m):
     return round(max((n / m) * 130, 8) if n > 0 else 4)
 
 
-def _dashboard_gauge_gradient(score):
+def _dashboard_gauge_color(score):
     score = max(0, min(10, score or 0))
-    deg = (score / 10) * 360
-    color = "#58120a" if score >= 7 else ("#dd231c" if score >= 4 else "#18b985")
-    return f"conic-gradient({color} 0deg {deg}deg, #eee {deg}deg 360deg)"
+    return "#7a1010" if score >= 7 else ("#e0282e" if score >= 4 else "#f0a00c")
 
 
-def _dashboard_donut_gradient(counts):
-    colors = {"critical": "#58120a", "high": "#dd231c", "medium": "#f09f0e", "low": "#18b985"}
-    order = ["medium", "low", "high", "critical"]
+def _dashboard_ring_svg(score, size=88, r=38, sw=12, center_text=None):
+    """
+    Single-value progress ring (Avg Risk Score) — a background track circle
+    plus a foreground circle whose stroke-dasharray is cut to score/10 of
+    the full circumference, matching the reference design's SVG ring
+    (not the old conic-gradient div, which couldn't be screenshotted with
+    the exact same anti-aliasing/edge as a real <svg>).
+    """
+    score = max(0, min(10, score or 0))
+    c = 2 * math.pi * r
+    filled = (score / 10) * c
+    color = _dashboard_gauge_color(score)
+    cx = cy = size / 2
+    text = center_text if center_text is not None else f"{score}"
+    return (
+        f'<svg width="{size}" height="{size}">'
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#ececec" stroke-width="{sw}"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="{sw}" '
+        f'stroke-dasharray="{filled} {c - filled}" stroke-dashoffset="0" '
+        f'transform="rotate(-90 {cx} {cy})"/></svg>'
+        f'<div class="c"><span style="font-size:18px">{text}</span></div>'
+    )
+
+
+_SEV_ORDER = ["critical", "high", "medium", "low"]
+_SEV_COLORS = {"critical": "#7a1010", "high": "#e0282e", "medium": "#f0a00c", "low": "#1dbf8a"}
+_SEV_LABELS = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
+
+
+def _dashboard_donut_svg(counts, size=140, r=59, sw=22):
+    """
+    Multi-segment "Vulns Fixed" donut — one stacked <circle> per non-zero
+    severity (Critical -> High -> Medium -> Low, matching the reference
+    design's legend order), each cut to its own share of the circumference
+    and offset by the cumulative length of every segment drawn before it.
+    Replaces the old single conic-gradient div, which could only encode
+    one hue per element and couldn't reproduce this exact stacked-ring
+    look.
+    """
     total = sum(counts.values())
-    if total == 0:
-        return "#eee", 0
-    deg = 0
-    stops = []
-    for k in order:
-        n = counts.get(k, 0)
-        if n > 0:
-            slice_deg = (n / total) * 360
-            stops.append(f"{colors[k]} {deg}deg {deg + slice_deg}deg")
-            deg += slice_deg
-    return f"conic-gradient({', '.join(stops)})", total
+    cx = cy = size / 2
+    circles = [f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#ececec" stroke-width="{sw}"/>']
+    if total > 0:
+        cumulative = 0.0
+        c = 2 * math.pi * r
+        for k in _SEV_ORDER:
+            n = counts.get(k, 0)
+            if n <= 0:
+                continue
+            seg_len = (n / total) * c
+            circles.append(
+                f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{_SEV_COLORS[k]}" stroke-width="{sw}" '
+                f'stroke-dasharray="{seg_len} {c - seg_len}" stroke-dashoffset="{-cumulative}" '
+                f'transform="rotate(-90 {cx} {cy})"/>'
+            )
+            cumulative += seg_len
+    return f'<svg width="{size}" height="{size}">{"".join(circles)}</svg>'
 
 
 def _build_dashboard_html(data, title="📊 VaptFix Admin Dashboard",
@@ -10677,7 +10600,7 @@ def _build_dashboard_html(data, title="📊 VaptFix Admin Dashboard",
     support  = data.get("support_requests") or {}
 
     risk_label = "High risk level" if avg_score >= 7 else ("Moderate risk level" if avg_score >= 4 else "Low risk level")
-    gauge_bg = _dashboard_gauge_gradient(avg_score)
+    gauge_svg = _dashboard_ring_svg(avg_score, size=88, r=38, sw=12)
 
     fixed_counts = {
         "critical": fixed.get("critical_fixed", 0),
@@ -10685,35 +10608,40 @@ def _build_dashboard_html(data, title="📊 VaptFix Admin Dashboard",
         "medium": fixed.get("medium_fixed", 0),
         "low": fixed.get("low_fixed", 0),
     }
-    donut_bg, fixed_total = _dashboard_donut_gradient(fixed_counts)
-    legend_labels = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
+    fixed_total = sum(fixed_counts.values())
+    donut_svg = _dashboard_donut_svg(fixed_counts, size=140, r=59, sw=22)
     legend_html = "".join(
-        f'<div class="legend-row"><span class="dot {k}"></span>'
-        f'<span class="name">{legend_labels[k]}</span>'
-        f'<span class="pct">{fixed_counts[k]}</span></div>'
-        for k in ["medium", "low", "high", "critical"]
+        f'<li><span class="d" style="background:{_SEV_COLORS[k]}"></span>{_SEV_LABELS[k]}<b>{fixed_counts[k]}</b></li>'
+        for k in _SEV_ORDER
     )
 
-    def chip(label, info):
+    def chip(sev_key, label, info):
+        # Real bug report: this used to color every chip's dot red/orange
+        # by overdue status alone — the reference design instead keeps
+        # each chip's dot fixed to ITS OWN severity color always (Critical
+        # is always the dark-red dot, Low is always the green dot, etc.),
+        # and signals "overdue" purely via the "over" class (red border/
+        # background on the whole chip), same as the mockup's own Critical
+        # chip staying dark-red-dotted even while overdue.
+        dot_color = _SEV_COLORS[sev_key]
         if not info:
-            return f'<div class="chip"><span class="dot yellow"></span> {label} — N/A</div>'
+            return f'<span class="chip"><span class="d" style="background:{dot_color}"></span>{label} — N/A</span>'
         overdue = info.get("status") == "overdue"
-        dot = "red" if overdue else "yellow"
-        cls = "chip danger" if overdue else "chip"
+        cls = "chip over" if overdue else "chip"
         status_txt = "Overdue" if overdue else info.get("remaining_label", "")
-        return f'<div class="{cls}"><span class="dot {dot}"></span> {label} — {status_txt}</div>'
+        return f'<span class="{cls}"><span class="d" style="background:{dot_color}"></span>{label} — {status_txt}</span>'
 
     chips_html = "".join([
-        chip("Critical", timeline.get("critical")),
-        chip("High",     timeline.get("high")),
-        chip("Medium",   timeline.get("medium")),
-        chip("Low",      timeline.get("low")),
+        chip("critical", "Critical", timeline.get("critical")),
+        chip("high",     "High",     timeline.get("high")),
+        chip("medium",   "Medium",   timeline.get("medium")),
+        chip("low",      "Low",      timeline.get("low")),
     ])
 
     bars_html = "".join(
-        f'<div class="vcol"><span class="num">{n}</span>'
-        f'<div class="col {k}" style="height:{_dashboard_bar_height(n, max_v)}px"></div>'
-        f'<span class="lbl">{lbl}</span></div>'
+        f'<div class="bar"><span class="v">{n}</span>'
+        f'<div class="b" style="height:{_dashboard_bar_height(n, max_v)}px;background:{_SEV_COLORS[k]}"></div>'
+        f'<span class="n">{lbl}</span></div>'
         for k, lbl, n in [
             ("critical", "Critical", critical),
             ("high", "High", high),
@@ -10727,57 +10655,45 @@ def _build_dashboard_html(data, title="📊 VaptFix Admin Dashboard",
       <h2>{title}</h2>
       <p>{subtitle}</p>
     </div>
-
-    <div class="bento">
-      <div class="bento-card span2">
-        <div class="bento-label">🏢 Total Assets</div>
-        <div class="bento-value">{total_assets}</div>
-        <div class="bento-sub">Monitored endpoints</div>
+    <div class="dash-bd">
+      <div class="row3">
+        <div class="card"><div class="lbl">🏢 Total Assets</div><div class="big">{total_assets}</div><div class="sub">Monitored endpoints</div></div>
+        <div class="card risk">
+          <div class="ring" style="width:88px;height:88px">{gauge_svg}</div>
+          <div>
+            <div class="lbl">⚠️ Avg Risk Score</div>
+            <div class="big">{avg_score} <small>/ 10</small></div>
+            <div class="sub">{risk_label}</div>
+          </div>
+        </div>
+        <div class="card"><div class="lbl">⚡ Mean Time to Remediate</div><div class="big">{mtr.get('label', 'N/A')}</div><div class="sub">Average resolution time</div></div>
       </div>
 
-      <div class="bento-card span2">
-        <div class="gauge-wrap">
-          <div class="gauge" style="background:{gauge_bg}"><span>{avg_score}</span></div>
-          <div class="gauge-info">
-            <div class="bento-label">⚠️ Avg Risk Score</div>
-            <div class="bento-value">{avg_score} <span style="font-size:14px;font-weight:400;color:var(--slack-sub)">/ 10</span></div>
-            <div class="bento-sub">{risk_label}</div>
+      <div class="row2">
+        <div class="card">
+          <div class="ttl">🔴 Vulnerabilities by Severity</div>
+          <div class="bars">{bars_html}</div>
+        </div>
+        <div class="card">
+          <div class="ttl">🔧 Vulns Fixed <span class="frac">{fixed.get('total_fixed', 0)} / {total_vulns}</span></div>
+          <div class="fixed">
+            <div class="ring" style="width:140px;height:140px">{donut_svg}<div class="c"><div><div style="font-size:26px;line-height:1">{fixed_total}</div><div style="font-size:11px;font-weight:700;color:var(--slack-sub)">fixed</div></div></div></div>
+            <ul class="legend">{legend_html}</ul>
           </div>
         </div>
       </div>
 
-      <div class="bento-card span2">
-        <div class="bento-label">⚡ Mean Time to Remediate</div>
-        <div class="bento-value">{mtr.get('label', 'N/A')}</div>
-        <div class="bento-sub">Average resolution time</div>
-      </div>
-
-      <div class="bento-card span3 chart-card">
-        <div class="chart-title">🔴 Vulnerabilities by Severity</div>
-        <div class="vbars">{bars_html}</div>
-      </div>
-
-      <div class="bento-card span3 chart-card">
-        <div class="chart-title">🔧 Vulns Fixed<span class="chart-sub">{fixed.get('total_fixed', 0)} / {total_vulns}</span></div>
-        <div class="donut-wrap">
-          <div class="donut" style="background:{donut_bg}">
-            <div class="donut-center"><div class="big">{fixed_total}</div><div class="small">fixed</div></div>
-          </div>
-          <div class="donut-legend">{legend_html}</div>
-        </div>
-      </div>
-
-      <div class="bento-card span6">
-        <div class="bento-label">⏱️ Mitigation Timeline</div>
+      <div class="card">
+        <div class="lbl">⏱️ Mitigation Timeline</div>
         <div class="chips">{chips_html}</div>
       </div>
 
-      <div class="bento-card span6">
-        <div class="bento-label">🎫 Support Requests</div>
-        <div class="support-row">
-          <div class="support-stat"><div class="num">{support.get('total', 0)}</div><div class="txt">Total Requests</div></div>
-          <div class="support-stat"><div class="num">{support.get('pending', 0)}</div><div class="txt">Pending</div></div>
-          <div class="support-stat"><div class="num">{support.get('closed', 0)}</div><div class="txt">Closed</div></div>
+      <div class="card">
+        <div class="lbl">🎫 Support Requests</div>
+        <div class="stats">
+          <div class="stat"><div class="big">{support.get('total', 0)}</div><div class="sub">Total Requests</div></div>
+          <div class="stat"><div class="big">{support.get('pending', 0)}</div><div class="sub">Pending</div></div>
+          <div class="stat"><div class="big">{support.get('closed', 0)}</div><div class="sub">Closed</div></div>
         </div>
       </div>
     </div>
