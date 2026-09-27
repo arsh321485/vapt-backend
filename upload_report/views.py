@@ -712,7 +712,44 @@ class UploadReportView(APIView):
             # stored below, so a 2nd/3rd file in this same request merges
             # into the 1st rather than each other.
             from .merge_service import get_todays_report_id, merge_hosts_into_report
+            from django.core.cache import cache as _merge_cache
+
+            # Real bug report: two (or more) uploads for the SAME admin
+            # submitted as separate near-simultaneous requests (e.g. a
+            # "select several files" flow that fires one request per file
+            # without waiting for the previous one, or several quick manual
+            # uploads) each called get_todays_report_id() before any
+            # sibling had gotten far enough to create ITS OWN UploadReport
+            # row — custom/PDF uploads spend real, non-trivial time in AI
+            # extraction (validate_and_extract_custom_report_cached, below)
+            # before that row is ever created, giving a wide window for
+            # this. Every one of them independently saw "nothing uploaded
+            # yet today" and created its own separate nessus_reports doc
+            # instead of merging into one — confirmed live: 4 files for one
+            # admin, uploaded ~30-90s apart, ended up as 4 separate reports
+            # instead of merging. A short mutex around just this decision —
+            # held only until THIS request's anchor (an already-existing
+            # today's report, or this file's own freshly-created one) is
+            # settled — serializes that one moment without blocking the
+            # rest of file processing for anyone else.
+            _merge_lock_key = f"upload_merge_lock_{target_admin.id}"
+            _merge_lock_held = False
+            for _ in range(60):  # ~30s max wait for a sibling request's anchor to settle
+                if _merge_cache.add(_merge_lock_key, True, timeout=180):
+                    _merge_lock_held = True
+                    break
+                time.sleep(0.5)
+
             todays_report_id = get_todays_report_id(target_admin)
+            if todays_report_id and _merge_lock_held:
+                # An anchor already exists (from an earlier request today,
+                # possibly one still processing its OTHER files) — this
+                # request will only ever merge into it, never create a new
+                # one, so the race this lock guards against can't happen
+                # here. Release right away instead of holding it for this
+                # file's own (possibly slow) processing.
+                _merge_cache.delete(_merge_lock_key)
+                _merge_lock_held = False
 
             for uploaded_file in uploaded_files:
                 file_path = None
@@ -930,6 +967,17 @@ class UploadReportView(APIView):
                             # today) merges into this report from here on.
                             if mongodb_stored and is_structured and not todays_report_id:
                                 todays_report_id = report_id
+                                # This file just became today's anchor —
+                                # release the mutex now so a sibling
+                                # request waiting on it (see its acquire,
+                                # above) can proceed immediately instead of
+                                # waiting out the rest of this file's own
+                                # processing (freemium trimming, response
+                                # building, remaining files in this same
+                                # request, etc).
+                                if _merge_lock_held:
+                                    _merge_cache.delete(_merge_lock_key)
+                                    _merge_lock_held = False
 
                         # Real bug report — see the plan-gate comment above:
                         # Freemium/undecided-plan trimming now happens ONCE
