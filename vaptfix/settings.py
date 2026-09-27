@@ -78,6 +78,23 @@ MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "https://vaptbacken
 MICROSOFT_AUTH_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
 MICROSOFT_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
 
+# Real bug report: after switching MICROSOFT_TENANT_ID to "common" (so
+# users from any organization can sign in), the app-only (client_credentials)
+# Graph calls this app also makes — _get_graph_app_token in users/views.py,
+# used to auto-publish/install the Teams bot — started failing outright.
+# Microsoft does not allow the client_credentials grant against /common/,
+# /organizations/, or /consumers/ at all (AADSTS900023): an app-only token
+# is only ever issued for ONE specific tenant, so there has to be an actual
+# tenant ID in that request no matter what the interactive user-login
+# endpoint above uses. This app is still homed in Secureitlab's own tenant
+# regardless of which OTHER tenants' users can now sign into it, so
+# client_credentials calls always target that one specific tenant here —
+# never MICROSOFT_TENANT_ID once that's "common".
+MICROSOFT_APP_TENANT_ID = os.getenv("MICROSOFT_APP_TENANT_ID") or (
+    MICROSOFT_TENANT_ID if MICROSOFT_TENANT_ID not in ("common", "organizations", "consumers") else "d8d3c1d1-f608-4781-9aa2-3d85c0b3c24b"
+)
+MICROSOFT_APP_TOKEN_URL = f"https://login.microsoftonline.com/{MICROSOFT_APP_TENANT_ID}/oauth2/v2.0/token"
+
 
 
 RECAPTCHA_SKIP = DEBUG

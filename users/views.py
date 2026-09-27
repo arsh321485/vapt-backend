@@ -1261,8 +1261,16 @@ def _get_graph_app_token():
     if _graph_app_token_cache["token"] and time.time() < _graph_app_token_cache["expires_at"] - 60:
         return _graph_app_token_cache["token"]
     try:
+        # Real bug report: this broke the moment MICROSOFT_TENANT_ID became
+        # "common" (for multi-tenant sign-in) — Microsoft rejects
+        # client_credentials against /common/ outright (AADSTS900023), since
+        # an app-only token is only ever issued for one specific tenant. See
+        # MICROSOFT_APP_TENANT_ID's own comment in settings.py: this app is
+        # still homed in Secureitlab's tenant no matter which OTHER tenants'
+        # users can now sign in interactively, so this call always targets
+        # that one specific tenant, never the shared MICROSOFT_TOKEN_URL.
         resp = _http_post(
-            settings.MICROSOFT_TOKEN_URL,
+            settings.MICROSOFT_APP_TOKEN_URL,
             data={
                 "grant_type": "client_credentials",
                 "client_id": settings.MICROSOFT_CLIENT_ID,

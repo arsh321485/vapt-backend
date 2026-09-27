@@ -18,8 +18,18 @@ logger = logging.getLogger(__name__)
 # Tenant Bot Channels Registration. Multi-tenant bots get their Connector
 # API token from the generic https://login.microsoftonline.com/botframework.com/
 # authority; single-tenant bots must request it from their OWN Entra ID
-# tenant instead — same settings.MICROSOFT_TOKEN_URL already used for Graph
-# API calls elsewhere in this app.
+# tenant instead — same settings.MICROSOFT_APP_TOKEN_URL already used for
+# the other app-only Graph call in this app (users.views._get_graph_app_token).
+#
+# Real bug report: this used settings.MICROSOFT_TOKEN_URL directly, which
+# broke outright once that became "common" for multi-tenant sign-in —
+# Microsoft rejects the client_credentials grant against /common/
+# (AADSTS900023); an app-only token can only ever be issued for one
+# specific tenant. This bot's Azure resource is still homed in
+# Secureitlab's own tenant regardless of which OTHER tenants' users can
+# now sign in interactively, so this always targets that one specific
+# tenant (MICROSOFT_APP_TENANT_ID), never whatever MICROSOFT_TENANT_ID
+# happens to be set to for the interactive login flow.
 _TOKEN_SCOPE = "https://api.botframework.com/.default"  # nosec B105 - public OAuth scope identifier, not a secret
 
 _cached_token = None
@@ -34,7 +44,7 @@ def _get_bot_access_token() -> str:
         return _cached_token
 
     resp = requests.post(
-        settings.MICROSOFT_TOKEN_URL,
+        settings.MICROSOFT_APP_TOKEN_URL,
         data={
             "grant_type": "client_credentials",
             "client_id": settings.MICROSOFT_CLIENT_ID,
