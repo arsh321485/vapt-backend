@@ -178,9 +178,39 @@ def heal_todays_reports(db, admin_id: str = None, admin_email: str = None) -> st
     # Stray version-number host cleanup (see docstring) — runs even when
     # there was only ever one report today, since a single extraction run
     # can produce this on its own.
-    _heal_stray_version_hosts(db, target_id)
+    changed_hosts = _heal_stray_version_hosts(db, target_id)
+
+    # Real bug report: healing MongoDB alone wasn't enough — every
+    # per-metric dashboard endpoint (AdminTotalAssetsAPIView,
+    # AdminVulnerabilitiesAPIView, etc.) keeps its OWN independent cache
+    # (up to 300s), checked before it ever re-reads Mongo. Without busting
+    # those too, a page loaded within that window kept showing the exact
+    # stale per-file counts (e.g. "15") this heal had just fixed
+    # underneath it. Only worth doing when something actually changed —
+    # the common case (nothing to heal) shouldn't pay for a cache-clear
+    # round trip on every single request.
+    if source_docs or changed_hosts:
+        _bust_dashboard_caches(admin_id)
 
     return target_id
+
+
+def _bust_dashboard_caches(admin_id) -> None:
+    if not admin_id:
+        return
+    from django.core.cache import cache
+
+    for key in (
+        f"admin_total_assets_{admin_id}",
+        f"admin_avg_score_{admin_id}",
+        f"admin_vulnerabilities_{admin_id}",
+        f"admin_inprocess_timeline_{admin_id}",
+        f"admin_dashboard_summary_{admin_id}",
+        f"mitigation_by_team_v2_{admin_id}",
+        f"admin_register_list_{admin_id}",
+        f"admin_asset_list_{admin_id}",
+    ):
+        cache.delete(key)
 
 
 def _heal_stray_version_hosts(db, report_id: str) -> None:

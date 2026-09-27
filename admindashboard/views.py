@@ -1015,7 +1015,7 @@ class AdminTotalAssetsAPIView(APIView):
                 report_id = doc.get("report_id") or str(doc.get("_id", ""))
 
                 data = {"total_assets": total_assets, "report_id": report_id}
-                cache.set(cache_key, data, 300)
+                cache.set(cache_key, data, 30)
                 return Response(data, status=status.HTTP_200_OK)
 
         except Exception as e:
@@ -1241,7 +1241,7 @@ class AdminAvgScoreAPIView(APIView):
                 avg = round(sum(cvss_vals) / len(cvss_vals), 2) if cvss_vals else 0
 
                 data = {"avg_score": avg, "report_id": report_id}
-                cache.set(cache_key, data, 300)
+                cache.set(cache_key, data, 30)
                 return Response(data, status=status.HTTP_200_OK)
 
         except Exception as e:
@@ -1334,7 +1334,7 @@ class AdminVulnerabilitiesAPIView(APIView):
                                 counts["low"] += 1
 
                 counts["report_id"] = report_id
-                cache.set(cache_key, counts, 300)
+                cache.set(cache_key, counts, 30)
                 return Response(counts, status=status.HTTP_200_OK)
 
         except Exception as e:
