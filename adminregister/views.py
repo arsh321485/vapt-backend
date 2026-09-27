@@ -406,6 +406,25 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                     )
                 }
 
+                # Real bug report: Register rows never carried asset_type at
+                # all, so the frontend had to guess a row's classification
+                # (Assets/Web App/Firewall/Server) from the hostname itself
+                # — same taxonomy/function the All Vulnerabilities tab
+                # already uses (adminasset.AllVulnerabilitiesAPIView), so
+                # both pages now agree on the same type for the same
+                # (plugin_name, host_name) pair.
+                from upload_report.asset_classification import get_asset_type_map_for_report, classify_finding_type
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in latest_doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 rows = []
                 # Real bug report: the same vulnerability found on multiple
                 # ports of the same asset (e.g. "SSL Certificate Cannot Be
@@ -499,6 +518,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                             "operating_system": host_os,
                             "plugin_id": v.get("plugin_id"),
                             "automation_status": automation_status_by_key.get((plugin_name, host_name)),
+                            "asset_type": classify_finding_type(plugin_name, asset_type_map.get(host_name, "other")),
                         }
                         _seen_vuln_asset_rows[dedup_key] = row
                         rows.append(row)
@@ -530,6 +550,7 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                         "operating_system": None,
                         "plugin_id": _fdoc.get("plugin_id"),
                         "automation_status": automation_status_by_key.get(_key),
+                        "asset_type": classify_finding_type(_pname, asset_type_map.get(_hname, "other")),
                     }
                     _seen_vuln_asset_rows[_key] = row
                     rows.append(row)

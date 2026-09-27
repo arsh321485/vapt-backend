@@ -1606,6 +1606,15 @@ class UserAllVulnerabilitiesAPIView(APIView):
                     )
                 }
 
+                # Same fix_vulnerability_id lookup as the admin-side endpoint
+                # — one active fix doc per (plugin_name, host_name).
+                fix_id_by_key = {}
+                for fdoc in db[FIX_VULN_COLLECTION].find(
+                    {"report_id": str(report_id)}, {"plugin_name": 1, "host_name": 1}
+                ):
+                    key = (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""))
+                    fix_id_by_key.setdefault(key, str(fdoc["_id"]))
+
                 vuln_map = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -1627,27 +1636,47 @@ class UserAllVulnerabilitiesAPIView(APIView):
                                 "open_count": 0,
                                 "held_count": 0,
                                 "deleted_count": 0,
-                                # Same asset-category segregation (Assets/Web App/
-                                # Firewall/Server) as the admin-side endpoint.
+                                # Same fix as the admin-side endpoint: counts
+                                # only OPEN assets (see below), so this always
+                                # sums to open_count instead of also counting
+                                # held/deleted assets toward a category —
+                                # same taxonomy the All Assets tab uses.
                                 "asset_type_counts": {"other": 0, "web_app": 0, "firewall": 0, "server": 0},
                                 "automation_status_counts": {"full": 0, "partial": 0, "not_possible": 0, "pending": 0},
+                                # Per-asset detail, same as the admin-side
+                                # endpoint — lets the frontend filter this
+                                # vuln's own host list by classification tab
+                                # instead of guessing from hostname.
+                                "hosts": [],
                             }
 
                         entry = vuln_map[plugin_name]
                         entry["total_assets"] += 1
-                        if (plugin_name, host_name) in deleted_set:
-                            entry["deleted_count"] += 1
-                        elif (plugin_name, host_name) in held_set:
-                            entry["held_count"] += 1
-                        else:
-                            entry["open_count"] += 1
                         host_asset_type = asset_type_map.get(host_name, "other")
                         asset_type = classify_finding_type(plugin_name, host_asset_type)
-                        entry["asset_type_counts"][asset_type] += 1
                         _astatus = automation_status_by_key.get((plugin_name, host_name)) or "pending"
                         if _astatus not in entry["automation_status_counts"]:
                             _astatus = "pending"
                         entry["automation_status_counts"][_astatus] += 1
+
+                        if (plugin_name, host_name) in deleted_set:
+                            entry["deleted_count"] += 1
+                            host_status = "deleted"
+                        elif (plugin_name, host_name) in held_set:
+                            entry["held_count"] += 1
+                            host_status = "held"
+                        else:
+                            entry["open_count"] += 1
+                            entry["asset_type_counts"][asset_type] += 1
+                            host_status = "open"
+
+                        entry["hosts"].append({
+                            "host_name": host_name,
+                            "asset_type": asset_type,
+                            "fix_vulnerability_id": fix_id_by_key.get((plugin_name, host_name)),
+                            "status": host_status,
+                            "automation_status": automation_status_by_key.get((plugin_name, host_name)),
+                        })
 
                 # How many DISTINCT (already team-filtered) vulnerabilities
                 # affect at least one asset of each category — same as the

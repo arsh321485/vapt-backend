@@ -1415,6 +1415,19 @@ class AllVulnerabilitiesAPIView(APIView):
                     )
                 }
 
+                # fix_vulnerability_id lookup — one active fix doc per
+                # (plugin_name, host_name), so the frontend can call
+                # fix-vulnerability/{id}/... directly from this list without
+                # a separate resolve step. Closed docs are irrelevant here —
+                # a closed pair is skipped from this whole view already (see
+                # closed_set below).
+                fix_id_by_key = {}
+                for fdoc in db[FIX_VULN_COLLECTION].find(
+                    {"report_id": str(report_id)}, {"plugin_name": 1, "host_name": 1}
+                ):
+                    key = (fdoc.get("plugin_name", ""), fdoc.get("host_name", ""))
+                    fix_id_by_key.setdefault(key, str(fdoc["_id"]))
+
                 vuln_map = {}
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
@@ -1435,11 +1448,16 @@ class AllVulnerabilitiesAPIView(APIView):
                                 "open_count": 0,
                                 "held_count": 0,
                                 "deleted_count": 0,
-                                # Segregation by asset category (Assets/Web App/
-                                # Firewall/Server), same taxonomy the All Assets
-                                # tab already uses — lets the frontend show which
-                                # categories a finding actually affects without
-                                # opening the per-asset drill-down.
+                                # Real bug report: this used to count EVERY
+                                # asset (open, held, deleted alike) toward its
+                                # category, so it could show e.g. web_app: 1
+                                # for a vulnerability whose only web_app host
+                                # was actually on hold — mismatched against
+                                # the Register list, which only ever shows
+                                # OPEN rows for a vuln/asset pair. Now counts
+                                # only OPEN assets (see below), so this always
+                                # sums to open_count and matches what
+                                # Register shows for the same vulnerability.
                                 "asset_type_counts": {"other": 0, "web_app": 0, "firewall": 0, "server": 0},
                                 # "pending" = automation_card hasn't finished
                                 # generating yet for that asset (null/missing
@@ -1447,23 +1465,50 @@ class AllVulnerabilitiesAPIView(APIView):
                                 # count, as opposed to "not_possible" (AI
                                 # already decided no automation applies).
                                 "automation_status_counts": {"full": 0, "partial": 0, "not_possible": 0, "pending": 0},
+                                # Real bug report: the Web App/Server/Firewall
+                                # classification tabs on the frontend still
+                                # showed EVERY asset under a matching
+                                # vulnerability, not just the ones of that
+                                # tab's own type (e.g. TLS 1.1's "Assets"-type
+                                # host kept appearing under the "Web App"
+                                # filter too) — this response never exposed
+                                # each host's own asset_type for the frontend
+                                # to filter by, only the aggregate counts
+                                # above. One entry per asset lets the
+                                # frontend filter this vuln's own host list
+                                # by classification instead of guessing from
+                                # hostname or showing all of them regardless
+                                # of tab.
+                                "hosts": [],
                             }
 
                         entry = vuln_map[plugin_name]
                         entry["total_assets"] += 1
-                        if (plugin_name, host_name) in deleted_set:
-                            entry["deleted_count"] += 1
-                        elif (plugin_name, host_name) in held_set:
-                            entry["held_count"] += 1
-                        else:
-                            entry["open_count"] += 1
                         host_asset_type = asset_type_map.get(host_name, "other")
                         asset_type = classify_finding_type(plugin_name, host_asset_type)
-                        entry["asset_type_counts"][asset_type] += 1
                         _astatus = automation_status_by_key.get((plugin_name, host_name)) or "pending"
                         if _astatus not in entry["automation_status_counts"]:
                             _astatus = "pending"
                         entry["automation_status_counts"][_astatus] += 1
+
+                        if (plugin_name, host_name) in deleted_set:
+                            entry["deleted_count"] += 1
+                            host_status = "deleted"
+                        elif (plugin_name, host_name) in held_set:
+                            entry["held_count"] += 1
+                            host_status = "held"
+                        else:
+                            entry["open_count"] += 1
+                            entry["asset_type_counts"][asset_type] += 1
+                            host_status = "open"
+
+                        entry["hosts"].append({
+                            "host_name": host_name,
+                            "asset_type": asset_type,
+                            "fix_vulnerability_id": fix_id_by_key.get((plugin_name, host_name)),
+                            "status": host_status,
+                            "automation_status": automation_status_by_key.get((plugin_name, host_name)),
+                        })
 
                 # Real request: how many DISTINCT vulnerabilities affect at
                 # least one asset of each category — the tab-bar filter
@@ -1830,6 +1875,93 @@ class VulnHoldListByReportAPIView(APIView):
                         "asset_type": asset_type_map.get(hn, "other"),
                         "held_at":   _iso(held.get("held_at")),
                         "held_by":   held.get("held_by", ""),
+                    })
+
+                result = list(vuln_map.values())
+                return Response({
+                    "report_id": str(report_id),
+                    "total": len(result),
+                    "vulnerabilities": result,
+                }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class VulnDeleteListByReportAPIView(APIView):
+    """
+    GET /api/admin/adminasset/report/<report_id>/vulnerability/delete-list/
+    Returns all deleted vulnerabilities for a specific report.
+
+    Real bug report: the frontend has been calling this exact URL (the
+    "Deleted" list view, same idea as VulnHoldListByReportAPIView's own
+    "hold-list") and getting a 404 every time — this endpoint was never
+    built on the admin side at all, even though DELETED_VULNS_COLLECTION
+    already exists and is already written to by BulkVulnDeleteAPIView.
+    Mirrors VulnHoldListByReportAPIView exactly, just reading deleted_at/
+    deleted_by instead of held_at/held_by (see userasset's identical
+    UserVulnDeleteListByReportAPIView, which had the same gap fixed once
+    already on the user side).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, report_id):
+        try:
+            with MongoContext() as db:
+                is_valid, doc, error_response = validate_report_ownership(db, report_id, request.user)
+                if not is_valid:
+                    return error_response
+
+                deleted_docs = list(db[DELETED_VULNS_COLLECTION].find({"report_id": str(report_id)}))
+
+                if not deleted_docs:
+                    return Response({
+                        "report_id": str(report_id),
+                        "total": 0,
+                        "vulnerabilities": [],
+                    }, status=status.HTTP_200_OK)
+
+                vuln_lookup = {}
+                for host in (doc.get("vulnerabilities_by_host") or []):
+                    hn = (host.get("host_name") or "").strip()
+                    for v in (host.get("vulnerabilities") or []):
+                        pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
+                        if pname:
+                            vuln_lookup[(hn, pname)] = v
+
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
+                vuln_map = {}
+                for deleted in deleted_docs:
+                    pname = deleted.get("plugin_name", "")
+                    hn    = deleted.get("host_name", "")
+                    vuln  = vuln_lookup.get((hn, pname), {})
+
+                    if pname not in vuln_map:
+                        vuln_map[pname] = {
+                            "plugin_name": pname,
+                            "severity":    (vuln.get("risk_factor") or vuln.get("severity") or "").title(),
+                            "cvss_score":  str(vuln.get("cvss_v3_base_score") or vuln.get("cvss") or ""),
+                            "asset_count": 0,
+                            "hosts":       [],
+                        }
+
+                    vuln_map[pname]["asset_count"] += 1
+                    vuln_map[pname]["hosts"].append({
+                        "host_name":   hn,
+                        "asset_type":  asset_type_map.get(hn, "other"),
+                        "deleted_at":  _iso(deleted.get("deleted_at")),
+                        "deleted_by":  deleted.get("deleted_by", ""),
                     })
 
                 result = list(vuln_map.values())

@@ -337,6 +337,23 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                     )
                 }
 
+                # Same fix as the admin-side register list: Register rows
+                # never carried asset_type, so the frontend had to guess a
+                # row's classification from the hostname — use the same
+                # taxonomy/function the All Vulnerabilities tab uses so both
+                # pages agree on the same type for the same pair.
+                from upload_report.asset_classification import get_asset_type_map_for_report, classify_finding_type
+                asset_type_map = get_asset_type_map_for_report(
+                    db, report_id,
+                    [
+                        {"host_name": (h.get("host_name") or "").strip(),
+                         "host_information": h.get("host_information"),
+                         "vulnerabilities": h.get("vulnerabilities")}
+                        for h in latest_doc.get("vulnerabilities_by_host", [])
+                        if (h.get("host_name") or "").strip()
+                    ],
+                )
+
                 # Step 3: Build rows — only team-assigned vulnerabilities
                 rows = []
                 # Same dedup as the admin-side register list: one row per
@@ -411,6 +428,7 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                             "second_observation": _normalize_iso(second_obs),
                             "status": vuln_status,
                             "automation_status": automation_status_by_key.get((plugin_name, host_name)),
+                            "asset_type": classify_finding_type(plugin_name, asset_type_map.get(host_name, "other")),
                         }
                         _seen_vuln_asset_rows[dedup_key] = row
                         rows.append(row)
@@ -441,6 +459,7 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                         "second_observation": _normalize_iso(_fdoc.get("closed_at")),
                         "status": "closed",
                         "automation_status": automation_status_by_key.get(_key),
+                        "asset_type": classify_finding_type(_pname, asset_type_map.get(_hname, "other")),
                     }
                     _seen_vuln_asset_rows[_key] = row
                     rows.append(row)

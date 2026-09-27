@@ -19,6 +19,7 @@ from .views import (
     BulkVulnUnholdAPIView,
     BulkVulnDeleteAPIView,
     VulnHoldListByReportAPIView,
+    VulnDeleteListByReportAPIView,
 )
 
 urlpatterns = [
@@ -148,6 +149,15 @@ urlpatterns = [
         "report/<str:report_id>/vulnerability/hold-list/",
         VulnHoldListByReportAPIView.as_view(),
         name="vuln-hold-list-by-report",
+    ),
+
+    # GET list of all deleted vulnerabilities for a report
+    #  — MUST be before the generic <path:plugin_name>/... routes above,
+    # same reasoning as assets/hold-list/ needing to precede <host_name>.
+    path(
+        "report/<str:report_id>/vulnerability/delete-list/",
+        VulnDeleteListByReportAPIView.as_view(),
+        name="vuln-delete-list-by-report",
     ),
 ]
 
