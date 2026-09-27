@@ -1049,7 +1049,23 @@ def user_download_stats(request):
     only _ai_automation_stats_rows (already gated on that) feeds this now.
     """
     admin_id, admin_email, teams = _resolve_admin_and_teams(request)
-    if not admin_id or not teams:
+    if not admin_id:
+        return Response(
+            {"detail": "User is not linked to any team. Ask your admin to assign you a team.",
+             "count": 0, "stats": []},
+            status=403,
+        )
+    # Real bug report: `teams` is deliberately None for an admin/staff
+    # caller (see _resolve_admin_and_teams's own docstring — "None means no
+    # team filter, they see everything"), and every OTHER call site in this
+    # file already honors that. This one used `if not admin_id or not
+    # teams:` — `not None` is True too, so an admin/staff account hitting
+    # this member-side endpoint (e.g. an admin checking their own Scripts
+    # tab) got the exact same "not linked to any team" 403 as a genuine
+    # member with zero team assignments, even though they're not actually
+    # blocked at all. Only a real member (teams == [], not None) is
+    # genuinely unassigned.
+    if teams is not None and not teams:
         return Response(
             {"detail": "User is not linked to any team. Ask your admin to assign you a team.",
              "count": 0, "stats": []},
@@ -1064,8 +1080,12 @@ def user_download_stats(request):
     premium_required = is_freemium(admin_id) and not _is_unlimited_admin(admin_id)
 
     selected_team = request.query_params.get("team", "").strip()
-    active_teams = [selected_team] if selected_team and selected_team in teams else teams
-    teams_lower = {t.lower() for t in active_teams}
+    if teams is None:
+        # Admin/staff caller — no team filter at all (see comment above).
+        active_teams = [selected_team] if selected_team else None
+    else:
+        active_teams = [selected_team] if selected_team and selected_team in teams else teams
+    teams_lower = {t.lower() for t in active_teams} if active_teams is not None else None
 
     with MongoContext() as db:
         report_id, uploaded_at, report_ids, plugin_ids, vuln_names = _load_all_reports_plugin_ids(db, admin_id, admin_email)
@@ -1078,7 +1098,7 @@ def user_download_stats(request):
 
         ai_rows = [
             r for r in _ai_automation_stats_rows(db, report_ids, download_role="user")
-            if (r.get("team") or "").lower() in teams_lower
+            if teams_lower is None or (r.get("team") or "").lower() in teams_lower
         ]
     stats = sorted(ai_rows, key=lambda s: s.get("download_count", 0), reverse=True)
     return Response({
