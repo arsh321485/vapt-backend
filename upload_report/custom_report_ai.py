@@ -818,6 +818,57 @@ def _merge_by_normalized_domain(vulnerabilities_by_host: list) -> list:
     return merged
 
 
+_BARE_VERSION_HOST_RE = re.compile(r"^\d+(?:\.\d+){0,2}$")
+
+
+def _merge_stray_version_hosts(vulnerabilities_by_host: list) -> list:
+    """
+    Real bug report: on a real Sedco PDF, the model split one table row —
+    host "sedcosrv8" with finding "Outdated Microsoft IIS 8.0" — into TWO
+    host buckets: a correct but EMPTY "sedcosrv8" bucket, and a bogus
+    "8.0" bucket (just the version suffix off the finding's own title)
+    holding the actual finding. "8.0" then rendered on the Assets tab as
+    if it were a real host that could never be resolved/cleared.
+
+    A host_name made of only digits and 1-2 dots (never 3, so a real
+    dotted-quad IPv4 like "172.17.1.4" is never matched) cannot be a real
+    hostname or IP — it can only be a stray version number. When one
+    appears immediately next to a bucket with zero findings of its own,
+    that's the same split: fold the stray bucket's findings into that
+    empty neighbor and drop it. Anything not matching this exact adjacent-
+    empty-neighbor signature is left untouched — better to keep an oddly
+    named host visible than guess wrong and attach findings to the wrong
+    asset.
+    """
+    stray_indices = [
+        i for i, h in enumerate(vulnerabilities_by_host)
+        if _BARE_VERSION_HOST_RE.match((h.get("host_name") or "").strip())
+    ]
+    if not stray_indices:
+        return vulnerabilities_by_host
+
+    to_drop = set()
+    for i in stray_indices:
+        stray = vulnerabilities_by_host[i]
+        for j in (i - 1, i + 1):
+            if j < 0 or j >= len(vulnerabilities_by_host) or j in stray_indices:
+                continue
+            neighbor = vulnerabilities_by_host[j]
+            if not neighbor.get("vulnerabilities"):
+                neighbor.setdefault("vulnerabilities", []).extend(stray.get("vulnerabilities") or [])
+                logger.warning(
+                    f"[CustomFileValidation] dropped stray version-number host "
+                    f"'{stray.get('host_name')}' — merged its finding(s) into "
+                    f"empty neighboring host '{neighbor.get('host_name')}'"
+                )
+                to_drop.add(i)
+                break
+
+    if not to_drop:
+        return vulnerabilities_by_host
+    return [h for i, h in enumerate(vulnerabilities_by_host) if i not in to_drop]
+
+
 def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: str = "") -> Dict[str, Any]:
     """
     One single GPT call: validate + extract a single already-sized-to-fit
@@ -1152,6 +1203,7 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
     alias_map = _resolve_alias_groups(chunk_result.get("alias_map") or {}, _extract_ip_hostname_aliases(truncated))
     vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
     vulnerabilities_by_host = _merge_by_normalized_domain(vulnerabilities_by_host)
+    vulnerabilities_by_host = _merge_stray_version_hosts(vulnerabilities_by_host)
 
     # Real bug report: a single extraction pass over a long prose document
     # can silently skip a genuine finding — confirmed on a real PDF (7
@@ -1185,6 +1237,7 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
         vulnerabilities_by_host = _apply_host_aliases(vulnerabilities_by_host, alias_map)
         # Safety net beyond the fixed alias_map — see its own docstring.
         vulnerabilities_by_host = _merge_by_normalized_domain(vulnerabilities_by_host)
+        vulnerabilities_by_host = _merge_stray_version_hosts(vulnerabilities_by_host)
         added_after = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
 
         if stated_total is None:
