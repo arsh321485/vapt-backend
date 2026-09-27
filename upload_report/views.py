@@ -749,13 +749,34 @@ class UploadReportView(APIView):
             # kicked in — never because this loop simply lost patience.
             _merge_lock_key = f"upload_merge_lock_{target_admin.id}"
             _merge_lock_held = False
-            for _ in range(360):  # up to 180s — matches the lock's own timeout below
+            # Real bug report (round 3): even after widening the wait to
+            # 180s, the exact same split-into-N-separate-reports symptom
+            # was reported AGAIN on a real admin — with deploy confirmed
+            # (git pull showed "Already up to date" right before the
+            # failing test). Nothing about that loop's own logic explains
+            # a still-failing merge, which means the next diagnosis needs
+            # to see, from the actual production logs, whether this code
+            # even runs the way it's read here — every step of the
+            # acquire/wait/release sequence is now logged so a real
+            # journalctl trace can confirm or rule out this lock entirely,
+            # instead of reasoning about it blind again.
+            _lock_wait_start = time.perf_counter()
+            for _attempt in range(360):  # up to 180s — matches the lock's own timeout below
                 if _merge_cache.add(_merge_lock_key, True, timeout=180):
                     _merge_lock_held = True
                     break
                 time.sleep(0.5)
+            _lock_wait_ms = int((time.perf_counter() - _lock_wait_start) * 1000)
+            logger.info(
+                f"[MergeUpload] lock key={_merge_lock_key} held={_merge_lock_held} "
+                f"waited_ms={_lock_wait_ms}"
+            )
 
             todays_report_id = get_todays_report_id(target_admin)
+            logger.info(
+                f"[MergeUpload] key={_merge_lock_key} todays_report_id={todays_report_id} "
+                f"lock_held={_merge_lock_held}"
+            )
             if todays_report_id and _merge_lock_held:
                 # An anchor already exists (from an earlier request today,
                 # possibly one still processing its OTHER files) — this
@@ -765,6 +786,7 @@ class UploadReportView(APIView):
                 # file's own (possibly slow) processing.
                 _merge_cache.delete(_merge_lock_key)
                 _merge_lock_held = False
+                logger.info(f"[MergeUpload] key={_merge_lock_key} released early — anchor already existed")
 
             for uploaded_file in uploaded_files:
                 file_path = None
@@ -940,6 +962,11 @@ class UploadReportView(APIView):
 
                         is_structured = parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom")
                         is_merge = bool(todays_report_id) and is_structured
+                        logger.info(
+                            f"[MergeUpload] key={_merge_lock_key} file={uploaded_file.name!r} "
+                            f"parsed_type={parsed_data.get('type')!r} is_structured={is_structured} "
+                            f"todays_report_id={todays_report_id} is_merge={is_merge}"
+                        )
 
                         if is_merge:
                             # Same-day merge — fold this file's hosts/vulns into
@@ -982,6 +1009,10 @@ class UploadReportView(APIView):
                             # today) merges into this report from here on.
                             if mongodb_stored and is_structured and not todays_report_id:
                                 todays_report_id = report_id
+                                logger.info(
+                                    f"[MergeUpload] key={_merge_lock_key} became anchor "
+                                    f"report_id={report_id} lock_held={_merge_lock_held}"
+                                )
                                 # This file just became today's anchor —
                                 # release the mutex now so a sibling
                                 # request waiting on it (see its acquire,
@@ -993,6 +1024,7 @@ class UploadReportView(APIView):
                                 if _merge_lock_held:
                                     _merge_cache.delete(_merge_lock_key)
                                     _merge_lock_held = False
+                                    logger.info(f"[MergeUpload] key={_merge_lock_key} released after becoming anchor")
 
                         # Real bug report — see the plan-gate comment above:
                         # Freemium/undecided-plan trimming now happens ONCE
