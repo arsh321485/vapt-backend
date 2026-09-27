@@ -2586,6 +2586,29 @@ class AdminDashboardSummaryAPIView(APIView):
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
 
+        # Real bug report: same-day uploads have repeatedly split into
+        # separate reports instead of merging (upload-time race the
+        # merge lock hasn't reliably prevented in production — see
+        # merge_service.heal_todays_reports's own docstring). Heal it on
+        # the read side, right here, before any of the sub-views below
+        # resolve "latest report" — every one of them independently
+        # queries nessus_reports fresh, so a healed single report is all
+        # they need to see, no per-view changes required. Guarded by a
+        # short cache flag (not this endpoint's own 30s summary cache,
+        # which already covers the common case) so the today-scan itself
+        # only actually runs once every 20s per admin, not on every one
+        # of this endpoint's own frequent polls.
+        try:
+            _heal_key = f"heal_todays_reports_{request.user.id}"
+            if not cache.get(_heal_key):
+                from vaptfix.mongo_client import MongoContext
+                from upload_report.merge_service import heal_todays_reports
+                with MongoContext() as _db:
+                    heal_todays_reports(_db, admin_id=str(request.user.id), admin_email=getattr(request.user, "email", None))
+                cache.set(_heal_key, True, 20)
+        except Exception:
+            logger.exception("[AdminDashboardSummary] heal_todays_reports failed")
+
         views_map = {
             "total_assets":          AdminTotalAssetsAPIView,
             "avg_score":             AdminAvgScoreAPIView,

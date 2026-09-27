@@ -9,6 +9,9 @@ from django.utils.timezone import is_naive, make_aware, utc
 from django.utils import timezone
 import pymongo
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _clear_dashboard_cache(user_id):
@@ -980,6 +983,21 @@ class AdminAssetsAPIView(APIView):
                 }, status=status.HTTP_200_OK)
 
             with MongoContext() as db:
+                # Real bug report: see admindashboard/adminregister's
+                # identical hook and merge_service.heal_todays_reports's
+                # own docstring — the upload-time merge lock hasn't
+                # reliably prevented same-day uploads splitting into
+                # separate reports in production. Healed here too so the
+                # Assets page always reflects one combined report.
+                try:
+                    _heal_key = f"heal_todays_reports_{admin_id}"
+                    if not cache.get(_heal_key):
+                        from upload_report.merge_service import heal_todays_reports
+                        heal_todays_reports(db, admin_id=admin_id, admin_email=admin_email)
+                        cache.set(_heal_key, True, 20)
+                except Exception:
+                    logger.exception("[AdminAssets] heal_todays_reports failed")
+
                 doc = _load_latest_report_for_admin(db, admin_email, admin_id)
 
                 if not doc:

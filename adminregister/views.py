@@ -292,6 +292,23 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 return Response(_cached, status=status.HTTP_200_OK)
 
             with MongoContext() as db:
+                # Real bug report: see admindashboard's identical hook and
+                # merge_service.heal_todays_reports's own docstring — the
+                # upload-time merge lock hasn't reliably prevented same-day
+                # uploads splitting into separate reports in production.
+                # Healed here too, on the read side, so Register always
+                # reflects one combined report regardless of whether that
+                # write-time race gets hit. Same 20s per-admin guard as the
+                # dashboard hook, independent of this view's own 60s cache.
+                try:
+                    _heal_key = f"heal_todays_reports_{current_admin_id}"
+                    if not cache.get(_heal_key):
+                        from upload_report.merge_service import heal_todays_reports
+                        heal_todays_reports(db, admin_id=current_admin_id, admin_email=current_admin_email)
+                        cache.set(_heal_key, True, 20)
+                except Exception:
+                    logger.exception("[Register] heal_todays_reports failed")
+
                 coll = db[NESSUS_COLLECTION]
                 closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
 

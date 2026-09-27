@@ -69,6 +69,165 @@ def get_todays_report_id(admin) -> str | None:
     return str(first_today._id) if first_today else None
 
 
+_BARE_VERSION_HOST_RE = re.compile(r"^\d+(?:\.\d+){0,2}$")
+
+DOWNSTREAM_REPORT_ID_COLLECTIONS = (
+    "vulnerability_cards",
+    "fix_vulnerabilities",
+    "fix_vulnerabilities_closed",
+    "hold_vulnerabilities",
+    "deleted_vulnerabilities",
+)
+
+
+def heal_todays_reports(db, admin_id: str = None, admin_email: str = None) -> str | None:
+    """
+    Real bug report: the upload-time mutex (UploadReportView.post()) that's
+    supposed to prevent same-day uploads splitting into separate reports
+    has repeatedly failed to prevent exactly that in production, across
+    several real admins — root cause still unconfirmed (a MongoDB trace
+    added to that exact code path recorded ZERO hits across multiple
+    fresh, confirmed-post-deploy tests, meaning whatever process actually
+    serves uploads isn't running that code at all, for a reason that
+    couldn't be pinned down from here without direct server access).
+
+    Rather than depend on fixing that elusive write-time race, this heals
+    the SYMPTOM on the READ side instead: called from the admin-facing
+    endpoints users actually look at (dashboard summary, Register list),
+    it finds every nessus_reports doc for this admin uploaded since local
+    midnight and, if there's more than one, merges them all into the
+    earliest one — same merge_hosts_into_report logic + downstream
+    (vulnerability_cards/fix_vulnerabilities/hold/deleted) report_id
+    repointing already used for every one-off manual fix of this same
+    bug this session. Idempotent and cheap when there's nothing to heal
+    (single query, no write) — safe to call on every request.
+
+    Also folds in the "stray version-number host" cleanup (e.g. a bare
+    "8.0" split off "Outdated Microsoft IIS 8.0" into its own fake host)
+    for whatever survives as the final merged report, since that's shown
+    up on every one of these split reports so far — see
+    upload_report.custom_report_ai._merge_stray_version_hosts, which only
+    ever runs at extraction time and never touches already-stored data.
+
+    Returns the surviving (possibly newly-merged) report_id for today, or
+    None if this admin hasn't uploaded anything today at all.
+    """
+    from django.utils import timezone
+
+    if not admin_id and not admin_email:
+        return None
+
+    now = timezone.now()
+    start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    query_conditions = []
+    if admin_id:
+        query_conditions.append({"admin_id": str(admin_id)})
+    if admin_email:
+        query_conditions.append({"admin_email": admin_email})
+
+    coll = db[NESSUS_COLLECTION]
+    todays_docs = list(
+        coll.find(
+            {"$or": query_conditions, "uploaded_at": {"$gte": start_of_today}},
+        ).sort("uploaded_at", 1)
+    )
+    if not todays_docs:
+        return None
+
+    target_doc = todays_docs[0]
+    target_id = target_doc["report_id"]
+    source_docs = todays_docs[1:]
+
+    if source_docs:
+        logger.warning(
+            f"[MergeUpload] heal_todays_reports found {len(todays_docs)} reports for "
+            f"admin_id={admin_id} admin_email={admin_email} today — merging "
+            f"{len(source_docs)} into {target_id}"
+        )
+        for src in source_docs:
+            sid = src["report_id"]
+            try:
+                merge_hosts_into_report(db, target_id, src.get("vulnerabilities_by_host") or [])
+            except Exception:
+                logger.exception(f"[MergeUpload] heal: merge of {sid} into {target_id} failed")
+                continue
+
+            # Carry over any already-computed asset classifications rather
+            # than losing them (the merged host set gets re-classified
+            # lazily anyway, but no need to throw away work already done).
+            src_map = {r.get("host_name"): r.get("asset_type") for r in (src.get("asset_type_map") or [])}
+            if src_map:
+                tgt_fresh = coll.find_one({"report_id": target_id}, {"asset_type_map": 1}) or {}
+                tgt_map = {r.get("host_name"): r.get("asset_type") for r in (tgt_fresh.get("asset_type_map") or [])}
+                merged_map = {**src_map, **tgt_map}
+                coll.update_one(
+                    {"report_id": target_id},
+                    {"$set": {"asset_type_map": [{"host_name": k, "asset_type": v} for k, v in merged_map.items()]}},
+                )
+
+            for coll_name in DOWNSTREAM_REPORT_ID_COLLECTIONS:
+                db[coll_name].update_many({"report_id": sid}, {"$set": {"report_id": target_id}})
+
+            coll.delete_one({"report_id": sid})
+
+        # All merged content already had cards generated in its own
+        # (now-deleted) source report — never re-trigger generation.
+        coll.update_one({"report_id": target_id}, {"$set": {"cards_generation_complete": True}})
+
+    # Stray version-number host cleanup (see docstring) — runs even when
+    # there was only ever one report today, since a single extraction run
+    # can produce this on its own.
+    _heal_stray_version_hosts(db, target_id)
+
+    return target_id
+
+
+def _heal_stray_version_hosts(db, report_id: str) -> None:
+    doc = db[NESSUS_COLLECTION].find_one({"report_id": report_id}, {"vulnerabilities_by_host": 1})
+    if not doc:
+        return
+    vbh = doc.get("vulnerabilities_by_host") or []
+    stray_indices = [
+        i for i, h in enumerate(vbh)
+        if _BARE_VERSION_HOST_RE.match((h.get("host_name") or "").strip())
+    ]
+    if not stray_indices:
+        return
+
+    to_drop = set()
+    for i in stray_indices:
+        stray = vbh[i]
+        for j in (i - 1, i + 1):
+            if j < 0 or j >= len(vbh) or j in stray_indices:
+                continue
+            neighbor = vbh[j]
+            if not neighbor.get("vulnerabilities"):
+                neighbor.setdefault("vulnerabilities", []).extend(stray.get("vulnerabilities") or [])
+                good_host = neighbor.get("host_name")
+                bad_host = stray.get("host_name")
+                logger.warning(
+                    f"[MergeUpload] heal: dropped stray version-number host "
+                    f"'{bad_host}' on report_id={report_id} — merged into '{good_host}'"
+                )
+                card = db["vulnerability_cards"].find_one({"report_id": report_id, "host_name": bad_host})
+                if card:
+                    db["vulnerability_cards"].update_one({"_id": card["_id"]}, {"$set": {"host_name": good_host}})
+                fx = db["fix_vulnerabilities"].find_one({"report_id": report_id, "host_name": bad_host})
+                if fx:
+                    db["fix_vulnerabilities"].update_one({"_id": fx["_id"]}, {"$set": {"host_name": good_host}})
+                to_drop.add(i)
+                break
+
+    if not to_drop:
+        return
+    new_vbh = [h for i, h in enumerate(vbh) if i not in to_drop]
+    db[NESSUS_COLLECTION].update_one(
+        {"report_id": report_id},
+        {"$set": {"vulnerabilities_by_host": new_vbh, "total_hosts": len(new_vbh)}},
+    )
+
+
 def merge_hosts_into_report(db, target_report_id: str, new_hosts: list) -> dict:
     """
     Merges `new_hosts` (already run through _prepare_hosts_for_storage —
