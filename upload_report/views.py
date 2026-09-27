@@ -732,9 +732,24 @@ class UploadReportView(APIView):
             # today's report, or this file's own freshly-created one) is
             # settled — serializes that one moment without blocking the
             # rest of file processing for anyone else.
+            # Real bug report (round 2): this recurred on a real admin even
+            # WITH the lock above in place — 4 files, ~13s apart this time,
+            # still ended up as 4 separate reports. Root cause: this loop
+            # only waited up to 30s to ACQUIRE the lock before giving up and
+            # proceeding as if no anchor existed — but a slow custom-report
+            # AI extraction (with its recall/retry passes, see
+            # custom_report_ai.py) can genuinely hold the lock well past
+            # 30s. A waiter that gives up early does exactly what this lock
+            # exists to prevent: it stops waiting and creates its own
+            # separate report while the first upload is still mid-
+            # extraction. Wait as long as the lock itself can possibly be
+            # held (its own timeout=180 safety net below) instead of an
+            # arbitrary shorter cap, so a waiter only ever proceeds once the
+            # holder has genuinely finished OR the lock's own expiry has
+            # kicked in — never because this loop simply lost patience.
             _merge_lock_key = f"upload_merge_lock_{target_admin.id}"
             _merge_lock_held = False
-            for _ in range(60):  # ~30s max wait for a sibling request's anchor to settle
+            for _ in range(360):  # up to 180s — matches the lock's own timeout below
                 if _merge_cache.add(_merge_lock_key, True, timeout=180):
                     _merge_lock_held = True
                     break
