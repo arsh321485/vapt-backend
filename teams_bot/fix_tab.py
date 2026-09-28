@@ -142,7 +142,7 @@ def _row(title_text, subtitle_text, action_id, value, size="Small", extra_action
 # data; classification/hold status is looked up per host_name and joined
 # in, same approach Slack's _fix_subtab_blocks uses. ──────────────────────
 
-CLASS_FILTERS = [("all", "All"), ("web_app", "Web App"), ("firewall", "Firewall"), ("server", "Server"), ("other", "Assets")]
+CLASS_FILTERS = [("all", "All"), ("other", "Assets"), ("web_app", "Web App"), ("firewall", "Firewall"), ("server", "Server")]
 _CLASS_LABEL = {"web_app": "Web App", "firewall": "Firewall", "server": "Server", "other": "Asset"}
 
 
@@ -150,10 +150,23 @@ def _match_class(atype, cls):
     return cls == "all" or (atype or "other") == cls
 
 
-def _class_filter_columnset(prefix, active_cls, extra_value=None):
+def _class_counts(items, type_key="asset_type"):
+    """{"all": N, "other": n, "web_app": n, ...} from a list of dicts (or
+    (i, r, atype)/(idx, r, atype) tuples — see call sites) each carrying
+    their own classification. Same counts-in-the-pill-label convention as
+    _status_filter_columnset's own STATUS_FILTERS."""
+    counts = {"all": len(items), "other": 0, "web_app": 0, "firewall": 0, "server": 0}
+    for item in items:
+        atype = item.get(type_key, "other") if isinstance(item, dict) else item[-1]
+        counts[atype] = counts.get(atype, 0) + 1
+    return counts
+
+
+def _class_filter_columnset(prefix, active_cls, counts, extra_value=None):
     extra_value = extra_value or {}
+    options = [(k, f"{label} {counts.get(k, 0)}") for k, label in CLASS_FILTERS]
     return cards.pill_columnset(
-        CLASS_FILTERS, active_cls,
+        options, active_cls,
         lambda k: {"action_id": f"{prefix}_cls", "cls": k, "offset": 0, **extra_value},
     )
 
@@ -394,6 +407,7 @@ def assets_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=
 
     for a in assets:
         a["asset_type"] = class_map.get(a["host"], "other")
+    cls_counts = _class_counts(assets)
     assets = [a for a in assets if _match_class(a["asset_type"], cls)]
 
     total = len(assets)
@@ -405,7 +419,7 @@ def assets_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=
         {"type": "TextBlock", "text": subtitle or "Every asset in your latest report. Tap View to see its vulnerabilities.", "size": "Small", "isSubtle": True, "wrap": True},
         _sev_filter_columnset(view_prefix, sev, st, {"cls": cls}),
         _status_filter_columnset(view_prefix, sev, st, st_counts, {"cls": cls}),
-        _class_filter_columnset(view_prefix, cls, {"sev": sev, "st": st}),
+        _class_filter_columnset(view_prefix, cls, cls_counts, {"sev": sev, "st": st}),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No assets found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
@@ -532,6 +546,7 @@ def vulns_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=F
         (i, r, class_map.get((r.get("asset") or "").strip(), "other"))
         for i, r in filtered
     ]
+    cls_counts = _class_counts(filtered)
     filtered = [(i, r, atype) for i, r, atype in filtered if _match_class(atype, cls)]
 
     total = len(filtered)
@@ -544,7 +559,7 @@ def vulns_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=F
         {"type": "TextBlock", "text": subtitle or "Every vulnerability in your latest report.", "size": "Small", "isSubtle": True, "wrap": True},
         _sev_filter_columnset(view_prefix, sev, st, {"cls": cls}),
         _status_filter_columnset(view_prefix, sev, st, st_counts, {"cls": cls}),
-        _class_filter_columnset(view_prefix, cls, {"sev": sev, "st": st}),
+        _class_filter_columnset(view_prefix, cls, cls_counts, {"sev": sev, "st": st}),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No vulnerabilities found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
