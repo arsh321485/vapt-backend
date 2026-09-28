@@ -327,11 +327,22 @@ def bust_asset_vuln_caches(caller, as_member=False, team_name=None):
 
 def _fetch_asset_classification_data(caller, as_member=False, team_name=None):
     """
-    {host_name: asset_type} classification map + the report_id it was
-    computed against — via AdminAssetsAPIView (admin) or UserAssetsAPIView
-    (as_member=True, team-scoped). Same data source Slack's Hold/Unhold/
-    Delete + classification feature already uses
+    Classification data for the Assets tab — via AdminAssetsAPIView (admin)
+    or UserAssetsAPIView (as_member=True, team-scoped), the SAME real
+    endpoint the website's own All Assets tab calls. Same data source
+    Slack's Hold/Unhold/Delete + classification feature already uses
     (users.views.SlackSlashCommandView._fetch_asset_classification_map).
+
+    Real bug report: this used to keep only a single {host: asset_type}
+    map and recompute its OWN pill counts locally (one category per
+    host) — that disagreed with the website's own numbers for the exact
+    same report, because a host with mixed-nature findings counts toward
+    EVERY category it has a finding in there (see AdminAssetsAPIView's
+    own `categories` list per asset and its `asset_type_totals`), not
+    just one. Now carries `categories_map` (host -> list of categories,
+    for filtering) and `asset_type_totals` (the website's own precomputed
+    pill counts) straight through instead of re-deriving either locally,
+    so Teams' numbers can never drift from the website's again.
     """
     def _fetch():
         from .actions import _call_view_in_process
@@ -343,9 +354,22 @@ def _fetch_asset_classification_data(caller, as_member=False, team_name=None):
             from adminasset.views import AdminAssetsAPIView
             status_code, data = _call_view_in_process(AdminAssetsAPIView, caller, method="get")
         if status_code >= 300 or not isinstance(data, dict):
-            return {"map": {}, "report_id": None}
-        cmap = {a.get("asset"): (a.get("asset_type") or "other") for a in (data.get("assets") or []) if a.get("asset")}
-        return {"map": cmap, "report_id": data.get("report_id")}
+            return {"map": {}, "categories_map": {}, "asset_type_totals": {}, "report_id": None}
+        cmap = {}
+        categories_map = {}
+        for a in (data.get("assets") or []):
+            host = a.get("asset")
+            if not host:
+                continue
+            cmap[host] = a.get("asset_type") or "other"
+            categories_map[host] = a.get("categories") or [cmap[host]]
+        return {
+            "map": cmap,
+            "categories_map": categories_map,
+            "asset_type_totals": data.get("asset_type_totals") or {},
+            "total_assets": data.get("total_assets", len(cmap)),
+            "report_id": data.get("report_id"),
+        }
     key = f"asset_class:{caller.id}:{'member' if as_member else 'admin'}:{team_name or ''}"
     return cached_fetch(key, 20, _fetch)
 
@@ -403,12 +427,23 @@ def assets_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=
 
     class_data = _fetch_asset_classification_data(admin, as_member=as_member, team_name=team_name)
     class_map, report_id = class_data["map"], class_data["report_id"]
+    categories_map = class_data["categories_map"]
     held_map = _fetch_held_assets_map(admin, as_member=as_member, team_name=team_name)
 
+    # Real bug report: pill counts here used to be recomputed locally
+    # (one category per host) and disagreed with the website's own All
+    # Assets tab for the exact same report — a mixed-nature host counts
+    # toward EVERY category it has a finding in on the website (see
+    # AdminAssetsAPIView's own `categories` list), not just one. Use the
+    # website's own precomputed asset_type_totals directly instead of
+    # re-deriving a different number, and filter by full `categories`
+    # membership (not a single asset_type) so a click on "Web App" shows
+    # the exact same assets the website's own Web App tab would.
+    cls_counts = {"all": class_data["total_assets"], **class_data["asset_type_totals"]}
     for a in assets:
         a["asset_type"] = class_map.get(a["host"], "other")
-    cls_counts = _class_counts(assets)
-    assets = [a for a in assets if _match_class(a["asset_type"], cls)]
+        a["categories"] = categories_map.get(a["host"], [a["asset_type"]])
+    assets = [a for a in assets if cls == "all" or cls in a["categories"]]
 
     total = len(assets)
     page = assets[offset:offset + PAGE_SIZE]
@@ -530,6 +565,35 @@ def _fetch_held_vulns_map(caller, as_member=False, team_name=None):
     return cached_fetch(key, 20, _fetch)
 
 
+def _fetch_all_vulnerabilities_totals(caller, report_id, as_member=False):
+    """
+    asset_type_totals (+ total) straight from AllVulnerabilitiesAPIView/
+    UserAllVulnerabilitiesAPIView — the SAME real endpoint the website's
+    own All Vulnerabilities tab calls for its classification pill counts.
+    Real bug report: this tab used to recompute its own pill counts from
+    the flat register rows (one row per vuln+host pair) instead, which
+    counts differently than the website's own grouped-by-plugin-name
+    logic and disagreed with it for the exact same report.
+    """
+    def _fetch():
+        from .actions import _call_view_in_process
+        if as_member:
+            from userasset.views import UserAllVulnerabilitiesAPIView
+            status_code, data = _call_view_in_process(
+                UserAllVulnerabilitiesAPIView, caller, method="get", url_kwargs={"report_id": report_id},
+            )
+        else:
+            from adminasset.views import AllVulnerabilitiesAPIView
+            status_code, data = _call_view_in_process(
+                AllVulnerabilitiesAPIView, caller, method="get", url_kwargs={"report_id": report_id},
+            )
+        if status_code >= 300 or not isinstance(data, dict):
+            return {"total": 0, "asset_type_totals": {}}
+        return {"total": data.get("total", 0), "asset_type_totals": data.get("asset_type_totals") or {}}
+    key = f"all_vulns_totals:{caller.id}:{'member' if as_member else 'admin'}:{report_id}"
+    return cached_fetch(key, 20, _fetch)
+
+
 def vulns_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=False, team_name=None,
                      view_prefix="fix_vuln", subtitle=None):
     rows = _fetch_rows(admin, as_member=as_member, team_name=team_name)
@@ -541,13 +605,26 @@ def vulns_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=F
     filtered = [(i, r) for i, r in sev_base if _match_status(r, st)]
 
     class_data = _fetch_asset_classification_data(admin, as_member=as_member, team_name=team_name)
-    class_map, report_id = class_data["map"], class_data["report_id"]
+    class_map, categories_map, report_id = class_data["map"], class_data["categories_map"], class_data["report_id"]
     filtered = [
         (i, r, class_map.get((r.get("asset") or "").strip(), "other"))
         for i, r in filtered
     ]
-    cls_counts = _class_counts(filtered)
-    filtered = [(i, r, atype) for i, r, atype in filtered if _match_class(atype, cls)]
+    # Real bug report: pill counts here used to be recomputed locally from
+    # these flat register rows (one row per vuln+host pair — the same
+    # vulnerability on 3 hosts counts 3 times) instead of the website's
+    # own AllVulnerabilitiesAPIView numbers (one entry per DISTINCT
+    # vulnerability) — disagreed with the website for the exact same
+    # report. Pull the real totals straight from that same endpoint;
+    # per-row filtering below still checks this row's own host against
+    # its full `categories` list (not just its single primary asset_type)
+    # so a click on a pill shows every row genuinely in that category.
+    real_totals = _fetch_all_vulnerabilities_totals(admin, report_id, as_member=as_member) if report_id else {"total": 0, "asset_type_totals": {}}
+    cls_counts = {"all": real_totals["total"], **real_totals["asset_type_totals"]}
+    filtered = [
+        (i, r, atype) for i, r, atype in filtered
+        if cls == "all" or cls in categories_map.get((r.get("asset") or "").strip(), [atype])
+    ]
 
     total = len(filtered)
     page = filtered[offset:offset + PAGE_SIZE]
