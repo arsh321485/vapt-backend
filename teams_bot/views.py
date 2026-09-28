@@ -512,6 +512,103 @@ class TeamsBotMessagesView(APIView):
         User = get_user_model()
         return User.objects.filter(ms_team_id=team_id).first(), team_id
 
+    def _try_rsc_provision_on_install(self, activity, team_id_direct):
+        """
+        Fallback for _handle_conversation_update when _resolve_admin finds no
+        admin for this team. The OLD flow (auto_create_vaptfix_team during
+        website login) always has a login request racing this webhook, so
+        "not found" there just meant "retry, it'll show up shortly" — see
+        the background-retry branch this method is called ahead of. The NEW
+        RSC (Resource-Specific Consent) flow has no such race: the client
+        installs the app into a team they already own/created themselves,
+        self-service, with no website login involved at all — so "not
+        found" here can also genuinely mean "this is a fresh RSC install,
+        go provision it", not just "not found yet".
+
+        Resolves which VaptFix admin this belongs to via the INSTALLER's
+        own AAD identity (activity.from.aadObjectId — the same field
+        member_resolve already uses elsewhere to identify an activity's
+        acting user) looked up against Graph with an app-only token scoped
+        to the INSTALLING tenant (RSC grants only apply to app-only tokens
+        issued for that specific tenant, never our own home-tenant token),
+        matched by email against our own User table. On a match, provisions
+        the exact same 5 channels (admin dashboard + 4 team channels) the
+        old auto-create-team flow always has, via the same
+        _create_vaptfix_channels/_ensure_admin_dashboard_channel functions
+        already proven there — just targeting THIS existing team instead of
+        a freshly created one — and records it as this admin's team.
+
+        Returns the resolved admin on success (caller finishes onboarding
+        the normal way), or None if this can't be resolved as an RSC
+        install (unknown installer, lookup failure, duplicate concurrent
+        delivery, etc.) — caller falls back to the existing "maybe a login
+        is still in-flight" retry, which is a safe no-op here since nothing
+        will ever populate ms_team_id for a genuine RSC install on its own.
+        """
+        aad_object_id = (activity.get("from") or {}).get("aadObjectId")
+        tenant_id = ((activity.get("channelData") or {}).get("tenant") or {}).get("id")
+        if not aad_object_id or not tenant_id or not team_id_direct:
+            return None
+
+        # Bot Framework can redeliver the same installationUpdate/
+        # conversationUpdate more than once (retries, or the bot landing in
+        # General plus a near-simultaneous per-channel event) — without this,
+        # two deliveries racing each other would both pass _resolve_admin's
+        # "not found" check and both call _create_vaptfix_channels, doubling
+        # every channel. 120s comfortably covers Graph's channel-creation
+        # latency; a genuinely failed attempt clears its own lock below so a
+        # later legitimate retry isn't blocked by a dead lock.
+        from django.core.cache import cache
+        lock_key = f"rsc_provision_lock_{team_id_direct}"
+        if not cache.add(lock_key, 1, timeout=120):
+            logger.info(f"[TeamsRSC] provisioning already in progress/recently done for team_id={team_id_direct} — skipping duplicate delivery")
+            return None
+
+        from users.views import _get_graph_app_token_for_tenant, _http_get
+        app_token = _get_graph_app_token_for_tenant(tenant_id)
+        if not app_token:
+            cache.delete(lock_key)
+            return None
+        headers = {"Authorization": f"Bearer {app_token}", "Content-Type": "application/json"}
+
+        try:
+            resp = _http_get(f"https://graph.microsoft.com/v1.0/users/{aad_object_id}", headers=headers, timeout=10)
+            if resp.status_code != 200:
+                logger.warning(f"[TeamsRSC] installer lookup failed for aad_object_id={aad_object_id}: {resp.status_code} {resp.text[:200]}")
+                cache.delete(lock_key)
+                return None
+            installer_data = resp.json()
+        except Exception:
+            logger.exception(f"[TeamsRSC] installer lookup raised for aad_object_id={aad_object_id}")
+            cache.delete(lock_key)
+            return None
+        installer_email = (installer_data.get("mail") or installer_data.get("userPrincipalName") or "").strip()
+        if not installer_email:
+            cache.delete(lock_key)
+            return None
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        admin = User.objects.filter(email__iexact=installer_email).first()
+        if not admin:
+            logger.info(f"[TeamsRSC] installer email={installer_email} doesn't match any VaptFix admin — not an RSC provisioning install, team_id={team_id_direct}")
+            cache.delete(lock_key)
+            return None
+
+        logger.info(f"[TeamsRSC] resolved admin={admin.email} for fresh RSC install, team_id={team_id_direct}")
+        # Use filter().update() to reliably persist — avoids djongo
+        # update_fields issues, same pattern the old OAuth-login flow uses
+        # to persist ms_team_id.
+        User.objects.filter(pk=admin.pk).update(ms_team_id=team_id_direct)
+
+        from users.views import _create_vaptfix_channels
+        try:
+            _create_vaptfix_channels(team_id_direct, headers, access_token=None, admin=admin)
+        except Exception:
+            logger.exception(f"[TeamsRSC] channel provisioning failed for team_id={team_id_direct}, admin={admin.email}")
+
+        return admin
+
     def _handle_message(self, activity: dict):
         service_url = activity.get("serviceUrl")
         conversation_id = (activity.get("conversation") or {}).get("id")
@@ -904,6 +1001,18 @@ class TeamsBotMessagesView(APIView):
         # exact path while wiring up the new private admin-dashboard channel.
         admin, resolved_team_id = self._resolve_admin(activity)
         if not admin:
+            # Self-service RSC (Resource-Specific Consent) install: the
+            # client installed the app into a team of their own with no
+            # website login in flight at all, so the retry loop below (which
+            # only ever re-checks _resolve_admin, and assumes ms_team_id
+            # will eventually get saved by SOME other in-flight request)
+            # would just exhaust every attempt and give up forever for this
+            # case. Try resolving+provisioning it as a fresh RSC install
+            # first — see _try_rsc_provision_on_install's own docstring.
+            rsc_admin = self._try_rsc_provision_on_install(activity, team_id_direct)
+            if rsc_admin:
+                self._complete_conversation_update_onboarding(rsc_admin, team_id_direct, thread_id)
+                return
             # Real bug report, confirmed live in prod logs on EVERY brand-
             # new team ("bot added to team_id=... but no admin has this
             # ms_team_id yet") — this webhook fires the moment
@@ -922,7 +1031,10 @@ class TeamsBotMessagesView(APIView):
             # admin resolution itself with backoff — same pattern as the
             # repoint retry below — so it succeeds once the website
             # request catches up and saves ms_team_id, typically within
-            # seconds.
+            # seconds. (Also covers a genuine RSC install whose installer-
+            # lookup/email-match just failed transiently above — the retry
+            # loop re-running _resolve_admin will pick it up once/if the
+            # admin's ms_team_id gets set some other way.)
             logger.info(f"[TeamsBot] bot added to team_id={thread_id} but no admin has this ms_team_id yet — starting background admin-resolution retry")
             t = threading.Thread(
                 target=self._background_retry_conversation_update_admin_resolution,

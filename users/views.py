@@ -1293,6 +1293,54 @@ def _get_graph_app_token():
     return token
 
 
+_graph_app_token_cache_by_tenant = {}
+
+
+def _get_graph_app_token_for_tenant(tenant_id):
+    """
+    App-only (client_credentials) Graph token scoped to a SPECIFIC
+    customer tenant — used for the RSC (Resource-Specific Consent) channel-
+    provisioning flow, where the app is installed into a team belonging to
+    some OTHER organization, not our own home tenant. Unlike
+    _get_graph_app_token() (always Secureitlab's own tenant, for our own
+    bot-install/catalog-publish calls), this must target whichever
+    tenant's team the app was JUST installed into — RSC grants (Channel.
+    Create.Group etc.) only apply to app-only tokens issued for THAT
+    tenant, never a token issued for our own home tenant. Requires no
+    separate admin consent beyond the RSC grant itself, since the act of
+    installing the app into a team IS what authorizes this.
+    """
+    if not tenant_id:
+        return None
+    cached = _graph_app_token_cache_by_tenant.get(tenant_id)
+    if cached and time.time() < cached["expires_at"] - 60:
+        return cached["token"]
+    try:
+        resp = _http_post(
+            f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": settings.MICROSOFT_CLIENT_ID,
+                "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                "scope": "https://graph.microsoft.com/.default",
+            },
+            timeout=15,
+        )
+        data = resp.json()
+    except Exception:
+        logger.exception(f"[TeamsRSC] Failed to acquire app-only Graph token for tenant_id={tenant_id}")
+        return None
+    token = data.get("access_token")
+    if not token:
+        logger.warning(f"[TeamsRSC] App-only Graph token request failed for tenant_id={tenant_id}: {data}")
+        return None
+    _graph_app_token_cache_by_tenant[tenant_id] = {
+        "token": token,
+        "expires_at": time.time() + int(data.get("expires_in", 3600)),
+    }
+    return token
+
+
 _teams_catalog_app_id_cache = {"id": None}
 
 
