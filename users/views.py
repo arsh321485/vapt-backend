@@ -1169,9 +1169,25 @@ class MicrosoftTeamsOAuthUrlView(APIView):
                 # "creation_failed"/"error" status rather than raising, so
                 # this doesn't break login itself, only the old auto-create-
                 # team-on-login side effect, which RSC now replaces.
-                "https://graph.microsoft.com/ChannelMessage.Send",
-                "https://graph.microsoft.com/TeamMember.ReadWrite.All",
-                "https://graph.microsoft.com/ChannelMember.ReadWrite.All",
+                #
+                # ChannelMessage.Send, TeamMember.ReadWrite.All and
+                # ChannelMember.ReadWrite.All removed too, for the same
+                # "Need admin approval" reason — confirmed via a full grep
+                # that nothing internal actually reads admin.ms_access_token
+                # for these anymore:
+                #   - ChannelMessage.Send: SendTeamsMessageView takes its
+                #     OWN access_token from the request body, never the
+                #     stored login token — this scope was never actually
+                #     load-bearing for it.
+                #   - TeamMember.ReadWrite.All / ChannelMember.ReadWrite.All:
+                #     only real internal use was reading (not writing) team
+                #     rosters — teams_bot/team_tab.py's
+                #     _fetch_teams_members_from_graph (Add User picker) and
+                #     this class's own _sync_all_team_members/
+                #     _handle_member_added (webhook failsafe sync) — both
+                #     migrated to an RSC app-only token (Member.Read.Group)
+                #     scoped to the admin's tenant instead, so neither needs
+                #     this delegated scope anymore either.
                 "offline_access",
                 "openid",
                 "email",
@@ -10212,14 +10228,16 @@ class TeamsWebhookView(APIView):
             logger.info(f"[TeamsWebhook] ✅ Created NEW UserDetail for {email} under admin {admin.email}")
 
     def _sync_all_team_members(self, admin, team_id, headers):
-        """Failsafe: sync whole team membership to DB."""
+        """
+        Failsafe: sync whole team membership to DB. `headers` now carries
+        an RSC app-only token (see _handle_member_added) rather than the
+        admin's own delegated token, so a 401 here isn't fixed by
+        refreshing the admin's token — _get_graph_app_token_for_tenant
+        already caches with its own expiry buffer, so this should be rare;
+        just log and bail like any other failed failsafe-sync attempt.
+        """
         url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/members"
         resp = _http_get(url, headers=headers, timeout=15)
-        if resp.status_code == 401:
-            new_token = self._refresh_admin_ms_token(admin)
-            if new_token:
-                headers["Authorization"] = f"Bearer {new_token}"
-                resp = _http_get(url, headers=headers, timeout=15)
         if resp.status_code != 200:
             logger.warning(f"[TeamsWebhook] Full team sync failed team_id={team_id} status={resp.status_code} body={resp.text}")
             return
@@ -10271,14 +10289,27 @@ class TeamsWebhookView(APIView):
                     return
                 logger.info(f"[TeamsWebhook] Found admin by ms_team_id={team_id}: email={admin.email}")
 
-            access_token = admin.ms_access_token
-            logger.info(f"[TeamsWebhook] Admin token check: email={admin.email} access_token_set={bool(access_token)}")
-            if not access_token:
-                logger.error(f"[TeamsWebhook] ❌ Admin {admin.email} has no ms_access_token — cannot fetch member details")
+            # RSC (Resource-Specific Consent) app-only token scoped to the
+            # admin's own tenant — via Member.Read.Group, granted per-team
+            # at install time with no admin consent needed — instead of the
+            # admin's own delegated ms_access_token. TeamMember.ReadWrite.
+            # All/ChannelMember.ReadWrite.All (which this used to require
+            # at login) were exactly the kind of admin-consent-required
+            # permissions that triggered the "Need admin approval" screen
+            # for external-tenant admins signing in, so this was moved off
+            # the delegated token so those could come out of the login
+            # scope entirely. admin.ms_access_token is still read here, but
+            # only locally to decode its "tid" claim (which tenant to
+            # request an app-only token for) — no Graph call is made with
+            # the delegated token itself anymore.
+            tenant_id = _decode_jwt_tid(admin.ms_access_token)
+            app_token = _get_graph_app_token_for_tenant(tenant_id)
+            if not app_token:
+                logger.error(f"[TeamsWebhook] ❌ Could not acquire RSC app-only token for admin={admin.email} tenant_id={tenant_id} — cannot fetch member details")
                 return
 
             headers = {
-                "Authorization": f"Bearer {access_token}",
+                "Authorization": f"Bearer {app_token}",
                 "Content-Type": "application/json",
             }
 
@@ -10289,11 +10320,6 @@ class TeamsWebhookView(APIView):
             # Fetch member details from MS Graph
             member_url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/members/{member_id}"
             member_resp = _http_get(member_url, headers=headers, timeout=10)
-            if member_resp.status_code == 401:
-                new_token = self._refresh_admin_ms_token(admin)
-                if new_token:
-                    headers["Authorization"] = f"Bearer {new_token}"
-                    member_resp = _http_get(member_url, headers=headers, timeout=10)
 
             email = None
             display_name = "Teams User"
@@ -10317,20 +10343,18 @@ class TeamsWebhookView(APIView):
             # Graph team-member payload often misses email.
             # Resolve from directory user object using AAD user id.
             if (not email or "@" not in str(email)) and aad_user_id:
+                # Directory-wide /users/{id} lookup — RSC's Member.Read.Group
+                # only covers team-scoped endpoints, so this call can 403 for
+                # a member whose team-membership record didn't already carry
+                # an inline email (the common case does; this is a rare
+                # fallback). Failing here just means this one member's email
+                # doesn't get resolved this round — not fatal, see the
+                # `if not email` check right below.
                 user_resp = _http_get(
                     f"https://graph.microsoft.com/v1.0/users/{aad_user_id}?$select=mail,userPrincipalName,displayName",
                     headers=headers,
                     timeout=10,
                 )
-                if user_resp.status_code == 401:
-                    new_token = self._refresh_admin_ms_token(admin)
-                    if new_token:
-                        headers["Authorization"] = f"Bearer {new_token}"
-                        user_resp = _http_get(
-                            f"https://graph.microsoft.com/v1.0/users/{aad_user_id}?$select=mail,userPrincipalName,displayName",
-                            headers=headers,
-                            timeout=10,
-                        )
                 if user_resp.status_code == 200:
                     user_data = user_resp.json()
                     email = user_data.get("mail") or user_data.get("userPrincipalName")

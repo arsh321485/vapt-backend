@@ -132,29 +132,37 @@ def _fetch_teams_members_from_graph(admin):
     (Slack's own Add User modal does the same thing with a users_select
     picker). Cached ~45s (fix_tab.cached_fetch), same throttling reasoning
     as _live_sync_members_from_teams.
+
+    Uses an RSC (Resource-Specific Consent) app-only token scoped to the
+    admin's own tenant — via Member.Read.Group, granted per-team the
+    moment the app was installed, no admin consent needed — instead of
+    the admin's own delegated ms_access_token. TeamMember.ReadWrite.All/
+    ChannelMember.ReadWrite.All (which this used to require at login) were
+    exactly the kind of admin-consent-required permissions that triggered
+    the "Need admin approval" screen for external-tenant admins signing
+    in, so this was moved off the delegated token so those could come out
+    of the login scope entirely. The admin's own ms_access_token is still
+    read here, but only locally to decode its "tid" claim (which tenant
+    to request an app-only token for) — no Graph call is made with it.
     """
     def _do_fetch():
         team_id = getattr(admin, "ms_team_id", None)
-        access_token = getattr(admin, "ms_access_token", None)
-        if not team_id or not access_token:
+        if not team_id:
+            return []
+        from users.views import _decode_jwt_tid, _get_graph_app_token_for_tenant
+        tenant_id = _decode_jwt_tid(getattr(admin, "ms_access_token", None))
+        app_token = _get_graph_app_token_for_tenant(tenant_id)
+        if not app_token:
             return []
         try:
             import requests
             resp = requests.get(
                 f"https://graph.microsoft.com/v1.0/teams/{team_id}/members",
-                headers={"Authorization": f"Bearer {access_token}"},
+                headers={"Authorization": f"Bearer {app_token}"},
                 timeout=15,
             )
-            if resp.status_code == 401:
-                new_token = _refresh_ms_access_token(admin)
-                if not new_token:
-                    return []
-                resp = requests.get(
-                    f"https://graph.microsoft.com/v1.0/teams/{team_id}/members",
-                    headers={"Authorization": f"Bearer {new_token}"},
-                    timeout=15,
-                )
             if resp.status_code != 200:
+                logger.warning(f"[TeamsBot] fetch Teams members from Graph (RSC) failed: {resp.status_code} {resp.text[:200]}")
                 return []
             out = []
             for m in resp.json().get("value") or []:
