@@ -102,12 +102,18 @@ def _status_filter_columnset(prefix, active_sev, active_st, counts, extra_value=
     )
 
 
-def _row(title_text, subtitle_text, action_id, value, size="Small"):
+def _row(title_text, subtitle_text, action_id, value, size="Small", extra_actions=None):
     """One clickable list row — title/subtitle on the left, a real 'View'
     button on the right (matches Slack's section+accessory-button rows).
     `size` bumps both lines up together (e.g. "Default") for callers that
     want a larger read — defaults to "Small" so every other caller's
-    layout is unchanged."""
+    layout is unchanged. `extra_actions` (Hold/Unhold/Delete, etc.) render
+    alongside "View" in the same ActionSet when a caller needs more than
+    one action per row — action_id/value can be None to omit "View"
+    entirely (a row with only Hold/Unhold/Delete, no drill-down)."""
+    actions = list(extra_actions or [])
+    if action_id:
+        actions.insert(0, cards._execute_action("View ›", {"action_id": action_id, **value}))
     return {
         "type": "ColumnSet",
         "spacing": "Medium",
@@ -122,13 +128,52 @@ def _row(title_text, subtitle_text, action_id, value, size="Small"):
             },
             {
                 "type": "Column", "width": "auto", "verticalContentAlignment": "Center",
-                "items": [{
-                    "type": "ActionSet",
-                    "actions": [cards._execute_action("View ›", {"action_id": action_id, **value})],
-                }],
+                "items": [{"type": "ActionSet", "actions": actions}],
             },
         ],
     }
+
+
+# ─── Classification filter (Assets/Web App/Firewall/Server) — same
+# taxonomy as the website's Assets tab and Slack's own Hold/Unhold/Delete
+# feature (upload_report.asset_classification). Added as a supplemental
+# filter alongside the existing severity/status pills, not a replacement
+# — both All Assets and All Vulnerabilities keep their register-sourced
+# data; classification/hold status is looked up per host_name and joined
+# in, same approach Slack's _fix_subtab_blocks uses. ──────────────────────
+
+CLASS_FILTERS = [("all", "All"), ("web_app", "Web App"), ("firewall", "Firewall"), ("server", "Server"), ("other", "Assets")]
+_CLASS_LABEL = {"web_app": "Web App", "firewall": "Firewall", "server": "Server", "other": "Asset"}
+
+
+def _match_class(atype, cls):
+    return cls == "all" or (atype or "other") == cls
+
+
+def _class_filter_columnset(prefix, active_cls, extra_value=None):
+    extra_value = extra_value or {}
+    return cards.pill_columnset(
+        CLASS_FILTERS, active_cls,
+        lambda k: {"action_id": f"{prefix}_cls", "cls": k, "offset": 0, **extra_value},
+    )
+
+
+def _confirm_body(title, warning, confirm_action_id, confirm_val, cancel_action_id, cancel_val):
+    """Generic destructive-action confirm screen — same Confirm/Cancel
+    convention as team_tab.py's own delete-user flow (see its
+    `_confirm_body`), duplicated here rather than imported to avoid a
+    circular import (team_tab already imports FROM this module)."""
+    return [
+        {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "spacing": "Medium", "color": "attention", "wrap": True},
+        {"type": "TextBlock", "text": warning, "wrap": True, "size": "Small"},
+        {
+            "type": "ActionSet", "spacing": "Medium",
+            "actions": [
+                cards._execute_action("✅ Yes, delete", {"action_id": confirm_action_id, **confirm_val}, style="destructive"),
+                cards._execute_action("← Cancel", {"action_id": cancel_action_id, **cancel_val}),
+            ],
+        },
+    ]
 
 
 def _pagination_body(offset, total, action_id, extra_value=None):
@@ -228,6 +273,89 @@ def _fetch_register_rows(admin):
     return _fetch_register_data(admin).get("rows") or []
 
 
+def _fetch_rows(caller, as_member=False, team_name=None):
+    """admin -> _fetch_register_rows; member -> the team-scoped
+    UserLatestVulnerabilityRegisterAPIView rows (same shape, same fields —
+    see user_fix_tab.py's own module docstring)."""
+    if not as_member:
+        return _fetch_register_rows(caller)
+
+    def _fetch():
+        from userregister.views import UserLatestVulnerabilityRegisterAPIView
+        from .actions import _call_view_in_process
+        status_code, data = _call_view_in_process(
+            UserLatestVulnerabilityRegisterAPIView, caller, method="get", data={"team": team_name},
+        )
+        if status_code >= 300 or not isinstance(data, dict):
+            raise ValueError(f"user register fetch failed: {status_code}")
+        return data
+    return cached_fetch(f"user_register_data:{caller.id}:{team_name}", 20, _fetch).get("rows") or []
+
+
+def bust_asset_vuln_caches(caller, as_member=False, team_name=None):
+    """
+    Called right after a real Hold/Unhold/Delete mutation — cached_fetch's
+    own TTL (20s) would otherwise show the pre-mutation state for up to
+    20s after the click that just changed it, on the very same list the
+    user is looking at. Every cache key this feature reads from, busted
+    for this exact caller/scope.
+    """
+    from django.core.cache import cache
+    suffix = "member" if as_member else "admin"
+    keys = [
+        f"asset_class:{caller.id}:{suffix}:{team_name or ''}",
+        f"held_assets:{caller.id}:{suffix}:{team_name or ''}",
+        f"held_vulns:{caller.id}:{suffix}:{team_name or ''}",
+    ]
+    keys.append(f"user_register_data:{caller.id}:{team_name}" if as_member else f"register_data:{caller.id}")
+    for k in keys:
+        cache.delete(f"teamsbot_cache:{k}")
+
+
+def _fetch_asset_classification_data(caller, as_member=False, team_name=None):
+    """
+    {host_name: asset_type} classification map + the report_id it was
+    computed against — via AdminAssetsAPIView (admin) or UserAssetsAPIView
+    (as_member=True, team-scoped). Same data source Slack's Hold/Unhold/
+    Delete + classification feature already uses
+    (users.views.SlackSlashCommandView._fetch_asset_classification_map).
+    """
+    def _fetch():
+        from .actions import _call_view_in_process
+        if as_member:
+            from userasset.views import UserAssetsAPIView
+            data_kwargs = {"team": team_name} if team_name else None
+            status_code, data = _call_view_in_process(UserAssetsAPIView, caller, method="get", data=data_kwargs)
+        else:
+            from adminasset.views import AdminAssetsAPIView
+            status_code, data = _call_view_in_process(AdminAssetsAPIView, caller, method="get")
+        if status_code >= 300 or not isinstance(data, dict):
+            return {"map": {}, "report_id": None}
+        cmap = {a.get("asset"): (a.get("asset_type") or "other") for a in (data.get("assets") or []) if a.get("asset")}
+        return {"map": cmap, "report_id": data.get("report_id")}
+    key = f"asset_class:{caller.id}:{'member' if as_member else 'admin'}:{team_name or ''}"
+    return cached_fetch(key, 20, _fetch)
+
+
+def _fetch_held_assets_map(caller, as_member=False, team_name=None):
+    """{host_name: held-asset info dict} — via AdminHoldAssetsAPIView or
+    UserHoldAssetsAPIView (as_member=True, team-scoped)."""
+    def _fetch():
+        from .actions import _call_view_in_process
+        if as_member:
+            from userasset.views import UserHoldAssetsAPIView
+            data_kwargs = {"team": team_name} if team_name else None
+            status_code, data = _call_view_in_process(UserHoldAssetsAPIView, caller, method="get", data=data_kwargs)
+        else:
+            from adminasset.views import AdminHoldAssetsAPIView
+            status_code, data = _call_view_in_process(AdminHoldAssetsAPIView, caller, method="get")
+        if status_code >= 300 or not isinstance(data, dict):
+            return {}
+        return {a.get("asset"): a for a in (data.get("assets") or []) if a.get("asset")}
+    key = f"held_assets:{caller.id}:{'member' if as_member else 'admin'}:{team_name or ''}"
+    return cached_fetch(key, 20, _fetch)
+
+
 def _group_assets(rows):
     assets = {}
     order = []
@@ -252,32 +380,76 @@ def _group_assets(rows):
 
 # ─── All Assets ─────────────────────────────────────────────────────────
 
-def assets_list_body(admin, sev="all", st="all", offset=0):
-    rows = _fetch_register_rows(admin)
+def assets_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=False, team_name=None,
+                      view_prefix="fix_asset", subtitle=None):
+    rows = _fetch_rows(admin, as_member=as_member, team_name=team_name)
     sev_base = [r for r in rows if _match_sev(r, sev)]
     st_counts = _status_counts(sev_base)
     filtered_rows = [r for r in sev_base if _match_status(r, st)]
     assets = _group_assets(filtered_rows)
+
+    class_data = _fetch_asset_classification_data(admin, as_member=as_member, team_name=team_name)
+    class_map, report_id = class_data["map"], class_data["report_id"]
+    held_map = _fetch_held_assets_map(admin, as_member=as_member, team_name=team_name)
+
+    for a in assets:
+        a["asset_type"] = class_map.get(a["host"], "other")
+    assets = [a for a in assets if _match_class(a["asset_type"], cls)]
+
     total = len(assets)
     page = assets[offset:offset + PAGE_SIZE]
+    common_val = {"sev": sev, "st": st, "cls": cls, "report_id": report_id}
 
     body = [
         {"type": "TextBlock", "text": "💻 All Assets", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": "Every asset in your latest report. Tap View to see its vulnerabilities.", "size": "Small", "isSubtle": True, "wrap": True},
-        _sev_filter_columnset("fix_asset", sev, st),
-        _status_filter_columnset("fix_asset", sev, st, st_counts),
+        {"type": "TextBlock", "text": subtitle or "Every asset in your latest report. Tap View to see its vulnerabilities.", "size": "Small", "isSubtle": True, "wrap": True},
+        _sev_filter_columnset(view_prefix, sev, st, {"cls": cls}),
+        _status_filter_columnset(view_prefix, sev, st, st_counts, {"cls": cls}),
+        _class_filter_columnset(view_prefix, cls, {"sev": sev, "st": st}),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No assets found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
-        return body
+        return _append_held_assets_section(body, held_map, view_prefix, common_val, offset)
     for a in page:
-        # Real request: host name, vuln count, and status used to be on
-        # separate lines — combine them into one row so the count/status
-        # is visible at a glance without the row taking two lines just for
-        # that, and bump the font size up a step for readability.
-        title = f"🖥 {a['host']}   ·   {a['total']} Vulns   ·   {_status_label(a['status'])}"
-        body.append(_row(title, _sev_dots_text(a["counts"]), "fix_asset_view", {"host": a["host"], "offset": offset}, size="Default"))
-    body.extend(_pagination_body(offset, total, "fix_asset_pg", {"sev": sev, "st": st}))
+        # Real request: host name, vuln count, status, and classification
+        # used to be on separate lines — combine them into one row so
+        # they're all visible at a glance, and bump the font size up a
+        # step for readability.
+        title = f"🖥 {a['host']}   ·   {a['total']} Vulns   ·   {_status_label(a['status'])}   ·   {_CLASS_LABEL.get(a['asset_type'], 'Asset')}"
+        val = {"host": a["host"], "offset": offset, **common_val}
+        extra = [cards._execute_action(
+            "⏸ Hold", {"action_id": f"{view_prefix}_hold", **val},
+        )] if a["host"] not in held_map else []
+        extra.append(cards._execute_action(
+            "🗑 Delete", {"action_id": f"{view_prefix}_delete_confirm", **val}, style="destructive",
+        ))
+        body.append(_row(
+            title, _sev_dots_text(a["counts"]), f"{view_prefix}_view", {"host": a["host"], "offset": offset},
+            size="Default", extra_actions=extra,
+        ))
+    body.extend(_pagination_body(offset, total, f"{view_prefix}_pg", common_val))
+    return _append_held_assets_section(body, held_map, view_prefix, common_val, offset)
+
+
+def _append_held_assets_section(body, held_map, view_prefix, common_val, offset, limit=10):
+    """Real request (mirrors Slack's own Hold/Unhold/Delete feature):
+    a held asset is pulled out of the main list above (it has no open
+    findings left to show there), so without this it would look like
+    holding an asset just made it disappear with no way back."""
+    if not held_map:
+        return body
+    body.append({"type": "TextBlock", "text": "🔒 Held Assets", "weight": "Bolder", "size": "Medium", "spacing": "Large"})
+    for host, info in list(held_map.items())[:limit]:
+        sc = info.get("severity_counts") or {}
+        atype = info.get("asset_type") or "other"
+        title = f"🖥 {host}   ·   {_CLASS_LABEL.get(atype, 'Asset')}"
+        val = {"host": host, "offset": offset, **common_val}
+        body.append(_row(
+            title, _sev_dots_text(sc), None, None,
+            extra_actions=[cards._execute_action("🔓 Unhold", {"action_id": f"{view_prefix}_unhold", **val})],
+        ))
+    if len(held_map) > limit:
+        body.append({"type": "TextBlock", "text": f"+ {len(held_map) - limit} more held not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
     return body
 
 
@@ -310,36 +482,112 @@ def asset_detail_body(admin, host, back_offset=0):
 
 # ─── All Vulns (flat list) ──────────────────────────────────────────────
 
-def vulns_list_body(admin, sev="all", st="all", offset=0):
-    rows = _fetch_register_rows(admin)
+def _fetch_held_vulns_map(caller, as_member=False, team_name=None):
+    """{(plugin_name, host_name): held-doc} — via VulnHoldListByReportAPIView
+    (admin) or UserVulnHoldListByReportAPIView (as_member=True), report_id
+    resolved from the SAME classification fetch (no extra round trip)."""
+    def _fetch():
+        from .actions import _call_view_in_process
+        class_data = _fetch_asset_classification_data(caller, as_member=as_member, team_name=team_name)
+        report_id = class_data["report_id"]
+        if not report_id:
+            return {}
+        if as_member:
+            from userasset.views import UserVulnHoldListByReportAPIView
+            status_code, data = _call_view_in_process(
+                UserVulnHoldListByReportAPIView, caller, method="get", url_kwargs={"report_id": report_id},
+            )
+        else:
+            from adminasset.views import VulnHoldListByReportAPIView
+            status_code, data = _call_view_in_process(
+                VulnHoldListByReportAPIView, caller, method="get", url_kwargs={"report_id": report_id},
+            )
+        if status_code >= 300 or not isinstance(data, dict):
+            return {}
+        held = {}
+        for v in (data.get("vulnerabilities") or []):
+            for h in (v.get("hosts") or []):
+                held[(v.get("plugin_name"), h.get("host_name"))] = {
+                    "plugin_name": v.get("plugin_name"), "severity": v.get("severity"),
+                    "host_name": h.get("host_name"), "asset_type": h.get("asset_type"),
+                }
+        return held
+    key = f"held_vulns:{caller.id}:{'member' if as_member else 'admin'}:{team_name or ''}"
+    return cached_fetch(key, 20, _fetch)
+
+
+def vulns_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=False, team_name=None,
+                     view_prefix="fix_vuln", subtitle=None):
+    rows = _fetch_rows(admin, as_member=as_member, team_name=team_name)
     # Keep the index into the FULL unfiltered list — "View" hands back an
-    # idx the shared vuln-detail body resolves against that same full list
-    # (same reasoning as asset_detail_body's own host_rows indices).
+    # idx the shared vuln-detail body resolves again from that same full
+    # list (same reasoning as asset_detail_body's own host_rows indices).
     sev_base = [(i, r) for i, r in enumerate(rows) if _match_sev(r, sev)]
     st_counts = _status_counts([r for _, r in sev_base])
     filtered = [(i, r) for i, r in sev_base if _match_status(r, st)]
+
+    class_data = _fetch_asset_classification_data(admin, as_member=as_member, team_name=team_name)
+    class_map, report_id = class_data["map"], class_data["report_id"]
+    filtered = [
+        (i, r, class_map.get((r.get("asset") or "").strip(), "other"))
+        for i, r in filtered
+    ]
+    filtered = [(i, r, atype) for i, r, atype in filtered if _match_class(atype, cls)]
+
     total = len(filtered)
     page = filtered[offset:offset + PAGE_SIZE]
+    common_val = {"sev": sev, "st": st, "cls": cls, "report_id": report_id}
+    held_map = _fetch_held_vulns_map(admin, as_member=as_member, team_name=team_name)
 
     body = [
         {"type": "TextBlock", "text": "📋 All Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": "Every vulnerability in your latest report.", "size": "Small", "isSubtle": True, "wrap": True},
-        _sev_filter_columnset("fix_vuln", sev, st),
-        _status_filter_columnset("fix_vuln", sev, st, st_counts),
+        {"type": "TextBlock", "text": subtitle or "Every vulnerability in your latest report.", "size": "Small", "isSubtle": True, "wrap": True},
+        _sev_filter_columnset(view_prefix, sev, st, {"cls": cls}),
+        _status_filter_columnset(view_prefix, sev, st, st_counts, {"cls": cls}),
+        _class_filter_columnset(view_prefix, cls, {"sev": sev, "st": st}),
     ]
     if not page:
         body.append({"type": "TextBlock", "text": "No vulnerabilities found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
-        return body
-    for idx, r in page:
+        return _append_held_vulns_section(body, held_map, view_prefix, common_val, offset)
+    for idx, r, atype in page:
         name = r.get("vul_name") or "Unnamed vulnerability"
         rsev = (r.get("severity") or "medium").strip().lower()
         if rsev not in _SEV_ICON:
             rsev = "medium"
         host = r.get("asset") or "—"
         status = r.get("status") or "open"
-        subtitle = f"{host}   ·   {_status_label(status)}"
-        body.append(_row(f"{_SEV_ICON[rsev]} {name}", subtitle, "fix_vuln_view", {"idx": idx, "offset": offset}))
-    body.extend(_pagination_body(offset, total, "fix_vuln_pg", {"sev": sev, "st": st}))
+        subtitle = f"{host}   ·   {_status_label(status)}   ·   {_CLASS_LABEL.get(atype, 'Asset')}"
+        val = {"host": host, "plugin_name": name, "offset": offset, **common_val}
+        extra = [
+            cards._execute_action("⏸ Hold", {"action_id": f"{view_prefix}_hold", **val}),
+            cards._execute_action("🗑 Delete", {"action_id": f"{view_prefix}_delete_confirm", **val}, style="destructive"),
+        ]
+        body.append(_row(
+            f"{_SEV_ICON[rsev]} {name}", subtitle, f"{view_prefix}_view", {"idx": idx, "offset": offset},
+            extra_actions=extra,
+        ))
+    body.extend(_pagination_body(offset, total, f"{view_prefix}_pg", common_val))
+    return _append_held_vulns_section(body, held_map, view_prefix, common_val, offset)
+
+
+def _append_held_vulns_section(body, held_map, view_prefix, common_val, offset, limit=10):
+    if not held_map:
+        return body
+    body.append({"type": "TextBlock", "text": "🔒 Held Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Large"})
+    for (plugin_name, host), info in list(held_map.items())[:limit]:
+        rsev = (info.get("severity") or "medium").strip().lower()
+        if rsev not in _SEV_ICON:
+            rsev = "medium"
+        atype = info.get("asset_type") or "other"
+        title = f"{_SEV_ICON[rsev]} {plugin_name}"
+        subtitle = f"{host}   ·   {_CLASS_LABEL.get(atype, 'Asset')}"
+        val = {"host": host, "plugin_name": plugin_name, "offset": offset, **common_val}
+        body.append(_row(
+            title, subtitle, None, None,
+            extra_actions=[cards._execute_action("🔓 Unhold", {"action_id": f"{view_prefix}_unhold", **val})],
+        ))
+    if len(held_map) > limit:
+        body.append({"type": "TextBlock", "text": f"+ {len(held_map) - limit} more held not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
     return body
 
 
@@ -1096,7 +1344,7 @@ def common_vuln_asset_detail_body(admin, team_key, idx, host, asset_offset=0, ba
 
 # ─── Top-level entry point ──────────────────────────────────────────────
 
-def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="all", sev="all", st="all"):
+def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="all", sev="all", st="all", cls="all"):
     """Sub-nav row + that sub-tab's real (clickable) content.
 
     Real bug report: clicking the Common Vulns nav tab landed on
@@ -1107,13 +1355,36 @@ def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="all"
     body = [cards._fix_subnav_columnset(active_sub)]
     try:
         if active_sub == "fix_sub_vulns":
-            body.extend(vulns_list_body(admin, sev=sev, st=st, offset=offset))
+            body.extend(vulns_list_body(admin, sev=sev, st=st, cls=cls, offset=offset))
         elif active_sub == "fix_sub_common":
             body.append(cards._common_vulns_team_columnset(common_team))
             body.extend(common_vulns_list_body(admin, team_key=common_team, sev=sev, st=st, offset=offset))
         else:
-            body.extend(assets_list_body(admin, sev=sev, st=st, offset=offset))
+            body.extend(assets_list_body(admin, sev=sev, st=st, cls=cls, offset=offset))
     except Exception:
         logger.exception(f"[TeamsBot] fix_tab_body failed for {active_sub}")
         body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "spacing": "Medium"})
     return body
+
+
+# ─── Hold/Unhold/Delete confirm screens (Assets + Vulns) ────────────────
+# Delete goes through an explicit Confirm/Cancel step, same convention as
+# team_tab.py's own destructive actions — Hold/Unhold are non-destructive
+# (freely reversible from the same list) and fire immediately.
+
+def asset_delete_confirm_body(host, val, view_prefix="fix_asset"):
+    return _confirm_body(
+        f"⚠️ Delete asset {host}?",
+        "This removes the asset from the Assets/Vulnerabilities lists. An admin can restore it from the website if needed.",
+        f"{view_prefix}_delete_do", val,
+        f"{view_prefix}_back", val,
+    )
+
+
+def vuln_delete_confirm_body(plugin_name, host, val, view_prefix="fix_vuln"):
+    return _confirm_body(
+        f"⚠️ Delete \"{plugin_name}\" on {host}?",
+        "This removes this vulnerability from the Vulnerabilities list for this asset. An admin can restore it from the website if needed.",
+        f"{view_prefix}_delete_do", val,
+        f"{view_prefix}_back", val,
+    )

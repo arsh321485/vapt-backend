@@ -283,15 +283,62 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
     # Fix tab drill-down: asset/vuln "View" + pagination + Back — all real
     # Action.Submit clicks now (see teams_bot.fix_tab), matching Slack's
     # actual clickable list+detail behaviour instead of a flat picture.
-    if action_id in ("fix_asset_pg", "fix_asset_sev", "fix_asset_st"):
+    if action_id in ("fix_asset_pg", "fix_asset_sev", "fix_asset_st", "fix_asset_cls"):
         offset = int(value.get("offset") or 0)
         sev = value.get("sev") or "all"
         st = value.get("st") or "all"
+        cls = value.get("cls") or "all"
         try:
-            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_assets", offset=offset, sev=sev, st=st)
+            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_assets", offset=offset, sev=sev, st=st, cls=cls)
         except Exception:
-            logger.exception("[TeamsBot] fix_asset_pg/sev/st failed")
+            logger.exception("[TeamsBot] fix_asset_pg/sev/st/cls failed")
             body = [cards._header("💻 All Assets"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id in ("fix_asset_hold", "fix_asset_unhold"):
+        host = value.get("host") or ""
+        report_id = value.get("report_id") or ""
+        offset = int(value.get("offset") or 0)
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        cls = value.get("cls") or "all"
+        try:
+            from urllib.parse import quote
+            from adminasset.views import AssetHoldAPIView, AssetUnholdAPIView
+            view_cls = AssetHoldAPIView if action_id == "fix_asset_hold" else AssetUnholdAPIView
+            _call_view_in_process(view_cls, admin, method="post", url_kwargs={"report_id": report_id, "host_name": quote(host, safe="")})
+            fix_tab.bust_asset_vuln_caches(admin)
+            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_assets", offset=offset, sev=sev, st=st, cls=cls)
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [cards._header("💻 All Assets"), cards._body_text("Could not update this asset right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_asset_delete_confirm":
+        host = value.get("host") or ""
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_assets")] + fix_tab.asset_delete_confirm_body(host, value, view_prefix="fix_asset")
+        except Exception:
+            logger.exception("[TeamsBot] fix_asset_delete_confirm failed")
+            body = [cards._header("💻 All Assets"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_asset_delete_do":
+        host = value.get("host") or ""
+        report_id = value.get("report_id") or ""
+        offset = int(value.get("offset") or 0)
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        cls = value.get("cls") or "all"
+        try:
+            from urllib.parse import quote
+            from adminasset.views import AssetDeleteAPIView
+            _call_view_in_process(AssetDeleteAPIView, admin, method="delete", url_kwargs={"report_id": report_id, "host_name": quote(host, safe="")})
+            fix_tab.bust_asset_vuln_caches(admin)
+            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_assets", offset=offset, sev=sev, st=st, cls=cls)
+        except Exception:
+            logger.exception("[TeamsBot] fix_asset_delete_do failed")
+            body = [cards._header("💻 All Assets"), cards._body_text("Could not delete this asset right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id == "fix_asset_view":
@@ -328,22 +375,83 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
 
     if action_id == "fix_asset_back":
         offset = int(value.get("offset") or 0)
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        cls = value.get("cls") or "all"
         try:
-            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_assets", offset=offset)
+            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_assets", offset=offset, sev=sev, st=st, cls=cls)
         except Exception:
             logger.exception("[TeamsBot] fix_asset_back failed")
             body = [cards._header("💻 All Assets"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
-    if action_id in ("fix_vuln_pg", "fix_vuln_sev", "fix_vuln_st"):
+    if action_id in ("fix_vuln_pg", "fix_vuln_sev", "fix_vuln_st", "fix_vuln_cls"):
         offset = int(value.get("offset") or 0)
         sev = value.get("sev") or "all"
         st = value.get("st") or "all"
+        cls = value.get("cls") or "all"
         try:
-            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_vulns", offset=offset, sev=sev, st=st)
+            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_vulns", offset=offset, sev=sev, st=st, cls=cls)
         except Exception:
-            logger.exception("[TeamsBot] fix_vuln_pg/sev/st failed")
+            logger.exception("[TeamsBot] fix_vuln_pg/sev/st/cls failed")
             body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id in ("fix_vuln_hold", "fix_vuln_unhold"):
+        host = value.get("host") or ""
+        plugin_name = value.get("plugin_name") or ""
+        report_id = value.get("report_id") or ""
+        offset = int(value.get("offset") or 0)
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        cls = value.get("cls") or "all"
+        try:
+            from urllib.parse import quote
+            from adminasset.views import BulkVulnHoldAPIView, BulkVulnUnholdAPIView
+            view_cls = BulkVulnHoldAPIView if action_id == "fix_vuln_hold" else BulkVulnUnholdAPIView
+            _call_view_in_process(
+                view_cls, admin, method="post", request_format="json",
+                data={"host_names": [host]},
+                url_kwargs={"report_id": report_id, "plugin_name": quote(plugin_name, safe="")},
+            )
+            fix_tab.bust_asset_vuln_caches(admin)
+            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_vulns", offset=offset, sev=sev, st=st, cls=cls)
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not update this vulnerability right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_vuln_delete_confirm":
+        host = value.get("host") or ""
+        plugin_name = value.get("plugin_name") or ""
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.vuln_delete_confirm_body(plugin_name, host, value, view_prefix="fix_vuln")
+        except Exception:
+            logger.exception("[TeamsBot] fix_vuln_delete_confirm failed")
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_vuln_delete_do":
+        host = value.get("host") or ""
+        plugin_name = value.get("plugin_name") or ""
+        report_id = value.get("report_id") or ""
+        offset = int(value.get("offset") or 0)
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        cls = value.get("cls") or "all"
+        try:
+            from urllib.parse import quote
+            from adminasset.views import BulkVulnDeleteAPIView
+            _call_view_in_process(
+                BulkVulnDeleteAPIView, admin, method="delete", request_format="json",
+                data={"host_names": [host]},
+                url_kwargs={"report_id": report_id, "plugin_name": quote(plugin_name, safe="")},
+            )
+            fix_tab.bust_asset_vuln_caches(admin)
+            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_vulns", offset=offset, sev=sev, st=st, cls=cls)
+        except Exception:
+            logger.exception("[TeamsBot] fix_vuln_delete_do failed")
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not delete this vulnerability right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
     if action_id == "fix_vuln_view":
@@ -588,8 +696,11 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
 
     if action_id == "fix_vuln_back":
         offset = int(value.get("offset") or 0)
+        sev = value.get("sev") or "all"
+        st = value.get("st") or "all"
+        cls = value.get("cls") or "all"
         try:
-            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_vulns", offset=offset)
+            body = fix_tab.fix_tab_body(admin, active_sub="fix_sub_vulns", offset=offset, sev=sev, st=st, cls=cls)
         except Exception:
             logger.exception("[TeamsBot] fix_vuln_back failed")
             body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not load this right now.")]

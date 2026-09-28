@@ -63,31 +63,16 @@ def _fetch_team_rows(member_user, team_name):
     return _fetch_team_data(member_user, team_name).get("rows") or []
 
 
-def assets_list_body(member_user, team_name, sev="all", st="all", offset=0):
-    rows = _fetch_team_rows(member_user, team_name)
-    sev_base = [r for r in rows if _match_sev(r, sev)]
-    st_counts = _status_counts(sev_base)
-    filtered_rows = [r for r in sev_base if _match_status(r, st)]
-    assets = _group_assets(filtered_rows)
-    total = len(assets)
-    page = assets[offset:offset + PAGE_SIZE]
-
-    body = [
-        {"type": "TextBlock", "text": "💻 All Assets", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": f"Assets assigned to {team_name}. Tap View to see its vulnerabilities.", "size": "Small", "isSubtle": True, "wrap": True},
-        _sev_filter_columnset("ufix_asset", sev, st),
-        _status_filter_columnset("ufix_asset", sev, st, st_counts),
-    ]
-    if not page:
-        body.append({"type": "TextBlock", "text": "No assets found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
-        return body
-    for a in page:
-        # Same combined-row + larger-font request as the admin side's
-        # assets_list_body (fix_tab.py).
-        title = f"🖥 {a['host']}   ·   {a['total']} Vulns   ·   {_status_label(a['status'])}"
-        body.append(_row(title, _sev_dots_text(a["counts"]), "ufix_asset_view", {"host": a["host"], "offset": offset}, size="Default"))
-    body.extend(_pagination_body(offset, total, "ufix_asset_pg", {"sev": sev, "st": st}))
-    return body
+def assets_list_body(member_user, team_name, sev="all", st="all", cls="all", offset=0):
+    """Thin wrapper over fix_tab.assets_list_body (as_member=True) — same
+    classification + Hold/Unhold/Delete feature as the admin side, backed
+    by the team-scoped UserAssetsAPIView/UserHoldAssetsAPIView/
+    UserAssetHoldAPIView/etc instead of the admin ones."""
+    return fix_tab.assets_list_body(
+        member_user, sev=sev, st=st, cls=cls, offset=offset,
+        as_member=True, team_name=team_name, view_prefix="ufix_asset",
+        subtitle=f"Assets assigned to {team_name}. Tap View to see its vulnerabilities.",
+    )
 
 
 def asset_detail_body(member_user, team_name, host, back_offset=0):
@@ -113,34 +98,16 @@ def asset_detail_body(member_user, team_name, host, back_offset=0):
     return body
 
 
-def vulns_list_body(member_user, team_name, sev="all", st="all", offset=0):
-    rows = _fetch_team_rows(member_user, team_name)
-    sev_base = [(i, r) for i, r in enumerate(rows) if _match_sev(r, sev)]
-    st_counts = _status_counts([r for _, r in sev_base])
-    filtered = [(i, r) for i, r in sev_base if _match_status(r, st)]
-    total = len(filtered)
-    page = filtered[offset:offset + PAGE_SIZE]
-
-    body = [
-        {"type": "TextBlock", "text": "📋 All Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
-        {"type": "TextBlock", "text": f"Every vulnerability assigned to {team_name}.", "size": "Small", "isSubtle": True, "wrap": True},
-        _sev_filter_columnset("ufix_vuln", sev, st),
-        _status_filter_columnset("ufix_vuln", sev, st, st_counts),
-    ]
-    if not page:
-        body.append({"type": "TextBlock", "text": "No vulnerabilities found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
-        return body
-    for idx, r in page:
-        name = r.get("vul_name") or "Unnamed vulnerability"
-        rsev = (r.get("severity") or "medium").strip().lower()
-        if rsev not in _SEV_ICON:
-            rsev = "medium"
-        host = r.get("asset") or "—"
-        status = r.get("status") or "open"
-        subtitle = f"{host}   ·   {_status_label(status)}"
-        body.append(_row(f"{_SEV_ICON[rsev]} {name}", subtitle, "ufix_vuln_view", {"idx": idx, "offset": offset}))
-    body.extend(_pagination_body(offset, total, "ufix_vuln_pg", {"sev": sev, "st": st}))
-    return body
+def vulns_list_body(member_user, team_name, sev="all", st="all", cls="all", offset=0):
+    """Thin wrapper over fix_tab.vulns_list_body (as_member=True) — same
+    classification + Hold/Unhold/Delete feature as the admin side, backed
+    by the team-scoped UserAllVulnerabilitiesAPIView/UserBulkVuln*APIView/
+    UserVulnHoldListByReportAPIView instead of the admin ones."""
+    return fix_tab.vulns_list_body(
+        member_user, sev=sev, st=st, cls=cls, offset=offset,
+        as_member=True, team_name=team_name, view_prefix="ufix_vuln",
+        subtitle=f"Every vulnerability assigned to {team_name}.",
+    )
 
 
 # ─── Manual Fix / Automation Fix (real, actionable — member side) ───────
@@ -484,17 +451,17 @@ def submit_extension_request(member_user, r):
     return True, None
 
 
-def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets", offset=0, sev="all", st="all"):
+def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets", offset=0, sev="all", st="all", cls="all"):
     """`admin` is only used for the Common Vulns sub-tab (admin-scoped
     data source, see _common_vulns_for_team) — every other sub-tab is
     genuinely member-scoped and ignores it."""
     body = [_fix_subnav_columnset(sub_action_id)]
     if sub_action_id == "ufix_sub_vulns":
-        body.extend(vulns_list_body(member_user, team_name, sev=sev, st=st, offset=offset))
+        body.extend(vulns_list_body(member_user, team_name, sev=sev, st=st, cls=cls, offset=offset))
     elif sub_action_id == "ufix_sub_common":
         body.extend(_common_vulns_for_team(admin, team_name, sev=sev, st=st, offset=offset))
     else:
-        body.extend(assets_list_body(member_user, team_name, sev=sev, st=st, offset=offset))
+        body.extend(assets_list_body(member_user, team_name, sev=sev, st=st, cls=cls, offset=offset))
     return body
 
 
