@@ -1150,21 +1150,28 @@ class MicrosoftTeamsOAuthUrlView(APIView):
 
             scopes = [
                 "https://graph.microsoft.com/User.Read",
-                "https://graph.microsoft.com/Team.Create",
-                "https://graph.microsoft.com/Group.ReadWrite.All",
-                "https://graph.microsoft.com/Channel.Create",
+                # Team.Create, Group.ReadWrite.All, Channel.Create and
+                # AppCatalog.Submit were removed from here (were requested
+                # so auto_create_vaptfix_team/_get_or_publish_teams_catalog_app
+                # could auto-create a team + publish/install the bot during
+                # login) — all 4 are Delegated, admin-consent-required
+                # permissions, which is exactly what triggered Microsoft's
+                # "Need admin approval" screen for any external-tenant admin
+                # signing in. Team/channel provisioning now happens via RSC
+                # (Resource-Specific Consent, see teams_bot/views.py's
+                # _try_rsc_provision_on_install) instead — the client
+                # installs the app into their own team themselves, which
+                # grants Channel.Create.Group etc. per-team with zero admin
+                # consent needed, so login no longer needs to request any of
+                # these 4 at all. auto_create_vaptfix_team (still called
+                # below) degrades gracefully without them — every Graph call
+                # it makes is already wrapped in try/except and returns a
+                # "creation_failed"/"error" status rather than raising, so
+                # this doesn't break login itself, only the old auto-create-
+                # team-on-login side effect, which RSC now replaces.
                 "https://graph.microsoft.com/ChannelMessage.Send",
                 "https://graph.microsoft.com/TeamMember.ReadWrite.All",
                 "https://graph.microsoft.com/ChannelMember.ReadWrite.All",
-                # POST /appCatalogs/teamsApps (publishing the bot to the org
-                # catalog — see _get_or_publish_teams_catalog_app) doesn't
-                # support application-only auth at all, no matter what's
-                # granted on the app registration — confirmed via Graph docs
-                # and real 403s in prod even with AppCatalog.ReadWrite.All
-                # present on the app-only token. It needs a DELEGATED
-                # AppCatalog.Submit-or-higher scope from the signed-in
-                # admin instead, which is why this is requested here.
-                "https://graph.microsoft.com/AppCatalog.Submit",
                 "offline_access",
                 "openid",
                 "email",
