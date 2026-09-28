@@ -21,10 +21,7 @@ from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
-# Deliberately much longer than invite_utils' 15-minute signup link — this
-# is asking a human to notice an email and make a permanent-deletion
-# decision, not complete an in-progress signup. 48 hours.
-UNINSTALL_CONFIRM_TTL_SECONDS = 48 * 60 * 60
+UNINSTALL_CONFIRM_TTL_SECONDS = 7 * 60 * 60  # 7 hours
 _CACHE_PREFIX = "slack_uninstall_confirm_"
 
 

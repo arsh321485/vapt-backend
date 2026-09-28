@@ -9,7 +9,7 @@ unexpired token gets the report(s) reassigned to their new account.
 
 Storage: Django's shared cache (same MongoDB-backed cache already used for
 the Slack pending-upload flow) — a plain token -> dict mapping with a hard
-15-minute TTL. No new DB table needed; expiry is handled by the cache
+7-hour TTL. No new DB table needed; expiry is handled by the cache
 backend itself.
 """
 import logging
@@ -19,7 +19,7 @@ from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
-INVITE_TTL_SECONDS = 900  # 15 minutes — explicit product decision, kept short on purpose
+INVITE_TTL_SECONDS = 7 * 60 * 60  # 7 hours
 _CACHE_PREFIX = "report_claim_invite_"
 
 
@@ -28,7 +28,7 @@ def _cache_key(token: str) -> str:
 
 
 def create_invite(report_ids: list, created_by_admin_id: str) -> str:
-    """Generate a fresh token and store {report_ids, created_by} for 15 min."""
+    """Generate a fresh token and store {report_ids, created_by} for 7 hours."""
     token = secrets.token_urlsafe(24)
     cache.set(
         _cache_key(token),
