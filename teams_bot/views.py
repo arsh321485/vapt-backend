@@ -601,11 +601,28 @@ class TeamsBotMessagesView(APIView):
         # to persist ms_team_id.
         User.objects.filter(pk=admin.pk).update(ms_team_id=team_id_direct)
 
-        from users.views import _create_vaptfix_channels
+        from users.views import _create_vaptfix_channels, _backfill_sub_channel_bot_presence
+        channels_result = []
         try:
-            _create_vaptfix_channels(team_id_direct, headers, access_token=None, admin=admin)
+            channels_result = _create_vaptfix_channels(team_id_direct, headers, access_token=None, admin=admin)
         except Exception:
             logger.exception(f"[TeamsRSC] channel provisioning failed for team_id={team_id_direct}, admin={admin.email}")
+
+        # Real, confirmed platform quirk (see _backfill_sub_channel_bot_
+        # presence's own docstring): even with the bot genuinely team-scope
+        # installed, Teams only lists/routes @mentions to it in a given
+        # channel once it has actually sent/received some activity in THAT
+        # specific channel — General included. The old login flow got this
+        # "for free" since auto_create_vaptfix_team's retrofit branch calls
+        # this same backfill on every subsequent login, and admins log in
+        # repeatedly. RSC installs have no equivalent repeated trigger —
+        # this runs exactly once — so without calling it explicitly here,
+        # the bot would silently never work in the 4 team channels for any
+        # RSC-provisioned team.
+        try:
+            _backfill_sub_channel_bot_presence(team_id_direct, channels_result)
+        except Exception:
+            logger.exception(f"[TeamsRSC] sub-channel bot-presence backfill failed for team_id={team_id_direct}")
 
         return admin
 
