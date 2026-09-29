@@ -586,7 +586,7 @@ def _fetch_held_vulns_map(caller, as_member=False, team_name=None):
     return cached_fetch(key, 20, _fetch)
 
 
-def _fetch_all_vulnerabilities_totals(caller, report_id, as_member=False):
+def _fetch_all_vulnerabilities_totals(caller, report_id, as_member=False, team_name=None):
     """
     asset_type_totals (+ total) straight from AllVulnerabilitiesAPIView/
     UserAllVulnerabilitiesAPIView — the SAME real endpoint the website's
@@ -595,13 +595,22 @@ def _fetch_all_vulnerabilities_totals(caller, report_id, as_member=False):
     the flat register rows (one row per vuln+host pair) instead, which
     counts differently than the website's own grouped-by-plugin-name
     logic and disagreed with it for the exact same report.
+
+    Real bug report #2: on the member side, this never passed `team_name`
+    through to UserAllVulnerabilitiesAPIView at all (unlike
+    _fetch_asset_classification_data's own member path, which does) —
+    the API silently fell back to combining ALL of the member's teams
+    instead of scoping to whichever one was actually selected, and since
+    the cache key below also didn't include team_name, switching teams
+    could keep showing the FIRST team's numbers even after that.
     """
     def _fetch():
         from .actions import _call_view_in_process
         if as_member:
             from userasset.views import UserAllVulnerabilitiesAPIView
+            data_kwargs = {"team": team_name} if team_name else None
             status_code, data = _call_view_in_process(
-                UserAllVulnerabilitiesAPIView, caller, method="get", url_kwargs={"report_id": report_id},
+                UserAllVulnerabilitiesAPIView, caller, method="get", url_kwargs={"report_id": report_id}, data=data_kwargs,
             )
         else:
             from adminasset.views import AllVulnerabilitiesAPIView
@@ -611,7 +620,7 @@ def _fetch_all_vulnerabilities_totals(caller, report_id, as_member=False):
         if status_code >= 300 or not isinstance(data, dict):
             return {"total": 0, "asset_type_totals": {}}
         return {"total": data.get("total", 0), "asset_type_totals": data.get("asset_type_totals") or {}}
-    key = f"all_vulns_totals:{caller.id}:{'member' if as_member else 'admin'}:{report_id}"
+    key = f"all_vulns_totals:{caller.id}:{'member' if as_member else 'admin'}:{report_id}:{team_name or ''}"
     return cached_fetch(key, 20, _fetch)
 
 
@@ -640,7 +649,7 @@ def vulns_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=F
     # per-row filtering below still checks this row's own host against
     # its full `categories` list (not just its single primary asset_type)
     # so a click on a pill shows every row genuinely in that category.
-    real_totals = _fetch_all_vulnerabilities_totals(admin, report_id, as_member=as_member) if report_id else {"total": 0, "asset_type_totals": {}}
+    real_totals = _fetch_all_vulnerabilities_totals(admin, report_id, as_member=as_member, team_name=team_name) if report_id else {"total": 0, "asset_type_totals": {}}
     cls_counts = {"all": real_totals["total"], **real_totals["asset_type_totals"]}
     filtered = [
         (i, r, atype) for i, r, atype in filtered
