@@ -440,6 +440,27 @@ def assets_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=
     # membership (not a single asset_type) so a click on "Web App" shows
     # the exact same assets the website's own Web App tab would.
     cls_counts = {"all": class_data["total_assets"], **class_data["asset_type_totals"]}
+
+    # Real bug report: _group_assets only ever creates an entry for a host
+    # that appears in the vulnerability register rows — a host with ZERO
+    # findings never has a row there at all, so it silently never showed
+    # up in this list, even though the pill above correctly says 15 (it
+    # comes from class_data["total_assets"], the website's own real asset
+    # count, not from this row-derived list). The website's own All Assets
+    # tab shows every asset regardless of vuln count. Only backfill these
+    # when sev/st are both "all" — the sev/st pills filter real findings,
+    # and a zero-vuln host has none to match a specific severity/status
+    # against, so it's correctly absent from a filtered view, same as the
+    # website's own per-severity breakdowns.
+    if sev == "all" and st == "all":
+        present_hosts = {a["host"] for a in assets}
+        for host in class_map:
+            if host not in present_hosts:
+                assets.append({
+                    "host": host, "total": 0, "status": "closed",
+                    "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+                })
+
     for a in assets:
         a["asset_type"] = class_map.get(a["host"], "other")
         a["categories"] = categories_map.get(a["host"], [a["asset_type"]])
