@@ -412,7 +412,16 @@ class UploadReportAdmin(admin.ModelAdmin):
         for host in hosts:
             # Group by plugin_name — collect all plugin_outputs as an array
             grouped = {}  # plugin_name -> vuln_dict
-            for vuln in host.get("vulnerabilities", []):
+            # .get(key, []) only falls back to [] when the key is MISSING —
+            # a host whose "vulnerabilities" is explicitly null (real,
+            # confirmed output shape from the custom/AI-extraction path,
+            # e.g. after _merge_stray_version_hosts leaves an empty
+            # neighbor) still comes back as None here, and `for vuln in
+            # None` crashes — which _store_in_mongodb's caller silently
+            # swallowed as "MongoDB storage failed", leaving the report
+            # permanently missing from nessus_reports despite showing
+            # "Successfully Processed". `or []` normalizes both cases.
+            for vuln in host.get("vulnerabilities") or []:
                 plugin_name = (vuln.get("plugin_name") or "").strip()
                 if not plugin_name:
                     continue

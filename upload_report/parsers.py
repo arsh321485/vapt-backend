@@ -1049,7 +1049,7 @@ def parse_nessus_xml_streaming(file_path: str) -> Dict[str, Any]:
 
     # Summarize results
     total_hosts = len(vulnerabilities_by_host)
-    total_vulnerabilities = sum(len(h.get("vulnerabilities", [])) for h in vulnerabilities_by_host)
+    total_vulnerabilities = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
 
     return {
         "type": "nessus",
@@ -1457,7 +1457,7 @@ def parse_nessus_html(file_path: str) -> Dict[str, Any]:
         filtered_hosts: List[Dict[str, Any]] = []
         for host in hosts:
             filtered_vulns: List[Dict[str, Any]] = []
-            for vuln in host.get("vulnerabilities", []):
+            for vuln in host.get("vulnerabilities") or []:
                 risk = (vuln.get("risk_factor") or "").strip().lower()
                 if risk and risk not in allowed:
                     continue

@@ -181,7 +181,7 @@ class UploadReportView(APIView):
         for host in hosts:
             prepared_vulns: List[Dict[str, Any]] = []
             
-            for vuln in host.get("vulnerabilities", []):
+            for vuln in host.get("vulnerabilities") or []:
                 # Keep ALL fields including risk_factor
                 vuln_copy = vuln.copy()
                 
@@ -309,7 +309,7 @@ class UploadReportView(APIView):
             for host in hosts[:20]:
                 allowed_risks = {"critical", "high", "medium", "low"}
                 filtered_vulns = [
-                    v for v in host.get("vulnerabilities", [])
+                    v for v in host.get("vulnerabilities") or []
                     if not v.get("risk_factor") or v.get("risk_factor", "").strip().lower() in allowed_risks
                 ]
                 host_preview = {
@@ -1809,7 +1809,7 @@ def _ensure_fix_vulnerability_record(db, report_id, host_name, plugin_name, risk
     for host in nessus_doc.get("vulnerabilities_by_host", []):
         if (host.get("host_name") or host.get("host")) != host_name:
             continue
-        for v in host.get("vulnerabilities", []):
+        for v in host.get("vulnerabilities") or []:
             vname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
             if vname == str(plugin_name):
                 selected_vuln = v
@@ -1977,7 +1977,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 or ""
             ).strip()
 
-            for vuln in host.get("vulnerabilities", []):
+            for vuln in host.get("vulnerabilities") or []:
                 vuln_plugin_name = vuln.get("plugin_name", "").strip()
                 if not vuln_plugin_name:
                     continue
@@ -3043,7 +3043,7 @@ class GenerateVulnerabilityCardView(APIView):
                         or host_info.get("system-type")
                         or ""
                     ).strip()
-                    for vuln in host.get("vulnerabilities", []):
+                    for vuln in host.get("vulnerabilities") or []:
                         vuln_plugin_name = vuln.get("plugin_name", "").strip()
                         vuln_description = (
                             vuln.get("description", "")
@@ -3353,7 +3353,7 @@ class RunMitigationView(APIView):
                 or host_info.get("system-type")
                 or ""
             ).strip()
-            for vuln in host.get("vulnerabilities", []):
+            for vuln in host.get("vulnerabilities") or []:
                 if vuln.get("plugin_name", "").strip() == plugin_name:
                     found_vuln = vuln
                     found_host = h_name

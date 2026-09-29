@@ -179,7 +179,7 @@ class Command(BaseCommand):
             current_pairs = {
                 (h.get("host_name") or "", v.get("plugin_name") or "")
                 for h in result.get("vulnerabilities_by_host", [])
-                for v in h.get("vulnerabilities", [])
+                for v in h.get("vulnerabilities") or []
             }
             all_cards = list(db["vulnerability_cards"].find(
                 {"report_id": rid}, {"_id": 1, "host_name": 1, "vulnerability_name": 1}
