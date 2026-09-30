@@ -2181,6 +2181,21 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             }
             if run_automation:
                 cache_query["automation_card"] = {"$exists": True, "$nin": [{}, None]}
+                # Real bug report: {"$nin": [{}, None]} above only rejects a
+                # TRULY empty automation_card — it still accepts a stub like
+                # {"download_count": 0, "last_downloaded_at": None} left
+                # behind by a one-off GPT automation-generation failure
+                # (Automation Engineer task errored, _parse_automation_card
+                # never ran). That stub was non-empty, so it kept getting
+                # picked as "the" cache source for this vuln+OS signature —
+                # every OTHER host sharing it then cache-hit onto the same
+                # stub and inherited it too, cascading to every host in the
+                # report (confirmed live: 100+ stubbed cards for one admin,
+                # all the same vuln+OS, all copied from one failed source).
+                # Require the real generated content marker, not just any
+                # non-empty dict, so a stubbed source is treated as no
+                # cache and a fresh GPT generation runs instead.
+                cache_query["automation_card.automation_status"] = {"$exists": True}
             cached_card = None
             for candidate in db[VULN_CARD_COLLECTION].find(cache_query).sort("created_at", -1).limit(20):
                 if _descriptions_similar(candidate.get("description", ""), vuln.get("description", "")):
@@ -2712,6 +2727,12 @@ def backfill_automation_for_admin(admin) -> int:
                 {"automation_card": {"$exists": False}},
                 {"automation_card": {}},
                 {"automation_card": None},
+                # Stub left by a one-off GPT automation-generation failure
+                # (e.g. {"download_count": 0, "last_downloaded_at": None},
+                # possibly cache-propagated onto other hosts too) — non-empty,
+                # so it slipped past the three conditions above and never
+                # got backfilled even after the admin upgraded.
+                {"automation_card.automation_status": {"$exists": False}},
             ]},
         ]
     }

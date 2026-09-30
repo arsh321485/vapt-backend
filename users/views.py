@@ -13152,7 +13152,7 @@ class SlackSlashCommandView(APIView):
         if not card:
             return {"matched": False, "message": "No automated fix available for this vulnerability."}
 
-        if not card.get("automation_card"):
+        if not card.get("automation_card") or not card["automation_card"].get("automation_status"):
             # Real bug report: a card generated while the admin was still
             # Freemium never gets an automation_card (run_automation=False
             # in mitigation_tool.py) — billing.stripe_service queues a
@@ -13162,6 +13162,15 @@ class SlackSlashCommandView(APIView):
             # Stripe checkout.session.completed path), the vuln is stuck
             # showing "not ready" forever even after the admin is paid.
             # Self-heal here instead of just reporting the stale state.
+            #
+            # The `or not ...get("automation_status")` half catches a
+            # second, separate failure mode: a stub automation_card like
+            # {"download_count": 0, "last_downloaded_at": None} (left by a
+            # one-off GPT automation-generation failure, then cached onto
+            # other hosts — see the cache_query fix in upload_report/views.py's
+            # AutoGenCards). `not card.get("automation_card")` alone never
+            # caught this since the dict itself is non-empty, so the self-heal
+            # below never fired and these cards stayed "not ready" forever.
             self._maybe_requeue_automation_backfill(team_id, user_id)
             return {"matched": False, "message": (
                 "_Automation script is still being generated for this vulnerability — "
