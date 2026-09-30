@@ -23202,8 +23202,18 @@ class SlackInteractivityView(APIView):
                 category = parts[1] if len(parts) > 1 and parts[1] else "full"
                 sev_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
                 page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-                blocks = slash._automation_row_detail_blocks(
+                content_blocks = slash._automation_row_detail_blocks(
                     row_sid, team_id, slack_user_id, category, sev_filter, page_offset,
+                )
+                # Real bug report: this posted content_blocks alone, unlike
+                # every sibling handler (auto_view_row_back included) — the
+                # top navbar + Full/Partial subnav vanished on "View" and
+                # only came back via a "← Back" round trip.
+                sub_action_id = "auto_sub_partial" if category == "partial" else "auto_sub_full"
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_automation")
+                    + slash._automation_subnav_block(active_sub=sub_action_id)
+                    + content_blocks
                 )
                 self._post_response_url(
                     response_url,
