@@ -15925,7 +15925,21 @@ class SlackSlashCommandView(APIView):
                         "type": "context",
                         "elements": [{"type": "mrkdwn", "text": "_No open vulnerabilities_"}],
                     })
-                atype = (class_map.get(host, {}).get("asset_type") or "other").replace("_", " ").title()
+                # Real bug report: a mixed-nature host matches a specific
+                # classification pill (e.g. "Server") whenever that
+                # category is anywhere in its `categories` list, but this
+                # label only ever showed the host's single PRIMARY
+                # asset_type — a host primarily classified "Other" with a
+                # secondary "Server" finding correctly appeared under the
+                # Server pill, yet still displayed "Other" on its own row,
+                # looking like a mismatch even though the filter itself was
+                # right. When a specific pill is active, show that pill's
+                # own label instead (it's the reason this row is in view);
+                # only fall back to the host's primary type under "All".
+                if class_filter != "all":
+                    atype = dict(self._CLASS_FILTER_BUTTONS).get(class_filter, "Other")
+                else:
+                    atype = (class_map.get(host, {}).get("asset_type") or "other").replace("_", " ").title()
                 # Real request: View sits on the right of the asset line
                 # itself (a section block's own "accessory" slot — the one
                 # spot Slack lets a button sit beside text), with Hold/

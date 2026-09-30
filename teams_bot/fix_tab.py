@@ -485,7 +485,18 @@ def assets_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=
         # used to be on separate lines — combine them into one row so
         # they're all visible at a glance, and bump the font size up a
         # step for readability.
-        title = f"🖥 {a['host']}   ·   {a['total']} Vulns   ·   {_status_label(a['status'])}   ·   {_CLASS_LABEL.get(a['asset_type'], 'Asset')}"
+        #
+        # Real bug report: a mixed-nature host matches a specific
+        # classification pill (e.g. "Server") whenever that category is
+        # anywhere in its `categories` list, but this label only ever
+        # showed the host's single PRIMARY asset_type — a host primarily
+        # classified "Asset" with a secondary "Server" finding correctly
+        # appeared under the Server pill, yet still displayed "Asset" on
+        # its own row. When a specific pill is active, show that pill's
+        # own label instead; only fall back to the host's primary type
+        # under "All".
+        row_label = _CLASS_LABEL.get(cls, "Asset") if cls != "all" else _CLASS_LABEL.get(a['asset_type'], "Asset")
+        title = f"🖥 {a['host']}   ·   {a['total']} Vulns   ·   {_status_label(a['status'])}   ·   {row_label}"
         val = {"host": a["host"], "offset": offset, **common_val}
         extra = [cards._execute_action(
             "⏸ Hold", {"action_id": f"{view_prefix}_hold", **val},
