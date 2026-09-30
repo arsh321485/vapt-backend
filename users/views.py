@@ -13653,6 +13653,7 @@ class SlackSlashCommandView(APIView):
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": "view_team_grouped_vuln",
                     "value": f"{report_id}|{vapt_team}|{pname}|{offset}|{class_filter}",
+                    "style": "primary",
                 }
             blocks.append(section_block)
             if report_id:
@@ -13746,15 +13747,21 @@ class SlackSlashCommandView(APIView):
         if not v:
             blocks += self._text_block(f"❌ *{plugin_name}* could not be found — it may have just been deleted or fully held.")
             return blocks
+        report_id = data.get("report_id")
         sev = (v.get("severity") or "").strip() or "—"
         hosts = v.get("hosts") or []
+        # Real request: this screen used to be read-only — each asset now
+        # gets its own Hold/Unhold/Delete too (same per-(vuln,host) pair
+        # the bulk Hold All/Delete All already acts on, just scoped to ONE
+        # host here), and a held asset moves to its own section below.
+        open_hosts = [h for h in hosts if (h.get("status") or "open") != "held"]
+        held_hosts = [h for h in hosts if (h.get("status") or "open") == "held"]
         blocks.append({"type": "header", "text": {"type": "plain_text", "text": f"🛡 {plugin_name}"[:150], "emoji": True}})
         blocks.append(self._ctx(f"{sev} severity  •  {len(hosts)} asset(s) affected"))
         blocks.append({"type": "divider"})
-        if not hosts:
-            blocks += self._text_block("No assets currently affected.")
-            return blocks
-        for h in hosts:
+        if not open_hosts:
+            blocks += self._text_block("No open assets for this finding.")
+        for h in open_hosts:
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
             atype = (h.get("asset_type") or "other").replace("_", " ").title()
@@ -13770,8 +13777,55 @@ class SlackSlashCommandView(APIView):
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": "tasset_view",
                     "value": f"{host_name}|{vapt_team}|all|all|0|0|all",
+                    "style": "primary",
                 },
             })
+            if report_id:
+                blocks.append({
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "⏸ Hold", "emoji": True},
+                            "action_id": "tfix_vuln_hold_one",
+                            "value": f"{report_id}|{vapt_team}|{plugin_name}|{host_name}|{list_offset}|{class_filter}",
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "🗑 Delete", "emoji": True},
+                            "style": "danger",
+                            "action_id": "tfix_vuln_delete_one",
+                            "value": f"{report_id}|{vapt_team}|{plugin_name}|{host_name}|{list_offset}|{class_filter}",
+                            "confirm": {
+                                "title": {"type": "plain_text", "text": "Delete this finding on this asset?"},
+                                "text": {"type": "plain_text",
+                                         "text": f"Removes \"{plugin_name}\" from `{host_name}`. This cannot be undone."},
+                                "confirm": {"type": "plain_text", "text": "Yes, delete"},
+                                "deny": {"type": "plain_text", "text": "Cancel"},
+                            },
+                        },
+                    ],
+                })
+
+        if held_hosts:
+            blocks.append({"type": "divider"})
+            blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Held", "emoji": True}})
+            for h in held_hosts:
+                host_name = h.get("host_name") or "Unknown"
+                atype = (h.get("asset_type") or "other").replace("_", " ").title()
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_"},
+                    **({
+                        "accessory": {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "▶️ Unhold", "emoji": True},
+                            "action_id": "tfix_vuln_unhold_one",
+                            "value": f"{report_id}|{vapt_team}|{plugin_name}|{host_name}|{list_offset}|{class_filter}",
+                            "style": "primary",
+                        },
+                    } if report_id else {}),
+                })
         return blocks
 
     def _format_team_vuln_list(self, vulns, title, action_prefix, vapt_team, sev_filter="all", st_filter="all", offset=0, origin=""):
@@ -16519,6 +16573,7 @@ class SlackSlashCommandView(APIView):
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": "view_grouped_vuln",
                     "value": f"{report_id}|{pname}|{offset}|{class_filter}",
+                    "style": "primary",
                 }
             blocks.append(section_block)
             if report_id:
@@ -16623,33 +16678,88 @@ class SlackSlashCommandView(APIView):
         if not v:
             blocks += self._text_block(f"❌ *{plugin_name}* could not be found — it may have just been deleted or fully held.")
             return blocks
+        report_id = data.get("report_id")
         sev = (v.get("severity") or "").strip() or "—"
         hosts = v.get("hosts") or []
+        # Real request: this screen used to be read-only — each asset now
+        # gets its own Hold/Unhold/Delete too (same per-(vuln,host) pair
+        # the bulk Hold All/Delete All already acts on, just scoped to
+        # ONE host here via a single-item host_names list), and a held
+        # asset moves to its own section below, mirroring the "held"
+        # pattern used everywhere else in this feature.
+        open_hosts = [h for h in hosts if (h.get("status") or "open") != "held"]
+        held_hosts = [h for h in hosts if (h.get("status") or "open") == "held"]
         blocks.append({"type": "header", "text": {"type": "plain_text", "text": f"🛡 {plugin_name}"[:150], "emoji": True}})
         blocks.append(self._ctx(f"{sev} severity  •  {len(hosts)} asset(s) affected"))
         blocks.append({"type": "divider"})
-        if not hosts:
-            blocks += self._text_block("No assets currently affected.")
-            return blocks
-        for h in hosts:
+        if not open_hosts:
+            blocks += self._text_block("No open assets for this finding.")
+        for h in open_hosts:
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
             atype = (h.get("asset_type") or "other").replace("_", " ").title()
-            # Real request: each affected asset gets a View too (right of
-            # its own line, same accessory slot pattern as everywhere
-            # else) — opens that asset's own vulnerability list
-            # (_format_asset_vulns), the same "View" target the All Assets
-            # tab's own row already uses.
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_  |  *{st}*"},
+                # Real request: each affected asset gets a View too (right
+                # of its own line, same accessory slot pattern as
+                # everywhere else) — opens that asset's own vulnerability
+                # list (_format_asset_vulns), the same "View" target the
+                # All Assets tab's own row already uses.
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View", "emoji": True},
                     "action_id": "view_fix_asset",
                     "value": f"{host_name}|all|all|0|0|all",
+                    "style": "primary",
                 },
             })
+            if report_id:
+                blocks.append({
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "⏸ Hold", "emoji": True},
+                            "action_id": "vuln_hold_one",
+                            "value": f"{report_id}|{plugin_name}|{host_name}|{list_offset}|{class_filter}",
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "🗑 Delete", "emoji": True},
+                            "style": "danger",
+                            "action_id": "vuln_delete_one",
+                            "value": f"{report_id}|{plugin_name}|{host_name}|{list_offset}|{class_filter}",
+                            "confirm": {
+                                "title": {"type": "plain_text", "text": "Delete this finding on this asset?"},
+                                "text": {"type": "plain_text",
+                                         "text": f"Removes \"{plugin_name}\" from `{host_name}`. This cannot be undone."},
+                                "confirm": {"type": "plain_text", "text": "Yes, delete"},
+                                "deny": {"type": "plain_text", "text": "Cancel"},
+                            },
+                        },
+                    ],
+                })
+
+        if held_hosts:
+            blocks.append({"type": "divider"})
+            blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Held", "emoji": True}})
+            for h in held_hosts:
+                host_name = h.get("host_name") or "Unknown"
+                atype = (h.get("asset_type") or "other").replace("_", " ").title()
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_"},
+                    **({
+                        "accessory": {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "▶️ Unhold", "emoji": True},
+                            "action_id": "vuln_unhold_one",
+                            "value": f"{report_id}|{plugin_name}|{host_name}|{list_offset}|{class_filter}",
+                            "style": "primary",
+                        },
+                    } if report_id else {}),
+                })
         return blocks
 
     def _format_asset_vulns(self, rows, host, offset=0, sev_filter="all", st_filter="all", list_offset=0, class_filter="all"):
@@ -23429,6 +23539,40 @@ class SlackInteractivityView(APIView):
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
+            # ── Team All Vulnerabilities detail — Hold/Unhold/Delete ONE asset ──
+            if action_id in ("tfix_vuln_hold_one", "tfix_vuln_unhold_one", "tfix_vuln_delete_one"):
+                # value: report_id|team|plugin_name|host_name|list_offset|class_filter
+                parts = value.split("|")
+                vuln_report_id = parts[0] if len(parts) > 0 else ""
+                vapt_team = parts[1] if len(parts) > 1 else ""
+                plugin_name = parts[2] if len(parts) > 2 else ""
+                host_name = parts[3] if len(parts) > 3 else ""
+                list_offset = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+                class_filter = parts[5] if len(parts) > 5 and parts[5] else "all"
+                encoded_plugin = quote(plugin_name, safe="")
+                if action_id == "tfix_vuln_hold_one":
+                    endpoint, http_method = "hold", "post"
+                elif action_id == "tfix_vuln_unhold_one":
+                    endpoint, http_method = "unhold", "post"
+                else:
+                    endpoint, http_method = "delete", "delete"
+                if host_name:
+                    slash._call_user_api(
+                        f"/api/user/asset/report/{vuln_report_id}/vulnerability/{encoded_plugin}/{endpoint}/",
+                        team_id, slack_user_id, method=http_method, json_body={"host_names": [host_name]},
+                    )
+                vuln_data = slash._fetch_team_all_vulnerabilities(team_id, slack_user_id, vuln_report_id, vapt_team)
+                content = slash._format_team_vuln_assets_detail(
+                    vuln_data, plugin_name, vapt_team, list_offset=list_offset, class_filter=class_filter,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_vulns")
+                    + content
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
             if (
                 action_id.startswith("treg_list_sev_") or action_id.startswith("treg_list_st_") or action_id.startswith("treg_list_pg_")
             ):
@@ -24877,6 +25021,44 @@ class SlackInteractivityView(APIView):
                     team_id, slack_user_id=slack_user_id,
                 )
                 content = slash._format_grouped_vulns_list(vuln_data)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_vulns")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            # ── All Vulnerabilities detail — Hold/Unhold/Delete ONE asset ──
+            if action_id in ("vuln_hold_one", "vuln_unhold_one", "vuln_delete_one"):
+                # value: report_id|plugin_name|host_name|list_offset|class_filter
+                parts = value.split("|")
+                vuln_report_id = parts[0] if len(parts) > 0 else ""
+                plugin_name = parts[1] if len(parts) > 1 else ""
+                host_name = parts[2] if len(parts) > 2 else ""
+                list_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                class_filter = parts[4] if len(parts) > 4 and parts[4] else "all"
+                encoded_plugin = quote(plugin_name, safe="")
+                if action_id == "vuln_hold_one":
+                    endpoint, http_method = "hold", "post"
+                elif action_id == "vuln_unhold_one":
+                    endpoint, http_method = "unhold", "post"
+                else:
+                    endpoint, http_method = "delete", "delete"
+                if host_name:
+                    slash._call_api(
+                        f"/api/admin/adminasset/report/{vuln_report_id}/vulnerability/{encoded_plugin}/{endpoint}/",
+                        team_id, method=http_method, json_body={"host_names": [host_name]}, slack_user_id=slack_user_id,
+                    )
+                vuln_data = slash._call_api(
+                    f"/api/admin/adminasset/report/{vuln_report_id}/vulnerabilities/",
+                    team_id, slack_user_id=slack_user_id,
+                )
+                content = slash._format_vuln_assets_detail(
+                    vuln_data, plugin_name, list_offset=list_offset, class_filter=class_filter,
+                )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_fix")
                     + slash._fix_subnav_block(active_sub="fix_sub_vulns")
