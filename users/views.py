@@ -13770,7 +13770,9 @@ class SlackSlashCommandView(APIView):
         blocks.append({"type": "divider"})
         if not open_hosts:
             blocks += self._text_block("No open assets for this finding.")
-        for h in open_hosts:
+        for idx, h in enumerate(open_hosts):
+            if idx > 0:
+                blocks.append({"type": "divider"})
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
             atype = (h.get("asset_type") or "other").replace("_", " ").title()
@@ -16711,7 +16713,9 @@ class SlackSlashCommandView(APIView):
         blocks.append({"type": "divider"})
         if not open_hosts:
             blocks += self._text_block("No open assets for this finding.")
-        for h in open_hosts:
+        for idx, h in enumerate(open_hosts):
+            if idx > 0:
+                blocks.append({"type": "divider"})
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
             atype = (h.get("asset_type") or "other").replace("_", " ").title()
@@ -20723,6 +20727,20 @@ class SlackSlashCommandView(APIView):
             return "review"
         return "open"
 
+    def _short_date(self, val):
+        """Date-only prefix of a first/last-observation timestamp — these
+        store a full ISO datetime with microseconds/timezone
+        (2026-09-30 11:14:25.227000+00:00), which is more precision than
+        anyone reading "when was this first seen" needs."""
+        s = str(val or "—").strip()
+        if not s or s == "—":
+            return "—"
+        if "T" in s:
+            return s.split("T", 1)[0]
+        if " " in s and len(s) > 10:
+            return s.split(" ", 1)[0]
+        return s
+
     def _status_icon_for(self, st):
         """Emoji fallback — Open=❗ / Open-Review=👀 / In Progress=🔄 / Closed=🔒"""
         kind = self._status_icon_kind(st)
@@ -21065,18 +21083,8 @@ class SlackSlashCommandView(APIView):
                 action_text = "VIEW"
                 safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
 
-                def _short_date(val):
-                    s = str(val or "—").strip()
-                    if not s or s == "—":
-                        return "—"
-                    if "T" in s:
-                        return s.split("T", 1)[0]
-                    if " " in s and len(s) > 10:
-                        return s.split(" ", 1)[0]
-                    return s
-
-                first_s = _short_date(first_obs)
-                second_s = _short_date(second_obs)
+                first_s = self._short_date(first_obs)
+                second_s = self._short_date(second_obs)
 
                 btn = {
                     "type": "button",
@@ -21517,7 +21525,8 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*Port / Protocol*\n{port}/{proto}"},
             ]},
             self._ctx(
-                f"*First Obs.:* {v.get('first_observation') or '—'} | *Last Obs.:* {v.get('second_observation') or '—'}"
+                f"*First Obs.:* {self._short_date(v.get('first_observation'))} | "
+                f"*Last Obs.:* {self._short_date(v.get('second_observation'))}"
             ),
         ]
 
