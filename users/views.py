@@ -5262,16 +5262,29 @@ def _build_scope_manual_modal(latest_scope=None):
     }
 
 
-def _build_risk_criteria_modal():
+def _build_risk_criteria_modal(current_values=None):
+    """
+    Real bug report: this always pre-selected the hardcoded defaults
+    (Critical=2 Days, High=4 Days, Medium=2 Weeks, Low=4 Weeks), even when
+    reopened via /riskcriteria to EDIT an admin's already-saved criteria —
+    an admin who'd previously changed Critical to e.g. "1 Day" would see
+    "2 Days" again on reopen, making a genuinely-saved edit look like it
+    never took effect. `current_values` (the admin's actual saved
+    {"critical": ..., "high": ..., "medium": ..., "low": ...}, when any
+    exist) now takes priority over the hardcoded defaults — see
+    open_risk_criteria_modal's handler for where this gets fetched.
+    """
+    current_values = current_values or {}
+
     def _select_options():
         return [{"text": {"type": "plain_text", "text": label}, "value": label} for label in _RISK_LEVEL_OPTIONS]
 
     def _field(block_id, action_id, label, key):
-        # Pre-selected with the default for this severity (Critical=2 Days,
-        # High=4 Days, Medium=2 Weeks, Low=4 Weeks) so the dropdown never
-        # shows a blank "Select" — the admin can still pick a different
-        # option before hitting Save.
-        default_value = _RISK_CRITERIA_DEFAULTS[key]
+        # Pre-selected with this admin's actual saved value for this
+        # severity when one exists (falls back to the default otherwise)
+        # so the dropdown never shows a blank "Select" — still fully
+        # changeable via each dropdown before hitting Save.
+        default_value = current_values.get(key) if current_values.get(key) in _RISK_LEVEL_OPTIONS else _RISK_CRITERIA_DEFAULTS[key]
         return {
             "type": "input",
             "block_id": block_id,
@@ -23502,7 +23515,30 @@ class SlackInteractivityView(APIView):
                 if not bot_token or not trigger_id:
                     self._debug_write("open_risk_criteria_modal: missing bot_token or trigger_id")
                     return
-                view = _build_risk_criteria_modal()
+                # Real bug report: this modal always showed the hardcoded
+                # defaults even when the admin already has saved criteria
+                # — see _build_risk_criteria_modal's own docstring. Fetch
+                # the admin's current record (same endpoint the submit
+                # handler already uses, same "list is newest-first"
+                # assumption) so reopening to edit shows what's actually
+                # saved, not a reset back to the defaults.
+                current_values = {}
+                try:
+                    existing = slash._call_api(
+                        "/api/admin/risk_criteria/risks/", team_id, slack_user_id=slack_user_id,
+                    )
+                    existing_list = (existing.get("risk_criteria") or []) if isinstance(existing, dict) else []
+                    if existing_list:
+                        latest = existing_list[0]
+                        current_values = {
+                            "critical": latest.get("critical"),
+                            "high": latest.get("high"),
+                            "medium": latest.get("medium"),
+                            "low": latest.get("low"),
+                        }
+                except Exception:
+                    logger.exception("[SlackCmd] open_risk_criteria_modal: failed to fetch existing criteria")
+                view = _build_risk_criteria_modal(current_values)
                 resp = _http_post(
                     "https://slack.com/api/views.open",
                     headers={"Authorization": f"Bearer {bot_token}"},
