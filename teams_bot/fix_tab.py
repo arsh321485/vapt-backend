@@ -660,8 +660,21 @@ def vulns_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=F
 
     class_data = _fetch_asset_classification_data(admin, as_member=as_member, team_name=team_name)
     class_map, categories_map, report_id = class_data["map"], class_data["categories_map"], class_data["report_id"]
+
+    def _display_type(host):
+        cats = categories_map.get(host) or []
+        specific = next((c for c in cats if c != "other"), None)
+        return specific or class_map.get(host, "other")
+
+    # Real bug report: a host whose own base asset_type is "other" but has
+    # a specific finding-level category too (e.g. an OpenSSH finding
+    # classified "server") matches the Server pill correctly (that's what
+    # `categories` is for), but this per-row label always showed the
+    # host's base type regardless, so a host genuinely counted under
+    # Server still always displayed "Asset". Prefer any specific category
+    # over "other" here too.
     filtered = [
-        (i, r, class_map.get((r.get("asset") or "").strip(), "other"))
+        (i, r, _display_type((r.get("asset") or "").strip()))
         for i, r in filtered
     ]
     # Real bug report: pill counts here used to be recomputed locally from
