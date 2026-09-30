@@ -15533,16 +15533,24 @@ class SlackSlashCommandView(APIView):
                 locked_reason = str(e)
             except Exception:
                 logger.exception("[SlackCmd] automation plan-gate check failed (non-fatal, showing button)")
-            # can_download stays False (unchanged) — this call site is
-            # read-only for admin by design (see _format_vulndata_automation_
-            # detail's own docstring: no admin download route exists), and
-            # it's also reached by a member's Common Vulns view via
-            # _common_asset_vuln_detail_blocks, which never offered a
-            # download button here either. Only locked_reason is new — the
-            # function's can_download=False branch now shows it instead of
-            # always claiming "team members can download this" even when
-            # the plan doesn't allow it.
-            content = self._format_vulndata_automation_detail(v, automation, locked_reason=locked_reason)
+            # can_download: this call site is read-only for admin by design
+            # (no admin download route exists), but it's also reached by a
+            # genuine team-member's Common Vulns view via
+            # _common_asset_vuln_detail_blocks — that path is the ONLY
+            # caller that ever passes user_id (see its own docstring /
+            # _split_vt_marker's `|VT:<team>` marker: user_id is only set
+            # `if vt_team`, i.e. the click came from a team channel), so
+            # user_id doubles as a reliable "is a real member, not admin"
+            # signal here. Admin's own /vulndata, Register tab, and
+            # admin-side Common Vulns navigation never pass user_id and so
+            # stay locked out, matching the website's admin-is-read-only
+            # behavior; the member's download itself still goes through
+            # vulndata_ai_autofix_download -> the user-token API, which
+            # server-side blocks an admin account clicking from a team
+            # channel with "Admins cannot download scripts."
+            content = self._format_vulndata_automation_detail(
+                v, automation, can_download=bool(user_id), locked_reason=locked_reason,
+            )
         else:
             steps_data = None
             fix_vuln_id = v.get("fix_vulnerability_id")
