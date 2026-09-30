@@ -16060,6 +16060,16 @@ class SlackSlashCommandView(APIView):
         if class_filter != "all":
             vulns = [v for v in vulns if (v.get("asset_type_counts") or {}).get(class_filter, 0) > 0]
 
+        # Real request: a fully-held vulnerability (no open assets left)
+        # used to just stay in the main list showing "0 open, N held" with
+        # an Unhold All button — the same finding never moved out of view
+        # the way a fully-held ASSET already does (see "🔒 Assets On Hold"
+        # above). Split it into its own section instead, matching that
+        # same pattern: main total/pagination only ever counts what still
+        # has open findings.
+        held_vulns = [v for v in vulns if v.get("open_count", 0) == 0 and v.get("held_count", 0) > 0]
+        vulns = [v for v in vulns if not (v.get("open_count", 0) == 0 and v.get("held_count", 0) > 0)]
+
         count = len(vulns)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = vulns[offset:offset + PAGE_SIZE]
@@ -16081,7 +16091,7 @@ class SlackSlashCommandView(APIView):
         blocks.append({"type": "divider"})
         if not page_items:
             blocks += self._text_block("No vulnerabilities found.")
-            return blocks
+            return self._append_held_vulns_section(blocks, held_vulns, report_id)
 
         for v in page_items:
             pname = v.get("plugin_name") or "Unknown"
@@ -16089,13 +16099,25 @@ class SlackSlashCommandView(APIView):
             total_assets = v.get("total_assets", 0)
             open_c = v.get("open_count", 0)
             held_c = v.get("held_count", 0)
-            blocks.append({
+            # Real request: View sits on the right of the finding's own
+            # line (a section block's accessory slot), same as the All
+            # Assets tab — opens a read-only list of every asset this
+            # vulnerability affects, with each one's own status.
+            section_block = {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": f"*{pname}*\n{sev}  •  {total_assets} asset(s)  •  {open_c} open, {held_c} held",
                 },
-            })
+            }
+            if report_id:
+                section_block["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "action_id": "view_grouped_vuln",
+                    "value": f"{report_id}|{pname}|{offset}|{class_filter}",
+                }
+            blocks.append(section_block)
             if report_id:
                 action_elements = [
                     {
@@ -16141,6 +16163,79 @@ class SlackSlashCommandView(APIView):
         )
         if pg_block:
             blocks.append(pg_block)
+        return self._append_held_vulns_section(blocks, held_vulns, report_id)
+
+    def _append_held_vulns_section(self, blocks, held_vulns, report_id, limit=10):
+        """Real request (mirrors the Assets tab's own "🔒 Assets On Hold"
+        section above): a fully-held vulnerability is pulled out of the
+        main list — shown here with only an Unhold All button, since
+        there's nothing open left to Hold or a per-asset View to offer."""
+        if not held_vulns:
+            return blocks
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Vulnerabilities On Hold", "emoji": True}})
+        for v in held_vulns[:limit]:
+            pname = v.get("plugin_name") or "Unknown"
+            sev = (v.get("severity") or "").strip() or "—"
+            held_c = v.get("held_count", 0)
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{pname}*\n{sev}  •  {held_c} asset(s) held",
+                },
+                **({
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "▶️ Unhold All", "emoji": True},
+                        "action_id": "vuln_unhold",
+                        "value": f"{report_id}|{pname}",
+                        "style": "primary",
+                    },
+                } if report_id else {}),
+            })
+            blocks.append({"type": "divider"})
+        return blocks
+
+    def _format_vuln_assets_detail(self, data, plugin_name, list_offset=0, class_filter="all"):
+        """
+        The All Vulnerabilities tab's "View" target — read-only detail of
+        every asset a single grouped finding affects, with each one's own
+        status. Mirrors _format_asset_vulns' reversed direction (that one
+        lists an asset's vulnerabilities; this lists a vulnerability's
+        assets) — reuses AllVulnerabilitiesAPIView's own per-entry `hosts`
+        list (already includes host_name/asset_type/status per asset), so
+        no separate fetch is needed beyond the same call the list itself
+        already makes.
+        """
+        blocks = [
+            {"type": "actions", "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "← Back to All Vulnerabilities", "emoji": True},
+                "action_id": "view_grouped_vuln_back",
+                "value": f"{list_offset}|{class_filter}",
+            }]},
+        ]
+        v = next((x for x in (data.get("vulnerabilities") or []) if (x.get("plugin_name") or "") == plugin_name), None)
+        if not v:
+            blocks += self._text_block(f"❌ *{plugin_name}* could not be found — it may have just been deleted or fully held.")
+            return blocks
+        sev = (v.get("severity") or "").strip() or "—"
+        hosts = v.get("hosts") or []
+        blocks.append({"type": "header", "text": {"type": "plain_text", "text": f"🛡 {plugin_name}"[:150], "emoji": True}})
+        blocks.append(self._ctx(f"{sev} severity  •  {len(hosts)} asset(s) affected"))
+        blocks.append({"type": "divider"})
+        if not hosts:
+            blocks += self._text_block("No assets currently affected.")
+            return blocks
+        for h in hosts:
+            host_name = h.get("host_name") or "Unknown"
+            st = (h.get("status") or "open").replace("_", " ").title()
+            atype = (h.get("asset_type") or "other").replace("_", " ").title()
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_  |  *{st}*"},
+            })
         return blocks
 
     def _format_asset_vulns(self, rows, host, offset=0, sev_filter="all", st_filter="all", list_offset=0, class_filter="all"):
@@ -24104,6 +24199,48 @@ class SlackInteractivityView(APIView):
                 else:
                     page_offset = int(parts[0]) if parts and parts[0].isdigit() else 0
                     class_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                report_id, _, _ = slash._fetch_asset_classification_map(team_id, slack_user_id)
+                vuln_data = slash._call_api(
+                    f"/api/admin/adminasset/report/{report_id}/vulnerabilities/",
+                    team_id, slack_user_id=slack_user_id,
+                ) if report_id else {}
+                content = slash._format_grouped_vulns_list(vuln_data, offset=page_offset, class_filter=class_filter)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_vulns")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            # ── All Vulnerabilities (grouped) — View a finding's own assets ──
+            if action_id == "view_grouped_vuln":
+                parts = value.split("|")
+                vuln_report_id = parts[0] if parts else ""
+                plugin_name = parts[1] if len(parts) > 1 else ""
+                list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                class_filter = parts[3] if len(parts) > 3 and parts[3] else "all"
+                vuln_data = slash._call_api(
+                    f"/api/admin/adminasset/report/{vuln_report_id}/vulnerabilities/",
+                    team_id, slack_user_id=slack_user_id,
+                ) if vuln_report_id else {}
+                content = slash._format_vuln_assets_detail(vuln_data, plugin_name, list_offset=list_offset, class_filter=class_filter)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_vulns")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            if action_id == "view_grouped_vuln_back":
+                parts = value.split("|")
+                page_offset = int(parts[0]) if parts and parts[0].isdigit() else 0
+                class_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
                 report_id, _, _ = slash._fetch_asset_classification_map(team_id, slack_user_id)
                 vuln_data = slash._call_api(
                     f"/api/admin/adminasset/report/{report_id}/vulnerabilities/",
