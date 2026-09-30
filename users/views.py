@@ -5073,11 +5073,18 @@ def _build_upload_report_modal(latest_report=None):
                 "element": {
                     "type": "file_input",
                     "action_id": "upload_file_input",
-                    # No "filetypes" restriction — Slack's views.open rejects the
-                    # whole modal with "invalid_arguments" if the list contains
-                    # any extension it doesn't recognize (e.g. "nessus" isn't a
-                    # standard one), so filtering happens where it already did
-                    # for the website flow: UploadReportView.ALLOWED_EXTENSIONS.
+                    # Real bug report: the FULL supported list (see
+                    # SUPPORTED_REPORT_EXTENSIONS in upload_report/parsers.py)
+                    # includes "nessus"/"xml"/"html"/"htm" — Slack's views.open
+                    # previously rejected the WHOLE modal with
+                    # "invalid_arguments" when "nessus" was in this list (not a
+                    # standard extension Slack recognizes), so only the
+                    # universally-safe ones are restricted here. A .nessus/
+                    # .xml/.html/.htm file still has to be picked via "All
+                    # Files", but still gets caught by the real validation this
+                    # modal's own submit handler already does (see
+                    # _submit_upload_report) if it's genuinely unsupported.
+                    "filetypes": ["pdf", "doc", "docx", "csv", "xls", "xlsx"],
                     "max_files": 10,
                 },
             },
