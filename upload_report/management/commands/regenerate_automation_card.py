@@ -107,6 +107,13 @@ class Command(BaseCommand):
                 {"automation_card.automation_status": {"$in": ["full", "partial"]},
                  "automation_card.language": {"$ne": "python"}},
                 {"automation_card.generation_invalid": True},
+                # Stub left by a one-off GPT automation-generation failure —
+                # {"download_count": 0, "last_downloaded_at": None} with no
+                # automation_status at all, possibly cache-propagated onto
+                # other hosts too (see AutoGenCards' cache_query fix). Not
+                # caught by the {} / None checks above since the dict itself
+                # is non-empty.
+                {"automation_card.automation_status": {"$exists": False}},
             ]
         else:
             vuln = options.get("vulnerability")
