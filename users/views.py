@@ -5065,10 +5065,7 @@ def _build_upload_report_modal(latest_report=None):
         "submit": {"type": "plain_text", "text": "Upload"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": (
-                "Upload a Nessus report, AWS Inspector export, or any other "
-                "vulnerability/pentest report."
-            )}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "Upload your vulnerability assessment file"}},
             {
                 "type": "input",
                 "block_id": "upload_file_block",
