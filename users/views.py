@@ -13987,7 +13987,14 @@ class SlackSlashCommandView(APIView):
                 ctx_els = self._sev_count_context_elements(sev_counts)
                 if ctx_els:
                     blocks.append({"type": "context", "elements": ctx_els})
-                atype = (class_map.get(a["host_name"], {}).get("asset_type") or "other").replace("_", " ").title()
+                # Prefer any specific category (web_app/firewall/server)
+                # over the host's own base "other" type when one exists —
+                # same fix as admin's _format_asset_list, so a host that's
+                # genuinely counted under "Server" doesn't always display
+                # "Other" here.
+                host_categories = class_map.get(a["host_name"], {}).get("categories") or []
+                specific = next((c for c in host_categories if c != "other"), None)
+                atype = (specific or class_map.get(a["host_name"], {}).get("asset_type") or "other").replace("_", " ").title()
                 blocks.append({
                     "type": "section",
                     "text": {
@@ -16316,7 +16323,16 @@ class SlackSlashCommandView(APIView):
                 if class_filter != "all":
                     atype = dict(self._CLASS_FILTER_BUTTONS).get(class_filter, "Other")
                 else:
-                    atype = (class_map.get(host, {}).get("asset_type") or "other").replace("_", " ").title()
+                    # Real bug report #2: even under "All", a host whose
+                    # own base asset_type is "other" but has a specific
+                    # finding-level category too (e.g. an OpenSSH finding
+                    # classified "server") always showed "Other" here —
+                    # technically its primary type, but misleading when
+                    # it's also genuinely counted under "Server". Prefer
+                    # any specific category over "other" when one exists.
+                    host_categories = class_map.get(host, {}).get("categories") or []
+                    specific = next((c for c in host_categories if c != "other"), None)
+                    atype = (specific or class_map.get(host, {}).get("asset_type") or "other").replace("_", " ").title()
                 # Real request: View sits on the right of the asset line
                 # itself (a section block's own "accessory" slot — the one
                 # spot Slack lets a button sit beside text), with Hold/

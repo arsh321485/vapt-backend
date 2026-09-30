@@ -495,7 +495,20 @@ def assets_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=
         # its own row. When a specific pill is active, show that pill's
         # own label instead; only fall back to the host's primary type
         # under "All".
-        row_label = _CLASS_LABEL.get(cls, "Asset") if cls != "all" else _CLASS_LABEL.get(a['asset_type'], "Asset")
+        #
+        # Real bug report #2: even under "All", a host whose own base
+        # asset_type is "other" but has a specific finding-level category
+        # too (e.g. an OpenSSH finding classified "server" — see
+        # classify_finding_type's own docstring for why a host's
+        # categories can include more than its base type) always showed
+        # "Other" here — technically its primary type, but misleading when
+        # it's also genuinely counted under "Server". Prefer any specific
+        # category over "other" when one exists.
+        if cls != "all":
+            row_label = _CLASS_LABEL.get(cls, "Asset")
+        else:
+            specific = next((c for c in a["categories"] if c != "other"), None)
+            row_label = _CLASS_LABEL.get(specific or a['asset_type'], "Asset")
         title = f"🖥 {a['host']}   ·   {a['total']} Vulns   ·   {_status_label(a['status'])}   ·   {row_label}"
         val = {"host": a["host"], "offset": offset, **common_val}
         extra = [cards._execute_action(
