@@ -117,29 +117,51 @@ def _vuln_name_lookup_keys(vuln):
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
+def _is_genuine_team_member(user):
+    """
+    True iff this user has a product-level UserDetail (team-member) record —
+    the real signal for "this is a VaptFix team member", independent of
+    Django's own is_staff/is_superuser flags.
+
+    Real bug report: those Django flags don't reliably track VaptFix's own
+    admin-vs-member distinction at all — confirmed live, two genuine team
+    members (with real Member_role assignments, added via /adduser) have
+    is_staff=True on their Django User record for unrelated internal-access
+    reasons, and a real report-owning admin has been seen with is_staff=False
+    (see _resolve_admin_and_teams' prior docstring). Checking UserDetail
+    first means both directions resolve correctly: a genuine member is never
+    wrongly treated as "admin" just because is_staff happens to be set, and
+    vice versa.
+    """
+    if not UserDetail:
+        return False
+    return UserDetail.objects.filter(email=getattr(user, "email", None)).exists()
+
+
 def _resolve_admin_and_teams(request):
     """
     Returns (admin_id, admin_email, teams_or_None).
-    - Admin/superadmin caller → (their own id/email, None) — None means
-      "no team filter", they see everything from their latest report.
     - Team member caller → (their parent admin's id/email, their Member_role
-      teams list) via UserDetail, same lookup userregister uses.
+      teams list) via UserDetail, same lookup userregister uses. Checked
+      FIRST (see _is_genuine_team_member) so a member whose Django account
+      also happens to be is_staff never gets misresolved as the admin.
+    - Admin/superadmin caller (no UserDetail record at all) → (their own
+      id/email, None) — None means "no team filter", they see everything
+      from their latest report.
     """
     user = request.user
+    if UserDetail:
+        detail = UserDetail.objects.select_related("admin").filter(email=user.email).first()
+        if detail:
+            teams = detail.Member_role if isinstance(detail.Member_role, list) else []
+            if not teams and detail.team_name:
+                teams = [detail.team_name]
+            return str(detail.admin.id), getattr(detail.admin, "email", None), teams
+
     if user.is_staff or user.is_superuser:
         return str(user.id), getattr(user, "email", None), None
 
-    if not UserDetail:
-        return None, None, []
-
-    detail = UserDetail.objects.select_related("admin").filter(email=user.email).first()
-    if not detail:
-        return None, None, []
-
-    teams = detail.Member_role if isinstance(detail.Member_role, list) else []
-    if not teams and detail.team_name:
-        teams = [detail.team_name]
-    return str(detail.admin.id), getattr(detail.admin, "email", None), teams
+    return None, None, []
 
 
 def _premium_required_message(admin_id):
@@ -947,7 +969,7 @@ def user_download_script(request, plugin_id):
     ?os=Windows|Linux|Cisco — optional; omit to get any available variant.
     """
     user_email = getattr(request.user, "email", "")
-    if request.user.is_staff or request.user.is_superuser:
+    if not _is_genuine_team_member(request.user) and (request.user.is_staff or request.user.is_superuser):
         logger.warning(f"[ScriptDownload] blocked — admin/superuser tried to download plugin_id={plugin_id} (email={user_email})")
         return Response(
             {"error": "Admins cannot download scripts. Read-only access only."},
@@ -1122,7 +1144,7 @@ def user_submit_feedback(request):
     Body: { "plugin_id": 103669, "working": true }
     Admin users are not allowed to submit feedback.
     """
-    if request.user.is_staff or request.user.is_superuser:
+    if not _is_genuine_team_member(request.user) and (request.user.is_staff or request.user.is_superuser):
         return Response(
             {"error": "Admins cannot submit feedback. Read-only access only."},
             status=403
@@ -1252,7 +1274,7 @@ def admin_view_ai_automation(request, card_id):
     script content (fix_script/verify_script stripped out; everything else
     — status, what can/can't be automated, considerations — stays visible).
     """
-    if not (request.user.is_staff or request.user.is_superuser):
+    if _is_genuine_team_member(request.user):
         return Response({"error": "Admin access only."}, status=403)
 
     admin_id = str(request.user.id)
@@ -1299,7 +1321,7 @@ def user_view_ai_automation(request, card_id):
 
     GET /api/user/automation-scripts/ai/<card_id>/view/
     """
-    if request.user.is_staff or request.user.is_superuser:
+    if not _is_genuine_team_member(request.user) and (request.user.is_staff or request.user.is_superuser):
         return Response(
             {"error": "Admins cannot use this endpoint. Use the admin view endpoint instead."},
             status=403,
@@ -1354,7 +1376,7 @@ def user_download_ai_automation_script(request, card_id):
 
     ?type=fix|verify — defaults to "fix".
     """
-    if request.user.is_staff or request.user.is_superuser:
+    if not _is_genuine_team_member(request.user) and (request.user.is_staff or request.user.is_superuser):
         return Response(
             {"error": "Admins cannot download scripts. Read-only access only."},
             status=403,
