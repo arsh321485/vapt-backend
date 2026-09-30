@@ -13056,6 +13056,8 @@ class SlackSlashCommandView(APIView):
                 resp = _http_get(url, headers=headers, params=params, timeout=25)
             elif method == "post":
                 resp = _http_post(url, headers=headers, json=json_body, timeout=25)
+            elif method == "delete":
+                resp = _http_delete(url, headers=headers, json=json_body, timeout=25)
             else:
                 resp = _http_get(url, headers=headers, timeout=25)
         except Exception as exc:
@@ -13431,7 +13433,7 @@ class SlackSlashCommandView(APIView):
     def _team_fix_subnav_block(self, vapt_team, active_sub=None):
         return self._button_row_blocks(self._TEAM_FIX_SUBTABS, active_action_id=active_sub, value=vapt_team)
 
-    def _team_fix_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, sev_filter="all", st_filter="all", offset=0):
+    def _team_fix_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, sev_filter="all", st_filter="all", offset=0, class_filter="all"):
         if sub_action_id == "tfix_sub_common":
             team_key = next(
                 (k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "config",
@@ -13449,9 +13451,18 @@ class SlackSlashCommandView(APIView):
             return self._team_not_member_blocks(vapt_team, raw_data)
 
         if sub_action_id == "tfix_sub_vulns":
-            return self._format_team_vuln_list(
-                vulns, title="📋 All Vulnerabilities", action_prefix="tfix_vuln", origin="tfixvulns",
-                vapt_team=vapt_team, sev_filter=sev_filter, st_filter=st_filter, offset=offset,
+            # Real request: same classification + Hold/Unhold/Delete +
+            # View feature already on admin's All Vulnerabilities tab
+            # (_format_grouped_vulns_list), team-scoped — a NEW function,
+            # deliberately separate from _format_team_vuln_list (that one
+            # is shared with the Register tab and must keep its existing
+            # flat-list shape, same reasoning _format_grouped_vulns_list's
+            # own docstring gives for staying separate from
+            # _format_vulndata_list on the admin side).
+            report_id, class_map, class_counts = self._fetch_team_asset_classification_map(team_id, user_id, vapt_team)
+            vuln_data = self._fetch_team_all_vulnerabilities(team_id, user_id, report_id, vapt_team)
+            return self._format_team_grouped_vulns_list(
+                vuln_data, vapt_team, offset=offset, class_filter=class_filter,
             )
 
         # tfix_sub_assets (default) — one row per distinct host, with a
@@ -13463,7 +13474,13 @@ class SlackSlashCommandView(APIView):
                 continue
             by_host.setdefault(host, []).append(v)
         asset_rows = [{"host_name": h, "vulns": vs} for h, vs in by_host.items()]
-        return self._format_team_asset_list(asset_rows, vapt_team, sev_filter=sev_filter, st_filter=st_filter, offset=offset)
+        report_id, class_map, class_counts = self._fetch_team_asset_classification_map(team_id, user_id, vapt_team)
+        _, held_map = self._fetch_team_held_assets(team_id, user_id, vapt_team)
+        return self._format_team_asset_list(
+            asset_rows, vapt_team, sev_filter=sev_filter, st_filter=st_filter, offset=offset,
+            class_filter=class_filter, class_map=class_map, class_counts=class_counts,
+            held_map=held_map, report_id=report_id,
+        )
 
     def _team_sev_status_filter_blocks(self, items, vapt_team, sev_filter, st_filter, action_prefix, extra_value=""):
         """
@@ -13551,6 +13568,184 @@ class SlackSlashCommandView(APIView):
             ],
         }
         return [sev_row, st_row]
+
+    def _format_team_grouped_vulns_list(self, data, vapt_team, offset=0, class_filter="all"):
+        """
+        Team-scoped mirror of _format_grouped_vulns_list (admin's All
+        Vulnerabilities tab) — grouped by plugin_name, with classification
+        + View + bulk Hold/Unhold/Delete, backed by
+        UserAllVulnerabilitiesAPIView (?team=<vapt_team>) instead of the
+        admin endpoint. Deliberately separate from _format_team_vuln_list,
+        which stays the flat per-(vuln,host) list shared with the Register
+        tab.
+        """
+        PAGE_SIZE = 5
+        report_id = data.get("report_id")
+        class_filter = (class_filter or "all").strip().lower()
+        if class_filter not in ("all", "web_app", "firewall", "server", "other"):
+            class_filter = "all"
+
+        vulns = data.get("vulnerabilities") or []
+        if class_filter != "all":
+            vulns = [v for v in vulns if (v.get("asset_type_counts") or {}).get(class_filter, 0) > 0]
+
+        held_vulns = [v for v in vulns if v.get("open_count", 0) == 0 and v.get("held_count", 0) > 0]
+        vulns = [v for v in vulns if not (v.get("open_count", 0) == 0 and v.get("held_count", 0) > 0)]
+
+        count = len(vulns)
+        offset = max(0, min(offset, max(count - 1, 0))) if count else 0
+        page_items = vulns[offset:offset + PAGE_SIZE]
+        end_num = offset + len(page_items)
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🛡 All Vulnerabilities", "emoji": True}},
+            self._ctx(f"{vapt_team} — vulnerabilities assigned to your team, grouped by finding."),
+        ]
+        vuln_class_counts = {"all": data.get("total", 0), **(data.get("asset_type_totals") or {})}
+        blocks.extend(self._class_filter_blocks(
+            class_filter, "tfix_vuln_class_", value_prefix=f"{vapt_team}|0|", counts=vuln_class_counts,
+        ))
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Total:* {count} vulnerabilities — showing {offset + 1 if page_items else 0}-{end_num}",
+            },
+        })
+        blocks.append({"type": "divider"})
+        if not page_items:
+            blocks += self._text_block("No vulnerabilities found.")
+            return self._append_team_held_vulns_section(blocks, held_vulns, report_id, vapt_team)
+
+        for v in page_items:
+            pname = v.get("plugin_name") or "Unknown"
+            sev = (v.get("severity") or "").strip() or "—"
+            total_assets = v.get("total_assets", 0)
+            open_c = v.get("open_count", 0)
+            held_c = v.get("held_count", 0)
+            section_block = {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{pname}*\n{sev}  •  {total_assets} asset(s)  •  {open_c} open, {held_c} held",
+                },
+            }
+            if report_id:
+                section_block["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "action_id": "view_team_grouped_vuln",
+                    "value": f"{report_id}|{vapt_team}|{pname}|{offset}|{class_filter}",
+                }
+            blocks.append(section_block)
+            if report_id:
+                action_elements = [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "⏸ Hold All", "emoji": True},
+                        "action_id": "tfix_vuln_hold",
+                        "value": f"{report_id}|{vapt_team}|{pname}",
+                        "confirm": {
+                            "title": {"type": "plain_text", "text": "Hold this vulnerability?"},
+                            "text": {"type": "plain_text",
+                                     "text": f"Holds \"{pname}\" on every asset it's currently open on."},
+                            "confirm": {"type": "plain_text", "text": "Yes, hold"},
+                            "deny": {"type": "plain_text", "text": "Cancel"},
+                        },
+                    },
+                ]
+                if held_c:
+                    action_elements.append({
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "▶️ Unhold All", "emoji": True},
+                        "action_id": "tfix_vuln_unhold",
+                        "value": f"{report_id}|{vapt_team}|{pname}",
+                    })
+                action_elements.append({
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🗑 Delete All", "emoji": True},
+                    "style": "danger",
+                    "action_id": "tfix_vuln_delete",
+                    "value": f"{report_id}|{vapt_team}|{pname}",
+                    "confirm": {
+                        "title": {"type": "plain_text", "text": "Delete this vulnerability?"},
+                        "text": {"type": "plain_text",
+                                 "text": f"Permanently removes \"{pname}\" from every asset it affects. This cannot be undone."},
+                        "confirm": {"type": "plain_text", "text": "Yes, delete"},
+                        "deny": {"type": "plain_text", "text": "Cancel"},
+                    },
+                })
+                blocks.append({"type": "actions", "elements": action_elements})
+            blocks.append({"type": "divider"})
+
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, "tfix_vulng_pg", value_prefix=f"{vapt_team}|", value_suffix=f"|{class_filter}",
+        )
+        if pg_block:
+            blocks.append(pg_block)
+        return self._append_team_held_vulns_section(blocks, held_vulns, report_id, vapt_team)
+
+    def _append_team_held_vulns_section(self, blocks, held_vulns, report_id, vapt_team, limit=10):
+        if not held_vulns:
+            return blocks
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Vulnerabilities On Hold", "emoji": True}})
+        for v in held_vulns[:limit]:
+            pname = v.get("plugin_name") or "Unknown"
+            sev = (v.get("severity") or "").strip() or "—"
+            held_c = v.get("held_count", 0)
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{pname}*\n{sev}  •  {held_c} asset(s) held",
+                },
+                **({
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "▶️ Unhold All", "emoji": True},
+                        "action_id": "tfix_vuln_unhold",
+                        "value": f"{report_id}|{vapt_team}|{pname}",
+                        "style": "primary",
+                    },
+                } if report_id else {}),
+            })
+            blocks.append({"type": "divider"})
+        return blocks
+
+    def _format_team_vuln_assets_detail(self, data, plugin_name, vapt_team, list_offset=0, class_filter="all"):
+        """View target for a grouped team vulnerability — read-only list of
+        every asset it affects, mirroring _format_vuln_assets_detail
+        (admin)."""
+        blocks = [
+            {"type": "actions", "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "← Back to All Vulnerabilities", "emoji": True},
+                "action_id": "view_team_grouped_vuln_back",
+                "value": f"{vapt_team}|{list_offset}|{class_filter}",
+            }]},
+        ]
+        v = next((x for x in (data.get("vulnerabilities") or []) if (x.get("plugin_name") or "") == plugin_name), None)
+        if not v:
+            blocks += self._text_block(f"❌ *{plugin_name}* could not be found — it may have just been deleted or fully held.")
+            return blocks
+        sev = (v.get("severity") or "").strip() or "—"
+        hosts = v.get("hosts") or []
+        blocks.append({"type": "header", "text": {"type": "plain_text", "text": f"🛡 {plugin_name}"[:150], "emoji": True}})
+        blocks.append(self._ctx(f"{sev} severity  •  {len(hosts)} asset(s) affected"))
+        blocks.append({"type": "divider"})
+        if not hosts:
+            blocks += self._text_block("No assets currently affected.")
+            return blocks
+        for h in hosts:
+            host_name = h.get("host_name") or "Unknown"
+            st = (h.get("status") or "open").replace("_", " ").title()
+            atype = (h.get("asset_type") or "other").replace("_", " ").title()
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_  |  *{st}*"},
+            })
+        return blocks
 
     def _format_team_vuln_list(self, vulns, title, action_prefix, vapt_team, sev_filter="all", st_filter="all", offset=0, origin=""):
         """
@@ -13652,13 +13847,28 @@ class SlackSlashCommandView(APIView):
             blocks.append(pg_block)
         return blocks
 
-    def _format_team_asset_list(self, asset_rows, vapt_team, sev_filter="all", st_filter="all", offset=0):
+    def _format_team_asset_list(self, asset_rows, vapt_team, sev_filter="all", st_filter="all", offset=0,
+                                 class_filter="all", class_map=None, class_counts=None, held_map=None, report_id=None):
         """
         Matches user-assets.html: severity + status filter rows, each asset
         row shows a severity-breakdown pill line (Critical: N, High: N, ...)
         instead of a flat vuln count.
+
+        Real request: same classification (Asset/Web App/Firewall/Server)
+        + Hold/Unhold/Delete feature already built for admin's All Assets
+        tab (_format_asset_list), now team-scoped — class_map/class_counts/
+        held_map come from _fetch_team_asset_classification_map/
+        _fetch_team_held_assets (UserAssetsAPIView/UserHoldAssetsAPIView,
+        ?team=<vapt_team>), same real numbers the website's own team-scoped
+        Assets page shows, not locally recomputed.
         """
         PAGE_SIZE = 5
+        class_filter = (class_filter or "all").strip().lower()
+        if class_filter not in ("all", "web_app", "firewall", "server", "other"):
+            class_filter = "all"
+        class_map = class_map or {}
+        class_counts = class_counts or {}
+        held_map = held_map or {}
 
         def norm_sev(v):
             return (v.get("risk_factor") or "").strip().lower()
@@ -13690,6 +13900,32 @@ class SlackSlashCommandView(APIView):
             return norm_status(v) == st_filter
 
         filtered_assets = [a for a in asset_rows if asset_matches_sev(a["vulns"]) and asset_matches_status(a["vulns"])]
+
+        # Real bug report (same one fixed on Teams/admin): a host built
+        # from register rows only ever exists here if it has at least one
+        # vulnerability — a clean, 0-vuln asset never shows up at all, even
+        # though UserAssetsAPIView's own class_map already includes it
+        # (that endpoint deliberately shows every genuinely clean host to
+        # every team — see its own comment). Only backfill under the
+        # unfiltered "All"/"All" view, same reasoning as the admin fix.
+        if sev_filter == "all" and st_filter == "all":
+            present = {a["host_name"] for a in asset_rows}
+            extra = [{"host_name": h, "vulns": []} for h in class_map if h not in present]
+            if extra:
+                filtered_assets = sorted(
+                    filtered_assets + [a for a in extra if a["host_name"] not in {x["host_name"] for x in filtered_assets}],
+                    key=lambda a: (len(a["vulns"]) == 0, a["host_name"]),
+                )
+
+        # Classification filter — full categories list per host, matching
+        # the admin fix (a mixed-nature host counts toward every category
+        # it has a finding in, not just one).
+        if class_filter != "all":
+            filtered_assets = [
+                a for a in filtered_assets
+                if class_filter in (class_map.get(a["host_name"], {}).get("categories") or ["other"])
+            ]
+
         count = len(filtered_assets)
         offset = max(0, min(offset, max(count - 1, 0))) if count else 0
         page_items = filtered_assets[offset:offset + PAGE_SIZE]
@@ -13703,7 +13939,13 @@ class SlackSlashCommandView(APIView):
             self._ctx(f"{vapt_team} — every asset with vulnerabilities assigned to your team."),
             {"type": "divider"},
         ]
-        blocks.extend(self._team_sev_status_filter_blocks(all_vulns, vapt_team, sev_filter, st_filter, "tfix_asset"))
+        blocks.extend(self._team_sev_status_filter_blocks(
+            all_vulns, vapt_team, sev_filter, st_filter, "tfix_asset", extra_value=f"|{class_filter}",
+        ))
+        cls_counts = {"all": class_counts.get("all", len(class_map)), **{k: v for k, v in class_counts.items() if k != "all"}}
+        blocks.extend(self._class_filter_blocks(
+            class_filter, "tfix_asset_class_", value_prefix=f"{vapt_team}|{sev_filter}|{st_filter}|0|", counts=cls_counts,
+        ))
         blocks.append({"type": "divider"})
 
         if not page_items:
@@ -13728,30 +13970,86 @@ class SlackSlashCommandView(APIView):
                 ctx_els = self._sev_count_context_elements(sev_counts)
                 if ctx_els:
                     blocks.append({"type": "context", "elements": ctx_els})
+                atype = (class_map.get(a["host_name"], {}).get("asset_type") or "other").replace("_", " ").title()
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*`{sno}`*  `{a['host_name']}`  |  *{len(vs)} Vulns*",
+                        "text": f"*`{sno}`*  `{a['host_name']}`  |  *{len(vs)} Vulns*  |  _{atype}_",
                     },
                     "accessory": {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "View", "emoji": True},
                         "action_id": "tasset_view",
-                        # host|team|sev|st|list_offset|vuln_offset
-                        "value": f"{a['host_name']}|{vapt_team}|{sev_filter}|{st_filter}|{offset}|0",
+                        # host|team|sev|st|list_offset|vuln_offset|class
+                        "value": f"{a['host_name']}|{vapt_team}|{sev_filter}|{st_filter}|{offset}|0|{class_filter}",
                         "style": "primary",
                     },
                 })
+                if report_id:
+                    action_elements = []
+                    val = f"{report_id}|{vapt_team}|{a['host_name']}"
+                    if a["host_name"] not in held_map:
+                        action_elements.append({
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "⏸ Hold", "emoji": True},
+                            "action_id": "tfix_asset_hold",
+                            "value": val,
+                            "confirm": {
+                                "title": {"type": "plain_text", "text": "Hold this asset?"},
+                                "text": {"type": "plain_text",
+                                         "text": f"`{a['host_name']}` will be removed from active remediation tracking until unheld."},
+                                "confirm": {"type": "plain_text", "text": "Yes, hold"},
+                                "deny": {"type": "plain_text", "text": "Cancel"},
+                            },
+                        })
+                    action_elements.append({
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🗑 Delete", "emoji": True},
+                        "style": "danger",
+                        "action_id": "tfix_asset_delete",
+                        "value": val,
+                        "confirm": {
+                            "title": {"type": "plain_text", "text": "Delete this asset?"},
+                            "text": {"type": "plain_text",
+                                     "text": f"This permanently removes `{a['host_name']}` from this report. This cannot be undone."},
+                            "confirm": {"type": "plain_text", "text": "Yes, delete"},
+                            "deny": {"type": "plain_text", "text": "Cancel"},
+                        },
+                    })
+                    blocks.append({"type": "actions", "elements": action_elements})
 
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"Showing {start_num}-{end_num} of {count} results"}})
         value_prefix = f"{vapt_team}|{sev_filter}|{st_filter}|"
-        pg_block = self._numbered_pagination_block(offset, PAGE_SIZE, count, "tfix_asset_pg", value_prefix=value_prefix)
+        pg_block = self._numbered_pagination_block(
+            offset, PAGE_SIZE, count, "tfix_asset_pg", value_prefix=value_prefix, value_suffix=f"|{class_filter}",
+        )
         if pg_block:
             blocks.append(pg_block)
+
+        if held_map:
+            blocks.append({"type": "divider"})
+            blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Assets On Hold", "emoji": True}})
+            for host, info in held_map.items():
+                held_atype = (info.get("asset_type") or "other").replace("_", " ").title()
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"🖥 `{host}`  |  *{info.get('total_vulnerabilities', 0)} Vulns*  |  _{held_atype}_",
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "▶️ Unhold", "emoji": True},
+                        "action_id": "tfix_asset_unhold",
+                        "value": f"{report_id}|{vapt_team}|{host}",
+                        "style": "primary",
+                    },
+                })
+                blocks.append({"type": "divider"})
         return blocks
 
-    def _format_team_asset_vulns(self, vulns, host, vapt_team, sev_filter="all", st_filter="all", offset=0, list_offset=0):
+    def _format_team_asset_vulns(self, vulns, host, vapt_team, sev_filter="all", st_filter="all", offset=0, list_offset=0, class_filter="all"):
         """
         Per-asset vuln drill-down for team All Assets — mirrors admin's
         _format_asset_vulns (status icon per row, Fix button into the shared
@@ -13799,7 +14097,7 @@ class SlackSlashCommandView(APIView):
                     "type": "button",
                     "text": {"type": "plain_text", "text": "← Back to All Assets", "emoji": True},
                     "action_id": "tasset_detail_back",
-                    "value": f"{vapt_team}|{sev_filter}|{st_filter}|{list_offset}",
+                    "value": f"{vapt_team}|{sev_filter}|{st_filter}|{list_offset}|{class_filter}",
                 }],
             },
             {"type": "divider"},
@@ -15797,6 +16095,68 @@ class SlackSlashCommandView(APIView):
         except Exception:
             logger.exception(f"[SlackCmd] _fetch_held_assets failed for team_id={team_id}")
             return None, {}
+
+    # ── Team (member) versions of the above — same classification +
+    # Hold/Unhold/Delete feature, team-scoped via UserAssetsAPIView/
+    # UserAllVulnerabilitiesAPIView/UserHoldAssetsAPIView (?team=<vapt_team>),
+    # authenticated as the specific member via _call_user_api instead of the
+    # admin. Mirrors adminasset's own numbers exactly the same way the admin
+    # versions above do — same real bug class (locally-recomputed counts
+    # disagreeing with the website) is avoided here by construction, since
+    # these are the SAME real endpoints the website's own team-scoped pages
+    # (user-assets.html/user-vulnerabilities.html) call.
+
+    def _fetch_team_asset_classification_map(self, team_id, user_id, vapt_team):
+        """Returns (report_id, {host_name: {"asset_type":..., "categories":[...]}}, counts) —
+        team-scoped. counts is {"all": total_assets, "other": n, ...} straight
+        from UserAssetsAPIView's own asset_type_totals. Best-effort —
+        returns (None, {}, {}) on any failure."""
+        try:
+            data = self._call_user_api(
+                "/api/user/asset/assets/", team_id, user_id, params={"team": vapt_team},
+            )
+            report_id = data.get("report_id")
+            class_map = {
+                a.get("asset"): {
+                    "asset_type": a.get("asset_type") or "other",
+                    "categories": a.get("categories") or [a.get("asset_type") or "other"],
+                }
+                for a in (data.get("assets") or []) if a.get("asset")
+            }
+            counts = {"all": data.get("total_assets", 0), **(data.get("asset_type_totals") or {})}
+            return report_id, class_map, counts
+        except Exception:
+            logger.exception(f"[SlackCmd] _fetch_team_asset_classification_map failed for team_id={team_id} vapt_team={vapt_team}")
+            return None, {}, {}
+
+    def _fetch_team_held_assets(self, team_id, user_id, vapt_team):
+        """Team-scoped held assets (UserHoldAssetsAPIView). Returns
+        (report_id, {host_name: asset_dict})."""
+        try:
+            data = self._call_user_api(
+                "/api/user/asset/assets/hold-list/", team_id, user_id, params={"team": vapt_team},
+            )
+            report_id = data.get("report_id")
+            held_map = {a.get("asset"): a for a in (data.get("assets") or []) if a.get("asset")}
+            return report_id, held_map
+        except Exception:
+            logger.exception(f"[SlackCmd] _fetch_team_held_assets failed for team_id={team_id} vapt_team={vapt_team}")
+            return None, {}
+
+    def _fetch_team_all_vulnerabilities(self, team_id, user_id, report_id, vapt_team):
+        """Team-scoped grouped-by-finding vulnerabilities (UserAllVulnerabilitiesAPIView)
+        — same response shape AllVulnerabilitiesAPIView returns (total,
+        asset_type_totals, vulnerabilities[] with open_count/held_count/hosts
+        per entry). Best-effort — returns {} on any failure."""
+        if not report_id:
+            return {}
+        try:
+            return self._call_user_api(
+                f"/api/user/asset/report/{report_id}/vulnerabilities/", team_id, user_id, params={"team": vapt_team},
+            )
+        except Exception:
+            logger.exception(f"[SlackCmd] _fetch_team_all_vulnerabilities failed for team_id={team_id} vapt_team={vapt_team}")
+            return {}
 
     # Shared classification filter row for both the All Assets and All
     # Vulnerabilities tabs — same 4 categories the website's Assets page
@@ -22846,20 +23206,170 @@ class SlackInteractivityView(APIView):
                 action_id.startswith("tfix_vuln_sev_") or action_id.startswith("tfix_vuln_st_") or action_id.startswith("tfix_vuln_pg_")
                 or action_id.startswith("tfix_asset_sev_") or action_id.startswith("tfix_asset_st_") or action_id.startswith("tfix_asset_pg_")
             ):
-                # value: "<team>|<sev>|<st>|<offset>"
+                # value: "<team>|<sev>|<st>|<offset>|<class>"
                 parts = value.split("|")
                 vapt_team = parts[0] if len(parts) > 0 else ""
                 sev_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
                 st_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
                 page_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                class_filter = parts[4] if len(parts) > 4 and parts[4] else "all"
                 sub_action_id = "tfix_sub_assets" if "asset" in action_id else "tfix_sub_vulns"
                 content_blocks = slash._team_fix_subtab_blocks(
                     sub_action_id, team_id, slack_user_id, vapt_team,
-                    sev_filter=sev_filter, st_filter=st_filter, offset=page_offset,
+                    sev_filter=sev_filter, st_filter=st_filter, offset=page_offset, class_filter=class_filter,
                 )
                 blocks = (
                     slash._team_nav_buttons_block("tnav_fix", vapt_team)
                     + slash._team_fix_subnav_block(vapt_team, active_sub=sub_action_id)
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            # ── Team All Assets — classification pill click ──────────────
+            if action_id.startswith("tfix_asset_class_"):
+                # value: "<team>|<sev>|<st>|0|<class>"
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                sev_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
+                st_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                class_filter = parts[4] if len(parts) > 4 and parts[4] else "all"
+                content_blocks = slash._team_fix_subtab_blocks(
+                    "tfix_sub_assets", team_id, slack_user_id, vapt_team,
+                    sev_filter=sev_filter, st_filter=st_filter, offset=0, class_filter=class_filter,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_assets")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            # ── Team All Assets — Hold / Unhold / Delete (single asset) ──
+            if action_id in ("tfix_asset_hold", "tfix_asset_unhold", "tfix_asset_delete"):
+                # value: "<report_id>|<team>|<host>"
+                parts = value.split("|", 2)
+                asset_report_id = parts[0] if len(parts) > 0 else ""
+                vapt_team = parts[1] if len(parts) > 1 else ""
+                host = parts[2] if len(parts) > 2 else ""
+                encoded_host = quote(host, safe="")
+                if action_id == "tfix_asset_hold":
+                    slash._call_user_api(
+                        f"/api/user/asset/report/{asset_report_id}/assets/{encoded_host}/hold/",
+                        team_id, slack_user_id, method="post", json_body={},
+                    )
+                elif action_id == "tfix_asset_unhold":
+                    slash._call_user_api(
+                        f"/api/user/asset/report/{asset_report_id}/assets/{encoded_host}/unhold/",
+                        team_id, slack_user_id, method="post", json_body={},
+                    )
+                else:
+                    slash._call_user_api(
+                        f"/api/user/asset/report/{asset_report_id}/assets/{encoded_host}/",
+                        team_id, slack_user_id, method="delete",
+                    )
+                content_blocks = slash._team_fix_subtab_blocks("tfix_sub_assets", team_id, slack_user_id, vapt_team)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_assets")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            # ── Team All Vulnerabilities (grouped) — classification + pagination ──
+            if action_id.startswith("tfix_vuln_class_") or action_id.startswith("tfix_vulng_pg_"):
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                if action_id.startswith("tfix_vuln_class_"):
+                    page_offset = 0
+                else:
+                    page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                class_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                content_blocks = slash._team_fix_subtab_blocks(
+                    "tfix_sub_vulns", team_id, slack_user_id, vapt_team,
+                    offset=page_offset, class_filter=class_filter,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_vulns")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            # ── Team All Vulnerabilities (grouped) — View a finding's own assets ──
+            if action_id == "view_team_grouped_vuln":
+                # value: "<report_id>|<team>|<plugin_name>|<list_offset>|<class>"
+                parts = value.split("|")
+                vuln_report_id = parts[0] if len(parts) > 0 else ""
+                vapt_team = parts[1] if len(parts) > 1 else ""
+                plugin_name = parts[2] if len(parts) > 2 else ""
+                list_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                class_filter = parts[4] if len(parts) > 4 and parts[4] else "all"
+                vuln_data = slash._fetch_team_all_vulnerabilities(team_id, slack_user_id, vuln_report_id, vapt_team)
+                content_blocks = slash._format_team_vuln_assets_detail(
+                    vuln_data, plugin_name, vapt_team, list_offset=list_offset, class_filter=class_filter,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_vulns")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            if action_id == "view_team_grouped_vuln_back":
+                # value: "<team>|<list_offset>|<class>"
+                parts = value.split("|")
+                vapt_team = parts[0] if len(parts) > 0 else ""
+                list_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                class_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
+                content_blocks = slash._team_fix_subtab_blocks(
+                    "tfix_sub_vulns", team_id, slack_user_id, vapt_team,
+                    offset=list_offset, class_filter=class_filter,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_vulns")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
+            # ── Team All Vulnerabilities (grouped) — bulk Hold / Unhold / Delete ──
+            if action_id in ("tfix_vuln_hold", "tfix_vuln_unhold", "tfix_vuln_delete"):
+                # value: "<report_id>|<team>|<plugin_name>"
+                parts = value.split("|", 2)
+                vuln_report_id = parts[0] if len(parts) > 0 else ""
+                vapt_team = parts[1] if len(parts) > 1 else ""
+                plugin_name = parts[2] if len(parts) > 2 else ""
+                encoded_plugin = quote(plugin_name, safe="")
+                assets_data = slash._call_user_api(
+                    f"/api/user/asset/report/{vuln_report_id}/vulnerability/{encoded_plugin}/assets/",
+                    team_id, slack_user_id, params={"team": vapt_team},
+                )
+                asset_rows = assets_data.get("assets") or []
+                if action_id == "tfix_vuln_hold":
+                    host_names = [a.get("host_name") for a in asset_rows if a.get("status") not in ("held", "deleted")]
+                    endpoint, http_method = "hold", "post"
+                elif action_id == "tfix_vuln_unhold":
+                    host_names = [a.get("host_name") for a in asset_rows if a.get("status") == "held"]
+                    endpoint, http_method = "unhold", "post"
+                else:
+                    host_names = [a.get("host_name") for a in asset_rows if a.get("status") != "deleted"]
+                    endpoint, http_method = "delete", "delete"
+                host_names = [h for h in host_names if h]
+                if host_names:
+                    slash._call_user_api(
+                        f"/api/user/asset/report/{vuln_report_id}/vulnerability/{encoded_plugin}/{endpoint}/",
+                        team_id, slack_user_id, method=http_method, json_body={"host_names": host_names},
+                    )
+                content_blocks = slash._team_fix_subtab_blocks("tfix_sub_vulns", team_id, slack_user_id, vapt_team)
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_vulns")
                     + content_blocks
                 )
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
@@ -23265,18 +23775,19 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id == "tasset_view":
-                # value: host|team|sev|st|list_offset|vuln_offset
-                parts = value.split("|", 5)
+                # value: host|team|sev|st|list_offset|vuln_offset|class
+                parts = value.split("|", 6)
                 host = parts[0] if len(parts) > 0 else ""
                 vapt_team = parts[1] if len(parts) > 1 else ""
                 sev_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
                 st_filter = parts[3] if len(parts) > 3 and parts[3] else "all"
                 list_offset = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
                 vuln_offset = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+                class_filter = parts[6] if len(parts) > 6 and parts[6] else "all"
                 vulns, _, _ = slash._get_team_vulns(vapt_team, team_id, slack_user_id)
                 content_blocks = slash._format_team_asset_vulns(
                     vulns, host, vapt_team, sev_filter=sev_filter, st_filter=st_filter,
-                    offset=vuln_offset, list_offset=list_offset,
+                    offset=vuln_offset, list_offset=list_offset, class_filter=class_filter,
                 )
                 blocks = (
                     slash._team_nav_buttons_block("tnav_fix", vapt_team)
@@ -23310,15 +23821,16 @@ class SlackInteractivityView(APIView):
                 return
 
             if action_id == "tasset_detail_back":
-                # value: team|sev|st|list_offset
+                # value: team|sev|st|list_offset|class
                 parts = value.split("|")
                 vapt_team = parts[0] if len(parts) > 0 else ""
                 sev_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
                 st_filter = parts[2] if len(parts) > 2 and parts[2] else "all"
                 list_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                class_filter = parts[4] if len(parts) > 4 and parts[4] else "all"
                 content_blocks = slash._team_fix_subtab_blocks(
                     "tfix_sub_assets", team_id, slack_user_id, vapt_team,
-                    sev_filter=sev_filter, st_filter=st_filter, offset=list_offset,
+                    sev_filter=sev_filter, st_filter=st_filter, offset=list_offset, class_filter=class_filter,
                 )
                 blocks = (
                     slash._team_nav_buttons_block("tnav_fix", vapt_team)
