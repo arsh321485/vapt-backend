@@ -15804,7 +15804,7 @@ class SlackSlashCommandView(APIView):
     # labeled "Assets" to match the website's own tab name for that bucket.
     _CLASS_FILTER_BUTTONS = [
         ("all", "All"),
-        ("other", "Assets"),
+        ("other", "Asset"),
         ("web_app", "Web App"),
         ("firewall", "Firewall"),
         ("server", "Server"),
@@ -15897,13 +15897,13 @@ class SlackSlashCommandView(APIView):
             {"type": "header", "text": {"type": "plain_text", "text": "🖥 All Assets", "emoji": True}},
             self._ctx("Every asset in your latest report. Click one to see its vulnerabilities."),
         ]
-        blocks.extend(self._class_filter_blocks(
-            class_filter, "fix_asset_class_", value_prefix=f"{sev_filter}|{st_filter}|0|", counts=class_counts,
-        ))
         blocks.extend(self._sev_status_filter_blocks(
             sev_filter, st_filter, {}, st_counts,
             sev_prefix="fix_asset_sev_", st_prefix="fix_asset_st_",
             extra_value=f"|{class_filter}",
+        ))
+        blocks.extend(self._class_filter_blocks(
+            class_filter, "fix_asset_class_", value_prefix=f"{sev_filter}|{st_filter}|0|", counts=class_counts,
         ))
         blocks.append({
             "type": "section",
