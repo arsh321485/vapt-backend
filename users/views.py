@@ -12600,6 +12600,30 @@ class SlackSlashCommandView(APIView):
             logger.warning("[SlackUploadReport] No file found in modal submission values")
             return self._text_block("❌ Please attach a file.")
 
+        # Real bug report: Slack's native file_input element lets the admin
+        # attach literally any file type — unlike the website's own upload
+        # form, nothing here stopped an unsupported one (a .zip, .txt,
+        # random screenshot, etc.) from being downloaded from Slack and
+        # POSTed to the backend, which would only then reject it with a
+        # generic "Unsupported file type" error deep in dispatch_parse.
+        # Check every attached file's extension against the same list
+        # dispatch_parse itself accepts (upload_report/parsers.py) BEFORE
+        # downloading anything, so an unsupported attachment fails fast
+        # with a clear message instead of wasting a Slack file-download
+        # round trip first.
+        from upload_report.parsers import SUPPORTED_REPORT_EXTENSIONS
+        unsupported = [
+            file_obj.get("name") or "file"
+            for file_obj in file_list
+            if os.path.splitext(file_obj.get("name") or "")[1].lower() not in SUPPORTED_REPORT_EXTENSIONS
+        ]
+        if unsupported:
+            allowed = ", ".join(sorted(SUPPORTED_REPORT_EXTENSIONS))
+            return self._text_block(
+                f"❌ Unsupported file type: *{', '.join(unsupported)}*.\n"
+                f"Supported formats: {allowed}"
+            )
+
         # One upload-and-generate cycle at a time per workspace — prevents a second
         # "Upload Report" click while the first is still generating cards from
         # racing it (duplicate progress messages, two watchers, etc). Released by

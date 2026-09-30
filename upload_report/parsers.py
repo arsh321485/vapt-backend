@@ -15,6 +15,15 @@ from typing import Dict, Any, List, Optional
 import pandas as pd
 from PyPDF2 import PdfReader
 
+# Single source of truth for "what dispatch_parse actually accepts" — kept
+# in sync with its own if/elif chain below. Used by upload entry points
+# (e.g. the Slack "Upload Report" modal) that want to reject an
+# unsupported file up front instead of downloading it first and only then
+# hitting dispatch_parse's own "Unsupported file type" error.
+SUPPORTED_REPORT_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".csv", ".xlsx", ".xls", ".xml", ".nessus", ".html", ".htm",
+}
+
 # BeautifulSoup import with safe fallback
 try:
     from bs4 import BeautifulSoup
