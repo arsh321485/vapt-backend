@@ -17869,12 +17869,25 @@ class SlackSlashCommandView(APIView):
             ],
         }
 
+    # Fixed 4-team set every VaptFix org gets (see _create_vaptfix_channels'
+    # own default_channels and users_details.views.UserDetailRoleUpdateView.
+    # allowed_roles — same canonical list, kept in sync here since this file
+    # has no shared import point with users_details for it).
+    _ALL_VAPT_TEAMS = ["Patch Management", "Configuration Management", "Network Security", "Architectural Flaws"]
+
     def _build_delete_team_user_modal(self, members, selected_detail_id=None, selected_member_teams=None):
         """
         "Update User Role" modal (Team tab) — pick an EXISTING VaptFix team
-        member, then check off which specific team role(s) to remove. Submitting
-        calls DELETE /api/admin/users_details/user-detail/<id>/delete-role/
-        once per checked team (that endpoint only removes one role per call).
+        member, then check/uncheck any of the 4 teams to sync their roles.
+        Submitting diffs the checked set against the member's current roles:
+        newly-checked teams get added (PATCH .../update-role/), newly-
+        unchecked ones get removed (DELETE .../delete-role/).
+
+        Real bug report: this used to only ever show the teams the member
+        was ALREADY on as checkboxes — an admin could remove a role here,
+        but had no way to ADD one (e.g. give someone a second team) from
+        this same modal. Now shows all 4 teams every time, with the
+        member's current ones pre-checked.
         """
         user_options = [
             {
@@ -17911,26 +17924,26 @@ class SlackSlashCommandView(APIView):
         ]
 
         if selected_detail_id:
-            if selected_member_teams:
-                team_options = [
-                    {"text": {"type": "plain_text", "text": t}, "value": t}
-                    for t in selected_member_teams
-                ]
-                blocks.append({
-                    "type": "input",
-                    "block_id": "dtu_team_block",
-                    "label": {"type": "plain_text", "text": "Update Team Role(s)"},
-                    "element": {
-                        "type": "checkboxes",
-                        "action_id": "dtu_team_checks",
-                        "options": team_options,
-                    },
-                })
-            else:
-                blocks.append({
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": "_This member has no teams assigned._"},
-                })
+            current_teams = set(selected_member_teams or [])
+            team_options = [
+                {"text": {"type": "plain_text", "text": t}, "value": t}
+                for t in self._ALL_VAPT_TEAMS
+            ]
+            team_element = {
+                "type": "checkboxes",
+                "action_id": "dtu_team_checks",
+                "options": team_options,
+            }
+            initial = [o for o in team_options if o["value"] in current_teams]
+            if initial:
+                team_element["initial_options"] = initial
+            blocks.append({
+                "type": "input",
+                "block_id": "dtu_team_block",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Update Team Role(s)"},
+                "element": team_element,
+            })
 
         return {
             "type": "modal",
@@ -25489,14 +25502,46 @@ class SlackInteractivityView(APIView):
             elif callback_id == "modal_deleteteamuser_submit":
                 detail_id = view.get("private_metadata") or ""
                 selected = _find_by_action_id(values, "dtu_team_checks").get("selected_options") or []
-                team_names = [o.get("value") for o in selected if o.get("value")]
+                checked_teams = [o.get("value") for o in selected if o.get("value")]
                 if not detail_id:
                     blocks = slash._text_block("❌ Please select a user first.")
-                elif not team_names:
-                    blocks = slash._text_block("❌ Select at least one team to remove them from.")
                 else:
-                    removed, failed = [], []
-                    for team_name in team_names:
+                    # Diff against the member's CURRENT roles (re-fetched here
+                    # rather than trusted from the modal state, so a stale/
+                    # concurrently-edited modal never overwrites someone
+                    # else's meanwhile change) — newly-checked teams get
+                    # added, newly-unchecked ones get removed. See
+                    # _build_delete_team_user_modal's docstring: this modal
+                    # used to be remove-only, with no way to add a role.
+                    try:
+                        member_data = slash._call_api(
+                            "/api/admin/users_details/list-user-details/", team_id,
+                            slack_user_id=slack_user_id,
+                        )
+                        member_list = member_data if isinstance(member_data, list) else (member_data.get("results") or member_data.get("users") or [])
+                        target = next((m for m in member_list if str(m.get("_id") or m.get("id")) == detail_id), None)
+                        current_teams = (target.get("Member_role") or []) if target else []
+                    except Exception:
+                        current_teams = []
+                    to_add = [t for t in checked_teams if t not in current_teams]
+                    to_remove = [t for t in current_teams if t not in checked_teams]
+
+                    added, removed, failed = [], [], []
+                    if to_add:
+                        try:
+                            result = slash._call_api(
+                                f"/api/admin/users_details/user-detail/{detail_id}/update-role/",
+                                team_id, method="patch",
+                                json_body={"new_roles": to_add, "confirm": True},
+                                slack_user_id=slack_user_id,
+                            )
+                            if result.get("message"):
+                                added.extend(to_add)
+                            else:
+                                failed.extend((t, result.get("detail", "unknown error")) for t in to_add)
+                        except Exception as exc:
+                            failed.extend((t, str(exc)) for t in to_add)
+                    for team_name in to_remove:
                         try:
                             result = slash._call_api(
                                 f"/api/admin/users_details/user-detail/{detail_id}/delete-role/",
@@ -25510,12 +25555,15 @@ class SlackInteractivityView(APIView):
                                 failed.append((team_name, result.get("detail", "unknown error")))
                         except Exception as exc:
                             failed.append((team_name, str(exc)))
+
                     lines = []
+                    if added:
+                        lines.append(f"✅ Added to: {', '.join(added)}")
                     if removed:
                         lines.append(f"✅ Removed from: {', '.join(removed)}")
                     if failed:
                         lines.append("❌ Failed: " + ", ".join(f"{t} ({e})" for t, e in failed))
-                    blocks = slash._text_block("\n".join(lines) or "❌ Nothing was removed.")
+                    blocks = slash._text_block("\n".join(lines) or "ℹ️ No changes made.")
             elif callback_id == "modal_support_reply_submit":
                 meta_json = view.get("private_metadata") or "{}"
                 reply_text = ((values.get("reply_text_block") or {}).get("reply_text_input") or {}).get("value") or ""
