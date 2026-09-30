@@ -15926,58 +15926,62 @@ class SlackSlashCommandView(APIView):
                         "elements": [{"type": "mrkdwn", "text": "_No open vulnerabilities_"}],
                     })
                 atype = (class_map.get(host, {}).get("asset_type") or "other").replace("_", " ").title()
+                # Real request: View sits on the right of the asset line
+                # itself (a section block's own "accessory" slot — the one
+                # spot Slack lets a button sit beside text), with Hold/
+                # Delete kept together in their own row underneath. A
+                # section's accessory only ever supports ONE element, which
+                # is why Hold/Delete can't join View up here.
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
                         "text": f"🖥 `{host}`  |  *{c['total']} Vulns*  |  _{atype}_",
                     },
+                    "accessory": {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View", "emoji": True},
+                        "action_id": "view_fix_asset",
+                        "value": f"{host}|{sev_filter}|{st_filter}|{offset}|0|{class_filter}",
+                        "style": "primary",
+                    },
                 })
-                # Real request: View/Hold/Delete should sit together in one
-                # row on the right, same as the Teams version of this
-                # feature — a section block only ever supports ONE
-                # accessory button, so "View" used to be alone up there
-                # with Hold/Delete stacked on their own row underneath.
-                # One "actions" block holds all three now. report_id is
-                # required for Hold/Delete's own per-report endpoint URLs
-                # (AssetHoldAPIView/AssetDeleteAPIView) — View still works
-                # without it.
-                action_elements = [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "View", "emoji": True},
-                    "action_id": "view_fix_asset",
-                    "value": f"{host}|{sev_filter}|{st_filter}|{offset}|0|{class_filter}",
-                    "style": "primary",
-                }]
+                # report_id is required for Hold/Delete's own per-report
+                # endpoint URLs (AssetHoldAPIView/AssetDeleteAPIView) —
+                # View above still works without it.
                 if report_id:
-                    action_elements.append({
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "⏸ Hold", "emoji": True},
-                        "action_id": "asset_hold",
-                        "value": f"{report_id}|{host}",
-                        "confirm": {
-                            "title": {"type": "plain_text", "text": "Hold this asset?"},
-                            "text": {"type": "plain_text",
-                                     "text": f"`{host}` will be removed from active remediation tracking until unheld."},
-                            "confirm": {"type": "plain_text", "text": "Yes, hold"},
-                            "deny": {"type": "plain_text", "text": "Cancel"},
-                        },
+                    blocks.append({
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "⏸ Hold", "emoji": True},
+                                "action_id": "asset_hold",
+                                "value": f"{report_id}|{host}",
+                                "confirm": {
+                                    "title": {"type": "plain_text", "text": "Hold this asset?"},
+                                    "text": {"type": "plain_text",
+                                             "text": f"`{host}` will be removed from active remediation tracking until unheld."},
+                                    "confirm": {"type": "plain_text", "text": "Yes, hold"},
+                                    "deny": {"type": "plain_text", "text": "Cancel"},
+                                },
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "🗑 Delete", "emoji": True},
+                                "style": "danger",
+                                "action_id": "asset_delete",
+                                "value": f"{report_id}|{host}",
+                                "confirm": {
+                                    "title": {"type": "plain_text", "text": "Delete this asset?"},
+                                    "text": {"type": "plain_text",
+                                             "text": f"This permanently removes `{host}` from this report. This cannot be undone."},
+                                    "confirm": {"type": "plain_text", "text": "Yes, delete"},
+                                    "deny": {"type": "plain_text", "text": "Cancel"},
+                                },
+                            },
+                        ],
                     })
-                    action_elements.append({
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "🗑 Delete", "emoji": True},
-                        "style": "danger",
-                        "action_id": "asset_delete",
-                        "value": f"{report_id}|{host}",
-                        "confirm": {
-                            "title": {"type": "plain_text", "text": "Delete this asset?"},
-                            "text": {"type": "plain_text",
-                                     "text": f"This permanently removes `{host}` from this report. This cannot be undone."},
-                            "confirm": {"type": "plain_text", "text": "Yes, delete"},
-                            "deny": {"type": "plain_text", "text": "Cancel"},
-                        },
-                    })
-                blocks.append({"type": "actions", "elements": action_elements})
                 blocks.append({"type": "divider"})
 
         pg_block = self._numbered_pagination_block(
