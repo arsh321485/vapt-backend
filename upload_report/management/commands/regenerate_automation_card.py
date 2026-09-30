@@ -71,7 +71,17 @@ class Command(BaseCommand):
         parser.add_argument(
             "--stale-non-python", action="store_true",
             help="Bulk mode: every matching card whose automation_card is missing, "
-                 "non-python, or was withheld by the syntax-validation safety net.",
+                 "non-python, was withheld by the syntax-validation safety net, or is "
+                 "a stub (see --stub-only) — the full superset.",
+        )
+        parser.add_argument(
+            "--stub-only", action="store_true",
+            help="Bulk mode: only cards whose automation_card is a non-empty stub "
+                 "with no automation_status at all (e.g. left by a one-off GPT "
+                 "automation-generation failure, then cache-propagated onto other "
+                 "hosts — see AutoGenCards' cache_query). Narrower than "
+                 "--stale-non-python, which also includes non-python-language and "
+                 "generation_invalid cards — a separate, unrelated issue.",
         )
         parser.add_argument(
             "--dry-run", action="store_true",
@@ -99,6 +109,9 @@ class Command(BaseCommand):
 
         if options.get("card_id"):
             query["card_id"] = options["card_id"]
+        elif options.get("stub_only"):
+            query["automation_card"] = {"$exists": True, "$nin": [{}, None]}
+            query["automation_card.automation_status"] = {"$exists": False}
         elif options.get("stale_non_python"):
             query["$or"] = [
                 {"automation_card": {"$exists": False}},
@@ -120,7 +133,7 @@ class Command(BaseCommand):
             host = options.get("host")
             if not vuln:
                 raise CommandError(
-                    "Provide --vulnerability (+ optional --host), --card-id, or --stale-non-python."
+                    "Provide --vulnerability (+ optional --host), --card-id, --stub-only, or --stale-non-python."
                 )
             query["vulnerability_name"] = {"$regex": f"^{_escape(vuln)}$", "$options": "i"}
             if host:
