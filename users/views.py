@@ -21834,12 +21834,6 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*OS*\n{automation.get('os') or '—'}"},
                 {"type": "mrkdwn", "text": f"*Language*\n{automation.get('language') or '—'}"},
                 {"type": "mrkdwn", "text": f"*Automation Possible*\n{automation.get('automation_possible') or '—'}"},
-                # Real gap: download_count was already tracked (incremented
-                # on every download of THIS card's script, see
-                # user_download_ai_automation_script) and shown in the list
-                # views (Register->Script), but never surfaced here on the
-                # vulnerability's own detail page.
-                {"type": "mrkdwn", "text": f"*Downloaded*\n{automation.get('download_count', 0)}x"},
             ]},
             {"type": "divider"},
         ]
@@ -22405,7 +22399,6 @@ class SlackSlashCommandView(APIView):
                 {"type": "mrkdwn", "text": f"*Script*\n`{script_name}`"},
                 {"type": "mrkdwn", "text": f"*Automation Possible*\n{possible_badge}"},
                 {"type": "mrkdwn", "text": f"*Tested Manually*\n{tested_badge}"},
-                {"type": "mrkdwn", "text": f"*Downloaded*\n{automation.get('download_count', 0)}x"},
             ]},
         ]
         if len(available) > 1:

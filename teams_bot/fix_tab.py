@@ -931,9 +931,9 @@ def shape_automation_detail(card):
         "available_os": [automation.get("os")] if automation.get("os") else [],
         "language": automation.get("language"),
         "automation_possible": automation.get("automation_possible"),
-        # Real gap: this was tracked (incremented on every download) but
-        # never actually reshaped into the dict every renderer reads —
-        # every "Downloaded" fact/field below was silently always 0.
+        # Still reshaped for the list views (Automations tab, Register->
+        # Scripts) that show a download count per row — the detail page's
+        # own "Downloaded" field was removed per explicit request.
         "download_count": automation.get("download_count", 0),
         "script_name": automation.get("script_name"),
         "script_description": automation.get("script_description"),
@@ -1030,13 +1030,6 @@ def _automation_fix_body(automation, admin=None):
             {"title": "OS", "value": str(automation.get("os") or "—")},
             {"title": "Language", "value": str(automation.get("language") or "—")},
             {"title": "Automation Possible", "value": str(automation.get("automation_possible") or "—")},
-            # Real gap: download_count was already tracked (incremented on
-            # every download of THIS card's script) and shown in the list
-            # views (Automations tab, Register->Scripts), but never
-            # surfaced on the vulnerability's own detail page — exactly
-            # where someone deciding whether to run it would look for "has
-            # anyone on my team already downloaded/tried this?".
-            {"title": "Downloaded", "value": f"{automation.get('download_count', 0)}x"},
         ],
     }]
 
