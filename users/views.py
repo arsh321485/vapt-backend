@@ -13758,9 +13758,19 @@ class SlackSlashCommandView(APIView):
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
             atype = (h.get("asset_type") or "other").replace("_", " ").title()
+            # Real request: each affected asset gets a View too (right of
+            # its own line), opening that asset's own vulnerability list
+            # (_format_team_asset_vulns) via the same "tasset_view" target
+            # the All Assets tab's own row uses.
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_  |  *{st}*"},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "action_id": "tasset_view",
+                    "value": f"{host_name}|{vapt_team}|all|all|0|0|all",
+                },
             })
         return blocks
 
@@ -16625,9 +16635,20 @@ class SlackSlashCommandView(APIView):
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
             atype = (h.get("asset_type") or "other").replace("_", " ").title()
+            # Real request: each affected asset gets a View too (right of
+            # its own line, same accessory slot pattern as everywhere
+            # else) — opens that asset's own vulnerability list
+            # (_format_asset_vulns), the same "View" target the All Assets
+            # tab's own row already uses.
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_  |  *{st}*"},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "action_id": "view_fix_asset",
+                    "value": f"{host_name}|all|all|0|0|all",
+                },
             })
         return blocks
 
