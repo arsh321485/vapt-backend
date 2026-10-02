@@ -13776,7 +13776,7 @@ class SlackSlashCommandView(APIView):
                 blocks.append({"type": "divider"})
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
-            atype = classify_finding_type(plugin_name, h.get("asset_type") or "other").replace("_", " ").title()
+            atype = self._display_asset_type(classify_finding_type(plugin_name, h.get("asset_type") or "other"))
             # Real request: each affected asset gets a View too (right of
             # its own line), opening that asset's own vulnerability list
             # (_format_team_asset_vulns) via the same "tasset_view" target
@@ -13824,7 +13824,7 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Held", "emoji": True}})
             for h in held_hosts:
                 host_name = h.get("host_name") or "Unknown"
-                atype = classify_finding_type(plugin_name, h.get("asset_type") or "other").replace("_", " ").title()
+                atype = self._display_asset_type(classify_finding_type(plugin_name, h.get("asset_type") or "other"))
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_"},
@@ -14070,7 +14070,7 @@ class SlackSlashCommandView(APIView):
                 # "Other" here.
                 host_categories = class_map.get(a["host_name"], {}).get("categories") or []
                 specific = next((c for c in host_categories if c != "other"), None)
-                atype = (specific or class_map.get(a["host_name"], {}).get("asset_type") or "other").replace("_", " ").title()
+                atype = self._display_asset_type(specific or class_map.get(a["host_name"], {}).get("asset_type"))
                 blocks.append({
                     "type": "section",
                     "text": {
@@ -14131,7 +14131,7 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "divider"})
             blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Assets On Hold", "emoji": True}})
             for host, info in held_map.items():
-                held_atype = (info.get("asset_type") or "other").replace("_", " ").title()
+                held_atype = self._display_asset_type(info.get("asset_type"))
                 blocks.append({
                     "type": "section",
                     "text": {
@@ -16416,7 +16416,7 @@ class SlackSlashCommandView(APIView):
                     # any specific category over "other" when one exists.
                     host_categories = class_map.get(host, {}).get("categories") or []
                     specific = next((c for c in host_categories if c != "other"), None)
-                    atype = (specific or class_map.get(host, {}).get("asset_type") or "other").replace("_", " ").title()
+                    atype = self._display_asset_type(specific or class_map.get(host, {}).get("asset_type"))
                 # Real request: View sits on the right of the asset line
                 # itself (a section block's own "accessory" slot — the one
                 # spot Slack lets a button sit beside text), with Hold/
@@ -16490,7 +16490,7 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "divider"})
             blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Assets On Hold", "emoji": True}})
             for host, info in held_map.items():
-                atype = (info.get("asset_type") or "other").replace("_", " ").title()
+                atype = self._display_asset_type(info.get("asset_type"))
                 blocks.append({
                     "type": "section",
                     "text": {
@@ -16725,7 +16725,7 @@ class SlackSlashCommandView(APIView):
             # classify differently from the host as a whole (see
             # classify_finding_type's own docstring — same fix already
             # applied to the Assets tab's classification pills).
-            atype = classify_finding_type(plugin_name, h.get("asset_type") or "other").replace("_", " ").title()
+            atype = self._display_asset_type(classify_finding_type(plugin_name, h.get("asset_type") or "other"))
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_  |  *{st}*"},
@@ -16774,7 +16774,7 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Held", "emoji": True}})
             for h in held_hosts:
                 host_name = h.get("host_name") or "Unknown"
-                atype = classify_finding_type(plugin_name, h.get("asset_type") or "other").replace("_", " ").title()
+                atype = self._display_asset_type(classify_finding_type(plugin_name, h.get("asset_type") or "other"))
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_"},
@@ -20733,6 +20733,18 @@ class SlackSlashCommandView(APIView):
         if "review" in st_norm:
             return "review"
         return "open"
+
+    def _display_asset_type(self, t):
+        """Classification label for display — "other" shows as "Asset"
+        (matching _CLASS_FILTER_BUTTONS' own pill label) everywhere this
+        category appears inline on a row, not just on the filter pill
+        itself. Real request: "Other" read as if the asset/finding couldn't
+        be classified at all; every other bucket (Web App/Firewall/Server)
+        already reads as a plain noun, so the fallback bucket should too."""
+        t = (t or "other").strip().lower()
+        if t == "other":
+            return "Asset"
+        return t.replace("_", " ").title()
 
     def _short_date(self, val):
         """Date-only prefix of a first/last-observation timestamp — these
