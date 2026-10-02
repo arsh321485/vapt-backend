@@ -15232,18 +15232,19 @@ class SlackSlashCommandView(APIView):
         }.get(sub_action_id, "overdue")
 
         try:
-            vd_data = self._call_user_api(
-                "/api/user/register/register/latest/vulns/", team_id, user_id,
-                params={"team": vapt_team},
-            )
+            # Real bug report: this used to fetch via a raw API call with
+            # no short_id ever assigned, so the Reminder tab's "View"
+            # button (added below via _format_notification_tab) always
+            # got skipped — _get_team_vulns is the canonical source every
+            # OTHER team-scoped list already goes through specifically
+            # because it assigns one, and _build_team_vuln_detail_response
+            # (the tav_view_* handler) only resolves a short_id against
+            # THIS exact function's own output.
+            rows, _report_id, _raw = self._get_team_vulns(vapt_team, team_id, user_id)
             rc_data = self._call_user_api("/api/user/risk_criteria/risks/", team_id, user_id)
         except Exception as exc:
             logger.exception("[team_reminder] fetch failed: %s", exc)
             return self._text_block(f"❌ Could not load Reminder data: `{exc}`")
-
-        rows = (vd_data.get("rows") or []) if isinstance(vd_data, dict) else []
-        team_lower = vapt_team.strip().lower()
-        rows = [r for r in rows if (r.get("assigned_team") or "").strip().lower() == team_lower]
 
         rc_list = (rc_data.get("risk_criteria") or []) if isinstance(rc_data, dict) else []
         if not rc_list:
@@ -15260,6 +15261,7 @@ class SlackSlashCommandView(APIView):
         return self._format_notification_tab(
             bucket_key, buckets[bucket_key], offset=offset,
             pg_action_id="trem_list_pg", value_prefix_extra=f"{vapt_team}|",
+            vapt_team=vapt_team,
         )
 
     def _button_row_blocks(self, items, active_action_id=None, chunk_size=5, value=""):
@@ -21256,7 +21258,7 @@ class SlackSlashCommandView(APIView):
             blocks.append(pg_block)
         return blocks
 
-    def _format_notification_tab(self, bucket_key, rows, offset=0, pg_action_id="notif_list_pg", value_prefix_extra=""):
+    def _format_notification_tab(self, bucket_key, rows, offset=0, pg_action_id="notif_list_pg", value_prefix_extra="", vapt_team=None):
         """
         "Reminder" nav tab sub-tabs — Overdue / Due Today / This Week /
         Next Week. Each sub-tab is just a plain paginated list of the rows
@@ -21264,6 +21266,19 @@ class SlackSlashCommandView(APIView):
         needed here since the bucket itself is the filter. `pg_action_id`
         is parameterized so the team-channel Reminder tab (own isolated
         action-id namespace) can reuse this exact renderer.
+
+        vapt_team: set only by the team-channel caller — real bug report:
+        the admin side's row already got a right-side "View" button (see
+        below), but the team-channel Reminder tab never did, because
+        _team_reminder_subtab_blocks fetched its rows via a raw API call
+        with no short_id assigned at all, so the `if sid:` guard below
+        always skipped it. Fixed at the source (_team_reminder_subtab_
+        blocks now goes through _get_team_vulns, same as every other
+        team-scoped list, which DOES assign one) — this parameter routes
+        the button to the team-scoped detail handler (tav_view_*) instead
+        of the admin-only view_allvuln_detail_* one, since a team member's
+        short_id is only valid against _get_team_vulns' own list, not
+        admin's full register.
         """
         PAGE_SIZE = 5
         titles = {
@@ -21325,13 +21340,22 @@ class SlackSlashCommandView(APIView):
                 }
                 if sid:
                     safe_sid = "".join(ch if ch.isalnum() else "_" for ch in str(sid))[:40]
-                    section["accessory"] = {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "View", "emoji": True},
-                        "action_id": f"view_allvuln_detail_{safe_sid}",
-                        "value": f"{sid}|notif{bucket_key}",
-                        "style": "primary",
-                    }
+                    if vapt_team:
+                        section["accessory"] = {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "View", "emoji": True},
+                            "action_id": f"tav_view_{safe_sid}",
+                            "value": f"{sid}|tfixvulns|{vapt_team}|all|all|0",
+                            "style": "primary",
+                        }
+                    else:
+                        section["accessory"] = {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "View", "emoji": True},
+                            "action_id": f"view_allvuln_detail_{safe_sid}",
+                            "value": f"{sid}|notif{bucket_key}",
+                            "style": "primary",
+                        }
                 blocks.append(section)
 
         blocks.append(
