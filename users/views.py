@@ -13910,20 +13910,20 @@ class SlackSlashCommandView(APIView):
                 ctx_els.append({"type": "mrkdwn", "text": f"`{sno}` *{name}*"})
                 blocks.append({"type": "context", "elements": ctx_els})
                 fix_value = f"{sid}|{origin}|{vapt_team}|{sev_filter}|{st_filter}|{offset}"
-                # Real request: a closed vuln has nothing left to fix —
-                # button reads "View" (no color, nothing actionable left)
-                # instead of "Fix"; a still-open one keeps "Fix" and is
-                # now styled green (Slack's "primary" style) so it reads as
-                # the actionable item it is.
+                # A closed vuln has nothing left to fix, so the button
+                # reads "View" instead of "Fix" — but real bug report: it
+                # was also left un-styled (plain/grey) while admin's own
+                # Register view always shows its button green regardless
+                # of status. Match that — green applies to both "Fix" and
+                # "View" now, only the label itself changes with status.
                 is_closed = st == "closed"
                 accessory = {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View" if is_closed else "Fix", "emoji": True},
                     "action_id": f"tav_view_{safe_sid}",
                     "value": fix_value,
+                    "style": "primary",
                 }
-                if not is_closed:
-                    accessory["style"] = "primary"
                 blocks.append({
                     "type": "section",
                     "text": {
