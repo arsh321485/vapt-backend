@@ -14063,14 +14063,23 @@ class SlackSlashCommandView(APIView):
                 ctx_els = self._sev_count_context_elements(sev_counts)
                 if ctx_els:
                     blocks.append({"type": "context", "elements": ctx_els})
-                # Prefer any specific category (web_app/firewall/server)
-                # over the host's own base "other" type when one exists —
-                # same fix as admin's _format_asset_list, so a host that's
-                # genuinely counted under "Server" doesn't always display
-                # "Other" here.
-                host_categories = class_map.get(a["host_name"], {}).get("categories") or []
-                specific = next((c for c in host_categories if c != "other"), None)
-                atype = self._display_asset_type(specific or class_map.get(a["host_name"], {}).get("asset_type"))
+                # Real bug report: unlike admin's _format_asset_list, this
+                # had no branch for an ACTIVE specific pill at all — it
+                # always preferred any specific category over "other",
+                # even while the Asset pill itself was selected. That's
+                # backwards: a host is showing here under Asset BECAUSE
+                # "other" is one of its categories, so its row showed
+                # "Server" (a different category from the same list) while
+                # sitting inside the Asset-filtered view, looking like a
+                # mismatch. When a specific pill is active, show that
+                # pill's own label (the reason this row is in view); only
+                # prefer a specific category over "other" under "All".
+                if class_filter != "all":
+                    atype = dict(self._CLASS_FILTER_BUTTONS).get(class_filter, "Asset")
+                else:
+                    host_categories = class_map.get(a["host_name"], {}).get("categories") or []
+                    specific = next((c for c in host_categories if c != "other"), None)
+                    atype = self._display_asset_type(specific or class_map.get(a["host_name"], {}).get("asset_type"))
                 blocks.append({
                     "type": "section",
                     "text": {
