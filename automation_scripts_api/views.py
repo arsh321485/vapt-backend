@@ -1463,8 +1463,16 @@ def user_download_ai_automation_script(request, card_id):
     # script tomorrow count again. Every hit in the window still gets
     # the real file content, so the download itself is never blocked —
     # only the counter is debounced.
+    #
+    # Real bug report #2: the dedupe key included script_type, so a card
+    # with BOTH a fix and a verify script (confirmed live: exactly this
+    # case) still landed TWO increments in one window — one for each
+    # button's own "first hit" — even though only one of the two buttons
+    # was ever actually clicked. download_count represents "this card's
+    # automation got downloaded", not "this exact variant" — key on
+    # (card_id, user) only, so fix+verify share the same debounce slot.
     from django.core.cache import cache
-    dedupe_key = f"ai_script_dl_dedupe:{card_id}:{request.user.id}:{script_type}"
+    dedupe_key = f"ai_script_dl_dedupe:{card_id}:{request.user.id}"
     if cache.add(dedupe_key, True, timeout=300):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with MongoContext() as db:
