@@ -1446,18 +1446,26 @@ def user_download_ai_automation_script(request, card_id):
         filename = f"{base_name}_{script_type}.py"
 
     # Real bug report: a single click on Teams' "Download Fix Script"
-    # Action.OpenUrl button reliably incremented download_count by 4, not
-    # 1 — confirmed live via direct Mongo read (download_count=4 but only
-    # ONE last_downloaded_at timestamp, meaning all 4 increments landed
-    # together, not across separate real downloads). Teams/the browser
-    # (link preview, SafeLinks-style scanning, retries) can hit this same
-    # authenticated GET more than once per actual user click — debounce
-    # so only the FIRST hit on a given (card, user, type) within a short
-    # window actually counts; every hit in that window still gets the
-    # real file content, so the download itself is never blocked.
+    # Action.OpenUrl button reliably incremented download_count by
+    # several, not 1 — confirmed live via direct Mongo read (a card's
+    # download_count jumping by 3-4 but only ONE last_downloaded_at
+    # timestamp, meaning the extra increments landed together, not
+    # across separate real downloads). Likely cause: Teams/Defender-style
+    # link-safety scanning pre-fetches a URL embedded in an Adaptive
+    # Card the moment the card is posted/re-rendered (this card
+    # re-renders on every OTHER click too, via update_activity, and
+    # script_download_url_ai mints a fresh signed token each time) —
+    # well before the person actually reads the card and clicks
+    # Download, so a short debounce window doesn't reliably overlap the
+    # two. A 15s window (first attempt at this fix) still wasn't enough
+    # in practice. 300s covers a realistic "render to real click" gap
+    # while still letting a genuinely separate download of the same
+    # script tomorrow count again. Every hit in the window still gets
+    # the real file content, so the download itself is never blocked —
+    # only the counter is debounced.
     from django.core.cache import cache
     dedupe_key = f"ai_script_dl_dedupe:{card_id}:{request.user.id}:{script_type}"
-    if cache.add(dedupe_key, True, timeout=15):
+    if cache.add(dedupe_key, True, timeout=300):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with MongoContext() as db:
             db[VULN_CARD_COLLECTION].update_one(
