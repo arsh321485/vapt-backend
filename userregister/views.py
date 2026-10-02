@@ -2793,24 +2793,21 @@ class UserSupportRequestsByReportAPIView(APIView):
                     continue
                 raw_docs.append(doc)
 
-            # Batch severity fallback map from fix_vulnerabilities.
-            fix_coll = db[FIX_VULN_COLLECTION]
-            object_ids = []
-            for sdoc in raw_docs:
-                raw_vid = str(sdoc.get("vulnerability_id") or "").strip()
-                if not raw_vid:
-                    continue
-                try:
-                    object_ids.append(ObjectId(raw_vid))
-                except Exception as e:
-                    logger.warning("Suppressed error: %s", e)
-
-            fix_severity_by_id = {}
-            if object_ids:
-                for fdoc in fix_coll.find({"_id": {"$in": object_ids}}):
-                    fid = str(fdoc.get("_id"))
-                    sev = (fdoc.get("risk_factor") or fdoc.get("severity") or "").strip().title()
-                    fix_severity_by_id[fid] = sev
+            # Real bug report: this only ever checked the OPEN
+            # fix_vulnerabilities collection for a severity fallback — a
+            # support request whose underlying vuln had since been closed
+            # (fix record moved to fix_vulnerabilities_closed) always came
+            # back with severity="" here, even though the admin-side
+            # equivalent (SupportRequestByReportAPIView) correctly showed
+            # it via its own _build_support_severity_lookups, which also
+            # checks the closed collection plus two more fallback layers
+            # (plugin_name+host match, raw Nessus scan match). Reuse that
+            # exact same admin-side logic instead of this weaker one-off
+            # version, so both sides resolve identically.
+            from adminregister.views import _build_support_severity_lookups, _resolve_support_request_severity
+            fix_severity_by_id, fix_severity_by_key, nessus_severity_by_key = (
+                _build_support_severity_lookups(db, report_id, admin_id, admin_email, raw_docs)
+            )
 
         # ── Batch-resolve requester names from UserDetail ────────────────────
         # Gather all unique user_ids (user_id preferred, fallback admin_id)
@@ -2863,9 +2860,8 @@ class UserSupportRequestsByReportAPIView(APIView):
             uid = str(doc.get("user_id") or doc.get("admin_id") or "")
             requester_name = id_to_name.get(uid) or _resolve_requester(doc)
             vulnerability_id = str(doc.get("vulnerability_id") or "").strip()
-            severity = (
-                (doc.get("severity") or doc.get("risk_factor") or "").strip().title()
-                or fix_severity_by_id.get(vulnerability_id, "")
+            severity = _resolve_support_request_severity(
+                doc, fix_severity_by_id, fix_severity_by_key, nessus_severity_by_key,
             )
             effective_status = (
                 "closed" if vulnerability_id in closed_vuln_ids
