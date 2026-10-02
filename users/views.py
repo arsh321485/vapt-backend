@@ -5078,13 +5078,14 @@ def _build_upload_report_modal(latest_report=None):
                     # includes "nessus"/"xml"/"html"/"htm" — Slack's views.open
                     # previously rejected the WHOLE modal with
                     # "invalid_arguments" when "nessus" was in this list (not a
-                    # standard extension Slack recognizes), so only the
-                    # universally-safe ones are restricted here. A .nessus/
-                    # .xml/.html/.htm file still has to be picked via "All
-                    # Files", but still gets caught by the real validation this
-                    # modal's own submit handler already does (see
-                    # _submit_upload_report) if it's genuinely unsupported.
-                    "filetypes": ["pdf", "doc", "docx", "csv", "xls", "xlsx"],
+                    # standard extension Slack recognizes). html/htm are common,
+                    # well-known extensions (unlike nessus/xml) — added back in
+                    # per explicit request; .nessus/.xml still have to be picked
+                    # via "All Files" until confirmed safe to add the same way.
+                    # Either way, the real validation this modal's own submit
+                    # handler does (see _submit_upload_report) still catches
+                    # anything genuinely unsupported.
+                    "filetypes": ["pdf", "doc", "docx", "csv", "xls", "xlsx", "html", "htm"],
                     "max_files": 10,
                 },
             },
