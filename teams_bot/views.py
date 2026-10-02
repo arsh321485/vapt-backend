@@ -285,6 +285,20 @@ class TeamsAIScriptDownloadView(APIView):
         except Exception:
             logger.exception(f"[TeamsAIScriptDownload] failed for team_id={team_id} card_id={card_id}")
             return HttpResponse(status=500)
+        if response.status_code == 200:
+            # Real bug report: a successful download increments
+            # automation_card.download_count in Mongo immediately, but the
+            # Script tab's own card list is cached for 20s
+            # (fix_tab.cached_fetch) — reopening the tab right after
+            # downloading showed the stale pre-download count, while the
+            # OTHER role's tab (whose cache happened to have already
+            # expired) showed the correct, already-incremented one. Bust
+            # both the admin and member cache entries for this report here
+            # so the very next view on either side is immediately fresh,
+            # instead of waiting out the cache window.
+            from django.core.cache import cache
+            cache.delete(f"teamsbot_cache:automation_cards:{admin.id}:admin")
+            cache.delete(f"teamsbot_cache:automation_cards:{admin.id}:member")
         return response
 
 
