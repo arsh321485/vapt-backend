@@ -13768,6 +13768,7 @@ class SlackSlashCommandView(APIView):
         blocks.append({"type": "header", "text": {"type": "plain_text", "text": f"🛡 {plugin_name}"[:150], "emoji": True}})
         blocks.append(self._ctx(f"{sev} severity  •  {len(hosts)} asset(s) affected"))
         blocks.append({"type": "divider"})
+        from upload_report.asset_classification import classify_finding_type
         if not open_hosts:
             blocks += self._text_block("No open assets for this finding.")
         for idx, h in enumerate(open_hosts):
@@ -13775,7 +13776,7 @@ class SlackSlashCommandView(APIView):
                 blocks.append({"type": "divider"})
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
-            atype = (h.get("asset_type") or "other").replace("_", " ").title()
+            atype = classify_finding_type(plugin_name, h.get("asset_type") or "other").replace("_", " ").title()
             # Real request: each affected asset gets a View too (right of
             # its own line), opening that asset's own vulnerability list
             # (_format_team_asset_vulns) via the same "tasset_view" target
@@ -13823,7 +13824,7 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Held", "emoji": True}})
             for h in held_hosts:
                 host_name = h.get("host_name") or "Unknown"
-                atype = (h.get("asset_type") or "other").replace("_", " ").title()
+                atype = classify_finding_type(plugin_name, h.get("asset_type") or "other").replace("_", " ").title()
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_"},
@@ -16711,6 +16712,7 @@ class SlackSlashCommandView(APIView):
         blocks.append({"type": "header", "text": {"type": "plain_text", "text": f"🛡 {plugin_name}"[:150], "emoji": True}})
         blocks.append(self._ctx(f"{sev} severity  •  {len(hosts)} asset(s) affected"))
         blocks.append({"type": "divider"})
+        from upload_report.asset_classification import classify_finding_type
         if not open_hosts:
             blocks += self._text_block("No open assets for this finding.")
         for idx, h in enumerate(open_hosts):
@@ -16718,7 +16720,12 @@ class SlackSlashCommandView(APIView):
                 blocks.append({"type": "divider"})
             host_name = h.get("host_name") or "Unknown"
             st = (h.get("status") or "open").replace("_", " ").title()
-            atype = (h.get("asset_type") or "other").replace("_", " ").title()
+            # Real request: this used the host's own overall asset_type
+            # (e.g. "other"), which ignores that THIS specific finding can
+            # classify differently from the host as a whole (see
+            # classify_finding_type's own docstring — same fix already
+            # applied to the Assets tab's classification pills).
+            atype = classify_finding_type(plugin_name, h.get("asset_type") or "other").replace("_", " ").title()
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_  |  *{st}*"},
@@ -16767,7 +16774,7 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "header", "text": {"type": "plain_text", "text": "🔒 Held", "emoji": True}})
             for h in held_hosts:
                 host_name = h.get("host_name") or "Unknown"
-                atype = (h.get("asset_type") or "other").replace("_", " ").title()
+                atype = classify_finding_type(plugin_name, h.get("asset_type") or "other").replace("_", " ").title()
                 blocks.append({
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": f"🖥 `{host_name}`  |  _{atype}_"},
