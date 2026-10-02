@@ -136,6 +136,47 @@ def create_personal_conversation(service_url: str, bot_id: str, tenant_id: str, 
     return (resp.json() or {}).get("id")
 
 
+def get_conversation_member(service_url: str, conversation_id: str, member_id: str):
+    """
+    Fetches one member's full TeamsChannelAccount (id, name, email,
+    userPrincipalName, aadObjectId, tenantId, ...) via the Connector API's
+    own GET /v3/conversations/{id}/members/{memberId} — authenticated with
+    this bot's OWN Bot Framework credentials (_connector_headers, same ones
+    every send/reply/delete above already uses), NOT a Microsoft Graph call.
+
+    Real bug report: the RSC install-provisioning flow (teams_bot.views.
+    _try_rsc_provision_on_install) used to resolve an installer's email via
+    Graph's GET /v1.0/users/{aadObjectId} instead, which requires the
+    User.Read.All Application permission — never actually granted (admin-
+    consented) for any customer tenant, confirmed live via a direct Graph
+    call returning 403 Authorization_RequestDenied with only the expected
+    Group.Selected (RSC) role on the token. That made the installer-match
+    step silently fail for every fresh RSC install with no prior website
+    login, for every tenant, not just one customer. This endpoint needs no
+    such tenant-wide consent — a bot that's already in the conversation
+    (true the moment RSC install happens) can look up any member already
+    visible there under its own Bot Framework identity.
+
+    Returns the member dict, or None on any failure (caller should treat
+    that the same as "can't resolve this installer").
+    """
+    if not (service_url and conversation_id and member_id):
+        return None
+    url = f"{service_url.rstrip('/')}/v3/conversations/{conversation_id}/members/{member_id}"
+    try:
+        resp = requests.get(url, headers=_connector_headers(), timeout=15)
+    except Exception:
+        logger.exception("[TeamsBot] get_conversation_member request failed")
+        return None
+    if resp.status_code >= 300:
+        logger.warning(f"[TeamsBot] get_conversation_member failed ({resp.status_code}): {resp.text[:500]}")
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
 def send_activity(service_url: str, conversation_id: str, activity: dict):
     """
     Send a NEW message into an existing conversation (not a reply to a

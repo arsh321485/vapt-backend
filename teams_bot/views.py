@@ -528,10 +528,11 @@ class TeamsBotMessagesView(APIView):
         Resolves which VaptFix admin this belongs to via the INSTALLER's
         own AAD identity (activity.from.aadObjectId — the same field
         member_resolve already uses elsewhere to identify an activity's
-        acting user) looked up against Graph with an app-only token scoped
-        to the INSTALLING tenant (RSC grants only apply to app-only tokens
-        issued for that specific tenant, never our own home-tenant token),
-        matched by email against our own User table. On a match, provisions
+        acting user), looked up through the Bot Framework Connector API's
+        own conversation-member endpoint (teams_bot.bot_api.
+        get_conversation_member — see its docstring for why this isn't a
+        Graph /users/{id} call), matched by email against our own User
+        table. On a match, provisions
         the exact same 5 channels (admin dashboard + 4 team channels) the
         old auto-create-team flow always has, via the same
         _create_vaptfix_channels/_ensure_admin_dashboard_channel functions
@@ -564,25 +565,29 @@ class TeamsBotMessagesView(APIView):
             logger.info(f"[TeamsRSC] provisioning already in progress/recently done for team_id={team_id_direct} — skipping duplicate delivery")
             return None
 
-        from users.views import _get_graph_app_token_for_tenant, _http_get
-        app_token = _get_graph_app_token_for_tenant(tenant_id)
-        if not app_token:
+        # Real bug report: this used to resolve the installer's email via
+        # Microsoft Graph's GET /v1.0/users/{aadObjectId}, which requires
+        # the User.Read.All Application permission — never actually
+        # admin-consented for any customer tenant (confirmed live: the
+        # app-only token's own "roles" claim only ever carries Group.
+        # Selected, the RSC role; the Graph call 403s with
+        # Authorization_RequestDenied every time). That silently broke
+        # installer-matching for EVERY fresh RSC install with no prior
+        # website login, on every tenant — not a one-customer issue.
+        # Bot Framework's own Connector API can look up a member already
+        # visible in this conversation (true the instant RSC install
+        # happens) under the bot's OWN credentials instead — no directory-
+        # wide Graph permission needed at all, same reasoning
+        # get_conversation_member's own docstring explains.
+        from teams_bot.bot_api import get_conversation_member
+        service_url = activity.get("serviceUrl")
+        conversation_id = (activity.get("conversation") or {}).get("id")
+        installer_data = get_conversation_member(service_url, conversation_id, aad_object_id)
+        if not installer_data:
+            logger.warning(f"[TeamsRSC] installer lookup failed for aad_object_id={aad_object_id}, team_id={team_id_direct}")
             cache.delete(lock_key)
             return None
-        headers = {"Authorization": f"Bearer {app_token}", "Content-Type": "application/json"}
-
-        try:
-            resp = _http_get(f"https://graph.microsoft.com/v1.0/users/{aad_object_id}", headers=headers, timeout=10)
-            if resp.status_code != 200:
-                logger.warning(f"[TeamsRSC] installer lookup failed for aad_object_id={aad_object_id}: {resp.status_code} {resp.text[:200]}")
-                cache.delete(lock_key)
-                return None
-            installer_data = resp.json()
-        except Exception:
-            logger.exception(f"[TeamsRSC] installer lookup raised for aad_object_id={aad_object_id}")
-            cache.delete(lock_key)
-            return None
-        installer_email = (installer_data.get("mail") or installer_data.get("userPrincipalName") or "").strip()
+        installer_email = (installer_data.get("email") or installer_data.get("userPrincipalName") or "").strip()
         if not installer_email:
             cache.delete(lock_key)
             return None
@@ -601,7 +606,13 @@ class TeamsBotMessagesView(APIView):
         # to persist ms_team_id.
         User.objects.filter(pk=admin.pk).update(ms_team_id=team_id_direct)
 
-        from users.views import _create_vaptfix_channels, _backfill_sub_channel_bot_presence
+        from users.views import _get_graph_app_token_for_tenant, _create_vaptfix_channels, _backfill_sub_channel_bot_presence
+        app_token = _get_graph_app_token_for_tenant(tenant_id)
+        if not app_token:
+            logger.warning(f"[TeamsRSC] could not get Graph app token for tenant_id={tenant_id}, team_id={team_id_direct} — channel creation needs the RSC-granted Channel.Create.Group role, which this token call line carries, unlike the now-removed installer-lookup step above")
+            cache.delete(lock_key)
+            return admin
+        headers = {"Authorization": f"Bearer {app_token}", "Content-Type": "application/json"}
         channels_result = []
         try:
             channels_result = _create_vaptfix_channels(team_id_direct, headers, access_token=None, admin=admin)
