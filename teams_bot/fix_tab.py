@@ -321,6 +321,17 @@ def bust_asset_vuln_caches(caller, as_member=False, team_name=None):
         f"held_vulns:{caller.id}:{suffix}:{team_name or ''}",
     ]
     keys.append(f"user_register_data:{caller.id}:{team_name}" if as_member else f"register_data:{caller.id}")
+    # all_vulns_totals/all_vulns_grouped are keyed by report_id too — look
+    # it up (itself cached, so this doesn't add a real round trip) so the
+    # grouped "All Vulnerabilities" list/detail screens don't keep showing
+    # pre-mutation Hold/Delete state for up to 20s like the others would.
+    try:
+        report_id = _fetch_asset_classification_data(caller, as_member=as_member, team_name=team_name)["report_id"]
+    except Exception:
+        report_id = None
+    if report_id:
+        keys.append(f"all_vulns_totals:{caller.id}:{suffix}:{report_id}:{team_name or ''}")
+        keys.append(f"all_vulns_grouped:{caller.id}:{suffix}:{report_id}:{team_name or ''}")
     for k in keys:
         cache.delete(f"teamsbot_cache:{k}")
 
@@ -648,6 +659,37 @@ def _fetch_all_vulnerabilities_totals(caller, report_id, as_member=False, team_n
     return cached_fetch(key, 20, _fetch)
 
 
+def _fetch_grouped_vulnerabilities(caller, report_id, as_member=False, team_name=None):
+    """
+    Full AllVulnerabilitiesAPIView/UserAllVulnerabilitiesAPIView response —
+    one entry per DISTINCT vulnerability (grouped by plugin_name), each
+    carrying its own `hosts` list (host_name/asset_type/status per
+    affected asset) — everything a "N asset(s) affected" list row plus its
+    own per-asset drill-down screen needs, no separate fetch per
+    vulnerability required. Same endpoint _fetch_all_vulnerabilities_totals
+    already calls for pill counts, kept separate since that one discards
+    everything except the totals.
+    """
+    def _fetch():
+        from .actions import _call_view_in_process
+        if as_member:
+            from userasset.views import UserAllVulnerabilitiesAPIView
+            data_kwargs = {"team": team_name} if team_name else None
+            status_code, data = _call_view_in_process(
+                UserAllVulnerabilitiesAPIView, caller, method="get", url_kwargs={"report_id": report_id}, data=data_kwargs,
+            )
+        else:
+            from adminasset.views import AllVulnerabilitiesAPIView
+            status_code, data = _call_view_in_process(
+                AllVulnerabilitiesAPIView, caller, method="get", url_kwargs={"report_id": report_id},
+            )
+        if status_code >= 300 or not isinstance(data, dict):
+            return []
+        return data.get("vulnerabilities") or []
+    key = f"all_vulns_grouped:{caller.id}:{'member' if as_member else 'admin'}:{report_id}:{team_name or ''}"
+    return cached_fetch(key, 20, _fetch)
+
+
 def vulns_list_body(admin, sev="all", st="all", cls="all", offset=0, as_member=False, team_name=None,
                      view_prefix="fix_vuln", subtitle=None):
     rows = _fetch_rows(admin, as_member=as_member, team_name=team_name)
@@ -748,6 +790,129 @@ def _append_held_vulns_section(body, held_map, view_prefix, common_val, offset, 
     if len(held_map) > limit:
         body.append({"type": "TextBlock", "text": f"+ {len(held_map) - limit} more held not shown.", "size": "Small", "isSubtle": True, "spacing": "Small"})
     return body
+
+
+# ─── All Vulns (grouped by finding — real request: show how many assets
+# EACH distinct vulnerability affects, matching Slack's own grouped view
+# (_format_grouped_vulns_list/_format_vuln_assets_detail), instead of the
+# flat per-host list above (vulns_list_body) which never showed a
+# per-finding asset count at all. ────────────────────────────────────────
+
+def grouped_vulns_list_body(admin, cls="all", offset=0, as_member=False, team_name=None, view_prefix="fix_gvuln", subtitle=None):
+    """One row per DISTINCT finding (grouped by plugin_name, via the same
+    AllVulnerabilitiesAPIView/UserAllVulnerabilitiesAPIView the website's
+    own All Vulnerabilities tab uses) — "N asset(s) affected", open/held
+    breakdown, Hold All/Delete All, and a "View" into
+    grouped_vuln_assets_detail_body for the per-asset list."""
+    class_data = _fetch_asset_classification_data(admin, as_member=as_member, team_name=team_name)
+    report_id = class_data["report_id"]
+    vulns = _fetch_grouped_vulnerabilities(admin, report_id, as_member=as_member, team_name=team_name) if report_id else []
+    real_totals = _fetch_all_vulnerabilities_totals(admin, report_id, as_member=as_member, team_name=team_name) if report_id else {"total": 0, "asset_type_totals": {}}
+    cls_counts = {"all": real_totals["total"], **real_totals["asset_type_totals"]}
+
+    def _matches_cls(v):
+        return cls == "all" or (v.get("asset_type_counts") or {}).get(cls, 0) > 0
+
+    filtered = [v for v in vulns if _matches_cls(v)]
+    total = len(filtered)
+    page = filtered[offset:offset + PAGE_SIZE]
+    common_val = {"cls": cls, "report_id": report_id or ""}
+
+    body = [
+        {"type": "TextBlock", "text": "📋 All Vulnerabilities", "weight": "Bolder", "size": "Medium", "spacing": "Medium"},
+        {"type": "TextBlock", "text": subtitle or "Every distinct vulnerability in your latest report.", "size": "Small", "isSubtle": True, "wrap": True},
+        _class_filter_columnset(view_prefix, cls, cls_counts),
+    ]
+    if not page:
+        body.append({"type": "TextBlock", "text": "No vulnerabilities found.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
+        return body
+    for v in page:
+        name = v.get("plugin_name") or "Unnamed vulnerability"
+        rsev = (v.get("severity") or "medium").strip().lower()
+        if rsev not in _SEV_ICON:
+            rsev = "medium"
+        hosts = v.get("hosts") or []
+        open_hosts = [h for h in hosts if (h.get("status") or "open") != "held"]
+        held_count = len(hosts) - len(open_hosts)
+        subtitle_txt = f"{len(hosts)} asset(s) affected   ·   {len(open_hosts)} open, {held_count} held"
+        val = {"plugin_name": name, "offset": offset, **common_val}
+        extra = []
+        if open_hosts:
+            extra.append(cards._execute_action("⏸ Hold All", {"action_id": f"{view_prefix}_hold_all", **val}))
+            extra.append(cards._execute_action("🗑 Delete All", {"action_id": f"{view_prefix}_delete_all_confirm", **val}, style="destructive"))
+        body.append(_row(
+            f"{_SEV_ICON[rsev]} {name}", subtitle_txt, f"{view_prefix}_view", val,
+            extra_actions=extra,
+        ))
+    body.extend(_pagination_body(offset, total, f"{view_prefix}_pg", common_val))
+    return body
+
+
+def grouped_vuln_assets_detail_body(admin, plugin_name, list_offset=0, cls="all", report_id=None, as_member=False, team_name=None, view_prefix="fix_gvuln"):
+    """The "View" target for grouped_vulns_list_body — every asset one
+    specific finding affects, each with its own Hold/Unhold/Delete.
+    Mirrors Slack's _format_vuln_assets_detail (and its team-scoped
+    _format_team_vuln_assets_detail mirror)."""
+    vulns = _fetch_grouped_vulnerabilities(admin, report_id, as_member=as_member, team_name=team_name) if report_id else []
+    v = next((x for x in vulns if (x.get("plugin_name") or "") == plugin_name), None)
+    common_val = {"cls": cls, "report_id": report_id or ""}
+    back_val = {"offset": list_offset, **common_val}
+    body = [_back_action("← Back to All Vulnerabilities", f"{view_prefix}_back", back_val)]
+    if not v:
+        body.append({"type": "TextBlock", "text": f"❌ \"{plugin_name}\" could not be found — it may have just been deleted or fully held.", "wrap": True, "spacing": "Medium"})
+        return body
+
+    sev = (v.get("severity") or "Medium").strip() or "Medium"
+    hosts = v.get("hosts") or []
+    open_hosts = [h for h in hosts if (h.get("status") or "open") != "held"]
+    held_hosts = [h for h in hosts if (h.get("status") or "open") == "held"]
+    body.append({"type": "TextBlock", "text": f"🛡 {plugin_name}", "weight": "Bolder", "size": "Medium", "spacing": "Medium", "wrap": True})
+    body.append({"type": "TextBlock", "text": f"{sev} severity   ·   {len(hosts)} asset(s) affected", "size": "Small", "isSubtle": True})
+
+    asset_val_base = {"plugin_name": plugin_name, "list_offset": list_offset, **common_val}
+    if not open_hosts:
+        body.append({"type": "TextBlock", "text": "No open assets for this finding.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
+    for h in open_hosts:
+        host_name = h.get("host_name") or "Unknown"
+        st = h.get("status") or "open"
+        atype = h.get("asset_type") or "other"
+        subtitle_txt = f"{_CLASS_LABEL.get(atype, 'Asset')}   ·   {_status_label(st)}"
+        val = {"host": host_name, **asset_val_base}
+        extra = [
+            cards._execute_action("⏸ Hold", {"action_id": f"{view_prefix}_asset_hold", **val}),
+            cards._execute_action("🗑 Delete", {"action_id": f"{view_prefix}_asset_delete_confirm", **val}, style="destructive"),
+        ]
+        body.append(_row(f"🖥 {host_name}", subtitle_txt, None, None, extra_actions=extra))
+
+    if held_hosts:
+        body.append({"type": "TextBlock", "text": "🔒 Held", "weight": "Bolder", "size": "Medium", "spacing": "Large"})
+        for h in held_hosts:
+            host_name = h.get("host_name") or "Unknown"
+            atype = h.get("asset_type") or "other"
+            val = {"host": host_name, **asset_val_base}
+            body.append(_row(
+                f"🖥 {host_name}", _CLASS_LABEL.get(atype, "Asset"), None, None,
+                extra_actions=[cards._execute_action("🔓 Unhold", {"action_id": f"{view_prefix}_asset_unhold", **val})],
+            ))
+    return body
+
+
+def grouped_vuln_delete_all_confirm_body(plugin_name, val, view_prefix="fix_gvuln"):
+    return _confirm_body(
+        f"⚠️ Delete \"{plugin_name}\" from ALL affected assets?",
+        "This removes this vulnerability from every open asset it currently affects. An admin can restore it from the website if needed.",
+        f"{view_prefix}_delete_all_do", val,
+        f"{view_prefix}_back", val,
+    )
+
+
+def grouped_vuln_asset_delete_confirm_body(plugin_name, host, val, view_prefix="fix_gvuln"):
+    return _confirm_body(
+        f"⚠️ Delete \"{plugin_name}\" on {host}?",
+        "This removes this vulnerability from the Vulnerabilities list for this asset. An admin can restore it from the website if needed.",
+        f"{view_prefix}_asset_delete_do", val,
+        f"{view_prefix}_view", val,
+    )
 
 
 def _vuln_facts_body(r):
@@ -1507,7 +1672,7 @@ def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="all"
     body = [cards._fix_subnav_columnset(active_sub)]
     try:
         if active_sub == "fix_sub_vulns":
-            body.extend(vulns_list_body(admin, sev=sev, st=st, cls=cls, offset=offset))
+            body.extend(grouped_vulns_list_body(admin, cls=cls, offset=offset))
         elif active_sub == "fix_sub_common":
             body.append(cards._common_vulns_team_columnset(common_team))
             body.extend(common_vulns_list_body(admin, team_key=common_team, sev=sev, st=st, offset=offset))

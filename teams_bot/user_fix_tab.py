@@ -75,6 +75,14 @@ def assets_list_body(member_user, team_name, sev="all", st="all", cls="all", off
     )
 
 
+def grouped_vuln_assets_detail_body(member_user, team_name, plugin_name, list_offset=0, cls="all", report_id=None):
+    """Thin wrapper over fix_tab.grouped_vuln_assets_detail_body (as_member=True)."""
+    return fix_tab.grouped_vuln_assets_detail_body(
+        member_user, plugin_name, list_offset=list_offset, cls=cls, report_id=report_id,
+        as_member=True, team_name=team_name, view_prefix="ufix_gvuln",
+    )
+
+
 def asset_detail_body(member_user, team_name, host, back_offset=0):
     rows = _fetch_team_rows(member_user, team_name)
     host_rows = [(i, r) for i, r in enumerate(rows) if (r.get("asset") or "Unknown").strip() == host]
@@ -98,14 +106,15 @@ def asset_detail_body(member_user, team_name, host, back_offset=0):
     return body
 
 
-def vulns_list_body(member_user, team_name, sev="all", st="all", cls="all", offset=0):
-    """Thin wrapper over fix_tab.vulns_list_body (as_member=True) — same
-    classification + Hold/Unhold/Delete feature as the admin side, backed
-    by the team-scoped UserAllVulnerabilitiesAPIView/UserBulkVuln*APIView/
-    UserVulnHoldListByReportAPIView instead of the admin ones."""
-    return fix_tab.vulns_list_body(
-        member_user, sev=sev, st=st, cls=cls, offset=offset,
-        as_member=True, team_name=team_name, view_prefix="ufix_vuln",
+def vulns_list_body(member_user, team_name, cls="all", offset=0):
+    """Thin wrapper over fix_tab.grouped_vulns_list_body (as_member=True) —
+    same grouped-by-finding "N asset(s) affected" view + Hold All/Delete
+    All as the admin side, backed by the team-scoped
+    UserAllVulnerabilitiesAPIView/UserBulkVuln*APIView instead of the
+    admin ones."""
+    return fix_tab.grouped_vulns_list_body(
+        member_user, cls=cls, offset=offset,
+        as_member=True, team_name=team_name, view_prefix="ufix_gvuln",
         subtitle=f"Every vulnerability assigned to {team_name}.",
     )
 
@@ -457,7 +466,7 @@ def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets",
     genuinely member-scoped and ignores it."""
     body = [_fix_subnav_columnset(sub_action_id)]
     if sub_action_id == "ufix_sub_vulns":
-        body.extend(vulns_list_body(member_user, team_name, sev=sev, st=st, cls=cls, offset=offset))
+        body.extend(vulns_list_body(member_user, team_name, cls=cls, offset=offset))
     elif sub_action_id == "ufix_sub_common":
         body.extend(_common_vulns_for_team(admin, team_name, sev=sev, st=st, offset=offset))
     else:

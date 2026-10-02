@@ -465,6 +465,117 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
         return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
 
+    # ── All Vulns, grouped by finding (real request: show how many assets
+    # each distinct vulnerability affects) ───────────────────────────────
+
+    if action_id in ("fix_gvuln_pg", "fix_gvuln_cls"):
+        offset = int(value.get("offset") or 0)
+        cls = value.get("cls") or "all"
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.grouped_vulns_list_body(admin, cls=cls, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] fix_gvuln_pg/cls failed")
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_gvuln_view":
+        plugin_name = value.get("plugin_name") or ""
+        list_offset = int(value.get("offset") or 0)
+        cls = value.get("cls") or "all"
+        report_id = value.get("report_id") or ""
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.grouped_vuln_assets_detail_body(
+                admin, plugin_name, list_offset=list_offset, cls=cls, report_id=report_id,
+            )
+        except Exception:
+            logger.exception("[TeamsBot] fix_gvuln_view failed")
+            body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_gvuln_back":
+        offset = int(value.get("offset") or 0)
+        cls = value.get("cls") or "all"
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.grouped_vulns_list_body(admin, cls=cls, offset=offset)
+        except Exception:
+            logger.exception("[TeamsBot] fix_gvuln_back failed")
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id in ("fix_gvuln_hold_all", "fix_gvuln_delete_all_do"):
+        plugin_name = value.get("plugin_name") or ""
+        report_id = value.get("report_id") or ""
+        offset = int(value.get("offset") or 0)
+        cls = value.get("cls") or "all"
+        try:
+            from urllib.parse import quote
+            from adminasset.views import BulkVulnHoldAPIView, BulkVulnDeleteAPIView
+            vulns = fix_tab._fetch_grouped_vulnerabilities(admin, report_id)
+            v = next((x for x in vulns if (x.get("plugin_name") or "") == plugin_name), None)
+            host_names = [h.get("host_name") for h in (v.get("hosts") or []) if (h.get("status") or "open") != "held"] if v else []
+            if host_names:
+                view_cls = BulkVulnHoldAPIView if action_id == "fix_gvuln_hold_all" else BulkVulnDeleteAPIView
+                method = "post" if action_id == "fix_gvuln_hold_all" else "delete"
+                _call_view_in_process(
+                    view_cls, admin, method=method, request_format="json",
+                    data={"host_names": host_names},
+                    url_kwargs={"report_id": report_id, "plugin_name": quote(plugin_name, safe="")},
+                )
+                fix_tab.bust_asset_vuln_caches(admin)
+            body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.grouped_vulns_list_body(admin, cls=cls, offset=offset)
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not update this vulnerability right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_gvuln_delete_all_confirm":
+        plugin_name = value.get("plugin_name") or ""
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.grouped_vuln_delete_all_confirm_body(plugin_name, value, view_prefix="fix_gvuln")
+        except Exception:
+            logger.exception("[TeamsBot] fix_gvuln_delete_all_confirm failed")
+            body = [cards._header("📋 All Vulnerabilities"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id in ("fix_gvuln_asset_hold", "fix_gvuln_asset_unhold", "fix_gvuln_asset_delete_do"):
+        plugin_name = value.get("plugin_name") or ""
+        host = value.get("host") or ""
+        report_id = value.get("report_id") or ""
+        list_offset = int(value.get("list_offset") or 0)
+        cls = value.get("cls") or "all"
+        try:
+            from urllib.parse import quote
+            from adminasset.views import BulkVulnHoldAPIView, BulkVulnUnholdAPIView, BulkVulnDeleteAPIView
+            if action_id == "fix_gvuln_asset_hold":
+                view_cls, method = BulkVulnHoldAPIView, "post"
+            elif action_id == "fix_gvuln_asset_unhold":
+                view_cls, method = BulkVulnUnholdAPIView, "post"
+            else:
+                view_cls, method = BulkVulnDeleteAPIView, "delete"
+            _call_view_in_process(
+                view_cls, admin, method=method, request_format="json",
+                data={"host_names": [host]},
+                url_kwargs={"report_id": report_id, "plugin_name": quote(plugin_name, safe="")},
+            )
+            fix_tab.bust_asset_vuln_caches(admin)
+            body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.grouped_vuln_assets_detail_body(
+                admin, plugin_name, list_offset=list_offset, cls=cls, report_id=report_id,
+            )
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [cards._header("📋 Vulnerability"), cards._body_text("Could not update this asset right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
+    if action_id == "fix_gvuln_asset_delete_confirm":
+        plugin_name = value.get("plugin_name") or ""
+        host = value.get("host") or ""
+        try:
+            body = [cards._fix_subnav_columnset("fix_sub_vulns")] + fix_tab.grouped_vuln_asset_delete_confirm_body(plugin_name, host, value, view_prefix="fix_gvuln")
+        except Exception:
+            logger.exception("[TeamsBot] fix_gvuln_asset_delete_confirm failed")
+            body = [cards._header("📋 Vulnerability"), cards._body_text("Could not load this right now.")]
+        return cards.nav_buttons_card(active_action_id="nav_fix", extra_body=body)
+
     if action_id == "fix_vuln_toggle":
         # Manual/Automation Fix toggle inside a vuln's own detail page —
         # works from any entry point (flat All Vulns list, an asset's own

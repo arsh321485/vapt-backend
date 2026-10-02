@@ -36,6 +36,13 @@ _FIX_ACTION_IDS = {
     # see teams_bot.fix_tab's shared assets_list_body/vulns_list_body).
     "ufix_asset_hold", "ufix_asset_unhold", "ufix_asset_delete_confirm", "ufix_asset_delete_do",
     "ufix_vuln_hold", "ufix_vuln_unhold", "ufix_vuln_delete_confirm", "ufix_vuln_delete_do",
+    # All Vulns, grouped by finding (real request: show how many assets
+    # each distinct vulnerability affects — see teams_bot.fix_tab's
+    # grouped_vulns_list_body/grouped_vuln_assets_detail_body).
+    "ufix_gvuln_pg", "ufix_gvuln_cls", "ufix_gvuln_view", "ufix_gvuln_back",
+    "ufix_gvuln_hold_all", "ufix_gvuln_delete_all_confirm", "ufix_gvuln_delete_all_do",
+    "ufix_gvuln_asset_hold", "ufix_gvuln_asset_unhold",
+    "ufix_gvuln_asset_delete_confirm", "ufix_gvuln_asset_delete_do",
 }
 _REGISTER_ACTION_IDS = {
     "unav_register", "ureg_sub_register", "ureg_sub_scripts",
@@ -260,6 +267,83 @@ def _render_fix(member_user, admin, team_id, team_name, action_id, value):
             logger.exception("[TeamsBot] ufix_vuln_delete_do failed")
             return [cards._body_text("Could not delete this vulnerability right now.")]
         return fix.fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_vulns", offset=offset, sev=sev, st=st, cls=cls)
+
+    # ── All Vulns, grouped by finding (team-scoped mirror of the admin
+    # side's fix_gvuln_* handlers in actions.py) ─────────────────────────
+
+    if action_id in ("ufix_gvuln_pg", "ufix_gvuln_cls"):
+        return [fix._fix_subnav_columnset("ufix_sub_vulns")] + fix.vulns_list_body(member_user, team_name, cls=cls, offset=offset)
+
+    if action_id == "ufix_gvuln_view":
+        plugin_name = value.get("plugin_name") or ""
+        report_id = value.get("report_id") or ""
+        return [fix._fix_subnav_columnset("ufix_sub_vulns")] + fix.grouped_vuln_assets_detail_body(
+            member_user, team_name, plugin_name, list_offset=offset, cls=cls, report_id=report_id,
+        )
+
+    if action_id == "ufix_gvuln_back":
+        return [fix._fix_subnav_columnset("ufix_sub_vulns")] + fix.vulns_list_body(member_user, team_name, cls=cls, offset=offset)
+
+    if action_id in ("ufix_gvuln_hold_all", "ufix_gvuln_delete_all_do"):
+        plugin_name = value.get("plugin_name") or ""
+        report_id = value.get("report_id") or ""
+        try:
+            from urllib.parse import quote
+            from userasset.views import UserBulkVulnHoldAPIView, UserBulkVulnDeleteAPIView
+            from .actions import _call_view_in_process
+            vulns = fix.fix_tab._fetch_grouped_vulnerabilities(member_user, report_id, as_member=True, team_name=team_name)
+            v = next((x for x in vulns if (x.get("plugin_name") or "") == plugin_name), None)
+            host_names = [h.get("host_name") for h in (v.get("hosts") or []) if (h.get("status") or "open") != "held"] if v else []
+            if host_names:
+                view_cls = UserBulkVulnHoldAPIView if action_id == "ufix_gvuln_hold_all" else UserBulkVulnDeleteAPIView
+                method = "post" if action_id == "ufix_gvuln_hold_all" else "delete"
+                _call_view_in_process(
+                    view_cls, member_user, method=method, request_format="json",
+                    data={"host_names": host_names},
+                    url_kwargs={"report_id": report_id, "plugin_name": quote(plugin_name, safe="")},
+                )
+                fix.fix_tab.bust_asset_vuln_caches(member_user, as_member=True, team_name=team_name)
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            return [cards._body_text("Could not update this vulnerability right now.")]
+        return [fix._fix_subnav_columnset("ufix_sub_vulns")] + fix.vulns_list_body(member_user, team_name, cls=cls, offset=offset)
+
+    if action_id == "ufix_gvuln_delete_all_confirm":
+        plugin_name = value.get("plugin_name") or ""
+        return [fix._fix_subnav_columnset("ufix_sub_vulns")] + fix.fix_tab.grouped_vuln_delete_all_confirm_body(plugin_name, value, view_prefix="ufix_gvuln")
+
+    if action_id in ("ufix_gvuln_asset_hold", "ufix_gvuln_asset_unhold", "ufix_gvuln_asset_delete_do"):
+        plugin_name = value.get("plugin_name") or ""
+        host = value.get("host") or ""
+        report_id = value.get("report_id") or ""
+        list_offset = _as_int(value.get("list_offset")) or 0
+        try:
+            from urllib.parse import quote
+            from userasset.views import UserBulkVulnHoldAPIView, UserBulkVulnUnholdAPIView, UserBulkVulnDeleteAPIView
+            from .actions import _call_view_in_process
+            if action_id == "ufix_gvuln_asset_hold":
+                view_cls, method = UserBulkVulnHoldAPIView, "post"
+            elif action_id == "ufix_gvuln_asset_unhold":
+                view_cls, method = UserBulkVulnUnholdAPIView, "post"
+            else:
+                view_cls, method = UserBulkVulnDeleteAPIView, "delete"
+            _call_view_in_process(
+                view_cls, member_user, method=method, request_format="json",
+                data={"host_names": [host]},
+                url_kwargs={"report_id": report_id, "plugin_name": quote(plugin_name, safe="")},
+            )
+            fix.fix_tab.bust_asset_vuln_caches(member_user, as_member=True, team_name=team_name)
+        except Exception:
+            logger.exception(f"[TeamsBot] {action_id} failed")
+            return [cards._body_text("Could not update this asset right now.")]
+        return [fix._fix_subnav_columnset("ufix_sub_vulns")] + fix.grouped_vuln_assets_detail_body(
+            member_user, team_name, plugin_name, list_offset=list_offset, cls=cls, report_id=report_id,
+        )
+
+    if action_id == "ufix_gvuln_asset_delete_confirm":
+        plugin_name = value.get("plugin_name") or ""
+        host = value.get("host") or ""
+        return [fix._fix_subnav_columnset("ufix_sub_vulns")] + fix.fix_tab.grouped_vuln_asset_delete_confirm_body(plugin_name, host, value, view_prefix="ufix_gvuln")
 
     if action_id == "ufix_asset_view":
         return fix.asset_detail_body(member_user, team_name, value.get("host"), back_offset=offset)
