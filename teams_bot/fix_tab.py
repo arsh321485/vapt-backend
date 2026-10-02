@@ -869,6 +869,11 @@ def grouped_vuln_assets_detail_body(admin, plugin_name, list_offset=0, cls="all"
     body.append({"type": "TextBlock", "text": f"🛡 {plugin_name}", "weight": "Bolder", "size": "Medium", "spacing": "Medium", "wrap": True})
     body.append({"type": "TextBlock", "text": f"{sev} severity   ·   {len(hosts)} asset(s) affected", "size": "Small", "isSubtle": True})
 
+    # Real request: each asset row gets a View too, opening that asset's
+    # own full vulnerability list (the same "fix_asset_view"/"ufix_asset_view"
+    # target the All Assets tab's own row already uses) — same pattern as
+    # Slack's _format_vuln_assets_detail.
+    asset_view_action_id = "ufix_asset_view" if as_member else "fix_asset_view"
     asset_val_base = {"plugin_name": plugin_name, "list_offset": list_offset, **common_val}
     if not open_hosts:
         body.append({"type": "TextBlock", "text": "No open assets for this finding.", "size": "Small", "isSubtle": True, "spacing": "Medium"})
@@ -882,7 +887,7 @@ def grouped_vuln_assets_detail_body(admin, plugin_name, list_offset=0, cls="all"
             cards._execute_action("⏸ Hold", {"action_id": f"{view_prefix}_asset_hold", **val}),
             cards._execute_action("🗑 Delete", {"action_id": f"{view_prefix}_asset_delete_confirm", **val}, style="destructive"),
         ]
-        body.append(_row(f"🖥 {host_name}", subtitle_txt, None, None, extra_actions=extra))
+        body.append(_row(f"🖥 {host_name}", subtitle_txt, asset_view_action_id, {"host": host_name, "offset": 0}, extra_actions=extra))
 
     if held_hosts:
         body.append({"type": "TextBlock", "text": "🔒 Held", "weight": "Bolder", "size": "Medium", "spacing": "Large"})
@@ -891,7 +896,7 @@ def grouped_vuln_assets_detail_body(admin, plugin_name, list_offset=0, cls="all"
             atype = h.get("asset_type") or "other"
             val = {"host": host_name, **asset_val_base}
             body.append(_row(
-                f"🖥 {host_name}", _CLASS_LABEL.get(atype, "Asset"), None, None,
+                f"🖥 {host_name}", _CLASS_LABEL.get(atype, "Asset"), asset_view_action_id, {"host": host_name, "offset": 0},
                 extra_actions=[cards._execute_action("🔓 Unhold", {"action_id": f"{view_prefix}_asset_unhold", **val})],
             ))
     return body
