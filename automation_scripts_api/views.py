@@ -1445,15 +1445,28 @@ def user_download_ai_automation_script(request, card_id):
         base_name = re.sub(r"[^A-Za-z0-9_-]+", "_", automation.get("script_name") or card_id).strip("_") or card_id
         filename = f"{base_name}_{script_type}.py"
 
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with MongoContext() as db:
-        db[VULN_CARD_COLLECTION].update_one(
-            {"card_id": card_id},
-            {
-                "$inc": {"automation_card.download_count": 1},
-                "$set": {"automation_card.last_downloaded_at": now},
-            },
-        )
+    # Real bug report: a single click on Teams' "Download Fix Script"
+    # Action.OpenUrl button reliably incremented download_count by 4, not
+    # 1 — confirmed live via direct Mongo read (download_count=4 but only
+    # ONE last_downloaded_at timestamp, meaning all 4 increments landed
+    # together, not across separate real downloads). Teams/the browser
+    # (link preview, SafeLinks-style scanning, retries) can hit this same
+    # authenticated GET more than once per actual user click — debounce
+    # so only the FIRST hit on a given (card, user, type) within a short
+    # window actually counts; every hit in that window still gets the
+    # real file content, so the download itself is never blocked.
+    from django.core.cache import cache
+    dedupe_key = f"ai_script_dl_dedupe:{card_id}:{request.user.id}:{script_type}"
+    if cache.add(dedupe_key, True, timeout=15):
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with MongoContext() as db:
+            db[VULN_CARD_COLLECTION].update_one(
+                {"card_id": card_id},
+                {
+                    "$inc": {"automation_card.download_count": 1},
+                    "$set": {"automation_card.last_downloaded_at": now},
+                },
+            )
 
     response = HttpResponse(content, content_type="text/x-python; charset=utf-8")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
