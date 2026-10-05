@@ -792,6 +792,71 @@ def parse_tenable_vuln_export_csv(file_path: str) -> Dict[str, Any]:
     }
 
 
+TENABLE_ASSET_EXPORT_SNIFF_COLUMNS = {"host_name", "ipv4_addresses", "operating_systems", "sources"}
+
+
+def _sniff_is_tenable_asset_export_csv(file_path: str) -> bool:
+    """Peek at the header row to detect a Tenable asset-inventory export (hosts only, no findings)."""
+    try:
+        with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as fp:
+            header_line = fp.readline()
+        columns = {c.strip().strip('"') for c in header_line.split(",")}
+        return TENABLE_ASSET_EXPORT_SNIFF_COLUMNS.issubset(columns)
+    except Exception:
+        return False
+
+
+def parse_tenable_asset_export_csv(file_path: str) -> Dict[str, Any]:
+    """
+    Parse a Tenable "Assets" export CSV into host-only entries (empty
+    vulnerabilities list) in the same shape the other parsers produce, so it
+    merges into an existing report like any other upload — adding the hosts
+    without inventing findings.
+    """
+    try:
+        df = pd.read_csv(file_path, dtype=str, keep_default_na=False)
+    except Exception as exc:
+        return {"error": f"Tenable asset export CSV parse error: {exc}"}
+
+    def _get(row, col: str) -> str:
+        val = row.get(col, "")
+        if val is None:
+            return ""
+        val = str(val).strip()
+        return "" if val.lower() == "nan" else val
+
+    vulnerabilities_by_host: List[Dict[str, Any]] = []
+    seen = set()
+    for _, row in df.iterrows():
+        ipv4 = _get(row, "ipv4_addresses")
+        host_name = ipv4 or _get(row, "host_name") or _get(row, "name") or _get(row, "id")
+        if not host_name or host_name in seen:
+            continue
+        seen.add(host_name)
+        host_info = {}
+        if ipv4:
+            host_info["IP"] = ipv4
+        fqdn = _get(row, "display_fqdn") or _get(row, "host_name")
+        if fqdn:
+            host_info["DNS Name"] = fqdn
+        os_val = _get(row, "operating_systems")
+        if os_val:
+            host_info["operating-system"] = os_val
+        vulnerabilities_by_host.append({
+            "host_name": host_name,
+            "host_information": host_info,
+            "vulnerabilities": [],
+        })
+
+    return {
+        "type": "nessus",
+        "scan_info": {"source": "Tenable Asset Export", "parser": "tenable_asset_export_csv"},
+        "total_hosts": len(vulnerabilities_by_host),
+        "total_vulnerabilities": 0,
+        "vulnerabilities_by_host": vulnerabilities_by_host,
+    }
+
+
 # ==================== NESSUS XML PARSER ==================== #
 
 # def parse_nessus_xml(file_path: str) -> Dict[str, Any]:
@@ -1644,6 +1709,8 @@ def dispatch_parse(file_path: str, filename: str) -> Dict[str, Any]:
                 return _strip_non_risk_findings(result)
             # Sniffed as AWS Inspector but structured parse failed — fall
             # back to generic CSV rather than losing the upload entirely.
+        if _sniff_is_tenable_asset_export_csv(file_path):
+            return parse_tenable_asset_export_csv(file_path)
         if _sniff_is_tenable_vuln_export_csv(file_path):
             result = parse_tenable_vuln_export_csv(file_path)
             if "error" not in result:

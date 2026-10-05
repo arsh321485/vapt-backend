@@ -711,7 +711,7 @@ class UploadReportView(APIView):
             # each starting its own. Set once the first file of the day is
             # stored below, so a 2nd/3rd file in this same request merges
             # into the 1st rather than each other.
-            from .merge_service import get_todays_report_id, merge_hosts_into_report
+            from .merge_service import get_merge_target_report_id, merge_hosts_into_report
             from django.core.cache import cache as _merge_cache
 
             # Real bug report: two (or more) uploads for the SAME admin
@@ -790,7 +790,7 @@ class UploadReportView(APIView):
                 f"waited_ms={_lock_wait_ms}"
             )
 
-            todays_report_id = get_todays_report_id(target_admin)
+            todays_report_id = get_merge_target_report_id(target_admin)
             logger.info(
                 f"[MergeUpload] key={_merge_lock_key} todays_report_id={todays_report_id} "
                 f"lock_held={_merge_lock_held}"
@@ -990,7 +990,7 @@ class UploadReportView(APIView):
                             parsed_count=parsed_count,
                         )
 
-                        is_structured = parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom")
+                        is_structured = parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom") or bool(parsed_data.get("vulnerabilities_by_host"))
                         is_merge = bool(todays_report_id) and is_structured
                         logger.info(
                             f"[MergeUpload] key={_merge_lock_key} file={uploaded_file.name!r} "
