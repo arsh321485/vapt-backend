@@ -453,7 +453,7 @@ class UploadReportAdmin(admin.ModelAdmin):
             })
         return prepared_hosts
 
-    def _store_in_mongodb(self, parsed_data, report_id, admin_email, original_filename, member_type, scope_id=None):
+    def _store_in_mongodb(self, parsed_data, report_id, admin_email, original_filename, member_type, scope_id=None, merge_into_report_id=None):
         """Store parsed report data in MongoDB."""
         mongo_uri = self._get_mongo_uri()
         if not mongo_uri:
@@ -537,7 +537,15 @@ class UploadReportAdmin(admin.ModelAdmin):
                     if locked_hosts:
                         document["locked_hosts"] = self._prepare_hosts_for_storage(locked_hosts)
                         document["freemium_trimmed"] = True
-                    db["nessus_reports"].insert_one(document)
+                    if merge_into_report_id:
+                        from .merge_service import merge_hosts_into_report
+                        merge_hosts_into_report(db, merge_into_report_id, hosts_payload)
+                        db["nessus_reports"].update_one(
+                            {"report_id": merge_into_report_id},
+                            {"$addToSet": {"uploaded_file_names": original_filename}},
+                        )
+                    else:
+                        db["nessus_reports"].insert_one(document)
                 else:
                     document["parsed_data"] = parsed_data
                     db["parsed_reports"].insert_one(document)
@@ -861,18 +869,28 @@ class UploadReportAdmin(admin.ModelAdmin):
                     obj.status = "Successfully Processed"
                     obj.save()
 
+                    # Merge into the admin's latest report when one exists
+                    # (same rule as the website/API upload path), so every
+                    # downstream step below keys off the report that actually
+                    # holds the data.
+                    structured = parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom") or bool(parsed_data.get("vulnerabilities_by_host"))
+                    from .merge_service import get_merge_target_report_id
+                    merge_target = get_merge_target_report_id(admin_user, exclude_pk=obj.pk) if structured else None
+                    upload_report_id = merge_target or str(obj._id)
+
                     # Store in MongoDB
                     mongodb_stored = self._store_in_mongodb(
                         parsed_data=parsed_data,
-                        report_id=str(obj._id),
+                        report_id=upload_report_id,
                         admin_email=admin_user.email,
                         original_filename=uploaded_file.name,
                         member_type=obj.member_type or "external",
                         scope_id=scope_id,
+                        merge_into_report_id=merge_target,
                     )
 
                     if mongodb_stored:
-                        self._mark_scope_fulfilled(scope_id, str(obj._id))
+                        self._mark_scope_fulfilled(scope_id, upload_report_id)
                         upload_actual_seconds = time.perf_counter() - op_started
 
                         # Same cache-invalidation this admin panel was
@@ -920,7 +938,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                             # that was just created.
                             threading.Thread(
                                 target=notify_admin_report_uploaded,
-                                args=(admin_user, [str(obj._id)]),
+                                args=(admin_user, [upload_report_id]),
                                 daemon=True,
                             ).start()
                         except Exception:
@@ -933,7 +951,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                                 with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as _client:
                                     _db = self._get_mongo_db(_client)
                                     _db["nessus_reports"].update_one(
-                                        {"report_id": str(obj._id)},
+                                        {"report_id": upload_report_id},
                                         {"$set": {"upload_processing_seconds": int(round(upload_actual_seconds))}}
                                     )
                             except Exception as _upe:
@@ -955,7 +973,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                         # above; only on new upload)
                         if parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom") and not change:
                             from .views import _auto_generate_cards_bg
-                            report_id = str(obj._id)
+                            report_id = upload_report_id
                             t = threading.Thread(
                                 target=_auto_generate_cards_bg,
                                 args=(report_id, admin_user.email, str(admin_user.id)),

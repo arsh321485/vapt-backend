@@ -50,15 +50,20 @@ def _normalize_plugin_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
 
 
-def get_merge_target_report_id(admin) -> str | None:
+def get_merge_target_report_id(admin, exclude_pk=None) -> str | None:
     """
     Returns the report_id of this admin's most recent successfully-stored
     upload, regardless of day — every new upload (magic link or normal)
     merges into it, instead of only merging within the same calendar day.
+    `exclude_pk` skips the upload currently being processed (its own row is
+    saved before this runs, so it would otherwise be picked as its own target).
     """
     from .models import UploadReport
 
-    latest = UploadReport.objects.filter(admin=admin).order_by("-uploaded_at").first()
+    qs = UploadReport.objects.filter(admin=admin)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    latest = qs.order_by("-uploaded_at").first()
     return str(latest._id) if latest else None
 
 
