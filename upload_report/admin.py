@@ -151,15 +151,30 @@ class UploadReportAdminForm(forms.ModelForm):
 
 class MagicPinUploadForm(forms.ModelForm):
     """
-    No admin dropdown at all — explicit request: a magic-pin upload should
-    never be attached to (or ask for) any existing admin's account.
-    MagicPinUploadAdmin.save_model always attributes the report to the
-    Super Admin doing the upload.
+    Optional "Upload for admin" selector — Super Admin only (this page is
+    already superuser-gated, see MagicPinUploadAdmin). Leave blank to keep
+    the report under the Super Admin's own account; pick an admin to attach
+    the upload (and merge into that admin's latest report) instead.
     """
+
+    target_admin = forms.ChoiceField(
+        choices=[],
+        required=False,
+        label="Upload for admin (optional)",
+    )
 
     class Meta:
         model = UploadReport
         fields = ['file']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        choices = [("", "— myself (Super Admin) —")]
+        for u in User.objects.all():
+            if u.is_superuser:
+                continue
+            choices.append((str(u.id), u.email))
+        self.fields['target_admin'].choices = choices
 
 
 @admin.register(UploadReport)
@@ -1076,7 +1091,9 @@ class MagicPinUploadAdmin(UploadReportAdmin):
     _MAGIC_LINK_NO_PLAN_LIMITS = True
 
     def save_model(self, request, obj, form, change):
-        form.cleaned_data['admin_select'] = request.user
+        target_id = (form.cleaned_data.get('target_admin') or '').strip()
+        target_user = User.objects.filter(id=target_id).first() if target_id else None
+        form.cleaned_data['admin_select'] = target_user or request.user
         super().save_model(request, obj, form, change)
 
     def changelist_view(self, request, extra_context=None):
