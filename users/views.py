@@ -2767,7 +2767,7 @@ class MicrosoftTeamsCallbackView(APIView):
                         defaults={
                             "password": make_password(None),
                             "is_active": True,
-                            "is_staff": _staff_flag_for_login(email),
+                            "is_staff": True,
                             "is_superuser": False,
                             "login_provider": "microsoft_teams",
                         },
@@ -2854,13 +2854,13 @@ class MicrosoftTeamsCallbackView(APIView):
                     """
                     return HttpResponse(conflict_html, status=400)
 
-                user.is_staff = _staff_flag_for_login(user.email)
+                user.is_staff = True
                 user.login_provider = 'microsoft_teams'
                 user.ms_access_token = access_token
                 user.ms_refresh_token = token_data.get('refresh_token', '')
                 # Use filter().update() to reliably persist — avoids djongo update_fields issues
                 rows = User.objects.filter(pk=user.pk).update(
-                    is_staff=_staff_flag_for_login(user.email),
+                    is_staff=True,
                     login_provider='microsoft_teams',
                     ms_access_token=access_token,
                     ms_refresh_token=token_data.get('refresh_token', ''),
@@ -6316,7 +6316,7 @@ class SlackLoginView(APIView):
                 email=slack_email,
                 defaults={
                     "is_active": True,
-                    "is_staff": _staff_flag_for_login(slack_email),
+                    "is_staff": True,
                     "is_superuser": False,
                     "password": make_password(None),
                     "last_login": timezone.now(),
@@ -6335,20 +6335,20 @@ class SlackLoginView(APIView):
                     _udb['users_user'].update_one(
                         {'id': str(user.id)},
                         {'$set': {
-                            'is_staff': _staff_flag_for_login(user.email),
+                            'is_staff': True,
                             'login_provider': 'slack',
                             'slack_user_id': slack_user_id,
                             'slack_team_id': slack_team.get('id'),
                             'last_login': timezone.now(),
                         }}
                     )
-                user.is_staff = _staff_flag_for_login(user.email)
+                user.is_staff = True
                 user.login_provider = 'slack'
             except Exception:
                 logger.warning("User update via pymongo failed in Slack login", exc_info=True)
                 # Fallback to ORM save
                 user.last_login = timezone.now()
-                user.is_staff = _staff_flag_for_login(user.email)
+                user.is_staff = True
                 user.login_provider = "slack"
                 user.slack_user_id = slack_user_id
                 user.slack_team_id = slack_team.get("id")
@@ -10118,16 +10118,6 @@ class _PlainTextRenderer(BaseRenderer):
         if isinstance(data, str):
             return data.encode(self.charset)
         return data
-
-
-def _staff_flag_for_login(email):
-    """
-    Django is_staff decides who can open the Django admin panel. Team members
-    (a UserDetail record exists for them) must never get it, however they
-    happen to sign in (Teams, Slack, ...). Real admin accounts keep it.
-    """
-    from users_details.models import UserDetail
-    return not UserDetail.objects.filter(email__iexact=email).exists()
 
 
 class TeamsWebhookView(APIView):
