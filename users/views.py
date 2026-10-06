@@ -6099,6 +6099,12 @@ class SlackOAuthCallbackView(APIView):
                     email=email,
                     defaults={"login_provider": "slack", "password": make_password(None)},
                 )
+                # Brand-new Slack-connected signup: plan-exempt for now, same as
+                # direct Slack sign-in (see SlackLoginView). Existing website
+                # accounts that link Slack keep their pricing rules.
+                if newly_created and not user.magic_link_unlimited:
+                    User.objects.filter(pk=user.pk).update(magic_link_unlimited=True)
+                    user.magic_link_unlimited = True
 
             # Report-claim magic link (optional). Also fires for an EXISTING
             # account that signs in via Slack with a valid invite_token —
