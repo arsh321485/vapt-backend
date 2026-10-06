@@ -4893,6 +4893,8 @@ def _admin_has_selected_plan(admin) -> bool:
     _parse_rc_days is duplicated per-file in this app: avoids a
     cross-app import just for one small check.
     """
+    if getattr(admin, "magic_link_unlimited", False):
+        return True
     from billing.models import Subscription
     return Subscription.objects.filter(admin=admin, status__in=["trialing", "active", "past_due"]).exists()
 
