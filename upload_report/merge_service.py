@@ -59,12 +59,22 @@ def get_merge_target_report_id(admin, exclude_pk=None) -> str | None:
     saved before this runs, so it would otherwise be picked as its own target).
     """
     from .models import UploadReport
+    from vaptfix.mongo_client import MongoContext
 
     qs = UploadReport.objects.filter(admin=admin)
     if exclude_pk is not None:
         qs = qs.exclude(pk=exclude_pk)
-    latest = qs.order_by("-uploaded_at").first()
-    return str(latest._id) if latest else None
+    candidates = [str(r._id) for r in qs.order_by("-uploaded_at")[:20]]
+    if not candidates:
+        return None
+    # Only a row that actually has a stored nessus_reports document can be a
+    # merge target — an upload row without one (e.g. a failed or extra row)
+    # would otherwise silently swallow the new data.
+    with MongoContext() as db:
+        for rid in candidates:
+            if db[NESSUS_COLLECTION].find_one({"report_id": rid}, {"_id": 1}):
+                return rid
+    return None
 
 
 def get_todays_report_id(admin) -> str | None:
@@ -299,8 +309,7 @@ def merge_hosts_into_report(db, target_report_id: str, new_hosts: list) -> dict:
     coll = db[NESSUS_COLLECTION]
     existing = coll.find_one({"report_id": target_report_id})
     if not existing:
-        logger.warning(f"[MergeUpload] target report_id={target_report_id} not found — nothing to merge into")
-        return {"total_hosts": 0, "total_vulnerabilities": 0}
+        raise ValueError(f"merge target report_id={target_report_id} has no stored report — refusing to report success")
 
     existing_hosts = existing.get("vulnerabilities_by_host") or []
     by_host_name = {h.get("host_name"): h for h in existing_hosts if h.get("host_name")}
