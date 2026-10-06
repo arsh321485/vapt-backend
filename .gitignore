@@ -34,3 +34,4 @@ prompt.txt
 # scanners (Bandit/Semgrep) stop flagging unused, never-executed code.
 _backups/
 automation_scripts_old_backup/
+deleted_backups/
