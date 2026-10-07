@@ -25816,11 +25816,33 @@ class SlackInteractivityView(APIView):
                         if not admin:
                             blocks = slash._text_block("❌ Could not find your admin account. Contact support.")
                         else:
-                            if not admin.magic_link_unlimited:
+                            was_already_unlimited = admin.magic_link_unlimited
+                            if not was_already_unlimited:
                                 admin.magic_link_unlimited = True
                                 admin.save(update_fields=["magic_link_unlimited"])
                             promo.redeemed_count = (promo.redeemed_count or 0) + 1
                             promo.save(update_fields=["redeemed_count"])
+                            # Real bug report: redeeming a promo code only
+                            # exempted FUTURE uploads from the Freemium
+                            # trim — a report already uploaded before
+                            # redemption (select_freemium_active_hosts ran
+                            # at upload time) stayed trimmed, same gap a
+                            # Freemium->Premium Stripe upgrade already has
+                            # a fix for. Reuse that exact unlock path so
+                            # "no plan needed, everything unlimited" is
+                            # true immediately, not just going forward.
+                            if not was_already_unlimited:
+                                try:
+                                    from upload_report.views import (
+                                        unlock_freemium_hosts_for_admin,
+                                        backfill_automation_for_admin,
+                                    )
+                                    unlock_freemium_hosts_for_admin(admin)
+                                    backfill_automation_for_admin(admin)
+                                except Exception:
+                                    logger.exception(
+                                        "[SlackInteractivity] promo code submit: freemium unlock/automation backfill failed"
+                                    )
                             blocks = slash._text_block(
                                 "✅ Promo code applied — your account now has full, unlimited access "
                                 "(assets, vulnerabilities, automation scripts, add user). No plan needed. "
