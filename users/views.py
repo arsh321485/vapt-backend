@@ -6346,16 +6346,6 @@ class SlackLoginView(APIView):
                 user.slack_team_id = slack_team.get("id")
                 user.save()
 
-            # Direct sign-in through the Slack platform is exempt from pricing
-            # plan locks (automation scripts, team members, assets,
-            # vulnerabilities, upload limit, locked hosts) for now — reuses
-            # the existing magic_link_unlimited exemption that billing.enforcement
-            # already honours everywhere. Revisit when the Slack app goes live on
-            # the Marketplace (then drop this line).
-            if not user.magic_link_unlimited:
-                User.objects.filter(pk=user.pk).update(magic_link_unlimited=True)
-                user.magic_link_unlimited = True
-
             # 3a. Ensure UserDetail exists when user authenticates from Slack.
             user_detail_created = False
             user_detail_updated = False
