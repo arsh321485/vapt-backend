@@ -22794,6 +22794,7 @@ class SlackInteractivityView(APIView):
                 "modal_upload_report_submit": "Upload Report",
                 "modal_scope_csv_submit": "Upload Scope File",
                 "modal_scope_manual_submit": "Enter Scope",
+                "modal_promo_code_submit": "Enter Promo Code",
             }
             if callback_id not in titles:
                 return Response({}, status=200)
