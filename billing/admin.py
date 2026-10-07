@@ -29,6 +29,9 @@ admin.site.register(StripeWebhookEvent)
 
 @admin.register(PromoCode)
 class PromoCodeAdmin(admin.ModelAdmin):
+    # No list_filter on is_active (BooleanField) — djongo's SQL->Mongo
+    # translator raises SQLDecodeError whenever is_active is combined into
+    # the WHERE clause on this model (confirmed against production); the
+    # admin changelist filter would crash the page the moment it's used.
     list_display = ("code", "is_active", "redeemed_count", "note", "created_at")
-    list_filter = ("is_active",)
     search_fields = ("code", "note")

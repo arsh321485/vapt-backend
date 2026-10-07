@@ -25792,12 +25792,19 @@ class SlackInteractivityView(APIView):
                         blocks = slash._text_block(f"❌ {err}")
             elif callback_id == "modal_promo_code_submit":
                 code_raw = ((values.get("promo_code_block") or {}).get("promo_code_input") or {}).get("value") or ""
-                code = code_raw.strip()
+                code = code_raw.strip().upper()
                 if not code:
                     blocks = slash._text_block("❌ Please enter a promo code.")
                 else:
                     from billing.models import PromoCode
-                    promo = PromoCode.objects.filter(code__iexact=code, is_active=True).first()
+                    # Plain exact `code=` filter only — djongo's SQL->Mongo
+                    # translator raises SQLDecodeError on this model whenever
+                    # is_active (BooleanField) is combined into the WHERE
+                    # clause (iexact's iLIKE included), confirmed via direct
+                    # testing against production. is_active is checked in
+                    # Python below instead of in the query.
+                    candidate = PromoCode.objects.filter(code=code).first()
+                    promo = candidate if (candidate and candidate.is_active) else None
                     if not promo:
                         blocks = slash._text_block(
                             "❌ Invalid or inactive promo code. Please check and try again — "

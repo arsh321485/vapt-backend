@@ -166,6 +166,19 @@ class PromoCode(models.Model):
     def __str__(self):
         return f"{self.code} ({'active' if self.is_active else 'inactive'})"
 
+    def save(self, *args, **kwargs):
+        # Normalized to upper/stripped so the Slack submit handler
+        # (users/views.py's modal_promo_code_submit) can match with a plain
+        # exact `code=` filter instead of `code__iexact=` — djongo's SQL
+        # translator raises SQLDecodeError on this model's queries whenever
+        # is_active (a BooleanField) is combined into the WHERE clause,
+        # iexact's iLIKE included, so this model can only ever be safely
+        # queried by other fields with exact-match filters, checking
+        # is_active in Python afterward instead.
+        if self.code:
+            self.code = self.code.strip().upper()
+        super().save(*args, **kwargs)
+
 
 class StripeWebhookEvent(models.Model):
     """Idempotency guard — Stripe can and will redeliver the same event."""
