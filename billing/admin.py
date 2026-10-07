@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import BillingCustomer, Subscription, Invoice, SalesLead, StripeWebhookEvent
+from .models import BillingCustomer, Subscription, Invoice, SalesLead, StripeWebhookEvent, PromoCode
 
 
 @admin.register(Subscription)
@@ -25,3 +25,10 @@ class SalesLeadAdmin(admin.ModelAdmin):
 
 admin.site.register(BillingCustomer)
 admin.site.register(StripeWebhookEvent)
+
+
+@admin.register(PromoCode)
+class PromoCodeAdmin(admin.ModelAdmin):
+    list_display = ("code", "is_active", "redeemed_count", "note", "created_at")
+    list_filter = ("is_active",)
+    search_fields = ("code", "note")

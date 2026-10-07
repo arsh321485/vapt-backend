@@ -4805,6 +4805,7 @@ _ADMIN_ONLY_VIEW_CALLBACKS = {
     "modal_adduser_submit", "modal_deleteuser_submit", "modal_deleteteamuser_submit",
     "modal_reject_submit", "modal_support_reply_submit", "modal_risk_criteria_submit",
     "modal_upload_report_submit", "modal_scope_csv_submit", "modal_scope_manual_submit",
+    "modal_promo_code_submit",
 }
 _TEAM_ONLY_VIEW_CALLBACKS = {
     "modal_raise_support_submit", "modal_team_support_reply_submit", "modal_extend_request_submit",
@@ -4892,8 +4893,20 @@ def _admin_has_selected_plan(admin) -> bool:
     separate copy (not a shared import) for the same reason
     _parse_rc_days is duplicated per-file in this app: avoids a
     cross-app import just for one small check.
+
+    Also True for a Slack admin who redeemed a promo code instead of
+    picking a plan (see _build_promo_code_modal / modal_promo_code_submit)
+    — magic_link_unlimited already exempts them from every Freemium limit
+    in billing/enforcement.py, so treating them as "no plan chosen" here
+    would just re-show the Choose Your Plan/Promo Code prompt forever and
+    block Risk Criteria from ever appearing. Deliberately NOT mirrored into
+    teams_bot.onboarding's copy — promo codes are Slack-only, per the
+    explicit request that Teams keep its normal pricing flow untouched.
     """
     from billing.models import Subscription
+    from billing.enforcement import _is_unlimited_admin
+    if _is_unlimited_admin(admin):
+        return True
     return Subscription.objects.filter(admin=admin, status__in=["trialing", "active", "past_due"]).exists()
 
 
@@ -4969,19 +4982,62 @@ def _build_admin_plan_prompt_blocks(admin):
         {"type": "section", "text": {"type": "mrkdwn", "text": (
             "Select your plan for solving the vulnerabilities — Freemium (free, "
             "limited) or Premium (full report, all assets). For pricing, go to "
-            "the website."
+            "the website. Have a promo code instead? Use the button below — no "
+            "plan needed."
         )}},
         {
             "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "💳 Choose Your Plan", "emoji": True},
-                "action_id": "open_pricing_plan",
-                "url": pricing_url,
-                "style": "primary",
-            }],
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "💳 Choose Your Plan", "emoji": True},
+                    "action_id": "open_pricing_plan",
+                    "url": pricing_url,
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🎟️ Enter Promo Code", "emoji": True},
+                    "action_id": "open_promo_code_modal",
+                },
+            ],
         },
     ]
+
+
+def _build_promo_code_modal(error_text=None):
+    """
+    Slack-only promo-code redemption — temporary alternative to picking a
+    paid plan (see _build_admin_plan_prompt_blocks). A valid, active
+    billing.models.PromoCode sets the admin's magic_link_unlimited flag,
+    the same exemption every asset/vuln/automation-script/team-member gate
+    in billing/enforcement.py already honors — no separate limit logic
+    needed here. `error_text`, when set, is shown so a resubmit after an
+    invalid code doesn't look like the first empty attempt.
+    """
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "Enter your promo code to unlock full, unrestricted access — no plan required."}},
+        {
+            "type": "input",
+            "block_id": "promo_code_block",
+            "label": {"type": "plain_text", "text": "Promo Code"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "promo_code_input",
+                "placeholder": {"type": "plain_text", "text": "e.g. VAPTFIX2026"},
+            },
+        },
+    ]
+    if error_text:
+        blocks.insert(0, {"type": "section", "text": {"type": "mrkdwn", "text": f":x: {error_text}"}})
+    return {
+        "type": "modal",
+        "callback_id": "modal_promo_code_submit",
+        "title": {"type": "plain_text", "text": "Enter Promo Code"},
+        "submit": {"type": "plain_text", "text": "Apply"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
 
 
 def _build_admin_awaiting_report_blocks():
@@ -23824,6 +23880,21 @@ class SlackInteractivityView(APIView):
                 self._debug_write(f"open_risk_criteria_modal views.open -> {getattr(resp, 'text', None)}")
                 return
 
+            if action_id == "open_promo_code_modal":
+                bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                if not bot_token or not trigger_id:
+                    self._debug_write("open_promo_code_modal: missing bot_token or trigger_id")
+                    return
+                view = _build_promo_code_modal()
+                resp = _http_post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                    timeout=10,
+                )
+                self._debug_write(f"open_promo_code_modal views.open -> {getattr(resp, 'text', None)}")
+                return
+
             if action_id == "open_upload_report_modal":
                 # Open the modal FIRST (the file_input default, from
                 # _build_upload_report_modal(None)) with the trigger_id,
@@ -25500,6 +25571,7 @@ class SlackInteractivityView(APIView):
             "modal_upload_report_submit": "Upload Report",
             "modal_scope_csv_submit": "Upload Scope File",
             "modal_scope_manual_submit": "Enter Scope",
+            "modal_promo_code_submit": "Enter Promo Code",
         }
         if callback_id not in titles:
             return
@@ -25718,6 +25790,45 @@ class SlackInteractivityView(APIView):
                     else:
                         err = resp_data.get("detail") or resp_data.get("error") or "Could not save risk criteria."
                         blocks = slash._text_block(f"❌ {err}")
+            elif callback_id == "modal_promo_code_submit":
+                code_raw = ((values.get("promo_code_block") or {}).get("promo_code_input") or {}).get("value") or ""
+                code = code_raw.strip()
+                if not code:
+                    blocks = slash._text_block("❌ Please enter a promo code.")
+                else:
+                    from billing.models import PromoCode
+                    promo = PromoCode.objects.filter(code__iexact=code, is_active=True).first()
+                    if not promo:
+                        blocks = slash._text_block(
+                            "❌ Invalid or inactive promo code. Please check and try again — "
+                            "click \"Enter Promo Code\" again from the previous message to retry."
+                        )
+                    else:
+                        admin = User.objects.filter(slack_team_id=team_id).first()
+                        if not admin:
+                            blocks = slash._text_block("❌ Could not find your admin account. Contact support.")
+                        else:
+                            if not admin.magic_link_unlimited:
+                                admin.magic_link_unlimited = True
+                                admin.save(update_fields=["magic_link_unlimited"])
+                            promo.redeemed_count = (promo.redeemed_count or 0) + 1
+                            promo.save(update_fields=["redeemed_count"])
+                            blocks = slash._text_block(
+                                "✅ Promo code applied — your account now has full, unlimited access "
+                                "(assets, vulnerabilities, automation scripts, add user). No plan needed. "
+                                "Loading your dashboard…"
+                            )
+                            # Same post-unlock transition modal_risk_criteria_submit uses —
+                            # re-post the navbar now that onboarding can proceed past the
+                            # (now-skipped) plan-selection step.
+                            try:
+                                bt = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                                if bt:
+                                    admin_ch_id = slash._get_admin_channel_id(bt)
+                                    if admin_ch_id:
+                                        _post_admin_onboarding_message(bt, admin_ch_id, team_id, admin)
+                            except Exception:
+                                logger.exception("[SlackInteractivity] promo code submit: failed to post navbar")
             elif callback_id == "modal_upload_report_submit":
                 blocks = slash._submit_upload_report(values, team_id, slack_user_id)
             elif callback_id == "modal_scope_csv_submit":

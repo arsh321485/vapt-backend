@@ -142,6 +142,31 @@ class SalesLead(models.Model):
         return f"{self.full_name} <{self.work_email}>"
 
 
+class PromoCode(models.Model):
+    """
+    Slack-platform-only exemption codes. Redeeming a valid, active code from
+    the Slack "Enter Promo Code" modal (users/views.py) sets the admin's
+    existing magic_link_unlimited flag — the same exemption tier already
+    honored everywhere in billing/enforcement.py (asset/vuln/automation-
+    script/team-member limits). Lets ops add/retire codes from Django admin
+    without a deploy, instead of hardcoding a single fixed code.
+    """
+    _id = models.ObjectIdField(primary_key=True, default=ObjectId)
+
+    code = models.CharField(max_length=50, unique=True)
+    is_active = models.BooleanField(default=True)
+    note = models.CharField(max_length=255, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    redeemed_count = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = "billing_promo_codes"
+
+    def __str__(self):
+        return f"{self.code} ({'active' if self.is_active else 'inactive'})"
+
+
 class StripeWebhookEvent(models.Model):
     """Idempotency guard — Stripe can and will redeliver the same event."""
     _id = models.ObjectIdField(primary_key=True, default=ObjectId)
