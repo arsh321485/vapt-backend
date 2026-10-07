@@ -5024,7 +5024,7 @@ def _build_promo_code_modal(error_text=None):
             "element": {
                 "type": "plain_text_input",
                 "action_id": "promo_code_input",
-                "placeholder": {"type": "plain_text", "text": "e.g. VAPTFIX2026"},
+                "placeholder": {"type": "plain_text", "text": "Enter code here"},
             },
         },
     ]
