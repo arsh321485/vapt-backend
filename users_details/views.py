@@ -1139,6 +1139,34 @@ class UserDetailCreateView(generics.CreateAPIView):
                     elif not team_id:
                         logger.warning(f"[UserDetailCreate] Teams sync skipped: missing team_id/ms_team_id for admin_id={admin_user.id}")
 
+                # Real bug report: an RSC-only admin (no delegated
+                # ms_access_token on file at all — e.g. installed Teams
+                # directly, never did the website/OAuth login) never reaches
+                # the Graph-based sync above, so a member added via the
+                # Teams bot's own "Add User" command landed in their
+                # channel (added to the Teams TEAM separately, by hand)
+                # but saw Teams' own empty-channel placeholder forever — no
+                # VaptFix welcome/Home card. Posting that card only needs
+                # our own Bot Framework credentials (see
+                # _ensure_one_sub_channel_welcomed), not Graph/access_token
+                # at all, so it can run unconditionally here, independent
+                # of whether the team-membership sync above succeeded.
+                if team_id and roles:
+                    try:
+                        from teams_bot.conversation_store import get_team_channel_reference, get_sub_channel_id
+                        from users.views import _ensure_one_sub_channel_welcomed
+                        ref = get_team_channel_reference(team_id)
+                        service_url = ref.get("service_url") if ref else None
+                        if service_url:
+                            for role in roles:
+                                channel_id = get_sub_channel_id(team_id, role)
+                                if channel_id:
+                                    _ensure_one_sub_channel_welcomed(team_id, channel_id, role, service_url)
+                        else:
+                            logger.info(f"[UserDetailCreate] sub-channel welcome-ensure skipped: no service_url on file for team_id={team_id}")
+                    except Exception:
+                        logger.exception(f"[UserDetailCreate] sub-channel welcome-ensure failed for {email}")
+
                 # Slack sync — runs even with empty roles (still saves slack_member_id)
                 if not slack_bot_token:
                     # Not applicable, not a failure — this admin has no Slack
