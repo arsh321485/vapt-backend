@@ -25910,9 +25910,20 @@ class SlackInteractivityView(APIView):
                             blocks = slash._text_block("❌ Could not find your admin account. Contact support.")
                         else:
                             was_already_unlimited = admin.magic_link_unlimited
-                            if not was_already_unlimited:
-                                admin.magic_link_unlimited = True
-                                admin.save(update_fields=["magic_link_unlimited"])
+                            # Real request: promo-code access is time-boxed
+                            # (60 days from redemption) for Marketplace
+                            # reviewer accounts — unlike the invite-claim/
+                            # superuser/allowlist exemptions, which stay
+                            # permanent (see billing/enforcement.py's
+                            # _is_unlimited_admin, which only treats
+                            # magic_link_unlimited as expired when this
+                            # field is set AND in the past). Re-entering a
+                            # valid code refreshes the 60-day window.
+                            from datetime import timedelta
+                            from django.utils import timezone as _tz
+                            admin.magic_link_unlimited = True
+                            admin.promo_code_expires_at = _tz.now() + timedelta(days=60)
+                            admin.save(update_fields=["magic_link_unlimited", "promo_code_expires_at"])
                             promo.redeemed_count = (promo.redeemed_count or 0) + 1
                             promo.save(update_fields=["redeemed_count"])
                             # Real bug report: redeeming a promo code only
@@ -25938,8 +25949,8 @@ class SlackInteractivityView(APIView):
                                     )
                             blocks = slash._text_block(
                                 "✅ Promo code applied — your account now has full, unlimited access "
-                                "(assets, vulnerabilities, automation scripts, add user). No plan needed. "
-                                "Loading your dashboard…"
+                                "(assets, vulnerabilities, automation scripts, add user) for the next "
+                                "*60 days*. No plan needed. Loading your dashboard…"
                             )
                             # Same post-unlock transition modal_risk_criteria_submit uses —
                             # re-post the navbar now that onboarding can proceed past the

@@ -89,6 +89,17 @@ class User(AbstractBaseUser, PermissionsMixin):
     # is_superuser/BILLING_UNLIMITED_ADMIN_EMAILS exemptions.
     magic_link_unlimited = models.BooleanField(default=False)
 
+    # Real request: a Slack promo-code redemption (see billing.models.
+    # PromoCode / users.views.py's modal_promo_code_submit) grants the same
+    # magic_link_unlimited exemption above, but only for 60 days from
+    # redemption — unlike the invite-claim/superuser/allowlist exemptions,
+    # which stay permanent. NULL means "no promo-code expiry" (every other
+    # path that sets magic_link_unlimited leaves this unset); set alongside
+    # magic_link_unlimited=True only by the promo-code redemption path.
+    # billing.enforcement._is_unlimited_admin treats magic_link_unlimited
+    # as expired (no longer exempt) once this timestamp is in the past.
+    promo_code_expires_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     last_login = models.DateTimeField(null=True, blank=True)

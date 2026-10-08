@@ -74,8 +74,20 @@ def _is_unlimited_admin(admin) -> bool:
     # invite (users.invite_utils.claim_invite sets this) gets no Freemium
     # restrictions at all — same exemption tier as is_superuser/the fixed
     # email allowlist below.
+    #
+    # A Slack promo-code redemption (users/views.py's modal_promo_code_
+    # submit) sets this SAME flag but also stamps promo_code_expires_at
+    # (60 days out) — every other path that sets magic_link_unlimited
+    # leaves that field NULL, meaning permanent. Only treat the flag as
+    # expired when that field is actually set AND in the past, so this
+    # never affects the invite-claim/superuser/allowlist exemptions.
     if getattr(admin, "magic_link_unlimited", False):
-        return True
+        expires_at = getattr(admin, "promo_code_expires_at", None)
+        if expires_at is None:
+            return True
+        from django.utils import timezone
+        if timezone.now() < expires_at:
+            return True
     email = (getattr(admin, "email", "") or "").strip().lower()
     return bool(email) and email in getattr(settings, "BILLING_UNLIMITED_ADMIN_EMAILS", [])
 
