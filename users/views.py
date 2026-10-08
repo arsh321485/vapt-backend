@@ -13797,10 +13797,19 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "divider"})
         return blocks
 
-    def _format_team_vuln_assets_detail(self, data, plugin_name, vapt_team, list_offset=0, class_filter="all"):
+    def _format_team_vuln_assets_detail(self, data, plugin_name, vapt_team, list_offset=0, class_filter="all", host_offset=0):
         """View target for a grouped team vulnerability — read-only list of
         every asset it affects, mirroring _format_vuln_assets_detail
-        (admin)."""
+        (admin).
+
+        Real bug report: same Slack 50-block-per-message limit as the
+        admin version — a finding with enough open assets (17, confirmed)
+        pushed this past the limit, so Slack silently rejected the
+        chat.update and "View" did nothing for that one finding while
+        smaller ones worked fine. Fixed with the same HOST_PAGE_SIZE
+        pagination (see view_team_grouped_vuln_assets_pg in _handle_action).
+        """
+        HOST_PAGE_SIZE = 5
         blocks = [
             {"type": "actions", "elements": [{
                 "type": "button",
@@ -13820,8 +13829,11 @@ class SlackSlashCommandView(APIView):
         # gets its own Hold/Unhold/Delete too (same per-(vuln,host) pair
         # the bulk Hold All/Delete All already acts on, just scoped to ONE
         # host here), and a held asset moves to its own section below.
-        open_hosts = [h for h in hosts if (h.get("status") or "open") != "held"]
+        all_open_hosts = [h for h in hosts if (h.get("status") or "open") != "held"]
         held_hosts = [h for h in hosts if (h.get("status") or "open") == "held"]
+        open_count = len(all_open_hosts)
+        host_offset = max(0, min(host_offset, max(open_count - 1, 0))) if open_count else 0
+        open_hosts = all_open_hosts[host_offset:host_offset + HOST_PAGE_SIZE]
         blocks.append({"type": "header", "text": {"type": "plain_text", "text": f"🛡 {plugin_name}"[:150], "emoji": True}})
         blocks.append(self._ctx(f"{sev} severity  •  {len(hosts)} asset(s) affected"))
         blocks.append({"type": "divider"})
@@ -13875,6 +13887,13 @@ class SlackSlashCommandView(APIView):
                         },
                     ],
                 })
+
+        pg_block = self._numbered_pagination_block(
+            host_offset, HOST_PAGE_SIZE, open_count, "view_team_grouped_vuln_assets_pg",
+            value_prefix=f"{report_id}|{vapt_team}|{plugin_name}|{list_offset}|{class_filter}|",
+        )
+        if pg_block:
+            blocks.append(pg_block)
 
         if held_hosts:
             blocks.append({"type": "divider"})
@@ -16743,7 +16762,7 @@ class SlackSlashCommandView(APIView):
             blocks.append({"type": "divider"})
         return blocks
 
-    def _format_vuln_assets_detail(self, data, plugin_name, list_offset=0, class_filter="all"):
+    def _format_vuln_assets_detail(self, data, plugin_name, list_offset=0, class_filter="all", host_offset=0):
         """
         The All Vulnerabilities tab's "View" target — read-only detail of
         every asset a single grouped finding affects, with each one's own
@@ -16753,7 +16772,20 @@ class SlackSlashCommandView(APIView):
         list (already includes host_name/asset_type/status per asset), so
         no separate fetch is needed beyond the same call the list itself
         already makes.
+
+        Real bug report: a finding with enough open assets (confirmed at
+        17) pushed this past Slack's 50-block-per-message hard limit — ~3
+        blocks per open host (divider + section + actions row) plus nav/
+        header overhead landed at 56 blocks here, so Slack silently
+        rejected the chat.update and "View" looked like it did nothing at
+        all for that one finding, while every other (smaller) finding
+        worked fine. Same class of bug _numbered_pagination_block's own
+        docstring already references. Fixed the same way the main grouped
+        list already paginates: HOST_PAGE_SIZE open hosts per page here
+        too, with ‹ page › controls at the bottom (see
+        view_grouped_vuln_assets_pg in _handle_action).
         """
+        HOST_PAGE_SIZE = 5
         blocks = [
             {"type": "actions", "elements": [{
                 "type": "button",
@@ -16775,8 +16807,11 @@ class SlackSlashCommandView(APIView):
         # ONE host here via a single-item host_names list), and a held
         # asset moves to its own section below, mirroring the "held"
         # pattern used everywhere else in this feature.
-        open_hosts = [h for h in hosts if (h.get("status") or "open") != "held"]
+        all_open_hosts = [h for h in hosts if (h.get("status") or "open") != "held"]
         held_hosts = [h for h in hosts if (h.get("status") or "open") == "held"]
+        open_count = len(all_open_hosts)
+        host_offset = max(0, min(host_offset, max(open_count - 1, 0))) if open_count else 0
+        open_hosts = all_open_hosts[host_offset:host_offset + HOST_PAGE_SIZE]
         blocks.append({"type": "header", "text": {"type": "plain_text", "text": f"🛡 {plugin_name}"[:150], "emoji": True}})
         blocks.append(self._ctx(f"{sev} severity  •  {len(hosts)} asset(s) affected"))
         blocks.append({"type": "divider"})
@@ -16836,6 +16871,13 @@ class SlackSlashCommandView(APIView):
                         },
                     ],
                 })
+
+        pg_block = self._numbered_pagination_block(
+            host_offset, HOST_PAGE_SIZE, open_count, "view_grouped_vuln_assets_pg",
+            value_prefix=f"{report_id}|{plugin_name}|{list_offset}|{class_filter}|",
+        )
+        if pg_block:
+            blocks.append(pg_block)
 
         if held_hosts:
             blocks.append({"type": "divider"})
@@ -23636,6 +23678,29 @@ class SlackInteractivityView(APIView):
                 self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
                 return
 
+            # Host-level pagination inside a grouped finding's asset list —
+            # team-member side counterpart of view_grouped_vuln_assets_pg.
+            if action_id.startswith("view_team_grouped_vuln_assets_pg_"):
+                # value: "<report_id>|<team>|<plugin_name>|<list_offset>|<class>|<host_offset>"
+                parts = value.split("|")
+                vuln_report_id = parts[0] if len(parts) > 0 else ""
+                vapt_team = parts[1] if len(parts) > 1 else ""
+                plugin_name = parts[2] if len(parts) > 2 else ""
+                list_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                class_filter = parts[4] if len(parts) > 4 and parts[4] else "all"
+                host_offset = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+                vuln_data = slash._fetch_team_all_vulnerabilities(team_id, slack_user_id, vuln_report_id, vapt_team)
+                content_blocks = slash._format_team_vuln_assets_detail(
+                    vuln_data, plugin_name, vapt_team, list_offset=list_offset, class_filter=class_filter, host_offset=host_offset,
+                )
+                blocks = (
+                    slash._team_nav_buttons_block("tnav_fix", vapt_team)
+                    + slash._team_fix_subnav_block(vapt_team, active_sub="tfix_sub_vulns")
+                    + content_blocks
+                )
+                self._post_response_url(response_url, {"replace_original": True, "blocks": blocks}, action_id)
+                return
+
             if action_id == "view_team_grouped_vuln_back":
                 # value: "<team>|<list_offset>|<class>"
                 parts = value.split("|")
@@ -25127,6 +25192,34 @@ class SlackInteractivityView(APIView):
                     team_id, slack_user_id=slack_user_id,
                 ) if vuln_report_id else {}
                 content = slash._format_vuln_assets_detail(vuln_data, plugin_name, list_offset=list_offset, class_filter=class_filter)
+                blocks = (
+                    slash._nav_buttons_block(active_action_id="nav_fix")
+                    + slash._fix_subnav_block(active_sub="fix_sub_vulns")
+                    + content
+                )
+                self._post_response_url(
+                    response_url, {"replace_original": True, "blocks": blocks}, action_id,
+                )
+                return
+
+            # Host-level pagination inside a grouped finding's asset list
+            # (see _format_vuln_assets_detail's own docstring for the real
+            # bug this fixes — 50-block Slack limit on findings with many
+            # open assets).
+            if action_id.startswith("view_grouped_vuln_assets_pg_"):
+                parts = value.split("|")
+                vuln_report_id = parts[0] if len(parts) > 0 else ""
+                plugin_name = parts[1] if len(parts) > 1 else ""
+                list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                class_filter = parts[3] if len(parts) > 3 and parts[3] else "all"
+                host_offset = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+                vuln_data = slash._call_api(
+                    f"/api/admin/adminasset/report/{vuln_report_id}/vulnerabilities/",
+                    team_id, slack_user_id=slack_user_id,
+                ) if vuln_report_id else {}
+                content = slash._format_vuln_assets_detail(
+                    vuln_data, plugin_name, list_offset=list_offset, class_filter=class_filter, host_offset=host_offset,
+                )
                 blocks = (
                     slash._nav_buttons_block(active_action_id="nav_fix")
                     + slash._fix_subnav_block(active_sub="fix_sub_vulns")
