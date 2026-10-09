@@ -44,6 +44,40 @@ def _get_crewai_llm():
     return ChatOpenAI(model=model, temperature=0.3, api_key=api_key, timeout=60, max_retries=1)
 
 
+def _print_crew_token_usage(crew, plugin_name: str, run_automation: bool = False, automation_only: bool = False) -> None:
+    """
+    Console-only observability (real request) — prints how many tokens this
+    crew run used for one particular vulnerability, right after
+    crew.kickoff(). Purely additive: never raises, never changes what the
+    caller does with `crew`/its result — best-effort read of CrewAI's own
+    built-in crew.usage_metrics.
+
+    Note (told to the user up front): when run_automation=True, this is the
+    manual-steps agents + the automation-engineer agent sharing ONE crew —
+    CrewAI's usage_metrics is a crew-level total, not split per agent/task,
+    so this number is manual+automation COMBINED for that case. The
+    standalone automation-backfill path (automation_only=True) genuinely is
+    automation-only, since only the automation_engineer agent runs there.
+    """
+    try:
+        usage = getattr(crew, "usage_metrics", None)
+        if not usage:
+            return
+        if automation_only:
+            scope = "automation-only"
+        else:
+            scope = "manual+automation combined" if run_automation else "manual only"
+        print(
+            f"[TokenUsage][MitigationCrew] \"{plugin_name}\" ({scope}): "
+            f"total={getattr(usage, 'total_tokens', None)}, "
+            f"prompt={getattr(usage, 'prompt_tokens', None)}, "
+            f"completion={getattr(usage, 'completion_tokens', None)}, "
+            f"requests={getattr(usage, 'successful_requests', None)}"
+        )
+    except Exception:
+        pass  # nosec B110 - console-print-only, must never affect generation
+
+
 def _detect_os(operating_system: str) -> str:
     """Return OS category: linux, windows, macos, android, ios."""
     os_lower = (operating_system or "").lower()
@@ -1196,6 +1230,7 @@ class MitigationGenerationTool:
             )
             crew_result = crew.kickoff()
             raw_text = str(crew_result)
+            _print_crew_token_usage(crew, plugin_name, run_automation)
 
             # tasks[2] is the async backup task (parallel track) — always
             # present regardless of run_automation, so this index is stable.
@@ -1292,6 +1327,7 @@ def generate_automation_for_existing_card(card: dict) -> dict:
         )
         logger.info(f"[AutomationBackfill] Starting standalone automation task for card_id={card.get('card_id')}")
         crew.kickoff()
+        _print_crew_token_usage(crew, card.get("vulnerability_name") or card.get("card_id") or "unknown", automation_only=True)
         raw = _task_raw_output(task)
         return _parse_automation_card(raw)
     except Exception as exc:

@@ -28,6 +28,29 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _print_token_usage(response, label: str) -> None:
+    """
+    Console-only observability (real request) — prints the token usage of
+    one GPT call made while reading/validating an uploaded custom file
+    (PDF/DOCX/CSV/XLSX). Purely additive: never raises, never changes what
+    the caller does with `response` — best-effort read of the LangChain
+    AIMessage's response_metadata['token_usage'] (OpenAI-compatible shape),
+    silently skipped if that shape isn't present.
+    """
+    try:
+        usage = (getattr(response, "response_metadata", None) or {}).get("token_usage") or {}
+        if not usage:
+            return
+        print(
+            f"[TokenUsage][FileRead] {label}: "
+            f"total={usage.get('total_tokens')}, "
+            f"prompt={usage.get('prompt_tokens')}, "
+            f"completion={usage.get('completion_tokens')}"
+        )
+    except Exception:
+        pass  # nosec B110 - console-print-only, must never affect parsing
+
 # Hard cap on how much raw text goes to the model — bounds token cost/latency
 # while still covering realistic pentest reports. Confirmed real bug at the
 # old 20000: a 27-page/13-host custom PDF report got truncated well before
@@ -368,6 +391,7 @@ def _find_missed_findings(document_text: str, filename: str, vulnerabilities_by_
         prompt = RECALL_CHECK_PROMPT.format(already_extracted=already_extracted, document_text=document_text)
         response = llm.invoke(prompt)
         raw_content = getattr(response, "content", "") or ""
+        _print_token_usage(response, f"'{filename}' recall-check")
     except Exception as exc:
         logger.warning(f"[CustomFileValidation] '{filename}' recall-check LLM call failed (non-fatal): {exc}")
         return []
@@ -885,6 +909,7 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
         prompt = VALIDATION_PROMPT.format(document_text=document_text)
         response = llm.invoke(prompt)
         raw_content = getattr(response, "content", "") or ""
+        _print_token_usage(response, label)
         finish_reason = (
             (response.response_metadata or {}).get("finish_reason")
             if hasattr(response, "response_metadata") else None
