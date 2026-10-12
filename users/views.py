@@ -9593,6 +9593,35 @@ class SlackDisconnectView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+class MicrosoftTeamsDisconnectView(APIView):
+    """
+    POST /api/admin/users/teams/disconnect/
+    Microsoft Teams counterpart of SlackDisconnectView above — the
+    customer's own explicit "Disconnect Teams" control from inside
+    VaptFix, sharing its actual cleanup with the Teams-side "app removed"
+    event (TeamsBotMessagesView._handle_bot_removed) via the same
+    _disconnect_teams_for_admin() helper, so both paths always agree on
+    what "disconnected" means.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        if not user.ms_team_id and not user.ms_access_token:
+            return Response({"detail": "Microsoft Teams is not connected."}, status=status.HTTP_400_BAD_REQUEST)
+
+        had_password = _disconnect_teams_for_admin(user)
+        return Response({
+            "message": "Microsoft Teams disconnected successfully.",
+            # True when Teams was this admin's ONLY way to sign in — same
+            # frontend prompt-for-a-password convention as Slack's
+            # password_required (see _disconnect_teams_for_admin's own
+            # docstring for why login_provider is deliberately left as
+            # "microsoft_teams" in that case).
+            "password_required": not had_password,
+        }, status=status.HTTP_200_OK)
+
+
 class SlackUninstallView(APIView):
     """
     POST /api/admin/users/slack/uninstall/
@@ -9623,6 +9652,22 @@ class SlackUninstallView(APIView):
             "message": f"Account and all data for {admin_email} permanently deleted.",
             "deleted": deleted_counts,
         }, status=status.HTTP_200_OK)
+
+
+class MicrosoftTeamsUninstallView(SlackUninstallView):
+    """
+    POST /api/admin/users/teams/uninstall/
+
+    Microsoft Teams counterpart of SlackUninstallView above — the real
+    "Uninstall" the customer's confirmation popup leads to, from the
+    Teams side of Manage Account. Logic is platform-agnostic already
+    (operates on request.user + confirm:true, not on which platform is
+    connected) — inherits everything from SlackUninstallView rather than
+    duplicating it; this subclass exists only so the URL the frontend
+    calls from the Teams side matches the platform, same reasoning as
+    MicrosoftTeamsConfirmUninstallView below.
+    """
+    pass
 
 
 class SlackConfirmUninstallView(APIView):
