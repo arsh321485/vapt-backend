@@ -956,6 +956,58 @@ class TeamsBotMessagesView(APIView):
         except Exception:
             logger.exception("[TeamsBot] post_onboarding_step after upload failed")
 
+    def _handle_bot_removed(self, activity: dict):
+        """
+        Fires when VaptFix is removed/uninstalled from a Teams tenant —
+        Microsoft Teams counterpart of SlackEventsView._handle_event's
+        app_uninstalled/tokens_revoked branch (see that method's own
+        comments, and users.views._disconnect_teams_for_admin's docstring,
+        for the full reasoning this mirrors). The caller
+        (_handle_conversation_update) already normalized both Bot
+        Framework shapes — an installationUpdate with action="remove", or
+        a conversationUpdate with the bot's own id in membersRemoved —
+        into this one handler.
+
+        Immediately clears only this admin's Teams connection (safe,
+        reversible) — nothing else is deleted yet. A one-time confirmation
+        link is then emailed, same mechanism uninstall_utils.py already
+        provides for Slack; nothing further happens unless the admin
+        clicks it (MicrosoftTeamsConfirmUninstallView -> _delete_all_admin_data,
+        which deliberately excludes vulnerability_cards/billing records —
+        same as every other uninstall path).
+        """
+        admin, team_id = self._resolve_admin(activity)
+        logger.info(f"[TeamsBot] Bot removed from team_id={team_id}")
+        if not admin:
+            logger.warning(f"[TeamsBot] bot removed: no admin found for team_id={team_id}")
+            return
+
+        admin_email = admin.email
+        admin_id = str(admin.id)
+        try:
+            from users.views import _disconnect_teams_for_admin
+            _disconnect_teams_for_admin(admin)
+            logger.info(f"[TeamsBot] Teams disconnect cleanup done for admin={admin_email}")
+        except Exception:
+            logger.exception(f"[TeamsBot] _disconnect_teams_for_admin failed for admin={admin_email}")
+            return
+
+        try:
+            from users.uninstall_utils import create_uninstall_confirmation
+            from users.utils import Util
+            from django.conf import settings
+
+            token = create_uninstall_confirmation(admin_id)
+            base_url = getattr(settings, "BACKEND_BASE_URL", "https://vaptbackend.secureitlab.com")
+            confirm_url = f"{base_url.rstrip('/')}/api/admin/users/teams/confirm-uninstall/?token={token}"
+            ok, err = Util.send_slack_uninstall_confirmation_email(
+                admin_email, confirm_url, platform="Microsoft Teams",
+            )
+            if not ok:
+                logger.warning(f"[TeamsUninstall] confirmation email failed for {admin_email}: {err}")
+        except Exception:
+            logger.exception(f"[TeamsUninstall] failed to send confirmation email for {admin_email}")
+
     def _handle_conversation_update(self, activity: dict):
         """
         Fires when the bot is added to a team/channel, or a member
@@ -980,8 +1032,23 @@ class TeamsBotMessagesView(APIView):
         post_onboarding_step runs — so the very first card goes directly
         there instead of landing in General first.
         """
-        members_added = activity.get("membersAdded") or []
         bot_id = (activity.get("recipient") or {}).get("id")
+
+        # Real feature request: detect the bot being REMOVED (app
+        # uninstalled from this tenant) the same way Slack's app_uninstalled
+        # event is already handled — see _handle_bot_removed's own
+        # docstring. Checked first/separately from the add-path below so a
+        # remove event can never accidentally fall through into add logic.
+        members_removed = activity.get("membersRemoved") or []
+        bot_was_removed = (
+            any(m.get("id") == bot_id for m in members_removed)
+            or (activity.get("type") == "installationUpdate" and activity.get("action") == "remove")
+        )
+        if bot_was_removed:
+            self._handle_bot_removed(activity)
+            return
+
+        members_added = activity.get("membersAdded") or []
         bot_was_added = (
             any(m.get("id") == bot_id for m in members_added)
             or (activity.get("type") == "installationUpdate" and activity.get("action") == "add")

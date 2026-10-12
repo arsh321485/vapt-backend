@@ -8635,6 +8635,48 @@ def _disconnect_slack_for_admin(user):
     return had_password
 
 
+def _disconnect_teams_for_admin(user):
+    """
+    Microsoft Teams counterpart of _disconnect_slack_for_admin above — same
+    reasoning, same guarantee: one shared cleanup for both the Teams
+    "removed from team" event (TeamsBotMessagingView's conversationUpdate/
+    installationUpdate "remove" handling) and any future VaptFix-side
+    "Disconnect Teams" button, instead of two copies that could drift.
+
+    Clears this admin's Teams connection fields (ms_access_token,
+    ms_refresh_token, ms_team_id, ms_teams_object_id) plus every team
+    member's own Teams link on their UserDetail row (ms_teams_member_id) —
+    mirrors slack_member_id/slack_channel_ids above. Once ms_team_id is
+    gone, no further proactive Teams message can be resolved for this
+    admin regardless of anything else.
+
+    Returns True if the admin had a usable password (so login_provider was
+    safely reset to "email"); False if Microsoft Teams was their ONLY way
+    to sign in (login_provider deliberately left as "microsoft_teams" —
+    credentials are still cleared either way, but forcing login_provider
+    to "email" here would lock them out with no way back in until they
+    reconnect).
+    """
+    from users_details.models import UserDetail
+
+    had_password = user.has_usable_password()
+    user.ms_access_token = None
+    user.ms_refresh_token = None
+    user.ms_team_id = None
+    user.ms_teams_object_id = None
+    if had_password and user.login_provider == 'microsoft_teams':
+        user.login_provider = 'email'
+    user.save()
+
+    UserDetail.objects.filter(admin=user).update(ms_teams_member_id=None)
+
+    logger.info(
+        f"[TeamsDisconnect] Cleaned up Microsoft Teams integration for admin={user.email} "
+        f"had_password={had_password}"
+    )
+    return had_password
+
+
 def _delete_all_admin_data(user):
     """
     Full, permanent "Uninstall" — real product requirement: disconnecting
@@ -9638,6 +9680,22 @@ class SlackConfirmUninstallView(APIView):
         </body></html>
         """
         return HttpResponse(html)
+
+
+class MicrosoftTeamsConfirmUninstallView(SlackConfirmUninstallView):
+    """
+    GET /api/admin/users/teams/confirm-uninstall/?token=<token>
+
+    Microsoft Teams counterpart of SlackConfirmUninstallView above — the
+    click-target of the confirmation email sent when VaptFix is removed
+    from a Teams tenant (TeamsBotMessagingView's conversationUpdate/
+    installationUpdate "remove" handling). Logic is byte-for-byte
+    identical (consume the one-time token, _delete_all_admin_data) —
+    inherits everything from SlackConfirmUninstallView rather than
+    duplicating it; this subclass exists only so the URL/view name
+    matches the platform that actually triggered it.
+    """
+    pass
 
 
 class SlackMemberLoginView(APIView):

@@ -266,11 +266,16 @@ class Util:
         return Util.send_mail(data)
 
     @staticmethod
-    def send_slack_uninstall_confirmation_email(user_email, confirm_url):
+    def send_slack_uninstall_confirmation_email(user_email, confirm_url, platform="Slack"):
         """
         Sent when VaptFix was removed from the customer's Slack workspace
-        (SlackEventsView's app_uninstalled/tokens_revoked handling) — Slack
-        access is already cut off by the time this goes out, but nothing
+        (SlackEventsView's app_uninstalled/tokens_revoked handling) — or,
+        with platform="Microsoft Teams", from the equivalent Teams removal
+        path (TeamsBotMessagingView's install/conversationUpdate "remove"
+        handling) — same template, same guarantee, just the platform name
+        in the copy changes. One shared function instead of a near-
+        identical duplicate per platform. The admin's platform connection
+        is already cut off by the time this goes out, but nothing
         else is deleted yet. Clicking the link is the one and only
         confirmation gate before the admin's entire VaptFix data (reports,
         team, vulnerabilities, everything) is permanently deleted; ignoring
@@ -319,10 +324,10 @@ class Util:
                   <tr>
                     <td style="padding:34px 34px 20px 34px;">
                       <h1 style="color:#1f2040; margin:0 0 16px 0; font-size:26px; line-height:1.25; text-align:center;">
-                        We noticed VaptFix was removed from your Slack workspace
+                        We noticed VaptFix was removed from your {platform} workspace
                       </h1>
                       <p style="color:#444; font-size:15px; line-height:1.6;">
-                        Your Slack integration has already been disconnected. Your VaptFix
+                        Your {platform} integration has already been disconnected. Your VaptFix
                         account and all its data (reports, team members, vulnerabilities,
                         everything) are still safe and untouched.
                       </p>
