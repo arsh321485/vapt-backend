@@ -8680,15 +8680,19 @@ def _disconnect_teams_for_admin(user):
 def _delete_all_admin_data(user):
     """
     Full, permanent "Uninstall" — real product requirement: disconnecting
-    Slack alone (see _disconnect_slack_for_admin above) leaves every report
-    this admin ever uploaded, every team member they added, every
-    vulnerability/fix/support-request tied to those reports, and the
-    admin's own login itself untouched. Uninstalling must delete ALL of it,
-    permanently, from BOTH entry points (the website's confirmed
-    "Uninstall" button, and Slack's own app_uninstalled event — see
-    SlackConfirmUninstallView/uninstall_utils.py for how the Slack path
-    still gates this behind an explicit yes, just via an email link instead
-    of an in-app popup, since Slack's own removal screen can't show ours).
+    Slack/Teams alone (see _disconnect_slack_for_admin/
+    _disconnect_teams_for_admin above) leaves every report this admin ever
+    uploaded, every team member they added (including that member's own
+    login account, if they have one — see below), every vulnerability/fix/
+    support-request tied to those reports, and the admin's own login
+    itself untouched. Uninstalling must delete ALL of it, permanently,
+    from every entry point (the website's confirmed "Uninstall" button,
+    Slack's own app_uninstalled event, and Teams' own app-removed event —
+    see SlackConfirmUninstallView/MicrosoftTeamsConfirmUninstallView/
+    uninstall_utils.py for how the platform-triggered paths still gate
+    this behind an explicit yes, just via an email link instead of an
+    in-app popup, since neither platform's own removal screen can show
+    ours).
 
     Deliberately does NOT touch:
       - billing/subscription records — real payment/Stripe data; deleting
@@ -8757,6 +8761,32 @@ def _delete_all_admin_data(user):
             {"admin_id": admin_id}
         ).deleted_count
 
+    # Real bug report: a team member who logs in directly with email+
+    # password (UserMemberLoginView) has their OWN users.User row, matched
+    # by email against UserDetail — separate from the UserDetail "roster"
+    # record deleted below. This loop never touched that login account, so
+    # it silently survived an uninstall (confirmed live: a deleted admin's
+    # team member could still log in afterward). Same cross-admin safety
+    # check already proven in delete_admin_data.py's management command:
+    # delete the member's login only if no OTHER admin's UserDetail still
+    # references that same email (someone can be a team member under more
+    # than one admin) — captured BEFORE UserDetail rows are deleted below,
+    # since the lookup needs them to still exist.
+    member_emails = list(
+        UserDetail.objects.filter(admin=user).values_list("email", flat=True).distinct()
+    )
+    member_logins_deleted = 0
+    for member_email in member_emails:
+        if not member_email:
+            continue
+        has_other_admin_link = UserDetail.objects.filter(
+            email__iexact=member_email
+        ).exclude(admin=user).exists()
+        if has_other_admin_link:
+            continue
+        member_logins_deleted += User.objects.filter(email__iexact=member_email).delete()[0]
+    deleted_counts["member_logins"] = member_logins_deleted
+
     deleted_counts["UserDetail"] = UserDetail.objects.filter(admin=user).delete()[0]
     deleted_counts["RiskCriteria"] = RiskCriteria.objects.filter(admin=user).delete()[0]
     # Real bug report: this row (visible directly in MongoDB Compass as the
@@ -8771,7 +8801,7 @@ def _delete_all_admin_data(user):
     ).delete()[0]
 
     logger.warning(
-        f"[SlackUninstall] PERMANENTLY deleted all data for admin={admin_email} "
+        f"[AdminUninstall] PERMANENTLY deleted all data for admin={admin_email} "
         f"admin_id={admin_id} report_count={len(report_ids)} counts={deleted_counts}"
     )
 
