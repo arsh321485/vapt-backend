@@ -59,6 +59,13 @@ class CustomTeam(models.Model):
     admin = models.ForeignKey(User, on_delete=models.CASCADE, related_name="custom_teams")
     name = models.CharField(max_length=255)
 
+    # Set once the on-demand channel is actually created (Phase 2b) — null
+    # until then, e.g. for an admin with no Slack/Teams connected yet, or
+    # if channel creation itself failed (never blocks the team existing).
+    slack_channel_id = models.CharField(max_length=255, blank=True, null=True)
+    slack_channel_name = models.CharField(max_length=255, blank=True, null=True)
+    ms_teams_channel_id = models.CharField(max_length=255, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -2186,6 +2186,22 @@ class CustomTeamListCreateView(generics.ListCreateAPIView):
             return Response({"detail": f'You already have a custom team named "{name}".'}, status=status.HTTP_400_BAD_REQUEST)
 
         team = CustomTeam.objects.create(admin=request.user, name=name)
+
+        # Phase 2b — on-demand Slack channel for this new team (best-effort,
+        # backgrounded so a slow/unreachable Slack API never delays this
+        # response; see ensure_custom_team_slack_channel's own docstring).
+        # An admin with no Slack connected, or any failure here, simply
+        # leaves slack_channel_id unset — the team itself still works
+        # everywhere else.
+        if getattr(request.user, "slack_bot_token", None):
+            import threading
+            from users.views import ensure_custom_team_slack_channel
+            threading.Thread(
+                target=ensure_custom_team_slack_channel,
+                args=(request.user, team),
+                daemon=True,
+            ).start()
+
         return Response(
             {"id": str(team._id), "name": team.name, "created_at": team.created_at},
             status=status.HTTP_201_CREATED,

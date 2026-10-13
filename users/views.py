@@ -4786,7 +4786,7 @@ def _authorize_channel_access(channel_name, team_id, slack_user_id):
             return False, _ADMIN_ONLY_ERROR_BLOCKS
         return True, None
 
-    team_display = SlackSlashCommandView.TEAM_CHANNELS.get(channel_name)
+    team_display = SlackSlashCommandView.resolve_team_name(channel_name)
     if team_display:
         if is_admin:
             return False, _TEAM_SIDE_BLOCKED_FOR_ADMIN_BLOCKS
@@ -5915,6 +5915,95 @@ def ensure_vaptfix_channels(bot_token, slack_user_id=None, is_admin=False, team_
                 logger.warning(f"[ensure_vaptfix_channels] Invite '{slack_user_id}' to '{name}' failed: {invite_data.get('error')}")
 
     return channel_ids
+
+
+def _slack_channel_name_for_custom_team(team_name: str) -> str:
+    """
+    "vaptfix-<slug>-team", same convention as the 4 fixed channels
+    (vaptfix-patch-management-team, ...) — Slack itself only accepts
+    lowercase letters/numbers/hyphens/underscores, max 80 chars, so
+    anything else in the admin-typed name is stripped, not just lowercased.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", team_name.strip().lower()).strip("-")
+    slug = slug or "team"
+    name = f"vaptfix-{slug}-team"
+    return name[:80].rstrip("-")
+
+
+def ensure_custom_team_slack_channel(admin, custom_team):
+    """
+    On-demand Slack counterpart of ensure_vaptfix_channels, for ONE newly
+    created CustomTeam (see its own docstring) instead of the 4 fixed
+    channels created once at initial team setup. Called right after
+    CustomTeamListCreateView.create() saves the row — best-effort: an
+    admin with no Slack connected yet, or any Slack API failure, just
+    leaves custom_team.slack_channel_id unset (the team itself still
+    exists and works everywhere else; only the dedicated channel is
+    missing until this succeeds, e.g. on a retry).
+
+    Mirrors ensure_vaptfix_channels' own create+join+invite+navbar-post
+    sequence for a single channel: conversations.create (name_taken
+    falls back to re-resolving the existing channel, same as there),
+    conversations.join, _post_team_navbar_message (team_name = the
+    custom team's own name — _cmd_postteamnav and everything it calls
+    already treat any non-fixed team name as "show everything", see
+    upload_report.team_utils.is_fixed_team), and inviting the admin's
+    own Slack user so they can see their new channel immediately.
+    """
+    bot_token = getattr(admin, "slack_bot_token", None)
+    team_id = getattr(admin, "slack_team_id", None)
+    if not bot_token or not team_id:
+        return None
+
+    name = _slack_channel_name_for_custom_team(custom_team.name)
+    headers = {"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}
+
+    create_resp = _http_post(
+        "https://slack.com/api/conversations.create",
+        headers=headers,
+        json={"name": name, "is_private": False}, timeout=15,
+    )
+    ch_data = create_resp.json() if create_resp else {}
+    channel_id = None
+    if ch_data.get("ok"):
+        channel_id = ch_data.get("channel", {}).get("id")
+    elif ch_data.get("error") == "name_taken":
+        list_resp = _http_get(
+            "https://slack.com/api/conversations.list",
+            headers=headers,
+            params={"types": "public_channel,private_channel", "limit": 1000}, timeout=15,
+        )
+        existing = {ch["name"].lower(): ch["id"] for ch in (list_resp.json() if list_resp else {}).get("channels", [])}
+        channel_id = existing.get(name)
+    else:
+        logger.warning(f"[CustomTeamChannel] Failed to create '{name}' for admin={admin.email}: {ch_data.get('error')}")
+        return None
+
+    if not channel_id:
+        return None
+
+    _http_post("https://slack.com/api/conversations.join", headers=headers, json={"channel": channel_id}, timeout=15)
+
+    try:
+        SlackEventsView()._post_team_navbar_message(bot_token, channel_id, team_id, custom_team.name)
+    except Exception:
+        logger.exception(f"[CustomTeamChannel] Failed to auto-post navbar for '{name}'")
+
+    admin_slack_user_id = getattr(admin, "slack_user_id", None)
+    if admin_slack_user_id:
+        invite_resp = _http_post(
+            "https://slack.com/api/conversations.invite",
+            headers=headers,
+            json={"channel": channel_id, "users": admin_slack_user_id}, timeout=15,
+        )
+        invite_data = invite_resp.json() if invite_resp else {}
+        if not invite_data.get("ok") and invite_data.get("error") not in ("already_in_channel", "cant_invite_self"):
+            logger.warning(f"[CustomTeamChannel] Invite admin to '{name}' failed: {invite_data.get('error')}")
+
+    custom_team.slack_channel_id = channel_id
+    custom_team.slack_channel_name = name
+    custom_team.save(update_fields=["slack_channel_id", "slack_channel_name"])
+    return channel_id
 
 
 class UserLoginPlatformView(APIView):
@@ -8951,9 +9040,10 @@ class SlackEventsView(APIView):
                         if channel_name == SlackSlashCommandView.ADMIN_CHANNEL:
                             if _try_claim_admin_channel_first_post(tid, channel_id):
                                 _post_admin_onboarding_message(admin.slack_bot_token, channel_id, tid, admin)
-                        elif channel_name in SlackSlashCommandView.TEAM_CHANNELS:
-                            team_name = SlackSlashCommandView.TEAM_CHANNELS[channel_name]
-                            self._post_team_navbar_message(admin.slack_bot_token, channel_id, tid, team_name)
+                        else:
+                            team_name = SlackSlashCommandView.resolve_team_name(channel_name)
+                            if team_name:
+                                self._post_team_navbar_message(admin.slack_bot_token, channel_id, tid, team_name)
 
             elif etype == "member_left_channel":
                 logger.info(f"[SlackEvent] member_left_channel: user={event.get('user')} channel={event.get('channel')}")
@@ -9245,7 +9335,7 @@ class SlackEventsView(APIView):
                 logger.warning(f"[SlackEvent] conversations.info failed for channel_id={channel_id}: {data.get('error')}")
                 return None
             channel_name = (data.get("channel") or {}).get("name", "")
-            return SlackSlashCommandView.TEAM_CHANNELS.get(channel_name)
+            return SlackSlashCommandView.resolve_team_name(channel_name)
         except Exception:
             logger.exception(f"[SlackEvent] _resolve_channel_team_role failed for channel_id={channel_id}")
             return None
@@ -12485,6 +12575,24 @@ class SlackSlashCommandView(APIView):
         "vaptfix-network-security-team":         "Network Security",
         "vaptfix-architectural-flaws-team":      "Architectural Flaws",
     }
+
+    @classmethod
+    def resolve_team_name(cls, channel_name):
+        """
+        channel_name -> team display name, checking the 4 fixed channels
+        FIRST (TEAM_CHANNELS, zero DB cost — unchanged, still the hot
+        path) and falling back to a CustomTeam lookup by its own
+        slack_channel_name (set once ensure_custom_team_slack_channel
+        actually creates it) for anything else. Returns None for a
+        channel that's neither (e.g. #general, or a custom team whose
+        channel creation hasn't happened/succeeded yet).
+        """
+        fixed = cls.TEAM_CHANNELS.get(channel_name)
+        if fixed:
+            return fixed
+        from users_details.models import CustomTeam
+        team = CustomTeam.objects.filter(slack_channel_name=channel_name).first()
+        return team.name if team else None
     _SEV_PREFIX = [("Critical", "C"), ("High", "H"), ("Medium", "M"), ("Low", "L")]
     _SEV_ICONS  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}  # legacy; prefer _sev_icon_image_element
 
@@ -12660,11 +12768,11 @@ class SlackSlashCommandView(APIView):
                 "/riskcriteria":   self._cmd_riskcriteria,
             }
             team_name = None
-        elif channel_name in self.TEAM_CHANNELS:
+        elif self.resolve_team_name(channel_name):
             allowed, deny_blocks = _authorize_channel_access(channel_name, team_id, user_id)
             if not allowed:
                 return Response({"response_type": "ephemeral", "blocks": deny_blocks})
-            team_name = self.TEAM_CHANNELS[channel_name]
+            team_name = self.resolve_team_name(channel_name)
             handlers = {
                 "/viewassigned":     self._cmd_viewassigned,
                 "/mitigationstatus": self._cmd_mitigationstatus,
