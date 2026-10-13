@@ -2054,6 +2054,14 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "os_category": _detect_os(operating_system),
                     "plugin_output": first_plugin_output,
                     "plugin_output_url": first_plugin_output_url,
+                    # Carried onto the saved vulnerability_cards document
+                    # below (where it's actually new) — lets
+                    # UploadReportAdmin.get_cards_status count just one
+                    # upload's own share instead of the whole report's
+                    # lifetime total. Absent on anything stored before this
+                    # field existed — those cards just don't count toward
+                    # any specific upload's total, same as today.
+                    "source_upload_id": vuln.get("source_upload_id"),
                     "risk_factor": (vuln.get("risk_factor") or vuln.get("severity") or "Medium").strip() or "Medium",
                 })
 
@@ -2255,6 +2263,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "vulnerability_name": vuln_plugin_name,
                     "host_name":          vuln_host_name,
                     "os_category":        vuln_os_category,
+                    "source_upload_id":   vuln.get("source_upload_id"),
                     "description":        vuln["description"],
                     "mitigation_table":   mitigation_table_arr,
                     "resource_id":        vuln_host_name or cached_card.get("resource_id"),
@@ -2328,6 +2337,7 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "vulnerability_name": vuln_plugin_name,
                     "host_name":          vuln_host_name,
                     "os_category":        vuln_os_category,
+                    "source_upload_id":   vuln.get("source_upload_id"),
                     "description":        vuln["description"],
                     "mitigation_table":   mitigation_table_arr,
                     "resource_id":        vc.get("resource_id"),

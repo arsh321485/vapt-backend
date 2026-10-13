@@ -351,16 +351,37 @@ class UploadReportAdmin(admin.ModelAdmin):
         _id in that case; the merged data lives under the TARGET report's
         _id instead, and this upload row has no stored link to it
         (confirmed: upload_reports has no merge_into_report_id field).
-        Falls back to the admin's newest nessus_reports document (same
-        admin_id/admin_email resolution every other merge-aware lookup in
-        this app already uses, e.g. ReportAssetsVulnsAPIView) instead of
-        silently showing "—" for an upload that actually succeeded.
+
+        Real follow-up request: once that fallback resolves the merged
+        row to the right report, it still showed the TARGET report's
+        whole lifetime total (e.g. "183/2074") instead of just this
+        file's own share ("23/23") — every merged-in upload looked
+        "Incomplete" forever because of OTHER files' backlog, even when
+        this specific file's own vulnerabilities were 100% carded.
+        vulnerability_cards is now tagged with source_upload_id (this
+        upload's own _id) at generation time — see _store_in_mongodb's
+        source_upload_id stamping and _auto_generate_cards_bg's
+        pass-through — so this counts just THIS upload's own cards
+        against its own parsed_count (the exact number this file parsed
+        into), falling back to the old whole-report count only for an
+        upload from before this tagging existed (no tagged cards found
+        at all).
         """
         try:
             from vaptfix.mongo_client import MongoContext
             with MongoContext() as db:
+                own_id = str(obj._id)
+                tagged_count = db["vulnerability_cards"].count_documents({"source_upload_id": own_id})
+                if tagged_count:
+                    expected = int(obj.parsed_count or 0)
+                    if expected == 0:
+                        return f"✅ {tagged_count}"
+                    if tagged_count >= expected:
+                        return f"✅ {tagged_count}/{expected}"
+                    return f"⚠️ Incomplete {tagged_count}/{expected}"
+
                 doc = db["nessus_reports"].find_one(
-                    {"report_id": str(obj._id)},
+                    {"report_id": own_id},
                     {"cards_expected_count": 1, "cards_generated_count": 1, "cards_generation_complete": 1},
                 )
                 if not doc:
@@ -566,6 +587,27 @@ class UploadReportAdmin(admin.ModelAdmin):
                             parsed_data["total_vulnerabilities"] = sum(
                                 len(h.get("vulnerabilities") or []) for h in active_hosts
                             )
+
+                    # Real request: the admin list's per-row "Cards" column
+                    # (get_cards_status below) could only ever show the
+                    # TARGET report's whole lifetime total for a merged
+                    # upload — there was no way to tell which cards came
+                    # from THIS specific file. Stamp source_upload_id (this
+                    # upload's own _id, i.e. `report_id` above) onto every
+                    # vulnerability here, before _prepare_hosts_for_storage/
+                    # merge_hosts_into_report — both preserve unknown extra
+                    # fields via plain dict .copy()/append, so this survives
+                    # into vulnerabilities_by_host untouched and then gets
+                    # carried onto the vulnerability_cards document by
+                    # _auto_generate_cards_bg, letting get_cards_status
+                    # count just this upload's own share instead of the
+                    # whole report's.
+                    for _host in (parsed_data.get("vulnerabilities_by_host") or []):
+                        for _vuln in (_host.get("vulnerabilities") or []):
+                            _vuln["source_upload_id"] = report_id
+                    for _host in locked_hosts:
+                        for _vuln in (_host.get("vulnerabilities") or []):
+                            _vuln["source_upload_id"] = report_id
 
                     hosts_payload = self._prepare_hosts_for_storage(
                         parsed_data.get("vulnerabilities_by_host", [])
