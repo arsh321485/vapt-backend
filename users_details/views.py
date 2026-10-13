@@ -6,7 +6,7 @@ from vaptfix.mongo_client import MongoContext
 from django.contrib.auth import get_user_model
 from bson import ObjectId
 from django.shortcuts import get_object_or_404
-from .models import UserDetail
+from .models import UserDetail, CustomTeam
 from .serializers import UserDetailSerializer, UserDetailCreateSerializer,UserDetailUpdateSerializer,UserDetailRoleUpdateSerializer
 from django.utils import timezone
 from sendgrid import SendGridAPIClient
@@ -19,6 +19,19 @@ import base64
 import os
 import threading
 import requests
+
+# The 4 auto-classified teams every vulnerability gets assigned to at card-
+# generation time (upload_report/mitigation_tool.py's _resolve_assigned_team)
+# — kept here as the canonical "is this one of the fixed 4, or a custom
+# team" check for ReportAssetsVulnsAPIView and the role validation views
+# below. A CustomTeam's name is never in this set by construction (admin-
+# typed, free text — see CustomTeam's own docstring).
+_FIXED_TEAM_NAMES = {
+    "Patch Management",
+    "Configuration Management",
+    "Network Security",
+    "Architectural Flaws",
+}
 
 REQUEST_TIMEOUT_SECONDS = 15
 
@@ -1436,16 +1449,14 @@ class UserDetailRoleDeleteView(generics.DestroyAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Allowed roles
-        allowed_roles = {
-            "Patch Management",
-            "Configuration Management",
-            "Network Security",
-            "Architectural Flaws",
-        }
+        # Allowed roles — the 4 fixed teams plus this admin's own custom
+        # team(s) (see CustomTeam/_FIXED_TEAM_NAMES docstrings).
+        allowed_roles = set(_FIXED_TEAM_NAMES) | set(
+            CustomTeam.objects.filter(admin=instance.admin).values_list("name", flat=True)
+        )
         if provided_role not in allowed_roles:
             return Response(
-                {"detail": f"Invalid member_role. Must be one of: {', '.join(allowed_roles)}"},
+                {"detail": f"Invalid member_role. Must be one of: {', '.join(sorted(allowed_roles))}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1605,6 +1616,17 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
+        # Per-request allowed set: the 4 fixed teams plus THIS member's
+        # admin's own custom team(s) — class-level self.allowed_roles/
+        # _allowed_map stay as the fixed-4 fallback (still referenced by
+        # name in a couple of error messages below), but every actual
+        # validation in this method uses these local, admin-aware versions
+        # instead (see CustomTeam/_FIXED_TEAM_NAMES docstrings).
+        allowed_roles = list(_FIXED_TEAM_NAMES) + list(
+            CustomTeam.objects.filter(admin=instance.admin).values_list("name", flat=True)
+        )
+        allowed_map = {r.lower(): r for r in allowed_roles}
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -1625,7 +1647,7 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
         invalid_new = []
         for r in new_roles_raw:
             key = (r or "").strip().lower()
-            canonical = self._allowed_map.get(key)
+            canonical = allowed_map.get(key)
             if not canonical:
                 invalid_new.append(r)
             else:
@@ -1633,7 +1655,7 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
 
         if invalid_new:
             return Response(
-                {"detail": f"Invalid new_roles: {invalid_new}. Allowed: {', '.join(self.allowed_roles)}"},
+                {"detail": f"Invalid new_roles: {invalid_new}. Allowed: {', '.join(allowed_roles)}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1641,10 +1663,10 @@ class UserDetailRoleUpdateView(generics.GenericAPIView):
         old_role = None
         if old_role_raw:
             key = old_role_raw.strip().lower()
-            old_role = self._allowed_map.get(key)
+            old_role = allowed_map.get(key)
             if not old_role:
                 return Response(
-                    {"detail": f"Invalid old_role '{old_role_raw}'. Allowed: {', '.join(self.allowed_roles)}"},
+                    {"detail": f"Invalid old_role '{old_role_raw}'. Allowed: {', '.join(allowed_roles)}"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -1975,7 +1997,16 @@ class ReportAssetsVulnsAPIView(APIView):
                 # or every finding on it is unassigned to any team — never
                 # when it simply belongs to someone else's team.
                 assigned_team_map = {}
-                if role_filter:
+                # Real feature request: an admin's own custom team (see
+                # CustomTeam below) has no auto-classification pool of its
+                # own — only the 4 fixed teams ever get an assigned_team
+                # stamped on a vulnerability_cards document at generation
+                # time (upload_report/mitigation_tool.py's _resolve_
+                # assigned_team). A role_filter that isn't one of those 4
+                # is a custom team name — role_plugins is deliberately left
+                # None for it (same as role_filter being empty), which the
+                # filtering below already treats as "show everything".
+                if role_filter and role_filter in _FIXED_TEAM_NAMES:
                     from upload_report.team_utils import infer_assigned_team
 
                     role_plugins = set()
@@ -2117,3 +2148,77 @@ class ReportAssetsVulnsAPIView(APIView):
         except Exception as exc:
             import traceback; traceback.print_exc()
             return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class CustomTeamListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /api/admin/users-details/custom-teams/        — list this admin's own custom teams
+    POST /api/admin/users-details/custom-teams/  {"name": "DevOps Team"}
+
+    Real feature request: alongside the 4 fixed teams (unchanged), an admin
+    can create unlimited custom team(s) of their own, name typed freely —
+    see CustomTeam's own docstring for how a custom team differs from a
+    fixed one (no auto-classification pool; ReportAssetsVulnsAPIView shows
+    everything for it instead).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return CustomTeam.objects.filter(admin=self.request.user).order_by("name")
+
+    def list(self, request, *args, **kwargs):
+        teams = self.get_queryset()
+        return Response(
+            [{"id": str(t._id), "name": t.name, "created_at": t.created_at} for t in teams],
+            status=status.HTTP_200_OK,
+        )
+
+    def create(self, request, *args, **kwargs):
+        name = (request.data.get("name") or "").strip()
+        if not name:
+            return Response({"detail": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if name in _FIXED_TEAM_NAMES:
+            return Response(
+                {"detail": f'"{name}" is already one of the 4 standard teams — choose a different name.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if CustomTeam.objects.filter(admin=request.user, name__iexact=name).exists():
+            return Response({"detail": f'You already have a custom team named "{name}".'}, status=status.HTTP_400_BAD_REQUEST)
+
+        team = CustomTeam.objects.create(admin=request.user, name=name)
+        return Response(
+            {"id": str(team._id), "name": team.name, "created_at": team.created_at},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class CustomTeamDeleteView(generics.DestroyAPIView):
+    """
+    DELETE /api/admin/users-details/custom-teams/<team_id>/
+
+    Does NOT touch any UserDetail rows already assigned this team name
+    (same as deleting a role elsewhere in this app never retroactively
+    un-assigns it) — only removes the team from future "Add User"/role
+    pickers. Real decision, not yet asked for: if "also remove this role
+    from every member who has it" is wanted later, that's its own
+    explicit, separate action (mirrors UserDetailRoleDeleteView's own
+    confirm-gated deletion, not a side effect of deleting the team itself).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        team_id = self.kwargs.get("team_id")
+        try:
+            obj_id = ObjectId(team_id)
+        except Exception:
+            return None
+        return get_object_or_404(CustomTeam, _id=obj_id)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if not instance:
+            return Response({"detail": "Invalid team_id"}, status=status.HTTP_400_BAD_REQUEST)
+        if instance.admin_id != request.user.id and not request.user.is_staff:
+            return Response({"detail": "You do not have permission to delete this team."}, status=status.HTTP_403_FORBIDDEN)
+        instance.delete()
+        return Response({"detail": "Custom team deleted."}, status=status.HTTP_200_OK)
