@@ -343,6 +343,18 @@ class UploadReportAdmin(admin.ModelAdmin):
         without querying MongoDB directly. Run
         `python manage.py retry_incomplete_card_generation` to fix any
         "Incomplete" rows shown here.
+
+        Real bug report: this always showed "—" for an upload that got
+        MERGED into an admin's existing report (same admin re-uploading,
+        or a Magic Link merge — see merge_service.py) — there's no
+        nessus_reports document whose own report_id equals THIS upload's
+        _id in that case; the merged data lives under the TARGET report's
+        _id instead, and this upload row has no stored link to it
+        (confirmed: upload_reports has no merge_into_report_id field).
+        Falls back to the admin's newest nessus_reports document (same
+        admin_id/admin_email resolution every other merge-aware lookup in
+        this app already uses, e.g. ReportAssetsVulnsAPIView) instead of
+        silently showing "—" for an upload that actually succeeded.
         """
         try:
             from vaptfix.mongo_client import MongoContext
@@ -351,6 +363,21 @@ class UploadReportAdmin(admin.ModelAdmin):
                     {"report_id": str(obj._id)},
                     {"cards_expected_count": 1, "cards_generated_count": 1, "cards_generation_complete": 1},
                 )
+                if not doc:
+                    admin_id = str(getattr(obj.admin, "id", "") or "")
+                    admin_email = obj.admin_email or getattr(obj.admin, "email", None)
+                    owner_query = {"$or": [
+                        c for c in [
+                            {"admin_id": admin_id} if admin_id else None,
+                            {"admin_email": admin_email} if admin_email else None,
+                        ] if c
+                    ]}
+                    if owner_query["$or"]:
+                        doc = db["nessus_reports"].find_one(
+                            owner_query,
+                            {"cards_expected_count": 1, "cards_generated_count": 1, "cards_generation_complete": 1},
+                            sort=[("uploaded_at", -1)],
+                        )
         except Exception:
             return "—"
 
