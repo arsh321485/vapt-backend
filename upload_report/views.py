@@ -1664,6 +1664,11 @@ class UploadReportDeleteAPIView(APIView):
 
 VULN_CARD_COLLECTION = "vulnerability_cards"
 NESSUS_COLLECTION = "nessus_reports"
+# How long a card_gen_locks row can go without a heartbeat refresh before
+# _auto_generate_cards_bg treats it as abandoned (a crashed/killed worker,
+# not a legitimately slow run — see its own docstring/comments for the real
+# bug this fixes) and takes it over instead of skipping forever.
+STALE_LOCK_SECONDS = 30 * 60
 
 # Track running card generation jobs to prevent duplicate threads
 _running_card_jobs: set = set()
@@ -1913,21 +1918,40 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             upsert=True,
         )
         if existing_lock is not None:
-            # Lock already existed — another process/thread is handling this.
-            # Real bug, confirmed live: the `finally` block below used to
-            # delete this lock UNCONDITIONALLY on the way out, including
-            # right here — so a second caller that saw "already locked" and
-            # skipped would still rip the lock out from under whichever
-            # process/thread genuinely holds it, the moment IT returns.
-            # A report already known to be running (or even genuinely
-            # hung) would then have its lock deleted by every OTHER
-            # caller that happened to check on it (a retry run, another
-            # upload, ...), letting yet another duplicate thread start
-            # concurrently. lock_acquired stays False here specifically so
-            # the finally block never touches a lock this call didn't
-            # create.
-            print(f"[AutoGenCards] Lock already held by another process for report_id={report_id}, skipping", flush=True)
-            return
+            # Real bug, confirmed live in production: a gunicorn worker
+            # restart (every code deploy restarts the service) kills this
+            # thread mid-run with no exception and no chance for the
+            # `finally` block below to ever fire — the lock it took out
+            # stays in card_gen_locks forever, with nothing to ever delete
+            # it. Every later attempt to resume (another upload, a retry)
+            # saw "Lock already held" and silently did nothing — confirmed
+            # on a real report stuck at 116/2074 cards for 8 days with the
+            # lock still dated to the original run. STALE_LOCK_SECONDS
+            # treats a lock older than that as abandoned and takes it over
+            # instead of skipping — the loop below refreshes locked_at on
+            # every iteration (a heartbeat), so a lock only ever looks
+            # stale when nothing is actually still running, never just
+            # because a large report legitimately takes hours.
+            locked_at = existing_lock.get("locked_at") or datetime.datetime.utcnow()
+            lock_age_seconds = (datetime.datetime.utcnow() - locked_at).total_seconds()
+            if lock_age_seconds < STALE_LOCK_SECONDS:
+                # Still fresh — another process/thread is genuinely handling
+                # this right now. lock_acquired stays False here specifically
+                # so the finally block never touches a lock this call didn't
+                # create (same reasoning as the original fix for the bug
+                # this replaced — see git history).
+                print(f"[AutoGenCards] Lock already held by another process for report_id={report_id} (age={int(lock_age_seconds)}s), skipping", flush=True)
+                return
+            print(
+                f"[AutoGenCards] Taking over STALE lock for report_id={report_id} "
+                f"(age={int(lock_age_seconds)}s, locked_at={locked_at}) — previous holder never released it, "
+                f"most likely a server restart killed it mid-run",
+                flush=True,
+            )
+            db["card_gen_locks"].update_one(
+                {"report_id": report_id},
+                {"$set": {"locked_at": datetime.datetime.utcnow()}},
+            )
         lock_acquired = True
 
         # Store agent start time so UploadStatusView can compute accurate elapsed
@@ -2113,6 +2137,20 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             vuln_plugin_name = vuln["plugin_name"]
             vuln_host_name   = vuln.get("host_name", "") or ""
             vuln_os_category = vuln.get("os_category", "windows")
+
+            # Heartbeat — keeps card_gen_locks' locked_at fresh for as long
+            # as this loop is genuinely still running, so the staleness
+            # check above only ever takes over a lock whose owning process
+            # is actually gone, never one still working through a large
+            # report (see STALE_LOCK_SECONDS and the lock-acquisition
+            # comments above for the real bug this is part of fixing).
+            try:
+                db["card_gen_locks"].update_one(
+                    {"report_id": report_id},
+                    {"$set": {"locked_at": datetime.datetime.utcnow()}},
+                )
+            except Exception:
+                pass  # nosec B110 - heartbeat is best-effort, must never block generation
 
             # ── Step 1: Skip if card already exists for this exact (report_id, plugin_name, host_name) ──
             already_exists = db[VULN_CARD_COLLECTION].find_one({
