@@ -1987,6 +1987,20 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                 team_names_lower = {name.lower(): name for name in TEAM_NAMES}
                 risk_levels = ["Critical", "High", "Medium", "Low"]
 
+                # Real feature request: an admin's own custom team(s) (see
+                # users_details.models.CustomTeam / upload_report.
+                # team_utils.is_fixed_team) have no classification pool of
+                # their own — every vulnerability belongs to them too, same
+                # "show everything" rule every member-facing view already
+                # follows (Phase 2a). Added as extra buckets below the 4
+                # fixed ones; each gets the SAME counts as the report's
+                # grand total, not a disjoint slice — that's the defined
+                # behavior for a custom team, not a bug.
+                from users_details.models import CustomTeam
+                custom_team_names = list(
+                    CustomTeam.objects.filter(admin=request.user).values_list("name", flat=True)
+                )
+
                 # ── plugin_name → risk_factor from nessus ───────────────────────
                 plugin_risk = {}
                 for host in doc.get("vulnerabilities_by_host", []):
@@ -2062,7 +2076,7 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                     )] = (card.get("assigned_team") or "").strip()
 
                 # ── initialize team buckets ─────────────────────────────────────
-                all_teams = TEAM_NAMES + ["Unassigned"]
+                all_teams = TEAM_NAMES + custom_team_names + ["Unassigned"]
 
                 def empty_bucket():
                     return {
@@ -2117,19 +2131,23 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                             _infer_assigned_team(plugin_name).lower()
                         ) or "Unassigned"
 
-                        bucket = teams[team_key]
-                        if key in closed_vuln_keys:
-                            # Summary (AdminVulnerabilitiesAPIView) excludes
-                            # closed vulnerabilities from its counts entirely
-                            # (same as held/deleted) — tracked here only as
-                            # an informational "closed" stat, never folded
-                            # into "total"/"open"/"by_risk", so the team
-                            # total stays equal to Summary's total.
-                            bucket["closed"] += 1
-                            continue
-                        bucket["total"] += 1
-                        bucket["open"] += 1
-                        bucket["by_risk"][risk_label] += 1
+                        # Every custom team sees everything too — same
+                        # increments as whichever fixed-team/Unassigned
+                        # bucket this vulnerability actually landed in.
+                        affected_buckets = [teams[team_key]] + [teams[n] for n in custom_team_names]
+                        for bucket in affected_buckets:
+                            if key in closed_vuln_keys:
+                                # Summary (AdminVulnerabilitiesAPIView) excludes
+                                # closed vulnerabilities from its counts entirely
+                                # (same as held/deleted) — tracked here only as
+                                # an informational "closed" stat, never folded
+                                # into "total"/"open"/"by_risk", so the team
+                                # total stays equal to Summary's total.
+                                bucket["closed"] += 1
+                                continue
+                            bucket["total"] += 1
+                            bucket["open"] += 1
+                            bucket["by_risk"][risk_label] += 1
 
                 # Supplemental pass — see closed_vuln_keys's own comment
                 # above. Any closed pair the main loop never reached (its
@@ -2144,6 +2162,8 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                         _infer_assigned_team(plugin_name).lower()
                     ) or "Unassigned"
                     teams[team_key]["closed"] += 1
+                    for custom_name in custom_team_names:
+                        teams[custom_name]["closed"] += 1
 
                 return Response(
                     {
