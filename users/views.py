@@ -15336,7 +15336,13 @@ class SlackSlashCommandView(APIView):
         data = self._call_user_api("/api/user/register/closed-vulns/", team_id, user_id)
         if not isinstance(data, dict) or data.get("detail") and "closed_vulnerabilities" not in data:
             return self._text_block(f"❌ {data.get('detail', 'Could not load closed vulnerabilities.')}")
-        rows = [r for r in (data.get("closed_vulnerabilities") or []) if r.get("assigned_team") == vapt_team]
+        # A custom team (see upload_report.team_utils.is_fixed_team) has no
+        # classification pool of its own — assigned_team here is always
+        # one of the 4 fixed teams, never a custom team's name — so show
+        # everything instead of filtering down to zero rows.
+        from upload_report.team_utils import is_fixed_team
+        all_rows = data.get("closed_vulnerabilities") or []
+        rows = all_rows if not is_fixed_team(vapt_team) else [r for r in all_rows if r.get("assigned_team") == vapt_team]
         return self._format_team_fixed_list(rows, vapt_team, offset=offset)
 
     def _format_team_fixed_list(self, rows, vapt_team, offset=0):
@@ -15394,7 +15400,9 @@ class SlackSlashCommandView(APIView):
         data = self._call_user_api("/api/user/register/closed-vulns/", team_id, user_id)
         if not isinstance(data, dict):
             return []
-        rows = [r for r in (data.get("closed_vulnerabilities") or []) if r.get("assigned_team") == vapt_team]
+        from upload_report.team_utils import is_fixed_team
+        all_rows = data.get("closed_vulnerabilities") or []
+        rows = all_rows if not is_fixed_team(vapt_team) else [r for r in all_rows if r.get("assigned_team") == vapt_team]
         return self._assign_severity_short_ids([dict(r, severity=r.get("risk_factor") or "") for r in rows])
 
     def _format_team_fixed_detail(self, record, team_id, user_id, vapt_team, offset=0, steps_offset=0):
@@ -22769,11 +22777,16 @@ class SlackSlashCommandView(APIView):
     def _format_team_support_status(self, data, team_name):
         # data is from SupportRequestByReportAPIView — full list filtered by team
         all_results = data.get("results") or []
-        # Filter for this team only
-        team_results = [
-            r for r in all_results
-            if (r.get("assigned_team") or "").strip().lower() == team_name.strip().lower()
-        ] if all_results else []
+        # Filter for this team only — a custom team (upload_report.
+        # team_utils.is_fixed_team) has no classification pool of its own,
+        # so it gets everything instead of matching zero rows.
+        from upload_report.team_utils import is_fixed_team
+        team_results = (
+            all_results if not is_fixed_team(team_name) else [
+                r for r in all_results
+                if (r.get("assigned_team") or "").strip().lower() == team_name.strip().lower()
+            ]
+        ) if all_results else []
 
         total   = len(team_results)
         pending = sum(1 for r in team_results if (r.get("status") or "open") != "closed")

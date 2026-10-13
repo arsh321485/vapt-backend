@@ -106,7 +106,22 @@ def _get_team_plugin_names(db, report_id, teams_lower):
     call) whenever a plugin has no card, or a card with no/invalid team —
     same fallback already proven correct elsewhere in the app.
     """
-    from upload_report.team_utils import infer_assigned_team
+    from upload_report.team_utils import infer_assigned_team, is_fixed_team
+
+    # Real feature request: a custom team (see CustomTeam/is_fixed_team's
+    # own docstrings) has no auto-classification pool of its own — a
+    # vulnerability's assigned_team/infer_assigned_team() output is NEVER
+    # a custom team's name, so without this, a member assigned only to a
+    # custom team would match nothing here at all (every team-scoped view
+    # built on this helper would show empty). The first custom team name
+    # present in teams_lower (display-name order doesn't matter — there's
+    # normally just one) is used as the catch-all "everything" bucket;
+    # fixed teams also present in teams_lower still get their own correct
+    # per-plugin attribution below, unaffected.
+    custom_team_catchall = next(
+        (display for key, display in teams_lower.items() if display and not is_fixed_team(display)),
+        None,
+    )
 
     team_plugins = set()
     plugin_team_map = {}
@@ -124,6 +139,9 @@ def _get_team_plugin_names(db, report_id, teams_lower):
         if matched:
             team_plugins.add(pname.lower())
             plugin_team_map[pname] = matched
+        elif custom_team_catchall:
+            team_plugins.add(pname.lower())
+            plugin_team_map[pname] = custom_team_catchall
 
     # Fill in every plugin_name that has NO card at all yet.
     nessus_doc = db[NESSUS_COLLECTION].find_one(
@@ -142,6 +160,9 @@ def _get_team_plugin_names(db, report_id, teams_lower):
             if matched:
                 team_plugins.add(pname.lower())
                 plugin_team_map[pname] = matched
+            elif custom_team_catchall:
+                team_plugins.add(pname.lower())
+                plugin_team_map[pname] = custom_team_catchall
 
     return team_plugins, plugin_team_map
 
@@ -1118,6 +1139,13 @@ class UserClosedFixVulnerabilitiesByHostAPIView(APIView):
 
             # Case-insensitive set of user's team names
             teams_lower_set = {t.lower() for t in active_teams}
+            # Real feature request: a custom team (see team_utils.
+            # is_fixed_team's docstring) has no classification pool of its
+            # own — assigned_team on a closed-fix doc is always one of the
+            # 4 fixed teams, never a custom team's name, so without this a
+            # member on a custom team would match nothing below.
+            from upload_report.team_utils import is_fixed_team
+            show_all_teams = any(not is_fixed_team(t) for t in active_teams)
 
             with MongoContext() as db:
                 # Get admin's latest report to scope by report_id
@@ -1162,8 +1190,9 @@ class UserClosedFixVulnerabilitiesByHostAPIView(APIView):
                 results = []
                 for doc in cursor:
                     doc_team = (doc.get("assigned_team") or "").strip().lower()
-                    # Team filter — case-insensitive
-                    if doc_team not in teams_lower_set:
+                    # Team filter — case-insensitive (bypassed entirely for
+                    # a custom team, which has no classification pool)
+                    if not show_all_teams and doc_team not in teams_lower_set:
                         continue
 
                     results.append({

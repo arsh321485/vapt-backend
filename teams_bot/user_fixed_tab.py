@@ -25,6 +25,12 @@ def _fetch_closed(member_user, team_name):
         if status_code >= 300 or not isinstance(data, dict):
             raise ValueError(f"closed vulns fetch failed: {status_code}")
         rows = data.get("closed_vulnerabilities") or []
+        # A custom team (upload_report.team_utils.is_fixed_team) has no
+        # classification pool of its own, so it gets everything instead of
+        # matching zero rows.
+        from upload_report.team_utils import is_fixed_team
+        if not is_fixed_team(team_name):
+            return rows
         return [r for r in rows if (r.get("assigned_team") or "") == team_name]
     return fix_tab.cached_fetch(f"user_closed_vulns:{member_user.id}:{team_name}", 20, _fetch)
 

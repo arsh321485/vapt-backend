@@ -33,6 +33,29 @@ TEAM_PATCH_MANAGEMENT = "Patch Management"
 TEAM_ARCHITECTURAL_FLAWS = "Architectural Flaws"
 TEAM_CONFIGURATION_MANAGEMENT = "Configuration Management"
 
+# Real feature request: an admin can additionally create their own custom
+# team(s) (users_details.models.CustomTeam), unlimited, name typed freely —
+# alongside these 4 fixed/auto-classified ones, which stay exactly as they
+# are. A vulnerability's assigned_team/infer_assigned_team() output is
+# ALWAYS one of these 4 — never a custom team's name — so this set is the
+# single, shared "is this a fixed team, or a custom one" check every
+# team-scoped view (userasset/views.py, users_details/views.py's
+# ReportAssetsVulnsAPIView, users/views.py's Slack team channels) uses to
+# decide: match by classification (fixed team) vs. show everything (custom
+# team, which has no classification pool of its own by design).
+FIXED_TEAMS = {
+    TEAM_NETWORK_SECURITY,
+    TEAM_PATCH_MANAGEMENT,
+    TEAM_ARCHITECTURAL_FLAWS,
+    TEAM_CONFIGURATION_MANAGEMENT,
+}
+
+
+def is_fixed_team(team_name: str) -> bool:
+    """True for one of the 4 auto-classified teams; False for anything
+    else (a custom team name, or empty/unknown)."""
+    return (team_name or "").strip() in FIXED_TEAMS
+
 
 def infer_assigned_team(vulnerability_name: str) -> str:
     """
