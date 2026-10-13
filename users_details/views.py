@@ -2202,6 +2202,17 @@ class CustomTeamListCreateView(generics.ListCreateAPIView):
                 daemon=True,
             ).start()
 
+        # Phase 3 — same, on-demand, for Microsoft Teams (see
+        # ensure_custom_team_teams_channel's own docstring).
+        if getattr(request.user, "ms_team_id", None):
+            import threading
+            from users.views import ensure_custom_team_teams_channel
+            threading.Thread(
+                target=ensure_custom_team_teams_channel,
+                args=(request.user, team),
+                daemon=True,
+            ).start()
+
         return Response(
             {"id": str(team._id), "name": team.name, "created_at": team.created_at},
             status=status.HTTP_201_CREATED,

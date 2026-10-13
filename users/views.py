@@ -1998,6 +1998,80 @@ def _create_vaptfix_channels(team_id, headers, access_token=None, admin=None):
     return results
 
 
+def ensure_custom_team_teams_channel(admin, custom_team):
+    """
+    On-demand Microsoft Teams counterpart of ensure_custom_team_slack_channel
+    (Phase 2b), for ONE newly created CustomTeam instead of the 4 fixed
+    channels _create_vaptfix_channels provisions at initial team setup.
+    Best-effort, same as the Slack version: an admin with no Teams
+    connected, or any Graph/Bot Framework failure, just leaves
+    custom_team.ms_teams_channel_id unset — the team itself still exists
+    and works everywhere else.
+
+    Unlike Slack (bot_token + conversations.create, both always on hand
+    once connected), creating a Teams channel needs an app-only Graph
+    token scoped to the CUSTOMER'S OWN tenant (_get_graph_app_token_for_
+    tenant) — which itself needs that tenant's id. RSC-only admins (the
+    normal case — see _try_rsc_provision_on_install's own docstring) have
+    no delegated ms_access_token to decode it from, so this reads it from
+    teams_bot.conversation_store's own team_channel_reference instead —
+    captured from a real Bot Framework activity the very first time the
+    bot was ever added to this team, independent of any token.
+    """
+    team_id = getattr(admin, "ms_team_id", None)
+    if not team_id:
+        return None
+
+    from teams_bot.conversation_store import get_team_channel_reference, save_sub_channel_team
+    ref = get_team_channel_reference(team_id)
+    if not ref:
+        logger.warning(f"[CustomTeamChannel] No team_channel_reference for team_id={team_id} (admin={admin.email}) — can't resolve tenant_id")
+        return None
+    tenant_id = ref.get("tenant_id")
+    service_url = ref.get("service_url")
+    if not tenant_id:
+        return None
+
+    graph_token = _get_graph_app_token_for_tenant(tenant_id)
+    if not graph_token:
+        return None
+
+    headers = {"Authorization": f"Bearer {graph_token}", "Content-Type": "application/json"}
+    ch_resp = _http_post(
+        f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
+        headers=headers,
+        json={
+            "displayName": custom_team.name,
+            "description": f"{custom_team.name} channel",
+            "membershipType": "standard",
+        },
+        timeout=15,
+    )
+    try:
+        ch_data = ch_resp.json() if ch_resp is not None else {}
+    except Exception:
+        ch_data = {}
+    channel_id = ch_data.get("id")
+    if not channel_id:
+        logger.warning(f"[CustomTeamChannel] Teams channel create failed for '{custom_team.name}' admin={admin.email}: {ch_data}")
+        return None
+
+    try:
+        save_sub_channel_team(team_id, channel_id, custom_team.name)
+    except Exception:
+        logger.exception(f"[CustomTeamChannel] save_sub_channel_team failed for '{custom_team.name}'")
+
+    if service_url:
+        try:
+            _ensure_one_sub_channel_welcomed(team_id, channel_id, custom_team.name, service_url)
+        except Exception:
+            logger.exception(f"[CustomTeamChannel] Failed to welcome new Teams channel for '{custom_team.name}'")
+
+    custom_team.ms_teams_channel_id = channel_id
+    custom_team.save(update_fields=["ms_teams_channel_id"])
+    return channel_id
+
+
 def _decode_jwt_tid(token):
     """Pull the "tid" (Azure AD tenant id) claim out of a Microsoft JWT
     (id_token OR a Graph access_token — both carry it) without verifying
