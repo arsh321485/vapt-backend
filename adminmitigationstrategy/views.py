@@ -124,7 +124,13 @@ class MitigationStrategyByTeamAPIView(APIView):
                         "vulnerabilities_by_host.vulnerabilities.severity": 1,
                         "vulnerabilities_by_host.vulnerabilities.risk": 1,
                     },
-                    sort=[("uploaded_at", pymongo.DESCENDING)],
+                    # Sorted by total_vulnerabilities first, not just
+                    # uploaded_at — same fix as resolve_report_id_for_
+                    # upload/admindashboard.views._load_latest_report_
+                    # for_admin: recency alone can pick a small claim-
+                    # link auto-split fragment over this admin's real,
+                    # bigger, properly-merged report.
+                    sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)],
                 )
 
                 if not latest_doc:
@@ -418,7 +424,13 @@ class VulnerabilityAssetCountAPIView(APIView):
                         "vulnerabilities_by_host.vulnerabilities.pluginname": 1,
                         "vulnerabilities_by_host.vulnerabilities.name": 1,
                     },
-                    sort=[("uploaded_at", pymongo.DESCENDING)],
+                    # Sorted by total_vulnerabilities first, not just
+                    # uploaded_at — same fix as resolve_report_id_for_
+                    # upload/admindashboard.views._load_latest_report_
+                    # for_admin: recency alone can pick a small claim-
+                    # link auto-split fragment over this admin's real,
+                    # bigger, properly-merged report.
+                    sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)],
                 )
 
                 if not latest_doc:

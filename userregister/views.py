@@ -2768,9 +2768,14 @@ class UserSupportRequestsByReportAPIView(APIView):
             if admin_email:
                 query_conditions.append({"admin_email": admin_email})
 
+            # Sorted by total_vulnerabilities first, not just
+            # uploaded_at — see _load_latest_report's own docstring in
+            # this same file for why recency alone can pick a small
+            # claim-link auto-split fragment over this admin's real,
+            # bigger, properly-merged report.
             latest_doc = nessus_coll.find_one(
                 {"$or": query_conditions},
-                sort=[("uploaded_at", pymongo.DESCENDING)]
+                sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)]
             )
             if not latest_doc:
                 return Response(
@@ -3066,9 +3071,14 @@ class UserSupportRequestsByHostAPIView(APIView):
             if admin_email:
                 query_conditions.append({"admin_email": admin_email})
 
+            # Sorted by total_vulnerabilities first, not just
+            # uploaded_at — see _load_latest_report's own docstring in
+            # this same file for why recency alone can pick a small
+            # claim-link auto-split fragment over this admin's real,
+            # bigger, properly-merged report.
             latest_doc = nessus_coll.find_one(
                 {"$or": query_conditions},
-                sort=[("uploaded_at", pymongo.DESCENDING)]
+                sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)]
             )
             if not latest_doc:
                 return Response(

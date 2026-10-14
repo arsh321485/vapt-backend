@@ -317,11 +317,25 @@ class LatestSuperAdminVulnerabilityRegisterAPIView(APIView):
                 if current_admin_email:
                     query_conditions.append({"admin_email": current_admin_email})
 
-                # Find the LATEST report for this specific Admin
-                # Uses $or to match by either admin_id or admin_email
+                # Find this Admin's REAL primary report.
+                # Uses $or to match by either admin_id or admin_email.
+                #
+                # Real bug report: an admin who ends up owning more than
+                # one nessus_reports document (e.g. a claim-link auto-
+                # split created a small standalone report for one
+                # specific file alongside this admin's own bigger,
+                # properly-merged report — heal_todays_reports above only
+                # merges same-day write-time split fragments, not
+                # legitimately-separate claimed reports like this one)
+                # had this pick whichever was most RECENT by uploaded_at
+                # — often the small fragment, not the real, complete
+                # picture. Same fix as resolve_report_id_for_upload/
+                # admindashboard.views._load_latest_report_for_admin:
+                # total_vulnerabilities is a far more reliable "this is
+                # the real, primary report" signal than recency.
                 latest_doc = coll.find_one(
                     {"$or": query_conditions},
-                    sort=[("uploaded_at", pymongo.DESCENDING)]
+                    sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)]
                 )
 
                 if not latest_doc:

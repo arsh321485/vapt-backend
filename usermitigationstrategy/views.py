@@ -92,10 +92,15 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                 closed_coll    = db[FIX_VULN_CLOSED_COLLECTION]
                 vuln_card_coll = db[VULN_CARD_COLLECTION]
 
-                # Step 2: Latest report for this admin
+                # Step 2: this admin's REAL primary report — sorted by
+                # total_vulnerabilities first, not just uploaded_at, so a
+                # small claim-link auto-split fragment can't outrank this
+                # admin's real, bigger, properly-merged report (same fix
+                # as resolve_report_id_for_upload/admindashboard.views.
+                # _load_latest_report_for_admin).
                 latest_doc = nessus_coll.find_one(
                     {"admin_id": admin_id},
-                    sort=[("uploaded_at", pymongo.DESCENDING)],
+                    sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)],
                 )
 
                 if not latest_doc:
@@ -331,10 +336,15 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                 nessus_coll    = db[NESSUS_COLLECTION]
                 vuln_card_coll = db[VULN_CARD_COLLECTION]
 
-                # Step 2: Latest report for this admin
+                # Step 2: this admin's REAL primary report — sorted by
+                # total_vulnerabilities first, not just uploaded_at, so a
+                # small claim-link auto-split fragment can't outrank this
+                # admin's real, bigger, properly-merged report (same fix
+                # as resolve_report_id_for_upload/admindashboard.views.
+                # _load_latest_report_for_admin).
                 latest_doc = nessus_coll.find_one(
                     {"admin_id": admin_id},
-                    sort=[("uploaded_at", pymongo.DESCENDING)],
+                    sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)],
                 )
 
                 if not latest_doc:
