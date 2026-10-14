@@ -342,12 +342,28 @@ class UploadReportAdmin(admin.ModelAdmin):
             all_owned_by_resolved_id.setdefault(rid, set()).add(str(r._id))
 
         selected_set = set(report_ids)
-        safe_report_ids, blocked_upload_ids = [], []
+        safe_report_ids, blocked_upload_ids, auto_split_ids = [], [], []
         for uid in report_ids:
             rid = resolved_by_upload_id[uid]
             siblings = all_owned_by_resolved_id.get(rid, {uid})
             if siblings <= selected_set:
                 safe_report_ids.append(uid)
+                continue
+
+            # Real feature request: before refusing outright, try to
+            # safely split this upload's own content out on its own — see
+            # _auto_split_duplicate_upload's own docstring. Only succeeds
+            # for an upload whose findings are ALL exact duplicates of
+            # cards that already exist elsewhere (the common, recurring
+            # case: the same test report re-uploaded and re-claimed) and
+            # whose own content was snapshotted at upload time (see
+            # upload_vuln_snapshots) — falls through to the existing
+            # blocking warning otherwise, exactly as before.
+            split_report_id = self._auto_split_duplicate_upload(owned_by_id[uid])
+            if split_report_id:
+                resolved_by_upload_id[uid] = split_report_id
+                safe_report_ids.append(uid)
+                auto_split_ids.append(uid)
             else:
                 blocked_upload_ids.append(uid)
 
@@ -383,6 +399,12 @@ class UploadReportAdmin(admin.ModelAdmin):
             f"Claim link (expires in {INVITE_TTL_SECONDS // 60} minutes) for "
             f"{len(report_ids)} report(s): {invite_url}"
         )
+        if auto_split_ids:
+            msg += (
+                f"  ({len(auto_split_ids)} of them were auto-split into their own "
+                "standalone report first — their findings were all duplicates of "
+                "ones already claimed elsewhere.)"
+            )
         if not_owned:
             msg += f"  ({not_owned} selected report(s) skipped — not owned by you.)"
         if not_ready:
@@ -415,6 +437,130 @@ class UploadReportAdmin(admin.ModelAdmin):
         under."""
         from .views import resolve_report_id_for_upload
         return resolve_report_id_for_upload(obj)
+
+    def _auto_split_duplicate_upload(self, obj):
+        """
+        For an upload whose own content was snapshotted at upload time
+        (see _store_in_mongodb's upload_vuln_snapshots write) and whose
+        findings are ALL exact duplicates of cards that already exist
+        elsewhere for this admin — builds a standalone nessus_reports
+        document + copied vulnerability_cards for it, tagged to its own
+        upload id, and returns that report_id. Returns None if there's no
+        snapshot (upload predates this feature) or if even one finding
+        has no existing card anywhere (genuinely new content — this
+        deliberately does NOT generate cards itself, no GPT calls here).
+
+        Used by generate_claim_link to make a fully-duplicate upload (the
+        common case: a Super Admin re-uploading the same test report for
+        a magic-link claim) independently claimable, without the slow,
+        costly AI re-parse a general "reconstruct any upload's content"
+        feature would need — see upload_vuln_snapshots' own comment for
+        the full story.
+        """
+        import uuid as _uuid
+        from vaptfix.mongo_client import MongoContext
+        own_id = str(obj._id)
+        with MongoContext() as db:
+            if db["nessus_reports"].find_one({"report_id": own_id}, {"_id": 1}):
+                return None  # already standalone — nothing to split
+
+            snapshot = db["upload_vuln_snapshots"].find_one({"upload_id": own_id})
+            if not snapshot:
+                return None
+
+            admin_id = str(getattr(obj.admin, "id", "") or "") or snapshot.get("admin_id")
+            admin_email = obj.admin_email or snapshot.get("admin_email")
+
+            all_hosts = list(snapshot.get("vulnerabilities_by_host") or []) + list(snapshot.get("locked_hosts") or [])
+            pairs = []
+            for host in all_hosts:
+                host_name = (host.get("host_name") or "").strip()
+                for v in (host.get("vulnerabilities") or []):
+                    pname = (v.get("plugin_name") or "").strip()
+                    if host_name and pname:
+                        pairs.append((host_name, pname))
+            if not pairs:
+                return None
+
+            # Every one of this upload's own findings must already have a
+            # card SOMEWHERE for this admin (confirms "fully duplicate") —
+            # matched case-insensitively, same as the earlier manual
+            # backfills this mirrors.
+            existing_by_key = {}
+            for card in db["vulnerability_cards"].find(
+                {"admin_id": admin_id},
+                {"host_name": 1, "vulnerability_name": 1, "report_id": 1,
+                 "created_at": 1, "card_id": 1},
+            ):
+                key = ((card.get("host_name") or "").strip().lower(), (card.get("vulnerability_name") or "").strip().lower())
+                existing = existing_by_key.get(key)
+                # Prefer the most recently created copy if more than one
+                # exists (same "newest wins" rule resolve_report_id_for_
+                # upload uses) — harmless either way since content only
+                # ever gets copied forward, never diverges.
+                if not existing or (card.get("created_at") and existing.get("created_at") and card["created_at"] > existing["created_at"]):
+                    existing_by_key[key] = card
+
+            full_cards = {}
+            for host_name, pname in pairs:
+                key = (host_name.lower(), pname.lower())
+                card = existing_by_key.get(key)
+                if not card:
+                    return None  # genuinely new content — refuse to guess
+                full_cards[key] = db["vulnerability_cards"].find_one({"card_id": card.get("card_id")}) or card
+
+            # Build the new standalone report from the snapshot's own,
+            # pristine (pre-merge-dedup) host/vuln data.
+            new_hosts_by_name = {}
+            for host in all_hosts:
+                host_name = (host.get("host_name") or "").strip()
+                if not host_name:
+                    continue
+                entry = new_hosts_by_name.setdefault(host_name, {
+                    "host_name": host_name,
+                    "host_information": host.get("host_information") or {},
+                    "vulnerabilities": [],
+                })
+                entry["vulnerabilities"].extend(host.get("vulnerabilities") or [])
+
+            now = datetime.datetime.utcnow()
+            new_vulnerabilities_by_host = list(new_hosts_by_name.values())
+            total_vulnerabilities = sum(len(h["vulnerabilities"]) for h in new_vulnerabilities_by_host)
+
+            db["nessus_reports"].insert_one({
+                "report_id": own_id,
+                "admin_id": admin_id,
+                "admin_email": admin_email,
+                "vulnerabilities_by_host": new_vulnerabilities_by_host,
+                "locked_hosts": [],
+                "total_hosts": len(new_vulnerabilities_by_host),
+                "total_vulnerabilities": total_vulnerabilities,
+                "cards_expected_count": len(pairs),
+                "cards_generated_count": len(pairs),
+                "cards_generation_complete": True,
+                "cards_generation_started_at": now,
+                "uploaded_at": now,
+            })
+
+            new_cards = []
+            for key, card in full_cards.items():
+                new_card = dict(card)
+                new_card.pop("_id", None)
+                new_card["card_id"] = str(_uuid.uuid4())
+                new_card["report_id"] = own_id
+                new_card["admin_id"] = admin_id
+                new_card["admin_email"] = admin_email
+                new_card["source_upload_id"] = own_id
+                new_card["created_at"] = now
+                new_cards.append(new_card)
+            if new_cards:
+                db["vulnerability_cards"].insert_many(new_cards)
+
+            logger.info(
+                f"[AutoSplitDuplicateUpload] Split {own_id} into its own standalone "
+                f"report — {len(new_cards)} card(s) copied from existing duplicates."
+            )
+            return own_id
 
     def _cards_progress(self, obj):
         """
@@ -788,6 +934,42 @@ class UploadReportAdmin(admin.ModelAdmin):
                     for _host in locked_hosts:
                         for _vuln in (_host.get("vulnerabilities") or []):
                             _vuln["source_upload_id"] = report_id
+
+                    # Real feature request: a MERGED upload (merge_into_
+                    # report_id set) whose findings are ALL exact
+                    # duplicates of ones an earlier upload already
+                    # contributed (merge_hosts_into_report skips re-
+                    # merging those, see its own docstring) has no
+                    # independent record of its own content anywhere —
+                    # that content is only ever STORED if at least one
+                    # finding turns out to be genuinely new. A Super Admin
+                    # repeatedly re-uploading the same test report (same
+                    # client, same findings, re-exported) for a magic-link
+                    # claim found generate_claim_link could never safely
+                    # claim just that one file — nothing recorded what it
+                    # actually reported, so there was no way to split it
+                    # out from the shared report's other, unrelated
+                    # uploads without a slow, costly AI re-parse of the
+                    # original file. Snapshotting every upload's own
+                    # vulnerabilities_by_host/locked_hosts here —
+                    # unconditionally, before merge can drop anything —
+                    # gives _auto_split_duplicate_upload (upload_report/
+                    # admin.py) a cheap, deterministic, no-GPT way to
+                    # rebuild a fully-duplicate upload's own standalone
+                    # report on demand, going forward. Does nothing for
+                    # uploads from before this existed.
+                    db["upload_vuln_snapshots"].update_one(
+                        {"upload_id": report_id},
+                        {"$set": {
+                            "upload_id": report_id,
+                            "admin_id": admin_id,
+                            "admin_email": admin_email,
+                            "vulnerabilities_by_host": parsed_data.get("vulnerabilities_by_host") or [],
+                            "locked_hosts": locked_hosts,
+                            "created_at": datetime.datetime.utcnow(),
+                        }},
+                        upsert=True,
+                    )
 
                     hosts_payload = self._prepare_hosts_for_storage(
                         parsed_data.get("vulnerabilities_by_host", [])
