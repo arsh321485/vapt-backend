@@ -265,7 +265,7 @@ class UploadReportAdmin(admin.ModelAdmin):
         # resolution so the two can never disagree again.
         report_ids_all = [str(r._id) for r in owned]
         progress_by_id = {str(r._id): self._cards_progress(r) for r in owned}
-        complete_ids = {rid for rid, (g, e, c, s) in progress_by_id.items() if c}
+        complete_ids = {rid for rid, (g, e, c, s, rc) in progress_by_id.items() if c}
         report_ids = [rid for rid in report_ids_all if rid in complete_ids]
         not_ready = [r for r in owned if str(r._id) not in complete_ids]
 
@@ -279,7 +279,7 @@ class UploadReportAdmin(admin.ModelAdmin):
         # rough guess before generation has even started and drifts further
         # off the longer a report has actually been running.
         def _progress_line(report_id):
-            generated, expected, complete, started_at = progress_by_id.get(report_id, (0, 0, False, None))
+            generated, expected, complete, started_at, _report_complete = progress_by_id.get(report_id, (0, 0, False, None, False))
             eta_text = "estimating…"
             if started_at:
                 elapsed = (datetime.datetime.utcnow() - started_at).total_seconds()
@@ -373,13 +373,16 @@ class UploadReportAdmin(admin.ModelAdmin):
                     expected = int(obj.parsed_count or 0)
                     complete = expected == 0 or tagged_count >= expected
                     started_at = None
+                    report_complete = False
                     sample = db["vulnerability_cards"].find_one({"source_upload_id": own_id}, {"report_id": 1})
                     if sample and sample.get("report_id"):
                         rdoc = db["nessus_reports"].find_one(
-                            {"report_id": sample["report_id"]}, {"cards_generation_started_at": 1}
+                            {"report_id": sample["report_id"]},
+                            {"cards_generation_started_at": 1, "cards_generation_complete": 1},
                         )
                         started_at = (rdoc or {}).get("cards_generation_started_at")
-                    return tagged_count, expected, complete, started_at
+                        report_complete = bool((rdoc or {}).get("cards_generation_complete"))
+                    return tagged_count, expected, complete, started_at, report_complete
 
                 doc = db["nessus_reports"].find_one(
                     {"report_id": own_id},
@@ -390,7 +393,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                     expected = int(doc.get("cards_expected_count") or 0)
                     generated = int(doc.get("cards_generated_count") or 0)
                     complete = bool(doc.get("cards_generation_complete")) or (expected > 0 and generated >= expected)
-                    return generated, expected, complete, doc.get("cards_generation_started_at")
+                    return generated, expected, complete, doc.get("cards_generation_started_at"), complete
 
                 admin_id = str(getattr(obj.admin, "id", "") or "")
                 admin_email = obj.admin_email or getattr(obj.admin, "email", None)
@@ -421,7 +424,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                 # for a file whose own parsed_count is 23.
                 if parent_doc and not parent_doc.get("cards_generation_complete"):
                     expected = int(obj.parsed_count or 0)
-                    return 0, expected, expected == 0, None
+                    return 0, expected, expected == 0, None, False
 
                 # Real follow-up: once the PARENT'S generation genuinely is
                 # complete (nothing left queued anywhere) and this upload
@@ -441,18 +444,18 @@ class UploadReportAdmin(admin.ModelAdmin):
                 # contributed that exact (host, plugin_name) pair.
                 if parent_doc:
                     expected = int(obj.parsed_count or 0)
-                    return expected, expected, True, parent_doc.get("cards_generation_started_at")
+                    return expected, expected, True, parent_doc.get("cards_generation_started_at"), True
 
                 doc = parent_doc
         except Exception:
-            return 0, 0, False, None
+            return 0, 0, False, None, False
 
         if not doc:
-            return 0, 0, False, None
+            return 0, 0, False, None, False
         expected = int(doc.get("cards_expected_count") or 0)
         generated = int(doc.get("cards_generated_count") or 0)
         complete = bool(doc.get("cards_generation_complete")) or (expected > 0 and generated >= expected)
-        return generated, expected, complete, doc.get("cards_generation_started_at")
+        return generated, expected, complete, doc.get("cards_generation_started_at"), complete
 
     def get_cards_status(self, obj):
         """
@@ -461,14 +464,32 @@ class UploadReportAdmin(admin.ModelAdmin):
         transient GPT-4o/Mongo failure) and the admin had no way to see it
         without querying MongoDB directly. Run
         `python manage.py retry_incomplete_card_generation` to fix any
-        "Incomplete" rows shown here. See _cards_progress for the merged-
-        upload resolution this now shares with generate_claim_link.
+        "⚠️ Incomplete" rows shown here. See _cards_progress for the
+        merged-upload resolution this now shares with generate_claim_link.
+
+        Real bug report: a file whose own card count will NEVER reach its
+        parsed_count — because the "missing" ones are exact (host,
+        plugin_name) duplicates of a finding some OTHER merged-in upload
+        already contributed (merge_hosts_into_report deliberately skips
+        re-merging those — see its own docstring) — kept showing
+        "⚠️ Incomplete" forever, indistinguishable from a report that's
+        genuinely still generating. Verified case-by-case (TIPCO/PPFC
+        files, Oct 2026) that every one of these gaps was a real,
+        permanent, already-tagged-elsewhere duplicate, not a missed
+        generation. Once the underlying report's OWN generation has
+        genuinely finished (report_complete — nothing left queued
+        anywhere), a gap here can only be that kind of permanent
+        duplicate/filtered-out shortfall, never "still working" — label
+        it as such instead of a scary, actionable-looking warning.
         """
-        generated, expected, complete, _started_at = self._cards_progress(obj)
+        generated, expected, complete, _started_at, report_complete = self._cards_progress(obj)
         if expected == 0:
             return f"✅ {generated}" if generated else "—"
         if complete:
             return f"✅ {generated}/{expected}"
+        if report_complete:
+            gap = expected - generated
+            return f"✅ {generated}/{expected} ({gap} shared with another file)"
         return f"⚠️ Incomplete {generated}/{expected}"
     get_cards_status.short_description = "Cards"
 
