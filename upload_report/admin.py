@@ -263,9 +263,20 @@ class UploadReportAdmin(admin.ModelAdmin):
         # column already showed it 100% complete — see _cards_progress's
         # own docstring for the full story. Now shares that exact same
         # resolution so the two can never disagree again.
+        # Real bug report: a file whose own card count can NEVER reach its
+        # parsed_count — because the "missing" ones are exact duplicates
+        # of a finding some OTHER merged-in upload already contributed
+        # (see get_cards_status's "shared with another file" label, added
+        # for the exact same reason) — failed this gate FOREVER, with a
+        # live ETA ("~28 min remaining") that could never actually
+        # resolve, since nothing was ever really pending for it. report_
+        # complete (the underlying report's OWN generation has genuinely
+        # finished — nothing left queued anywhere) means a gap here is
+        # provably permanent, never "still working", so it's accepted as
+        # ready too, same as a literal tagged_count >= expected.
         report_ids_all = [str(r._id) for r in owned]
         progress_by_id = {str(r._id): self._cards_progress(r) for r in owned}
-        complete_ids = {rid for rid, (g, e, c, s, rc) in progress_by_id.items() if c}
+        complete_ids = {rid for rid, (g, e, c, s, rc) in progress_by_id.items() if c or rc}
         report_ids = [rid for rid in report_ids_all if rid in complete_ids]
         not_ready = [r for r in owned if str(r._id) not in complete_ids]
 
@@ -395,48 +406,15 @@ class UploadReportAdmin(admin.ModelAdmin):
     get_admin_email.short_description = "Admin Email"
 
     def _resolve_report_id_for_claim(self, obj):
-        """The ACTUAL nessus_reports.report_id this upload's data lives
-        under — its own _id for a standalone/first-time upload, or the
-        admin's shared merged report's own report_id for one later merged
-        into an existing report (see merge_service.py). Used by
-        generate_claim_link so a claimed invite reassigns the REAL data,
-        not just the lightweight UploadReport tracking row — see its own
-        docstring for the full bug report this fixes.
-
-        Same 3-step resolution as _cards_progress (own doc, then tagged
-        cards, then the admin's own most-recent report): a fully-deduped
-        upload (every one of its findings is an exact duplicate of a
-        SIBLING upload's — merge_hosts_into_report skips re-merging those,
-        see its own docstring) has ZERO cards tagged to its own
-        source_upload_id, so the tagged-card lookup alone isn't enough —
-        confirmed live: PPFC_Internal_VAPT_Report_October_2 resolved to
-        its own (non-existent) _id instead of the real shared report_id
-        without this fallback, which would have reproduced the exact
-        claim-transfer bug this method exists to fix."""
-        from vaptfix.mongo_client import MongoContext
-        own_id = str(obj._id)
-        with MongoContext() as db:
-            if db["nessus_reports"].find_one({"report_id": own_id}, {"_id": 1}):
-                return own_id
-            sample = db["vulnerability_cards"].find_one({"source_upload_id": own_id}, {"report_id": 1})
-            if sample and sample.get("report_id"):
-                return sample["report_id"]
-
-            admin_id = str(getattr(obj.admin, "id", "") or "")
-            admin_email = obj.admin_email or getattr(obj.admin, "email", None)
-            owner_query = {"$or": [
-                c for c in [
-                    {"admin_id": admin_id} if admin_id else None,
-                    {"admin_email": admin_email} if admin_email else None,
-                ] if c
-            ]}
-            if owner_query["$or"]:
-                parent_doc = db["nessus_reports"].find_one(
-                    owner_query, {"report_id": 1}, sort=[("uploaded_at", -1)],
-                )
-                if parent_doc and parent_doc.get("report_id"):
-                    return parent_doc["report_id"]
-        return own_id
+        """Thin wrapper — see upload_report.views.resolve_report_id_for_upload
+        for the full resolution logic and docstring. Kept as a method here
+        only because generate_claim_link and _cards_progress already call
+        it as `self._resolve_report_id_for_claim(...)`; both now share the
+        exact same implementation as UploadCardsStatusAPIView so the three
+        can never disagree about which report_id an upload's data lives
+        under."""
+        from .views import resolve_report_id_for_upload
+        return resolve_report_id_for_upload(obj)
 
     def _cards_progress(self, obj):
         """
@@ -475,20 +453,30 @@ class UploadReportAdmin(admin.ModelAdmin):
             from vaptfix.mongo_client import MongoContext
             with MongoContext() as db:
                 own_id = str(obj._id)
-                tagged_count = db["vulnerability_cards"].count_documents({"source_upload_id": own_id})
+                # Real bug report: counting by source_upload_id alone
+                # double-counted a tag that happens to exist in more than
+                # one report_id at once — e.g. after a manual split/repair
+                # copied an upload's cards into its own new standalone
+                # report without deleting the (harmless, unused) old
+                # copies still sitting in the original shared report.
+                # Resolve the ONE canonical report_id first (same 3-step
+                # resolution as _resolve_report_id_for_claim, newest-copy-
+                # wins when a tag is ambiguous) and scope the count to
+                # just that — never a blind, unscoped tally across every
+                # report_id the tag happens to appear in.
+                resolved_report_id = self._resolve_report_id_for_claim(obj)
+                tagged_count = db["vulnerability_cards"].count_documents(
+                    {"source_upload_id": own_id, "report_id": resolved_report_id}
+                )
                 if tagged_count:
                     expected = int(obj.parsed_count or 0)
                     complete = expected == 0 or tagged_count >= expected
-                    started_at = None
-                    report_complete = False
-                    sample = db["vulnerability_cards"].find_one({"source_upload_id": own_id}, {"report_id": 1})
-                    if sample and sample.get("report_id"):
-                        rdoc = db["nessus_reports"].find_one(
-                            {"report_id": sample["report_id"]},
-                            {"cards_generation_started_at": 1, "cards_generation_complete": 1},
-                        )
-                        started_at = (rdoc or {}).get("cards_generation_started_at")
-                        report_complete = bool((rdoc or {}).get("cards_generation_complete"))
+                    rdoc = db["nessus_reports"].find_one(
+                        {"report_id": resolved_report_id},
+                        {"cards_generation_started_at": 1, "cards_generation_complete": 1},
+                    )
+                    started_at = (rdoc or {}).get("cards_generation_started_at")
+                    report_complete = bool((rdoc or {}).get("cards_generation_complete"))
                     return tagged_count, expected, complete, started_at, report_complete
 
                 doc = db["nessus_reports"].find_one(

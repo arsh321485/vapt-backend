@@ -2858,6 +2858,57 @@ def _fmt_seconds_for_status(seconds) -> str:
     return f"{rem} sec"
 
 
+def resolve_report_id_for_upload(upload_report_obj):
+    """The ACTUAL nessus_reports.report_id this upload's data lives
+    under — its own _id for a standalone/first-time upload, or the
+    admin's shared merged report's own report_id for one later merged
+    into an existing report (see merge_service.py). Shared by
+    UploadCardsStatusAPIView and UploadReportAdmin._cards_progress /
+    _resolve_report_id_for_claim (upload_report/admin.py) so every
+    by-report_id lookup for a given upload agrees on the same one.
+
+    3-step resolution: own doc directly, then a tagged card's own
+    report_id (needed for a fully-deduped upload — every one of its
+    findings is an exact duplicate of a sibling upload's, see
+    merge_hosts_into_report's own docstring — which has ZERO cards
+    tagged to its own source_upload_id in any OTHER report), then the
+    admin's own most-recent report as a last resort.
+
+    The tagged-card sample is sorted by created_at descending:  a tag
+    that happens to exist in more than one report_id (e.g. after a
+    manual split/repair copied an upload's cards into its own new
+    standalone report without deleting the harmless, unused old copies
+    still sitting in the original shared report) must always resolve to
+    the NEWER, correct copy — never arbitrarily whichever one find_one
+    happens to return first."""
+    from vaptfix.mongo_client import MongoContext
+    own_id = str(upload_report_obj._id)
+    with MongoContext() as db:
+        if db[NESSUS_COLLECTION].find_one({"report_id": own_id}, {"_id": 1}):
+            return own_id
+        sample = db[VULN_CARD_COLLECTION].find_one(
+            {"source_upload_id": own_id}, {"report_id": 1}, sort=[("created_at", -1)],
+        )
+        if sample and sample.get("report_id"):
+            return sample["report_id"]
+
+        admin_id = str(getattr(upload_report_obj.admin, "id", "") or "")
+        admin_email = upload_report_obj.admin_email or getattr(upload_report_obj.admin, "email", None)
+        owner_query = {"$or": [
+            c for c in [
+                {"admin_id": admin_id} if admin_id else None,
+                {"admin_email": admin_email} if admin_email else None,
+            ] if c
+        ]}
+        if owner_query["$or"]:
+            parent_doc = db[NESSUS_COLLECTION].find_one(
+                owner_query, {"report_id": 1}, sort=[("uploaded_at", -1)],
+            )
+            if parent_doc and parent_doc.get("report_id"):
+                return parent_doc["report_id"]
+    return own_id
+
+
 class UploadCardsStatusAPIView(APIView):
     """
     GET /upload_report/upload/<report_id>/status/
@@ -2903,27 +2954,28 @@ class UploadCardsStatusAPIView(APIView):
         # stayed stuck at 0% forever for every merged-in upload, even once
         # its own cards were already 100% generated (tagged via
         # source_upload_id — see _store_in_mongodb/_auto_generate_cards_bg,
-        # which tags EVERY upload, merged or not). Tagged-count-first,
-        # same as UploadReportAdmin._cards_progress, so the two agree.
-        tagged_count = db[VULN_CARD_COLLECTION].count_documents({"source_upload_id": own_id})
+        # which tags EVERY upload, merged or not). Resolve the one
+        # canonical report_id first (resolve_report_id_for_upload — same
+        # function UploadReportAdmin._cards_progress uses, so the two can
+        # never disagree) and scope the tagged count to just that, rather
+        # than an unscoped count across every report_id the tag happens to
+        # appear in — which double-counts if a manual split/repair ever
+        # leaves old copies of a tag behind in more than one report.
+        resolved_report_id = resolve_report_id_for_upload(report)
+        tagged_count = db[VULN_CARD_COLLECTION].count_documents(
+            {"source_upload_id": own_id, "report_id": resolved_report_id}
+        )
 
         if tagged_count:
             cards_total = int(getattr(report, "parsed_count", 0) or 0)
             cards_generated = tagged_count
             complete = cards_total == 0 or cards_generated >= cards_total
-            # Host/asset counts and started_at still need the real document
-            # this upload's cards live under — its own, or, for a merged
-            # upload, the originating upload's, resolved via one of these
-            # tagged cards' own report_id.
-            counts_doc = {}
-            sample = db[VULN_CARD_COLLECTION].find_one({"source_upload_id": own_id}, {"report_id": 1})
-            if sample and sample.get("report_id"):
-                counts_doc = db[NESSUS_COLLECTION].find_one(
-                    {"report_id": sample["report_id"]},
-                    {"cards_generation_started_at": 1, "vulnerabilities_by_host": 1, "locked_hosts": 1},
-                ) or {}
+            counts_doc = db[NESSUS_COLLECTION].find_one(
+                {"report_id": resolved_report_id},
+                {"cards_generation_started_at": 1, "vulnerabilities_by_host": 1, "locked_hosts": 1},
+            ) or {}
             started_at = counts_doc.get("cards_generation_started_at")
-            automation_filter = {"source_upload_id": own_id}
+            automation_filter = {"source_upload_id": own_id, "report_id": resolved_report_id}
         else:
             nessus_doc = db[NESSUS_COLLECTION].find_one(
                 {"report_id": own_id},
