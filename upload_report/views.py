@@ -2868,78 +2868,116 @@ class UploadCardsStatusAPIView(APIView):
         except Exception as exc:
             return Response({"error": "Cannot connect to database", "detail": str(exc)}, status=500)
 
-        nessus_doc = db[NESSUS_COLLECTION].find_one(
-            {"report_id": str(report_id)},
-            {
-                "total_vulnerabilities": 1,
-                "cards_expected_count": 1,
-                "cards_generation_complete": 1,
-                "cards_generated_count": 1,
-                "cards_generation_started_at": 1,
-                "vulnerabilities_by_host": 1,
-                "locked_hosts": 1,
-            },
-        )
+        own_id = str(report_id)
 
-        # Mongo document not committed yet (rare race right after upload) —
-        # still initializing, report as not complete with a short ETA.
-        if not nessus_doc:
-            return Response({
-                "report_id": str(report_id),
-                "cards_generation_complete": False,
-                "cards_total": int(getattr(report, "parsed_count", 0) or 0),
-                "cards_generated": 0,
-                "elapsed_seconds": 0,
-                "estimated_total_seconds": 45,
-                "estimated_total_text": "45 sec",
-                "remaining_seconds": 45,
-                "remaining_time_text": "45 sec",
-                "stalled": False,
-                "host_count": 0,
-                "unique_ip_count": 0,
-                "visible_asset_count": 0,
-                "locked_asset_count": 0,
-                "automation_full": 0,
-                "automation_partial": 0,
-                "automation_not_possible": 0,
-                "automation_done": 0,
-                "automation_pending": 0,
-            }, status=200)
+        # Real bug report: a MERGED upload (same admin re-uploading multiple
+        # files into one growing report — see UploadReportAdmin.
+        # _cards_progress for the full story) has no nessus_reports document
+        # whose own report_id equals THIS upload's own _id; the merged data
+        # lives under the ORIGINATING upload's report_id instead. This
+        # endpoint used to look up nessus_reports by own_id directly and
+        # fall straight into the "not started yet" branch below when that
+        # found nothing — the frontend's "Creating agents" progress bar
+        # stayed stuck at 0% forever for every merged-in upload, even once
+        # its own cards were already 100% generated (tagged via
+        # source_upload_id — see _store_in_mongodb/_auto_generate_cards_bg,
+        # which tags EVERY upload, merged or not). Tagged-count-first,
+        # same as UploadReportAdmin._cards_progress, so the two agree.
+        tagged_count = db[VULN_CARD_COLLECTION].count_documents({"source_upload_id": own_id})
 
-        # cards_expected_count (set by _auto_generate_cards_bg once it knows which
-        # vulns will actually get a card) is the correct denominator — total_vulnerabilities
-        # is the raw parsed count and can be HIGHER, because vulns without a plugin_name
-        # or a description are filtered out and never get a card. Comparing generated
-        # counts against the raw total made "cards_generation_complete: true" show up
-        # while cards_generated was still short (e.g. 65/93) and would never catch up.
-        # Fall back to total_vulnerabilities for reports generated before this field existed.
-        if "cards_expected_count" in nessus_doc:
-            cards_total = int(nessus_doc.get("cards_expected_count") or 0)
+        if tagged_count:
+            cards_total = int(getattr(report, "parsed_count", 0) or 0)
+            cards_generated = tagged_count
+            complete = cards_total == 0 or cards_generated >= cards_total
+            # Host/asset counts and started_at still need the real document
+            # this upload's cards live under — its own, or, for a merged
+            # upload, the originating upload's, resolved via one of these
+            # tagged cards' own report_id.
+            counts_doc = {}
+            sample = db[VULN_CARD_COLLECTION].find_one({"source_upload_id": own_id}, {"report_id": 1})
+            if sample and sample.get("report_id"):
+                counts_doc = db[NESSUS_COLLECTION].find_one(
+                    {"report_id": sample["report_id"]},
+                    {"cards_generation_started_at": 1, "vulnerabilities_by_host": 1, "locked_hosts": 1},
+                ) or {}
+            started_at = counts_doc.get("cards_generation_started_at")
+            automation_filter = {"source_upload_id": own_id}
         else:
-            cards_total = int(nessus_doc.get("total_vulnerabilities", 0) or 0)
-
-        raw_complete = bool(nessus_doc.get("cards_generation_complete", False))
-
-        # Nothing to generate for this report — treat as immediately complete.
-        if cards_total == 0 and not raw_complete:
-            db[NESSUS_COLLECTION].update_one(
-                {"report_id": str(report_id)},
-                {"$set": {"cards_generation_complete": True, "cards_generated_count": 0}},
+            nessus_doc = db[NESSUS_COLLECTION].find_one(
+                {"report_id": own_id},
+                {
+                    "total_vulnerabilities": 1,
+                    "cards_expected_count": 1,
+                    "cards_generation_complete": 1,
+                    "cards_generated_count": 1,
+                    "cards_generation_started_at": 1,
+                    "vulnerabilities_by_host": 1,
+                    "locked_hosts": 1,
+                },
             )
-            raw_complete = True
 
-        if raw_complete:
-            cards_generated = int(nessus_doc.get("cards_generated_count", cards_total) or cards_total)
-        else:
-            cards_generated = db[VULN_CARD_COLLECTION].count_documents({"report_id": str(report_id)})
+            # Mongo document not committed yet (rare race right after upload) —
+            # still initializing, report as not complete with a short ETA.
+            if not nessus_doc:
+                return Response({
+                    "report_id": own_id,
+                    "cards_generation_complete": False,
+                    "cards_total": int(getattr(report, "parsed_count", 0) or 0),
+                    "cards_generated": 0,
+                    "elapsed_seconds": 0,
+                    "estimated_total_seconds": 45,
+                    "estimated_total_text": "45 sec",
+                    "remaining_seconds": 45,
+                    "remaining_time_text": "45 sec",
+                    "stalled": False,
+                    "host_count": 0,
+                    "unique_ip_count": 0,
+                    "visible_asset_count": 0,
+                    "locked_asset_count": 0,
+                    "automation_full": 0,
+                    "automation_partial": 0,
+                    "automation_not_possible": 0,
+                    "automation_done": 0,
+                    "automation_pending": 0,
+                }, status=200)
 
-        # Defensive backstop, per the exact bug report: never actually report
-        # complete=true unless generated has genuinely caught up to total —
-        # regardless of what the raw Mongo flag says. Guards against any future
-        # mismatch between how completion gets marked and how the total is counted.
-        complete = raw_complete and (cards_total == 0 or cards_generated >= cards_total)
+            # cards_expected_count (set by _auto_generate_cards_bg once it knows which
+            # vulns will actually get a card) is the correct denominator — total_vulnerabilities
+            # is the raw parsed count and can be HIGHER, because vulns without a plugin_name
+            # or a description are filtered out and never get a card. Comparing generated
+            # counts against the raw total made "cards_generation_complete: true" show up
+            # while cards_generated was still short (e.g. 65/93) and would never catch up.
+            # Fall back to total_vulnerabilities for reports generated before this field existed.
+            if "cards_expected_count" in nessus_doc:
+                cards_total = int(nessus_doc.get("cards_expected_count") or 0)
+            else:
+                cards_total = int(nessus_doc.get("total_vulnerabilities", 0) or 0)
 
-        started_at = nessus_doc.get("cards_generation_started_at")
+            raw_complete = bool(nessus_doc.get("cards_generation_complete", False))
+
+            # Nothing to generate for this report — treat as immediately complete.
+            if cards_total == 0 and not raw_complete:
+                db[NESSUS_COLLECTION].update_one(
+                    {"report_id": own_id},
+                    {"$set": {"cards_generation_complete": True, "cards_generated_count": 0}},
+                )
+                raw_complete = True
+
+            if raw_complete:
+                cards_generated = int(nessus_doc.get("cards_generated_count", cards_total) or cards_total)
+            else:
+                cards_generated = db[VULN_CARD_COLLECTION].count_documents({"report_id": own_id})
+
+            # Defensive backstop, per the exact bug report: never actually report
+            # complete=true unless generated has genuinely caught up to total —
+            # regardless of what the raw Mongo flag says. Guards against any future
+            # mismatch between how completion gets marked and how the total is counted.
+            complete = raw_complete and (cards_total == 0 or cards_generated >= cards_total)
+
+            counts_doc = nessus_doc
+            started_at = nessus_doc.get("cards_generation_started_at")
+            automation_filter = {"report_id": own_id}
+
         if started_at and getattr(started_at, "tzinfo", None):
             started_at = started_at.replace(tzinfo=None)
         elapsed_seconds = (
@@ -2983,7 +3021,7 @@ class UploadCardsStatusAPIView(APIView):
         # Frontend contract (upload_report/host_ip_utils.py) — same 4 fields
         # as the upload response and the detail endpoint.
         from upload_report.host_ip_utils import counts_from_report_doc
-        counts = counts_from_report_doc(nessus_doc)
+        counts = counts_from_report_doc(counts_doc)
 
         # Real feature request: surface automation-script progress the same
         # way manual-mitigation-card progress is already surfaced above —
@@ -2992,20 +3030,24 @@ class UploadCardsStatusAPIView(APIView):
         # automation task failed to parse this one time). Broken down by
         # automation_status so the frontend can show "X full, Y partial, Z
         # not possible, W still pending" instead of one opaque number.
+        # automation_filter scopes to THIS upload's own cards (source_upload_id)
+        # for a tagged upload, falling back to report_id for a pre-tagging one
+        # — see tagged_count's branch above for why report_id alone silently
+        # matched nothing for a merged upload.
         automation_full = db[VULN_CARD_COLLECTION].count_documents({
-            "report_id": str(report_id), "automation_card.automation_status": "full",
+            **automation_filter, "automation_card.automation_status": "full",
         })
         automation_partial = db[VULN_CARD_COLLECTION].count_documents({
-            "report_id": str(report_id), "automation_card.automation_status": "partial",
+            **automation_filter, "automation_card.automation_status": "partial",
         })
         automation_not_possible = db[VULN_CARD_COLLECTION].count_documents({
-            "report_id": str(report_id), "automation_card.automation_status": "not_possible",
+            **automation_filter, "automation_card.automation_status": "not_possible",
         })
         automation_done = automation_full + automation_partial + automation_not_possible
         automation_pending = max(0, cards_generated - automation_done)
 
         return Response({
-            "report_id": str(report_id),
+            "report_id": own_id,
             "cards_generation_complete": complete,
             "cards_total": cards_total,
             "cards_generated": min(cards_generated, cards_total) if cards_total else cards_generated,
