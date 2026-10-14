@@ -301,7 +301,70 @@ class UploadReportAdmin(admin.ModelAdmin):
             )
             return
 
-        token = create_invite(report_ids, request.user.id)
+        # Real bug report: claim_invite used to reassign nessus_reports by
+        # matching report_id == an upload's own _id directly — only true
+        # for the upload that ORIGINALLY created that document, never for
+        # one later merged into this admin's existing report (same admin
+        # re-uploading multiple files). A claimed invite for a merged
+        # upload silently reassigned the UploadReport row but never the
+        # real report/cards at all — the new admin landed on a genuinely
+        # empty dashboard with no error anywhere (confirmed live:
+        # feacbf06's PPFC_Internal_VAPT_Report_October_2 upload, claimed
+        # by a new admin who then had zero nessus_reports documents).
+        #
+        # Resolving the real report_id isn't enough on its own, though:
+        # several of this admin's OTHER uploads can be merged into that
+        # SAME shared document (see merge_service.py). Blindly reassigning
+        # by the resolved report_id would otherwise hand off that ENTIRE
+        # shared document — every sibling upload's data too — the moment
+        # just ONE of them is claimed, silently taking the rest away from
+        # this admin's own account with no warning. Only let a shared
+        # report_id through when EVERY upload this admin still owns under
+        # it is part of THIS SAME claim request (a deliberate, all-at-once
+        # hand-off); otherwise exclude it and say why, rather than either
+        # transferring nothing (the old bug) or transferring too much.
+        owned_by_id = {str(r._id): r for r in owned}
+        resolved_by_upload_id = {uid: self._resolve_report_id_for_claim(owned_by_id[uid]) for uid in report_ids}
+        all_owned_by_resolved_id = {}
+        for r in UploadReport.objects.filter(admin_id=str(request.user.id)):
+            rid = self._resolve_report_id_for_claim(r)
+            all_owned_by_resolved_id.setdefault(rid, set()).add(str(r._id))
+
+        selected_set = set(report_ids)
+        safe_report_ids, blocked_upload_ids = [], []
+        for uid in report_ids:
+            rid = resolved_by_upload_id[uid]
+            siblings = all_owned_by_resolved_id.get(rid, {uid})
+            if siblings <= selected_set:
+                safe_report_ids.append(uid)
+            else:
+                blocked_upload_ids.append(uid)
+
+        if blocked_upload_ids:
+            example_rid = resolved_by_upload_id[blocked_upload_ids[0]]
+            other_count = len(all_owned_by_resolved_id.get(example_rid, set())) - 1
+            self.message_user(
+                request,
+                f"{len(blocked_upload_ids)} selected report(s) share their underlying "
+                f"data with {other_count} other upload(s) you still own (same admin "
+                "re-upload/merge) — claiming just some of them would hand off ALL of "
+                "that shared data, taking it away from your own account too. Select "
+                "every upload that shares this data together to claim it, or ask for "
+                "a different hand-off method to split just one file out.",
+                level=messages.WARNING,
+            )
+
+        report_ids = safe_report_ids
+        if not report_ids:
+            self.message_user(
+                request,
+                "No report(s) could be safely claimed — see the warning above.",
+                level=messages.ERROR,
+            )
+            return
+
+        mongo_report_ids = sorted({resolved_by_upload_id[uid] for uid in report_ids})
+        token = create_invite(report_ids, request.user.id, mongo_report_ids=mongo_report_ids)
         frontend_base = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
         invite_url = f"{frontend_base}/signup?invite={token}"
 
@@ -330,6 +393,50 @@ class UploadReportAdmin(admin.ModelAdmin):
     def get_admin_email(self, obj):
         return getattr(obj.admin, "email", None)
     get_admin_email.short_description = "Admin Email"
+
+    def _resolve_report_id_for_claim(self, obj):
+        """The ACTUAL nessus_reports.report_id this upload's data lives
+        under — its own _id for a standalone/first-time upload, or the
+        admin's shared merged report's own report_id for one later merged
+        into an existing report (see merge_service.py). Used by
+        generate_claim_link so a claimed invite reassigns the REAL data,
+        not just the lightweight UploadReport tracking row — see its own
+        docstring for the full bug report this fixes.
+
+        Same 3-step resolution as _cards_progress (own doc, then tagged
+        cards, then the admin's own most-recent report): a fully-deduped
+        upload (every one of its findings is an exact duplicate of a
+        SIBLING upload's — merge_hosts_into_report skips re-merging those,
+        see its own docstring) has ZERO cards tagged to its own
+        source_upload_id, so the tagged-card lookup alone isn't enough —
+        confirmed live: PPFC_Internal_VAPT_Report_October_2 resolved to
+        its own (non-existent) _id instead of the real shared report_id
+        without this fallback, which would have reproduced the exact
+        claim-transfer bug this method exists to fix."""
+        from vaptfix.mongo_client import MongoContext
+        own_id = str(obj._id)
+        with MongoContext() as db:
+            if db["nessus_reports"].find_one({"report_id": own_id}, {"_id": 1}):
+                return own_id
+            sample = db["vulnerability_cards"].find_one({"source_upload_id": own_id}, {"report_id": 1})
+            if sample and sample.get("report_id"):
+                return sample["report_id"]
+
+            admin_id = str(getattr(obj.admin, "id", "") or "")
+            admin_email = obj.admin_email or getattr(obj.admin, "email", None)
+            owner_query = {"$or": [
+                c for c in [
+                    {"admin_id": admin_id} if admin_id else None,
+                    {"admin_email": admin_email} if admin_email else None,
+                ] if c
+            ]}
+            if owner_query["$or"]:
+                parent_doc = db["nessus_reports"].find_one(
+                    owner_query, {"report_id": 1}, sort=[("uploaded_at", -1)],
+                )
+                if parent_doc and parent_doc.get("report_id"):
+                    return parent_doc["report_id"]
+        return own_id
 
     def _cards_progress(self, obj):
         """

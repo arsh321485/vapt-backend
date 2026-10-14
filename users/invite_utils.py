@@ -27,12 +27,36 @@ def _cache_key(token: str) -> str:
     return f"{_CACHE_PREFIX}{token}"
 
 
-def create_invite(report_ids: list, created_by_admin_id: str) -> str:
-    """Generate a fresh token and store {report_ids, created_by} for 7 hours."""
+def create_invite(report_ids: list, created_by_admin_id: str, mongo_report_ids: list = None) -> str:
+    """Generate a fresh token and store {report_ids, mongo_report_ids,
+    created_by} for 7 hours.
+
+    `report_ids` are the UploadReport rows' own _ids — unchanged meaning,
+    used for the pre-signup "You're claiming N report(s)" count
+    (peek_invite) and for reassigning those rows' own `admin` FK on claim.
+
+    `mongo_report_ids` are the ACTUAL nessus_reports.report_id value(s)
+    the real data lives under — NOT always the same as an upload's own
+    _id. Real bug report: claim_invite used to reassign nessus_reports by
+    matching report_id == an upload's own _id directly, which is only
+    true for the upload that ORIGINALLY created that document — never for
+    one later merged into an admin's existing report (same admin
+    re-uploading multiple files; see merge_service.py /
+    UploadReportAdmin._cards_progress for the full merged-upload story).
+    A claimed invite for a merged upload silently reassigned the
+    UploadReport row but never the real report/cards, leaving the new
+    admin's dashboard genuinely empty with no error anywhere. Defaults to
+    `report_ids` when omitted, matching the old (broken-for-merged, but
+    unchanged) behavior for any caller not yet updated to resolve and
+    pass the real one."""
     token = secrets.token_urlsafe(24)
     cache.set(
         _cache_key(token),
-        {"report_ids": list(report_ids), "created_by": str(created_by_admin_id)},
+        {
+            "report_ids": list(report_ids),
+            "mongo_report_ids": list(mongo_report_ids) if mongo_report_ids is not None else list(report_ids),
+            "created_by": str(created_by_admin_id),
+        },
         timeout=INVITE_TTL_SECONDS,
     )
     return token
@@ -62,6 +86,11 @@ def claim_invite(token: str, new_admin) -> int:
     cache.delete(key)  # single-use, regardless of what happens below
 
     report_ids = data.get("report_ids") or []
+    # mongo_report_ids is the real nessus_reports.report_id list — falls
+    # back to report_ids for an invite created before this field existed
+    # (standalone, non-merged uploads where the two were always equal
+    # anyway, so the fallback is exact, not just approximate).
+    mongo_report_ids = data.get("mongo_report_ids") or report_ids
     if not report_ids:
         return 0
 
@@ -70,7 +99,7 @@ def claim_invite(token: str, new_admin) -> int:
 
     db = get_shared_db()
     result = db["nessus_reports"].update_many(
-        {"report_id": {"$in": report_ids}},
+        {"report_id": {"$in": mongo_report_ids}},
         {"$set": {"admin_id": str(new_admin.id), "admin_email": new_admin.email}},
     )
 
