@@ -842,11 +842,25 @@ class UploadReportAdmin(admin.ModelAdmin):
             })
         return prepared_hosts
 
-    def _store_in_mongodb(self, parsed_data, report_id, admin_email, original_filename, member_type, scope_id=None, merge_into_report_id=None):
-        """Store parsed report data in MongoDB."""
+    def _store_in_mongodb(self, parsed_data, report_id, admin_email, original_filename, member_type, scope_id=None, merge_into_report_id=None, own_upload_id=None):
+        """Store parsed report data in MongoDB.
+
+        Real bug report: save_model's caller passes report_id=(merge_target
+        or this upload's own _id) — correct for the document/merge-target
+        plumbing below, but WRONG for source_upload_id stamping and the
+        upload_vuln_snapshots write, both of which need THIS upload's own
+        _id specifically, never the merge target's. A merged upload's
+        findings were silently tagged with the TARGET report's id instead
+        of its own, breaking per-file Cards Status and the claim-link
+        auto-split for any upload where a merge target happened to exist.
+        own_upload_id is the one true value for that; falls back to
+        report_id for the one caller (_parse_and_store_report_bg) that
+        never merges, where the two are always equal anyway."""
         mongo_uri = self._get_mongo_uri()
         if not mongo_uri:
             return False
+
+        tag_id = own_upload_id or report_id
 
         try:
             with pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) as client:
@@ -930,10 +944,10 @@ class UploadReportAdmin(admin.ModelAdmin):
                     # whole report's.
                     for _host in (parsed_data.get("vulnerabilities_by_host") or []):
                         for _vuln in (_host.get("vulnerabilities") or []):
-                            _vuln["source_upload_id"] = report_id
+                            _vuln["source_upload_id"] = tag_id
                     for _host in locked_hosts:
                         for _vuln in (_host.get("vulnerabilities") or []):
-                            _vuln["source_upload_id"] = report_id
+                            _vuln["source_upload_id"] = tag_id
 
                     # Real feature request: a MERGED upload (merge_into_
                     # report_id set) whose findings are ALL exact
@@ -959,9 +973,9 @@ class UploadReportAdmin(admin.ModelAdmin):
                     # report on demand, going forward. Does nothing for
                     # uploads from before this existed.
                     db["upload_vuln_snapshots"].update_one(
-                        {"upload_id": report_id},
+                        {"upload_id": tag_id},
                         {"$set": {
-                            "upload_id": report_id,
+                            "upload_id": tag_id,
                             "admin_id": admin_id,
                             "admin_email": admin_email,
                             "vulnerabilities_by_host": parsed_data.get("vulnerabilities_by_host") or [],
@@ -1324,7 +1338,10 @@ class UploadReportAdmin(admin.ModelAdmin):
                     merge_target = get_merge_target_report_id(admin_user, exclude_pk=obj.pk) if structured else None
                     upload_report_id = merge_target or str(obj._id)
 
-                    # Store in MongoDB
+                    # Store in MongoDB — own_upload_id is ALWAYS this
+                    # upload's own _id (never the merge target), see
+                    # _store_in_mongodb's own docstring for why that
+                    # distinction matters for source_upload_id tagging.
                     mongodb_stored = self._store_in_mongodb(
                         parsed_data=parsed_data,
                         report_id=upload_report_id,
@@ -1333,6 +1350,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                         member_type=obj.member_type or "external",
                         scope_id=scope_id,
                         merge_into_report_id=merge_target,
+                        own_upload_id=str(obj._id),
                     )
 
                     if mongodb_stored:
