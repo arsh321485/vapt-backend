@@ -418,17 +418,30 @@ class UploadReportAdmin(admin.ModelAdmin):
                 # predates source_upload_id tagging) used to fall straight
                 # through to the parent report's own, unrelated, whole-
                 # report expected/generated numbers below — e.g. "183/2142"
-                # for a file whose own parsed_count is 23. Only trust the
-                # parent's numbers when ITS OWN generation is already
-                # marked complete (nothing left queued anywhere, so the
-                # parent doc really is the best information available —
-                # the pre-existing, documented tradeoff for a genuinely
-                # pre-tagging legacy upload); otherwise report this file's
-                # own parsed_count with 0 generated so far, not a borrowed
-                # total from unrelated files.
+                # for a file whose own parsed_count is 23.
                 if parent_doc and not parent_doc.get("cards_generation_complete"):
                     expected = int(obj.parsed_count or 0)
                     return 0, expected, expected == 0, None
+
+                # Real follow-up: once the PARENT'S generation genuinely is
+                # complete (nothing left queued anywhere) and this upload
+                # STILL has zero cards tagged to its own source_upload_id,
+                # that's not "stuck" either — merge_hosts_into_report skips
+                # merging in a (host, plugin_name) pair that an EARLIER
+                # upload already contributed, so a file whose findings all
+                # happen to duplicate an earlier one (same client re-
+                # scanned, or literally the same report re-uploaded) never
+                # gets its own tagged cards at all, by design. Showing the
+                # parent's unrelated whole-report total here ("2142/2142"
+                # for a 23-vulnerability file) was just as confusing as the
+                # old "183/2142" bug, just on the complete side instead of
+                # the incomplete side. Report this file's own parsed_count
+                # as fully satisfied instead — every one of its findings
+                # already has a card, just tagged to whichever upload first
+                # contributed that exact (host, plugin_name) pair.
+                if parent_doc:
+                    expected = int(obj.parsed_count or 0)
+                    return expected, expected, True, parent_doc.get("cards_generation_started_at")
 
                 doc = parent_doc
         except Exception:

@@ -2381,6 +2381,28 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 print(f"[AutoGenCards] Insert error for '{vuln_plugin_name}' on host '{vuln_host_name}': {insert_err}", flush=True)
                 errors += 1
 
+        # Real bug report: cards_generation_complete/cards_generated_count
+        # used to only get written AFTER the automation-backfill pass
+        # below — which runs synchronously, one real GPT call per
+        # pre-existing card still missing automation data, and can take a
+        # very long time on a large/merged report (2000+ cards). A file
+        # whose own vulnerabilities were already 100% carded (or fully
+        # deduped against an earlier upload — see merge_hosts_into_report)
+        # still showed "Incomplete" on the website/admin for however long
+        # that backfill pass kept running, with no way to tell "still
+        # genuinely generating cards" apart from "cards are done, just
+        # backfilling automation on OTHER files' cards too". Card
+        # generation and automation backfill are different milestones —
+        # write this one as soon as the main generation loop (the thing
+        # cards_expected_count/cards_generated_count actually describe) is
+        # done, not after the slower, separate step that follows.
+        actual_count = db[VULN_CARD_COLLECTION].count_documents({"report_id": report_id})
+        is_complete = actual_count >= cards_expected_count
+        db[NESSUS_COLLECTION].update_one(
+            {"report_id": report_id},
+            {"$set": {"cards_generation_complete": is_complete, "cards_generated_count": actual_count}}
+        )
+
         # Backfill automation onto any already-existing cards this run
         # found missing it (collected above) — run only after the main
         # loop is done, so it never delays this run's genuinely-new
@@ -2916,9 +2938,67 @@ class UploadCardsStatusAPIView(APIView):
                 },
             )
 
-            # Mongo document not committed yet (rare race right after upload) —
-            # still initializing, report as not complete with a short ETA.
+            # Mongo document not committed yet, OR this is a MERGED upload
+            # whose data lives under the admin's existing, shared report
+            # instead (own_id matches nothing directly) — resolve via the
+            # admin's own most recent report, same as UploadReportAdmin.
+            # _cards_progress, before deciding what to show.
             if not nessus_doc:
+                admin_id = str(getattr(report.admin, "id", "") or "")
+                admin_email = report.admin_email or getattr(report.admin, "email", None)
+                owner_query = {"$or": [
+                    c for c in [
+                        {"admin_id": admin_id} if admin_id else None,
+                        {"admin_email": admin_email} if admin_email else None,
+                    ] if c
+                ]}
+                parent_doc = None
+                if owner_query["$or"]:
+                    parent_doc = db[NESSUS_COLLECTION].find_one(
+                        owner_query,
+                        {"cards_generation_complete": 1, "cards_generation_started_at": 1,
+                         "vulnerabilities_by_host": 1, "locked_hosts": 1},
+                        sort=[("uploaded_at", -1)],
+                    )
+
+                if parent_doc and parent_doc.get("cards_generation_complete"):
+                    # Real bug report: a merged upload whose own findings
+                    # all happen to duplicate ones an EARLIER upload already
+                    # contributed (merge_hosts_into_report skips merging in
+                    # a (host, plugin_name) pair someone else already has)
+                    # never gets its own tagged cards at all, by design —
+                    # once the admin's shared report has genuinely finished
+                    # generating (nothing left queued anywhere), that's not
+                    # "stuck at 0%", every one of this file's findings
+                    # already has a card, just tagged to whichever upload
+                    # first contributed that exact pair. Report this file's
+                    # own parsed_count as fully satisfied instead of a
+                    # perpetual "0/N, still generating".
+                    from upload_report.host_ip_utils import counts_from_report_doc
+                    cards_total = int(getattr(report, "parsed_count", 0) or 0)
+                    return Response({
+                        "report_id": own_id,
+                        "cards_generation_complete": True,
+                        "cards_total": cards_total,
+                        "cards_generated": cards_total,
+                        "elapsed_seconds": 0,
+                        "elapsed_time_text": _fmt_seconds_for_status(0),
+                        "estimated_total_seconds": 45,
+                        "estimated_total_text": "45 sec",
+                        "remaining_seconds": 0,
+                        "remaining_time_text": "0 sec",
+                        "stalled": False,
+                        "automation_full": 0,
+                        "automation_partial": 0,
+                        "automation_not_possible": 0,
+                        "automation_done": 0,
+                        "automation_pending": 0,
+                        **counts_from_report_doc(parent_doc or {}),
+                    }, status=200)
+
+                # Still genuinely nothing to show (rare race right after
+                # upload, or the admin's shared report is itself still
+                # actively generating) — not complete, short ETA.
                 return Response({
                     "report_id": own_id,
                     "cards_generation_complete": False,
