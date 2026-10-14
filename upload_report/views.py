@@ -2872,7 +2872,15 @@ def resolve_report_id_for_upload(upload_report_obj):
     findings is an exact duplicate of a sibling upload's, see
     merge_hosts_into_report's own docstring — which has ZERO cards
     tagged to its own source_upload_id in any OTHER report), then the
-    admin's own most-recent report as a last resort.
+    admin's own LARGEST report as a last resort (real bug report: an
+    upload with genuinely zero tagged cards anywhere — e.g. a very old
+    one from before source_upload_id tagging existed at all — used to
+    fall back to the admin's most-RECENT report by uploaded_at; that
+    broke the moment a small, newly-created standalone split-off report
+    existed for the same admin, since "most recent" then pointed at the
+    small split instead of the admin's actual big ongoing report. Total
+    vulnerability count is a far more reliable signal of "this is the
+    real, primary report" than recency for this last-resort case).
 
     The tagged-card sample is sorted by created_at descending:  a tag
     that happens to exist in more than one report_id (e.g. after a
@@ -2902,7 +2910,7 @@ def resolve_report_id_for_upload(upload_report_obj):
         ]}
         if owner_query["$or"]:
             parent_doc = db[NESSUS_COLLECTION].find_one(
-                owner_query, {"report_id": 1}, sort=[("uploaded_at", -1)],
+                owner_query, {"report_id": 1}, sort=[("total_vulnerabilities", -1), ("uploaded_at", -1)],
             )
             if parent_doc and parent_doc.get("report_id"):
                 return parent_doc["report_id"]
@@ -3006,11 +3014,16 @@ class UploadCardsStatusAPIView(APIView):
                 ]}
                 parent_doc = None
                 if owner_query["$or"]:
+                    # Sorted by total_vulnerabilities first, not just
+                    # uploaded_at — see resolve_report_id_for_upload's own
+                    # docstring above for why recency alone misidentifies
+                    # the admin's real primary report once a small
+                    # standalone split-off report also exists.
                     parent_doc = db[NESSUS_COLLECTION].find_one(
                         owner_query,
                         {"cards_generation_complete": 1, "cards_generation_started_at": 1,
                          "vulnerabilities_by_host": 1, "locked_hosts": 1},
-                        sort=[("uploaded_at", -1)],
+                        sort=[("total_vulnerabilities", -1), ("uploaded_at", -1)],
                     )
 
                 if parent_doc and parent_doc.get("cards_generation_complete"):

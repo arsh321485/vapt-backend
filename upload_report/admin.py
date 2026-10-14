@@ -500,11 +500,16 @@ class UploadReportAdmin(admin.ModelAdmin):
                 ]}
                 parent_doc = None
                 if owner_query["$or"]:
+                    # Sorted by total_vulnerabilities first, not just
+                    # uploaded_at — see resolve_report_id_for_upload's
+                    # docstring (upload_report/views.py) for why recency
+                    # alone misidentifies the admin's real primary report
+                    # once a small standalone split-off report also exists.
                     parent_doc = db["nessus_reports"].find_one(
                         owner_query,
                         {"cards_expected_count": 1, "cards_generated_count": 1,
                          "cards_generation_complete": 1, "cards_generation_started_at": 1},
-                        sort=[("uploaded_at", -1)],
+                        sort=[("total_vulnerabilities", -1), ("uploaded_at", -1)],
                     )
 
                 # Real bug report: a brand-new MERGED upload (own_id matches
