@@ -254,19 +254,18 @@ class UploadReportAdmin(admin.ModelAdmin):
         # to mint a link for any report whose cards aren't done yet. The
         # "Cards Status" column already on this list (get_cards_status)
         # tells the Super Admin when it's safe to retry.
-        from vaptfix.mongo_client import MongoContext
-
+        # Real bug report: this used to look up nessus_reports by
+        # report_id == this upload's own _id directly — only ever true for
+        # the upload that ORIGINALLY created that document, never for a
+        # later file merged into an admin's existing report. Every
+        # merged-in upload read "(0/0 cards, estimating...)" here forever
+        # and could never pass this gate, even once the "Cards Status"
+        # column already showed it 100% complete — see _cards_progress's
+        # own docstring for the full story. Now shares that exact same
+        # resolution so the two can never disagree again.
         report_ids_all = [str(r._id) for r in owned]
-        with MongoContext() as db:
-            progress_docs = {
-                doc.get("report_id"): doc
-                for doc in db["nessus_reports"].find(
-                    {"report_id": {"$in": report_ids_all}},
-                    {"report_id": 1, "cards_generation_complete": 1, "cards_generated_count": 1,
-                     "cards_expected_count": 1, "cards_generation_started_at": 1},
-                )
-            }
-        complete_ids = {rid for rid, doc in progress_docs.items() if doc.get("cards_generation_complete")}
+        progress_by_id = {str(r._id): self._cards_progress(r) for r in owned}
+        complete_ids = {rid for rid, (g, e, c, s) in progress_by_id.items() if c}
         report_ids = [rid for rid in report_ids_all if rid in complete_ids]
         not_ready = [r for r in owned if str(r._id) not in complete_ids]
 
@@ -280,10 +279,7 @@ class UploadReportAdmin(admin.ModelAdmin):
         # rough guess before generation has even started and drifts further
         # off the longer a report has actually been running.
         def _progress_line(report_id):
-            doc = progress_docs.get(report_id) or {}
-            expected = int(doc.get("cards_expected_count") or 0)
-            generated = int(doc.get("cards_generated_count") or 0)
-            started_at = doc.get("cards_generation_started_at")
+            generated, expected, complete, started_at = progress_by_id.get(report_id, (0, 0, False, None))
             eta_text = "estimating…"
             if started_at:
                 elapsed = (datetime.datetime.utcnow() - started_at).total_seconds()
@@ -335,37 +331,38 @@ class UploadReportAdmin(admin.ModelAdmin):
         return getattr(obj.admin, "email", None)
     get_admin_email.short_description = "Admin Email"
 
-    def get_cards_status(self, obj):
+    def _cards_progress(self, obj):
         """
-        Surfaces vulnerability-card generation state that was previously
-        invisible — a report could silently finish 0/N cards (e.g. a
-        transient GPT-4o/Mongo failure) and the admin had no way to see it
-        without querying MongoDB directly. Run
-        `python manage.py retry_incomplete_card_generation` to fix any
-        "Incomplete" rows shown here.
+        (generated, expected, complete, cards_generation_started_at) for
+        one UploadReport's own vulnerability cards — tagged-source_upload_id
+        count against this upload's own parsed_count first, falling back to
+        the whole nessus_reports document only for an upload from before
+        that tagging existed. Shared by get_cards_status (the list column)
+        and generate_claim_link (the readiness gate before minting an
+        invite) so the two can never again disagree about whether a
+        report's cards are done.
 
-        Real bug report: this always showed "—" for an upload that got
-        MERGED into an admin's existing report (same admin re-uploading,
-        or a Magic Link merge — see merge_service.py) — there's no
-        nessus_reports document whose own report_id equals THIS upload's
-        _id in that case; the merged data lives under the TARGET report's
-        _id instead, and this upload row has no stored link to it
-        (confirmed: upload_reports has no merge_into_report_id field).
+        Real bug report: generate_claim_link had its OWN separate check
+        that only ever looked up nessus_reports by report_id == this
+        upload's own _id — true only for the upload that ORIGINALLY
+        created that document, never for a later file merged into an
+        admin's existing report (same admin re-uploading, or a Magic Link
+        merge — see merge_service.py). Every merged-in upload (e.g. 4
+        VAPT PDFs from the same client, all folded into one growing
+        report) read "(0/0 cards, estimating...)" here FOREVER and could
+        never pass the readiness gate, even once get_cards_status's own
+        column already showed it 100% complete (it already had this exact
+        tagged-count-first resolution — see its own history below).
 
-        Real follow-up request: once that fallback resolves the merged
-        row to the right report, it still showed the TARGET report's
-        whole lifetime total (e.g. "183/2074") instead of just this
-        file's own share ("23/23") — every merged-in upload looked
-        "Incomplete" forever because of OTHER files' backlog, even when
-        this specific file's own vulnerabilities were 100% carded.
-        vulnerability_cards is now tagged with source_upload_id (this
-        upload's own _id) at generation time — see _store_in_mongodb's
-        source_upload_id stamping and _auto_generate_cards_bg's
-        pass-through — so this counts just THIS upload's own cards
-        against its own parsed_count (the exact number this file parsed
-        into), falling back to the old whole-report count only for an
-        upload from before this tagging existed (no tagged cards found
-        at all).
+        Real follow-up request (on get_cards_status, now inherited here
+        too): the nessus_reports fallback used to show the TARGET report's
+        whole lifetime total (e.g. "183/2074") instead of just this file's
+        own share ("23/23") — every merged-in upload looked "Incomplete"
+        forever because of OTHER files' backlog, even when this specific
+        file's own vulnerabilities were 100% carded. vulnerability_cards is
+        tagged with source_upload_id (this upload's own _id) at generation
+        time — see _store_in_mongodb's source_upload_id stamping and
+        _auto_generate_cards_bg's pass-through.
         """
         try:
             from vaptfix.mongo_client import MongoContext
@@ -374,15 +371,20 @@ class UploadReportAdmin(admin.ModelAdmin):
                 tagged_count = db["vulnerability_cards"].count_documents({"source_upload_id": own_id})
                 if tagged_count:
                     expected = int(obj.parsed_count or 0)
-                    if expected == 0:
-                        return f"✅ {tagged_count}"
-                    if tagged_count >= expected:
-                        return f"✅ {tagged_count}/{expected}"
-                    return f"⚠️ Incomplete {tagged_count}/{expected}"
+                    complete = expected == 0 or tagged_count >= expected
+                    started_at = None
+                    sample = db["vulnerability_cards"].find_one({"source_upload_id": own_id}, {"report_id": 1})
+                    if sample and sample.get("report_id"):
+                        rdoc = db["nessus_reports"].find_one(
+                            {"report_id": sample["report_id"]}, {"cards_generation_started_at": 1}
+                        )
+                        started_at = (rdoc or {}).get("cards_generation_started_at")
+                    return tagged_count, expected, complete, started_at
 
                 doc = db["nessus_reports"].find_one(
                     {"report_id": own_id},
-                    {"cards_expected_count": 1, "cards_generated_count": 1, "cards_generation_complete": 1},
+                    {"cards_expected_count": 1, "cards_generated_count": 1,
+                     "cards_generation_complete": 1, "cards_generation_started_at": 1},
                 )
                 if not doc:
                     admin_id = str(getattr(obj.admin, "id", "") or "")
@@ -396,19 +398,34 @@ class UploadReportAdmin(admin.ModelAdmin):
                     if owner_query["$or"]:
                         doc = db["nessus_reports"].find_one(
                             owner_query,
-                            {"cards_expected_count": 1, "cards_generated_count": 1, "cards_generation_complete": 1},
+                            {"cards_expected_count": 1, "cards_generated_count": 1,
+                             "cards_generation_complete": 1, "cards_generation_started_at": 1},
                             sort=[("uploaded_at", -1)],
                         )
         except Exception:
-            return "—"
+            return 0, 0, False, None
 
         if not doc:
-            return "—"
+            return 0, 0, False, None
         expected = int(doc.get("cards_expected_count") or 0)
         generated = int(doc.get("cards_generated_count") or 0)
+        complete = bool(doc.get("cards_generation_complete")) or (expected > 0 and generated >= expected)
+        return generated, expected, complete, doc.get("cards_generation_started_at")
+
+    def get_cards_status(self, obj):
+        """
+        Surfaces vulnerability-card generation state that was previously
+        invisible — a report could silently finish 0/N cards (e.g. a
+        transient GPT-4o/Mongo failure) and the admin had no way to see it
+        without querying MongoDB directly. Run
+        `python manage.py retry_incomplete_card_generation` to fix any
+        "Incomplete" rows shown here. See _cards_progress for the merged-
+        upload resolution this now shares with generate_claim_link.
+        """
+        generated, expected, complete, _started_at = self._cards_progress(obj)
         if expected == 0:
-            return "—"
-        if generated >= expected:
+            return f"✅ {generated}" if generated else "—"
+        if complete:
             return f"✅ {generated}/{expected}"
         return f"⚠️ Incomplete {generated}/{expected}"
     get_cards_status.short_description = "Cards"
