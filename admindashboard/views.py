@@ -421,41 +421,57 @@ class ReportMeanTimeRemediateAPIView(APIView):
 # ============================================================================
 
 def _load_latest_report_for_admin(db, admin_email, admin_id=None, projection=None):
-    """Load the most recently uploaded report for a specific admin.
+    """Load this admin's REAL primary report.
     Tries admin_id first (more reliable for newer reports), falls back to admin_email.
     Pass projection to limit fields returned and speed up the query.
+
+    Real bug report: an admin who ends up owning more than one
+    nessus_reports document (e.g. a claim-link auto-split created a
+    small standalone report for one specific file alongside this
+    admin's own bigger, properly-merged report) had the dashboard show
+    whichever one happened to be uploaded/created MOST RECENTLY — often
+    the small split-off fragment, not the real, complete picture, since
+    recency says nothing about which document is actually "the" report.
+    Same fix as resolve_report_id_for_upload/upload_report/views.py:
+    total_vulnerabilities is a far more reliable signal of "this is the
+    real, primary report" than recency; uploaded_at is still the
+    tiebreak when two reports happen to be the same size.
     """
     coll = db[NESSUS_COLLECTION]
+    sort = [("total_vulnerabilities", -1), ("uploaded_at", -1)]
     if admin_id:
         doc = coll.find_one(
             {"admin_id": str(admin_id)},
             projection,
-            sort=[("uploaded_at", -1)]
+            sort=sort
         )
         if doc:
             return doc
     return coll.find_one(
         {"admin_email": admin_email},
         projection,
-        sort=[("uploaded_at", -1)]
+        sort=sort
     )
 
 def _load_latest_report_meta_for_admin(db, admin_email, admin_id=None):
-    """Load only metadata needed for report scoping (report_id/_id)."""
+    """Load only metadata needed for report scoping (report_id/_id) —
+    see _load_latest_report_for_admin's own docstring for why this is
+    sorted by total_vulnerabilities first, not just uploaded_at."""
     coll = db[NESSUS_COLLECTION]
     projection = {"report_id": 1}
+    sort = [("total_vulnerabilities", -1), ("uploaded_at", -1)]
     if admin_id:
         doc = coll.find_one(
             {"admin_id": str(admin_id)},
             projection,
-            sort=[("uploaded_at", -1)]
+            sort=sort
         )
         if doc:
             return doc
     return coll.find_one(
         {"admin_email": admin_email},
         projection,
-        sort=[("uploaded_at", -1)]
+        sort=sort
     )
 
 

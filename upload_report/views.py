@@ -4468,9 +4468,19 @@ class AdminLatestReportAPIView(APIView):
             # "find this admin's latest report" view in this app already
             # uses — always finds the real merged doc regardless of which
             # specific UploadReport row is newest.
+            #
+            # Real bug report (round 2): uploaded_at alone isn't enough
+            # either — an admin who ends up owning more than one
+            # nessus_reports document (e.g. a claim-link auto-split's
+            # small standalone report alongside this admin's own bigger,
+            # properly-merged report) had this pick whichever was most
+            # RECENT, often the small fragment. total_vulnerabilities is
+            # a far more reliable "this is the real, primary report"
+            # signal than recency — same fix as resolve_report_id_for_
+            # upload/admindashboard.views._load_latest_report_for_admin.
             _doc = _db["nessus_reports"].find_one(
                 {"$or": [{"admin_id": str(request.user.id)}, {"admin_email": request.user.email}]},
-                sort=[("uploaded_at", -1)],
+                sort=[("total_vulnerabilities", -1), ("uploaded_at", -1)],
             )
             if _doc:
                 counts = counts_from_report_doc(_doc)
@@ -4531,11 +4541,16 @@ class ReportHeaderAPIView(APIView):
         try:
             with MC() as db:
                 query = {"$or": [{"admin_id": admin_id}, {"admin_email": admin_email}]}
+                # Sorted by total_vulnerabilities first, not just
+                # uploaded_at — see the earlier "round 2" comment above
+                # in this same file for why recency alone can pick a
+                # small claim-link auto-split fragment over this admin's
+                # real, bigger, properly-merged report.
                 nessus_doc = db["nessus_reports"].find_one(
                     query,
                     {"uploaded_at": 1, "scan_start": 1, "scan_end": 1,
                      "report_id": 1, "generated_on": 1},
-                    sort=[("uploaded_at", -1)],
+                    sort=[("total_vulnerabilities", -1), ("uploaded_at", -1)],
                 )
                 if nessus_doc:
                     report_generated_on = (
@@ -4604,7 +4619,13 @@ def _collect_report_data(admin_id, admin_email):
                 "vulnerabilities_by_host.vulnerabilities.risk": 1,
                 "vulnerabilities_by_host.vulnerabilities.port": 1,
             },
-            sort=[("uploaded_at", -1)],
+            # Sorted by total_vulnerabilities first, not just uploaded_at
+            # — see the earlier "round 2" comment in this same file for
+            # why recency alone can pick a small claim-link auto-split
+            # fragment over this admin's real, bigger, properly-merged
+            # report (this generates the admin's downloadable report, so
+            # picking the wrong one here is especially visible).
+            sort=[("total_vulnerabilities", -1), ("uploaded_at", -1)],
         )
 
         if not doc:

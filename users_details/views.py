@@ -1957,16 +1957,27 @@ class ReportAssetsVulnsAPIView(APIView):
 
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
+                # Real bug report: sorted by uploaded_at alone, an admin
+                # who ends up owning more than one nessus_reports document
+                # (e.g. a claim-link auto-split's small standalone report
+                # alongside this admin's own bigger, properly-merged one)
+                # had this pick whichever was most RECENT — often the
+                # small fragment, not the real, complete picture. Same
+                # fix as resolve_report_id_for_upload/admindashboard.
+                # views._load_latest_report_for_admin: total_
+                # vulnerabilities is a far more reliable "this is the
+                # real, primary report" signal than recency.
+                _latest_sort = [("total_vulnerabilities", -1), ("uploaded_at", -1)]
                 doc = coll.find_one(
                     {"admin_id": admin_id},
                     {"report_id": 1, "vulnerabilities_by_host": 1},
-                    sort=[("uploaded_at", -1)],
+                    sort=_latest_sort,
                 )
                 if not doc:
                     doc = coll.find_one(
                         {"admin_email": admin_email},
                         {"report_id": 1, "vulnerabilities_by_host": 1},
-                        sort=[("uploaded_at", -1)],
+                        sort=_latest_sort,
                     )
                 if not doc:
                     return Response(

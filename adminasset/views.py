@@ -924,16 +924,27 @@ class ClosedFixVulnerabilitiesByHostAPIView(APIView):
 # ---------------------- Helper for Latest Report ----------------------
 def _load_latest_report_for_admin(db, admin_email, admin_id=None):
     """
-    Load the most recently uploaded report for a specific admin.
+    Load this admin's REAL primary report.
     Tries admin_id first (more reliable), falls back to admin_email.
+
+    Real bug report: an admin who ends up owning more than one
+    nessus_reports document (e.g. a claim-link auto-split created a
+    small standalone report for one specific file alongside this
+    admin's own bigger, properly-merged report) had this show whichever
+    one happened to be uploaded/created MOST RECENTLY — often the small
+    split-off fragment, not the real, complete picture. Same fix as
+    resolve_report_id_for_upload/admindashboard.views._load_latest_
+    report_for_admin: total_vulnerabilities is a far more reliable
+    "this is the real, primary report" signal than recency.
     """
     coll = db[NESSUS_COLLECTION]
+    sort = [("total_vulnerabilities", -1), ("uploaded_at", -1)]
 
     # Try by admin_id first (for newer reports)
     if admin_id:
         doc = coll.find_one(
             {"admin_id": str(admin_id)},
-            sort=[("uploaded_at", -1)]
+            sort=sort
         )
         if doc:
             return doc
@@ -941,7 +952,7 @@ def _load_latest_report_for_admin(db, admin_email, admin_id=None):
     # Fallback to admin_email (for older reports)
     return coll.find_one(
         {"admin_email": admin_email},
-        sort=[("uploaded_at", -1)]
+        sort=sort
     )
 
 

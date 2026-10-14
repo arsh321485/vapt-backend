@@ -148,11 +148,16 @@ def _resolve_requester(doc):
 
 
 def _load_latest_report(db, admin_id, admin_email):
-    """Load admin's most recently uploaded nessus report."""
+    """Load admin's REAL primary nessus report — see userasset.views.
+    _load_latest_report's own docstring for why this is sorted by
+    total_vulnerabilities first, not just uploaded_at (recency alone
+    can pick a small claim-link auto-split fragment over the real,
+    bigger, properly-merged report)."""
     coll = db[NESSUS_COLLECTION]
-    doc = coll.find_one({"admin_id": str(admin_id)}, sort=[("uploaded_at", -1)])
+    sort = [("total_vulnerabilities", -1), ("uploaded_at", -1)]
+    doc = coll.find_one({"admin_id": str(admin_id)}, sort=sort)
     if not doc and admin_email:
-        doc = coll.find_one({"admin_email": admin_email}, sort=[("uploaded_at", -1)])
+        doc = coll.find_one({"admin_email": admin_email}, sort=sort)
     return doc
 
 

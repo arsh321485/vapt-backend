@@ -232,7 +232,13 @@ def _load_all_reports_plugin_ids(db, admin_id, admin_email):
     """
     coll = db[NESSUS_COLLECTION]
     query = {"$or": [{"admin_id": str(admin_id)}, {"admin_email": admin_email}]} if admin_email else {"admin_id": str(admin_id)}
-    docs = list(coll.find(query, sort=[("uploaded_at", -1)]))
+    # Sorted by total_vulnerabilities first, not just uploaded_at — only
+    # affects which doc `docs[0]` (below) reports as "latest"; plugin_ids/
+    # vuln_names/report_ids are unioned across every doc either way. Same
+    # fix as resolve_report_id_for_upload: recency alone can pick a small
+    # claim-link auto-split fragment over this admin's real, bigger,
+    # properly-merged report as "latest".
+    docs = list(coll.find(query, sort=[("total_vulnerabilities", -1), ("uploaded_at", -1)]))
     if not docs:
         return None, None, [], set(), set()
 

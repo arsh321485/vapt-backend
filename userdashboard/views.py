@@ -60,20 +60,38 @@ def _get_admin_riskcriteria(admin_user):
 
 
 def _load_latest_report(db, admin_id, admin_email):
-    """Load admin's most recently uploaded nessus report."""
+    """Load admin's REAL primary nessus report.
+
+    Real bug report: an admin who ends up owning more than one
+    nessus_reports document (e.g. a claim-link auto-split created a
+    small standalone report for one specific file alongside this
+    admin's own bigger, properly-merged report) had this show whichever
+    one happened to be uploaded/created MOST RECENTLY — often the small
+    split-off fragment, not the real, complete picture, since recency
+    says nothing about which document is actually "the" report. Same
+    fix as resolve_report_id_for_upload/admindashboard.views.
+    _load_latest_report_for_admin: total_vulnerabilities is a far more
+    reliable signal of "this is the real, primary report" than
+    recency; uploaded_at is still the tiebreak when two reports happen
+    to be the same size.
+    """
     coll = db[NESSUS_COLLECTION]
-    doc = coll.find_one({"admin_id": str(admin_id)}, sort=[("uploaded_at", -1)])
+    sort = [("total_vulnerabilities", -1), ("uploaded_at", -1)]
+    doc = coll.find_one({"admin_id": str(admin_id)}, sort=sort)
     if not doc and admin_email:
-        doc = coll.find_one({"admin_email": admin_email}, sort=[("uploaded_at", -1)])
+        doc = coll.find_one({"admin_email": admin_email}, sort=sort)
     return doc
 
 def _load_latest_report_meta(db, admin_id, admin_email):
-    """Load only report metadata used by lightweight dashboard endpoints."""
+    """Load only report metadata used by lightweight dashboard endpoints
+    — see _load_latest_report's own docstring for why this is sorted
+    by total_vulnerabilities first, not just uploaded_at."""
     coll = db[NESSUS_COLLECTION]
     projection = {"report_id": 1, "uploaded_at": 1}
-    doc = coll.find_one({"admin_id": str(admin_id)}, projection, sort=[("uploaded_at", -1)])
+    sort = [("total_vulnerabilities", -1), ("uploaded_at", -1)]
+    doc = coll.find_one({"admin_id": str(admin_id)}, projection, sort=sort)
     if not doc and admin_email:
-        doc = coll.find_one({"admin_email": admin_email}, projection, sort=[("uploaded_at", -1)])
+        doc = coll.find_one({"admin_email": admin_email}, projection, sort=sort)
     return doc
 
 
