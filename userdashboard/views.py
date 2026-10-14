@@ -144,9 +144,43 @@ def _format_wdh_label(wdh):
     return ", ".join(parts) if parts else "0 hour"
 
 
+class _TeamLookup(dict):
+    """Case-insensitive team-name lookup built from the logged-in member's
+    own team list — every endpoint in this file matches a card via
+    `.get(raw_team.lower())`, same interface as the plain dict this used
+    to return. When the member also belongs to a custom (non-fixed) team,
+    adds a fallback: any key that isn't a literal match for one of their
+    OWN team names still resolves to the custom team, since a custom
+    team's defined behavior everywhere else in the app (see
+    upload_report.team_utils.is_fixed_team, userasset/views.py's own
+    catchall) is "show everything" — not just cards the AI/keyword
+    classifier happened to tag with that exact name, which it never does
+    since it only ever assigns one of the 4 fixed team names.
+
+    Real bug report: a member whose ONLY team is a custom one saw an
+    all-zero website dashboard (Total Assets, Vulnerabilities, MTTR,
+    Support Requests, Mitigation Timeline, ...) — every
+    vulnerability_cards.assigned_team value is always one of the 4 fixed
+    names, so it never literal-matched the custom team's own name, and
+    this file was never touched by any of the Custom Teams phases (those
+    fixed userasset/views.py and the Fix/Register/Support/Closed tabs,
+    not this separate home-dashboard summary file)."""
+
+    def __init__(self, teams):
+        super().__init__({t.lower(): t for t in teams if t})
+        from upload_report.team_utils import is_fixed_team
+        self._custom_fallback = next((t for t in teams if t and not is_fixed_team(t)), None)
+
+    def get(self, key, default=None):
+        hit = super().get(key)
+        if hit is not None:
+            return hit
+        return self._custom_fallback if self._custom_fallback is not None else default
+
+
 def _normalize_teams(teams):
-    """Lowercase map for case-insensitive team matching."""
-    return {t.lower(): t for t in teams}
+    """Case-insensitive team-name lookup — see _TeamLookup."""
+    return _TeamLookup(teams)
 
 
 def _extract_total_steps(mitigation_table):
