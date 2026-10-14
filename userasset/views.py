@@ -92,8 +92,9 @@ def _load_latest_report(db, admin_id, admin_email):
 
 def _get_team_plugin_names(db, report_id, teams_lower):
     """
-    Returns (team_plugins_set, plugin_team_map) — covers EVERY plugin_name
-    present in the report, not just ones with a generated card.
+    Returns (team_plugins_set, plugin_team_map) — covers EVERY
+    (host_name, plugin_name) pair present in the report, not just ones
+    with a generated card.
 
     Real bug report: this only ever read vulnerability_cards.assigned_team
     (the AI's own classification, written by a slow background job that
@@ -105,6 +106,24 @@ def _get_team_plugin_names(db, report_id, teams_lower):
     team_utils.infer_assigned_team() (deterministic keyword match, no AI
     call) whenever a plugin has no card, or a card with no/invalid team —
     same fallback already proven correct elsewhere in the app.
+
+    Real bug report: team_plugins/plugin_team_map used to be keyed by
+    plugin_name ALONE — a vulnerability counted as "in" a team if ANY
+    card anywhere in the report had that exact finding name assigned
+    there, regardless of which specific host that card was actually for.
+    Invisible under normal conditions (every card for one upload gets
+    AI-classified in the same run, so a repeated finding reuses that same
+    classification everywhere) — but a report combining cards from
+    independently-classified uploads (e.g. a manual split/merge) can have
+    the exact same finding name land in two different teams on two
+    different hosts, leaking every host sharing that name into BOTH
+    teams' results at once (confirmed live: ReportAssetsVulnsAPIView had
+    the identical bug — see its own history). Every caller of this
+    function must now key its own plugin_name-based lookups into
+    team_plugins/plugin_team_map by (host_name, plugin_name.lower())
+    instead, matching AdminDistributionByTeamDetailAPIView's
+    vuln_team_map, which was never affected since it was already built
+    this way.
     """
     from upload_report.team_utils import infer_assigned_team, is_fixed_team
 
@@ -128,41 +147,59 @@ def _get_team_plugin_names(db, report_id, teams_lower):
     covered = set()
     for card in db[VULN_CARD_COLLECTION].find(
         {"report_id": str(report_id)},
-        {"vulnerability_name": 1, "plugin_name": 1, "assigned_team": 1}
+        {"vulnerability_name": 1, "plugin_name": 1, "assigned_team": 1, "host_name": 1}
     ):
         pname = (card.get("vulnerability_name") or card.get("plugin_name") or "").strip()
         if not pname:
             continue
-        covered.add(pname.lower())
+        key = ((card.get("host_name") or "").strip(), pname.lower())
+        covered.add(key)
         raw_team = (card.get("assigned_team") or "").strip()
-        matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+        # Real bug report: falling back to infer_assigned_team's keyword
+        # guess even when the card ALREADY has a real assigned_team (just
+        # one that isn't among the viewer's own teams) let a vulnerability
+        # genuinely classified into a DIFFERENT team leak into this one
+        # too, whenever the keyword heuristic happened to also agree —
+        # confirmed live: a member whose only team is Network Security
+        # saw 37 "their" vulnerabilities instead of the real 6, the other
+        # 31 being Configuration Management/Patch Management findings the
+        # AI had already classified correctly. The guess is only for a
+        # genuinely unclassified card (no card yet, or a card with no
+        # assigned_team at all) — same rule ReportAssetsVulnsAPIView
+        # already follows correctly.
+        matched = teams_lower.get(raw_team.lower()) if raw_team else teams_lower.get(infer_assigned_team(pname).lower())
         if matched:
-            team_plugins.add(pname.lower())
-            plugin_team_map[pname] = matched
+            team_plugins.add(key)
+            plugin_team_map[key] = matched
         elif custom_team_catchall:
-            team_plugins.add(pname.lower())
-            plugin_team_map[pname] = custom_team_catchall
+            team_plugins.add(key)
+            plugin_team_map[key] = custom_team_catchall
 
-    # Fill in every plugin_name that has NO card at all yet.
+    # Fill in every (host, plugin_name) pair that has NO card at all yet.
     nessus_doc = db[NESSUS_COLLECTION].find_one(
         {"report_id": str(report_id)},
-        {"vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
+        {"vulnerabilities_by_host.host_name": 1,
+         "vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
          "vulnerabilities_by_host.vulnerabilities.pluginname": 1,
          "vulnerabilities_by_host.vulnerabilities.name": 1},
     )
     for host in (nessus_doc or {}).get("vulnerabilities_by_host", []):
+        host_key = (host.get("host_name") or "").strip()
         for v in host.get("vulnerabilities", []):
             pname = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
-            if not pname or pname.lower() in covered:
+            if not pname:
                 continue
-            covered.add(pname.lower())
+            key = (host_key, pname.lower())
+            if key in covered:
+                continue
+            covered.add(key)
             matched = teams_lower.get(infer_assigned_team(pname).lower())
             if matched:
-                team_plugins.add(pname.lower())
-                plugin_team_map[pname] = matched
+                team_plugins.add(key)
+                plugin_team_map[key] = matched
             elif custom_team_catchall:
-                team_plugins.add(pname.lower())
-                plugin_team_map[pname] = custom_team_catchall
+                team_plugins.add(key)
+                plugin_team_map[key] = custom_team_catchall
 
     return team_plugins, plugin_team_map
 
@@ -186,10 +223,12 @@ def _validate_team_access(db, report_id, host_name, teams_lower):
     # Find host entry
     target_host = (host_name or "").strip().rstrip("/").lower()
     host_entry = None
+    matched_host_name = ""
     for h in (doc.get("vulnerabilities_by_host") or []):
         hn = (h.get("host_name") or h.get("host") or "").strip().rstrip("/")
         if hn.lower() == target_host:
             host_entry = h
+            matched_host_name = hn
             break
 
     if not host_entry:
@@ -198,9 +237,11 @@ def _validate_team_access(db, report_id, host_name, teams_lower):
             status=status.HTTP_404_NOT_FOUND
         )
 
-    # Check if any vulnerability belongs to user's team
+    # Check if any vulnerability belongs to user's team — keyed by
+    # (host_name, plugin_name), never plugin_name alone (see
+    # _get_team_plugin_names' own docstring).
     has_team_vuln = any(
-        (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+        (matched_host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
         for v in host_entry.get("vulnerabilities", [])
     )
 
@@ -252,8 +293,9 @@ def _compute_total_assets(db, report_id, team_plugins=None):
 
     count = 0
     for host in doc.get("vulnerabilities_by_host", []):
+        host_key = (host.get("host_name") or "").strip()
         has_team_vuln = any(
-            (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+            (host_key, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
             for v in host.get("vulnerabilities", [])
         )
         if has_team_vuln:
@@ -364,7 +406,7 @@ class UserAssetsAPIView(APIView):
 
                     team_vulns = [
                         v for v in host.get("vulnerabilities", [])
-                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                        if (host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
                         and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _held_vuln_set
                         and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _deleted_vuln_set
                     ]
@@ -417,9 +459,9 @@ class UserAssetsAPIView(APIView):
                             "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
                             "host_information": host.get("host_information") or {},
                             "assigned_teams": list({
-                                plugin_team_map[v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""]
+                                plugin_team_map[(host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower())]
                                 for v in team_vulns
-                                if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "") in plugin_team_map
+                                if (host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in plugin_team_map
                             }),
                             # Classified from ALL of this host's vulnerabilities
                             # (not just this team's), same as adminasset's
@@ -539,10 +581,13 @@ class UserHoldAssetsAPIView(APIView):
                     host_entry = held_doc.get("host_entry") or {}
                     vulns      = host_entry.get("vulnerabilities", [])
 
-                    # Only show held assets with team-assigned vulns
+                    # Only show held assets with team-assigned vulns — keyed
+                    # by (host_name, plugin_name), never plugin_name alone
+                    # (see _get_team_plugin_names' own docstring).
+                    _held_host_name = (held_doc.get("host_name") or "").strip()
                     team_vulns = [
                         v for v in vulns
-                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                        if (_held_host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
                     ]
                     if not team_vulns:
                         continue
@@ -646,7 +691,7 @@ class UserReportAssetsAPIView(APIView):
 
                     team_vulns = [
                         v for v in host.get("vulnerabilities", [])
-                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                        if (host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
                         and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _held_vuln_set
                         and ((v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip(), host_name) not in _deleted_vuln_set
                     ]
@@ -799,9 +844,12 @@ class UserHoldAssetsByReportAPIView(APIView):
                 for held_doc in held_docs:
                     host_entry = held_doc.get("host_entry") or {}
                     vulns      = host_entry.get("vulnerabilities", [])
+                    # Keyed by (host_name, plugin_name), never plugin_name
+                    # alone (see _get_team_plugin_names' own docstring).
+                    _held_host_name = (held_doc.get("host_name") or "").strip()
                     team_vulns = [
                         v for v in vulns
-                        if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                        if (_held_host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
                     ]
                     if not team_vulns:
                         continue
@@ -906,7 +954,9 @@ class UserAssetVulnerabilitiesByHostAPIView(APIView):
                 out = []
                 for v in (host_entry.get("vulnerabilities") or []):
                     plugin_name   = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
-                    assigned_team = plugin_team_map.get(plugin_name)
+                    # Keyed by (host_name, plugin_name), never plugin_name
+                    # alone (see _get_team_plugin_names' own docstring).
+                    assigned_team = plugin_team_map.get((host_name, plugin_name.strip().lower()))
                     if not assigned_team:
                         continue
                     if plugin_name in held_plugins or plugin_name in deleted_plugins:
@@ -1031,7 +1081,9 @@ class UserAssetVulnerabilitiesAPIView(APIView):
                 out = []
                 for v in (host_entry.get("vulnerabilities") or []):
                     plugin_name   = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
-                    assigned_team = plugin_team_map.get(plugin_name)
+                    # Keyed by (host_name, plugin_name), never plugin_name
+                    # alone (see _get_team_plugin_names' own docstring).
+                    assigned_team = plugin_team_map.get((host_name, plugin_name.strip().lower()))
                     if not assigned_team:
                         continue
                     if plugin_name in held_plugins or plugin_name in deleted_plugins:
@@ -1288,9 +1340,11 @@ class UserAssetHoldAPIView(APIView):
                 })
 
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
+                # Keyed by (host_name, plugin_name), never plugin_name alone
+                # (see _get_team_plugin_names' own docstring).
                 team_vulns = [
                     v for v in found.get("vulnerabilities", [])
-                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                    if (host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
                 ]
 
                 asset_data = {
@@ -1383,11 +1437,12 @@ class UserAssetUnholdAPIView(APIView):
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR
                     )
 
-                # Validate team access on held entry
+                # Validate team access on held entry — keyed by (host_name,
+                # plugin_name), never plugin_name alone.
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
                 team_vulns = [
                     v for v in host_entry.get("vulnerabilities", [])
-                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                    if (host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
                 ]
                 if not team_vulns:
                     return Response(
@@ -1482,10 +1537,12 @@ class UserAssetDeleteAPIView(APIView):
                 deleted_coll = db[DELETED_ASSETS_COLLECTION]
 
                 asset_entry = None
+                matched_host_name = ""
                 for h in (doc.get("vulnerabilities_by_host") or []):
                     hn = (h.get("host_name") or h.get("host") or "").strip()
                     if hn.lower() == target_host:
                         asset_entry = h
+                        matched_host_name = hn
                         break
 
                 if not asset_entry:
@@ -1494,10 +1551,12 @@ class UserAssetDeleteAPIView(APIView):
                         status=status.HTTP_404_NOT_FOUND
                     )
 
+                # Keyed by (host_name, plugin_name), never plugin_name alone
+                # (see _get_team_plugin_names' own docstring).
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
                 team_vulns = [
                     v for v in asset_entry.get("vulnerabilities", [])
-                    if (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower() in team_plugins
+                    if (matched_host_name, (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip().lower()) in team_plugins
                 ]
 
                 # Store in deleted_assets history
@@ -1649,7 +1708,10 @@ class UserAllVulnerabilitiesAPIView(APIView):
                     host_name = (host.get("host_name") or "").strip()
                     for v in host.get("vulnerabilities", []):
                         plugin_name = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
-                        if not plugin_name or plugin_name.lower() not in team_plugins:
+                        # Keyed by (host_name, plugin_name), never
+                        # plugin_name alone (see _get_team_plugin_names'
+                        # own docstring).
+                        if not plugin_name or (host_name, plugin_name.lower()) not in team_plugins:
                             continue
                         if (plugin_name, host_name) in closed_set:
                             continue
@@ -1659,8 +1721,8 @@ class UserAllVulnerabilitiesAPIView(APIView):
                                 "plugin_name": plugin_name,
                                 "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
                                 "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
+                                "assigned_team": plugin_team_map.get((host_name, plugin_name.lower()), ""),
                                 "vendor_fix_available": "Yes",
-                                "assigned_team": plugin_team_map.get(plugin_name, ""),
                                 "total_assets": 0,
                                 "open_count": 0,
                                 "held_count": 0,
@@ -1757,8 +1819,17 @@ class UserVulnAssetListAPIView(APIView):
                 if not doc:
                     return Response({"detail": "Report not found"}, status=status.HTTP_404_NOT_FOUND)
 
+                # Real bug report: this used to gate on plugin_name ALONE,
+                # then list EVERY host in the report with that finding name
+                # — once the upfront (global) check passed, a host where
+                # this exact plugin_name is actually assigned to a
+                # DIFFERENT team was shown too (see _get_team_plugin_names'
+                # own docstring). The per-host filter below is the real
+                # access control now; this is kept only so a plugin_name
+                # with NO match anywhere still returns the same 403 as
+                # before instead of a silently-empty 200.
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
-                if plugin_name.lower() not in team_plugins:
+                if not any(key[1] == plugin_name.lower() for key in team_plugins):
                     return Response(
                         {"detail": "Access denied. This vulnerability is not assigned to your team."},
                         status=status.HTTP_403_FORBIDDEN
@@ -1821,6 +1892,12 @@ class UserVulnAssetListAPIView(APIView):
                         pname = v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                         if pname != plugin_name:
                             continue
+                        # Real bug report: see the access-check comment
+                        # above — this specific host's own card must also
+                        # actually belong to the viewer's team, not just
+                        # share the finding's name with one that does.
+                        if (host_name, pname.lower()) not in team_plugins:
+                            continue
                         seen_hosts.add(host_name)
                         if host_name in deleted_hosts:
                             vuln_status = "deleted"
@@ -1874,8 +1951,18 @@ class UserBulkVulnHoldAPIView(APIView):
             teams_lower = _normalize_teams(teams)
 
             with MongoContext() as db:
+                # Real bug report: this used to gate on plugin_name ALONE —
+                # "is this finding assigned to my team ANYWHERE in the
+                # report" — then let the bulk action run against EVERY
+                # host_name the caller supplied, including a host where
+                # this exact plugin_name is actually assigned to a
+                # DIFFERENT team (see _get_team_plugin_names' own
+                # docstring for why that's possible once a report combines
+                # independently-classified uploads). Checked per host now,
+                # not as one global gate.
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
-                if plugin_name.lower() not in team_plugins:
+                authorized_hosts = {h for h in host_names if (h, plugin_name.lower()) in team_plugins}
+                if not authorized_hosts:
                     return Response(
                         {"detail": "Access denied. This vulnerability is not assigned to your team."},
                         status=status.HTTP_403_FORBIDDEN
@@ -1888,6 +1975,9 @@ class UserBulkVulnHoldAPIView(APIView):
 
                 processed, skipped = [], []
                 for host_name in host_names:
+                    if host_name not in authorized_hosts:
+                        skipped.append({"host_name": host_name, "reason": "not assigned to your team"})
+                        continue
                     if del_coll.find_one({
                         "report_id": str(report_id),
                         "plugin_name": plugin_name,
@@ -1947,8 +2037,12 @@ class UserBulkVulnUnholdAPIView(APIView):
             teams_lower = _normalize_teams(teams)
 
             with MongoContext() as db:
+                # Real bug report: see UserBulkVulnHoldAPIView's own
+                # comment — checked per host now, not as one global gate
+                # on plugin_name alone.
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
-                if plugin_name.lower() not in team_plugins:
+                authorized_hosts = [h for h in host_names if (h, plugin_name.lower()) in team_plugins]
+                if not authorized_hosts:
                     return Response(
                         {"detail": "Access denied. This vulnerability is not assigned to your team."},
                         status=status.HTTP_403_FORBIDDEN
@@ -1957,7 +2051,7 @@ class UserBulkVulnUnholdAPIView(APIView):
                 result = db[HOLD_VULNS_COLLECTION].delete_many({
                     "report_id": str(report_id),
                     "plugin_name": plugin_name,
-                    "host_name": {"$in": host_names},
+                    "host_name": {"$in": authorized_hosts},
                 })
 
                 if result.deleted_count:
@@ -1966,7 +2060,7 @@ class UserBulkVulnUnholdAPIView(APIView):
                 return Response({
                     "detail": f"Unheld on {result.deleted_count} asset(s)",
                     "plugin_name": plugin_name,
-                    "processed": host_names,
+                    "processed": authorized_hosts,
                 }, status=status.HTTP_200_OK)
 
         except Exception as exc:
@@ -1998,8 +2092,12 @@ class UserBulkVulnDeleteAPIView(APIView):
             teams_lower = _normalize_teams(teams)
 
             with MongoContext() as db:
+                # Real bug report: see UserBulkVulnHoldAPIView's own
+                # comment — checked per host now, not as one global gate
+                # on plugin_name alone.
                 team_plugins, _ = _get_team_plugin_names(db, report_id, teams_lower)
-                if plugin_name.lower() not in team_plugins:
+                authorized_hosts = [h for h in host_names if (h, plugin_name.lower()) in team_plugins]
+                if not authorized_hosts:
                     return Response(
                         {"detail": "Access denied. This vulnerability is not assigned to your team."},
                         status=status.HTTP_403_FORBIDDEN
@@ -2010,7 +2108,7 @@ class UserBulkVulnDeleteAPIView(APIView):
                 deleted_by = getattr(request.user, "email", None) or str(request.user.id)
                 now        = timezone.now()
 
-                for host_name in host_names:
+                for host_name in authorized_hosts:
                     del_coll.update_one(
                         {"report_id": str(report_id), "plugin_name": plugin_name, "host_name": host_name},
                         {"$setOnInsert": {"deleted_at": now, "deleted_by": deleted_by}},
@@ -2022,13 +2120,13 @@ class UserBulkVulnDeleteAPIView(APIView):
                         "host_name": host_name,
                     })
 
-                if host_names:
+                if authorized_hosts:
                     _clear_admin_dashboard_cache(admin_user.id)
 
                 return Response({
-                    "detail": f"Deleted from {len(host_names)} asset(s)",
+                    "detail": f"Deleted from {len(authorized_hosts)} asset(s)",
                     "plugin_name": plugin_name,
-                    "processed": host_names,
+                    "processed": authorized_hosts,
                 }, status=status.HTTP_200_OK)
 
         except Exception as exc:
@@ -2111,7 +2209,9 @@ class UserVulnHoldListByReportAPIView(APIView):
                     pname = held.get("plugin_name", "")
                     hn    = held.get("host_name", "")
 
-                    if pname.lower() not in team_plugins:
+                    # Keyed by (host_name, plugin_name), never plugin_name
+                    # alone (see _get_team_plugin_names' own docstring).
+                    if (hn, pname.lower()) not in team_plugins:
                         continue
 
                     vuln = vuln_lookup.get((hn, pname), {})
@@ -2121,7 +2221,7 @@ class UserVulnHoldListByReportAPIView(APIView):
                             "plugin_name":   pname,
                             "severity":      (vuln.get("risk_factor") or vuln.get("severity") or "").title(),
                             "cvss_score":    str(vuln.get("cvss_v3_base_score") or vuln.get("cvss") or ""),
-                            "assigned_team": plugin_team_map.get(pname, ""),
+                            "assigned_team": plugin_team_map.get((hn, pname.lower()), ""),
                             "asset_count":   0,
                             "hosts":         [],
                         }
@@ -2216,7 +2316,9 @@ class UserVulnDeleteListByReportAPIView(APIView):
                     pname = deleted.get("plugin_name", "")
                     hn    = deleted.get("host_name", "")
 
-                    if pname.lower() not in team_plugins:
+                    # Keyed by (host_name, plugin_name), never plugin_name
+                    # alone (see _get_team_plugin_names' own docstring).
+                    if (hn, pname.lower()) not in team_plugins:
                         continue
 
                     vuln = vuln_lookup.get((hn, pname), {})
@@ -2226,7 +2328,7 @@ class UserVulnDeleteListByReportAPIView(APIView):
                             "plugin_name":   pname,
                             "severity":      (vuln.get("risk_factor") or vuln.get("severity") or "").title(),
                             "cvss_score":    str(vuln.get("cvss_v3_base_score") or vuln.get("cvss") or ""),
-                            "assigned_team": plugin_team_map.get(pname, ""),
+                            "assigned_team": plugin_team_map.get((hn, pname.lower()), ""),
                             "asset_count":   0,
                             "hosts":         [],
                         }
