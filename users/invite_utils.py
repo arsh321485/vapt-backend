@@ -103,6 +103,21 @@ def claim_invite(token: str, new_admin) -> int:
         {"$set": {"admin_id": str(new_admin.id), "admin_email": new_admin.email}},
     )
 
+    # Real bug report: this reassigned nessus_reports (and UploadReport,
+    # below) but never vulnerability_cards — every claimed invite left
+    # the claimed report's own cards still stamped with the ORIGINAL
+    # admin's admin_id/admin_email, out of sync with the report doc they
+    # belong to (confirmed live: a freshly claimed report showed the new
+    # admin as owner, but its 46 cards still showed the old admin).
+    # Harmless for anything that only ever queries vulnerability_cards by
+    # report_id (most of the app), but a real landmine for the handful of
+    # places that filter by admin_id/admin_email directly. Keep both
+    # collections in sync on every claim, not just nessus_reports.
+    db["vulnerability_cards"].update_many(
+        {"report_id": {"$in": mongo_report_ids}},
+        {"$set": {"admin_id": str(new_admin.id), "admin_email": new_admin.email}},
+    )
+
     try:
         from bson import ObjectId
         from bson.errors import InvalidId
