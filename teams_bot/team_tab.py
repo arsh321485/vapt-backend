@@ -44,6 +44,29 @@ TEAM_ROLE_OPTIONS = [
 TEAM_CODE_TO_NAME = dict(TEAM_ROLE_OPTIONS)
 
 
+def _team_code_to_name_map(admin):
+    """TEAM_CODE_TO_NAME plus this admin's own CustomTeam(s), coded
+    "custom:<team _id>" since an arbitrary custom-team name isn't
+    guaranteed to be a safe short code the way "pm"/"cm"/"ns"/"af" are.
+    Every Add-User call site (card building, form-state reconciliation,
+    select-all, final submit) must resolve team codes through this —
+    not the bare module constant — or a custom team silently drops out
+    of that one step."""
+    from users_details.models import CustomTeam
+    mapping = dict(TEAM_CODE_TO_NAME)
+    for ct in CustomTeam.objects.filter(admin=admin):
+        mapping[f"custom:{ct._id}"] = ct.name
+    return mapping
+
+
+def _team_options_for_admin(admin):
+    """[(code, name), ...] choices for the Team(s) checkbox list: the 4
+    fixed teams plus this admin's own custom teams."""
+    mapping = _team_code_to_name_map(admin)
+    custom = [(code, name) for code, name in mapping.items() if code not in TEAM_CODE_TO_NAME]
+    return TEAM_ROLE_OPTIONS + custom
+
+
 def team_subnav_columnset(active_sub):
     return cards.pill_columnset(TEAM_SUBTABS, active_sub, lambda k: {"action_id": k})
 
@@ -241,7 +264,8 @@ def normalize_adduser_form_data(value, admin=None):
             normalized[field] = suffixed
 
     team_codes = [c.strip() for c in (normalized.get("au_team") or "").split(",") if c.strip()]
-    team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes if c in TEAM_CODE_TO_NAME]
+    team_code_to_name = _team_code_to_name_map(admin) if admin else TEAM_CODE_TO_NAME
+    team_names = [team_code_to_name[c] for c in team_codes if c in team_code_to_name]
     assets, vulns = _fetch_team_assets_vulns(admin, team_names) if (admin and team_names) else ([], [])
 
     for which, field, items in (("assets", "au_assets", assets), ("vulns", "au_vulns", vulns)):
@@ -390,8 +414,14 @@ def add_user_form_body(admin, form_data=None):
             {"type": "Input.Text", "id": "au_email", "label": "Email", "style": "Email", "placeholder": "name@example.com", "value": form_data.get("au_email") or ""},
         ])
 
+    # Real bug report: the Team(s) checkbox list was hardcoded to the 4
+    # fixed teams (TEAM_ROLE_OPTIONS) — an admin's own CustomTeam(s) never
+    # appeared here at all, even though every downstream piece (asset/vuln
+    # picker, role validation, channel routing) already supports them. See
+    # _team_code_to_name_map's docstring.
+    team_code_to_name = _team_code_to_name_map(admin)
     team_codes_selected = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
-    team_options = [{"title": name, "value": code} for code, name in TEAM_ROLE_OPTIONS]
+    team_options = [{"title": name, "value": code} for code, name in _team_options_for_admin(admin)]
     team_element = {"type": "Input.ChoiceSet", "id": f"au_team_{rev}", "label": "Team(s)", "style": "expanded", "isMultiSelect": True, "choices": team_options}
     # Real bug report: this was setting "initial_options" (a list of
     # {title, value} dicts) — that's Slack Block Kit's multi_static_select
@@ -411,7 +441,7 @@ def add_user_form_body(admin, form_data=None):
     })
 
     if team_codes_selected:
-        team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes_selected if c in TEAM_CODE_TO_NAME]
+        team_names = [team_code_to_name[c] for c in team_codes_selected if c in team_code_to_name]
         body.extend(_assets_vulns_picker_blocks(admin, team_names, form_data, rev))
 
     body.append({"type": "Input.Text", "id": "_rev", "value": str(rev), "isVisible": False})
@@ -593,7 +623,8 @@ def _apply_select_all(admin, form_data, which, select):
     current page) or cleared (select=False), leaving every other field
     exactly as the click carried them in."""
     team_codes = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
-    team_names = [TEAM_CODE_TO_NAME[c] for c in team_codes if c in TEAM_CODE_TO_NAME]
+    team_code_to_name = _team_code_to_name_map(admin)
+    team_names = [team_code_to_name[c] for c in team_codes if c in team_code_to_name]
     assets, vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
     updated = dict(form_data)
     if which == "assets":
@@ -632,7 +663,8 @@ def submit_add_user(admin, form_data):
     # — Adaptive Cards echoes multi-select values back as a single
     # comma-separated string, not a list, so split it here.
     codes = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
-    team_names = [TEAM_CODE_TO_NAME[c] for c in codes if c in TEAM_CODE_TO_NAME]
+    team_code_to_name = _team_code_to_name_map(admin)
+    team_names = [team_code_to_name[c] for c in codes if c in team_code_to_name]
 
     if not email or not first or not team_names:
         return False, "Pick a Teams member (or fill in Email/First Name manually) and select at least one Team."

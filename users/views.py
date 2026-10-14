@@ -18044,10 +18044,11 @@ class SlackSlashCommandView(APIView):
 
     _PICKER_PAGE_SIZE = 10  # Slack's own hard cap on options per checkboxes element
 
-    def _build_adduser_modal(self, selected_teams=None, state=None, assets_list=None, vulns_list=None):
+    def _build_adduser_modal(self, selected_teams=None, state=None, assets_list=None, vulns_list=None, team_id=None):
+        team_code_map = self._custom_team_code_map(team_id) if team_id else self._TEAM_MAP
         team_options = [
             {"text": {"type": "plain_text", "text": name}, "value": code}
-            for code, name in self._TEAM_MAP.items()
+            for code, name in team_code_map.items()
         ]
         team_element = {"type": "checkboxes", "action_id": "team_checks", "options": team_options}
         if selected_teams:
@@ -18892,6 +18893,26 @@ class SlackSlashCommandView(APIView):
         "af": "Architectural Flaws",
     }
 
+    def _custom_team_code_map(self, team_id):
+        """/adduser short-code -> team name for this team_id's admin: the
+        4 fixed codes (_TEAM_MAP) plus a slug code for each of the admin's
+        own CustomTeam(s) (same slugging as
+        _slack_channel_name_for_custom_team, so it's a single
+        whitespace-free word /adduser's own text splitting can handle).
+        Real bug report: without this, a custom team was simply impossible
+        to add a user to via Slack at all — both the Add User modal's
+        checkbox list and the /adduser text command only ever knew about
+        _TEAM_MAP, same class of gap as teams_bot/team_tab.py's Teams-side
+        Add User card had."""
+        mapping = dict(self._TEAM_MAP)
+        admin = User.objects.filter(slack_team_id=team_id).first()
+        if admin:
+            from users_details.models import CustomTeam
+            for ct in CustomTeam.objects.filter(admin=admin):
+                slug = re.sub(r"[^a-z0-9]+", "-", ct.name.strip().lower()).strip("-") or "team"
+                mapping[slug] = ct.name
+        return mapping
+
     def _cmd_adduser(self, text, team_id, user_id, role_assignments=None):
         parts = text.strip().split()
         # Minimum: @mention  type  team
@@ -18907,15 +18928,17 @@ class SlackSlashCommandView(APIView):
         user_type = "internal" if parts[1].lower() in ("internal", "team", "admin") else "external"
         team_codes = [p.lower() for p in parts[2:]]
 
-        # Validate team codes
-        unknown = [c for c in team_codes if c not in self._TEAM_MAP]
+        # Validate team codes — merged with this admin's own custom-team
+        # slug codes, see _custom_team_code_map's docstring.
+        team_code_map = self._custom_team_code_map(team_id)
+        unknown = [c for c in team_codes if c not in team_code_map]
         if unknown:
             return self._text_block(
                 f"❌ Unknown team code(s): `{'`, `'.join(unknown)}`\n"
                 "Valid codes: `pm` | `cm` | `ns` | `af`"
             )
 
-        team_names  = [self._TEAM_MAP[c] for c in team_codes]
+        team_names  = [team_code_map[c] for c in team_codes]
         primary_team = team_names[0]
         member_role  = team_names  # each team grants full access to that team
 
@@ -24630,7 +24653,7 @@ class SlackInteractivityView(APIView):
                     self._debug_write(f"_handle_action: {action_id} missing bot_token or trigger_id")
                     return
                 view = (
-                    slash._build_adduser_modal() if action_id == "team_sub_adduser"
+                    slash._build_adduser_modal(team_id=team_id) if action_id == "team_sub_adduser"
                     else slash._build_deleteuser_modal()
                 )
                 resp = _http_post(
@@ -26357,8 +26380,10 @@ class SlackInteractivityView(APIView):
         slash = SlackSlashCommandView()
         PAGE_SIZE = slash._PICKER_PAGE_SIZE
 
+        team_code_map = slash._custom_team_code_map(team_id)
+
         def team_names():
-            return [slash._TEAM_MAP.get(c) for c in state["teams"] if slash._TEAM_MAP.get(c)]
+            return [team_code_map.get(c) for c in state["teams"] if team_code_map.get(c)]
 
         self._debug_write(f"_handle_adduser_modal_live: start action={action_id} teams={state['teams']}")
 
@@ -26428,7 +26453,7 @@ class SlackInteractivityView(APIView):
             try:
                 bot_token = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
                 if bot_token and view_id:
-                    error_view = slash._build_adduser_modal(selected_teams=state.get("teams"))
+                    error_view = slash._build_adduser_modal(selected_teams=state.get("teams"), team_id=team_id)
                     error_view["blocks"].append({
                         "type": "section",
                         "text": {"type": "mrkdwn", "text": (
@@ -26460,6 +26485,7 @@ class SlackInteractivityView(APIView):
             return
         new_view = slash._build_adduser_modal(
             selected_teams=state["teams"], state=state, assets_list=assets_list, vulns_list=vulns_list,
+            team_id=team_id,
         )
         resp = _http_post(
             "https://slack.com/api/views.update",
