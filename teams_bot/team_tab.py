@@ -440,6 +440,20 @@ def add_user_form_body(admin, form_data=None):
         "actions": [cards._execute_action("🔄 Show Assets & Vulnerabilities for selected Team(s)", {"action_id": "team_adduser_refresh"})],
     })
 
+    # Real feature request: same inline "create a new team" convenience the
+    # website's own Add User screen already has (type a name, click Add —
+    # no separate page/flow) — mirrored here so a custom team can be made
+    # without leaving this card. Reuses CustomTeamListCreateView in-process
+    # (see team_adduser_create_team in actions.py) so validation, Slack/
+    # Teams channel auto-creation, everything stays identical to creating
+    # one from the website.
+    body.append({"type": "TextBlock", "text": "Or create a new team:", "size": "Small", "weight": "Bolder", "spacing": "Medium"})
+    body.append({"type": "Input.Text", "id": "au_new_team", "placeholder": "e.g. VIP Clients", "value": form_data.get("au_new_team") or ""})
+    body.append({
+        "type": "ActionSet", "spacing": "Small",
+        "actions": [cards._execute_action("➕ Create Team", {"action_id": "team_adduser_create_team"})],
+    })
+
     if team_codes_selected:
         team_names = [team_code_to_name[c] for c in team_codes_selected if c in team_code_to_name]
         body.extend(_assets_vulns_picker_blocks(admin, team_names, form_data, rev))

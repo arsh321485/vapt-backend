@@ -925,6 +925,43 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
+    if action_id == "team_adduser_create_team":
+        # Real feature request: same inline "create a new team" convenience
+        # the website's own Add User screen already has — reuses
+        # CustomTeamListCreateView in-process so validation (duplicate
+        # name, collision with a fixed team name) and the Slack/Teams
+        # channel auto-creation threads are IDENTICAL to creating one from
+        # the website, not a re-implementation.
+        try:
+            form_data = team_tab.normalize_adduser_form_data(value, admin)
+            new_name = (form_data.get("au_new_team") or "").strip()
+            create_error = None
+            if not new_name:
+                create_error = "Type a name first."
+            else:
+                from users_details.views import CustomTeamListCreateView
+                status_code, data = _call_view_in_process(
+                    CustomTeamListCreateView, admin, data={"name": new_name}, method="post",
+                )
+                if status_code >= 300:
+                    create_error = (data or {}).get("detail") or "Could not create team."
+                else:
+                    # Auto-select the newly created team so the admin
+                    # doesn't have to find and check it themselves.
+                    new_code = f"custom:{data.get('id')}"
+                    existing = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
+                    form_data["au_team"] = ",".join(existing + [new_code])
+            form_data["au_new_team"] = ""
+            body = [team_tab.team_subnav_columnset("team_sub_adduser")]
+            if create_error:
+                body.append(cards._header("❌ Could not create team"))
+                body.append(cards._body_text(create_error))
+            body.extend(team_tab.add_user_form_body(admin, form_data=form_data))
+        except Exception:
+            logger.exception("[TeamsBot] team_adduser_create_team failed")
+            body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
     if action_id == "team_adduser_submit":
         try:
             form_data = team_tab.normalize_adduser_form_data(value, admin)

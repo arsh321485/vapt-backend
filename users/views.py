@@ -18092,6 +18092,32 @@ class SlackSlashCommandView(APIView):
                 "dispatch_action": True,
                 "element": team_element,
             },
+            # Real feature request: same inline "create a new team"
+            # convenience the website's own Add User screen already has —
+            # the button's block_actions click is handled in
+            # _handle_adduser_modal_live (adduser_create_team), which calls
+            # the real custom-teams API (same validation/channel-creation
+            # as the website) and re-renders this modal with the new team
+            # already checked.
+            {
+                "type": "input",
+                "block_id": "new_team_block",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Or create a new team"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "new_team_input",
+                    "placeholder": {"type": "plain_text", "text": "e.g. VIP Clients"},
+                },
+            },
+            {
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "➕ Create Team", "emoji": True},
+                    "action_id": "adduser_create_team",
+                }],
+            },
         ]
         if state and state.get("teams"):
             blocks.extend(self._build_adduser_picker_blocks(state, assets_list or [], vulns_list or []))
@@ -23214,6 +23240,7 @@ class SlackInteractivityView(APIView):
                 "team_checks", "assets_checks", "vulns_checks",
                 "assets_pg_prev", "assets_pg_next", "vulns_pg_prev", "vulns_pg_next",
                 "assets_select_all", "assets_clear_all", "vulns_select_all", "vulns_clear_all",
+                "adduser_create_team",
             ):
                 threading.Thread(target=self._handle_adduser_modal_live, args=(payload,), daemon=True).start()
             elif live_action_id == "dtu_user_select":
@@ -26387,8 +26414,37 @@ class SlackInteractivityView(APIView):
 
         self._debug_write(f"_handle_adduser_modal_live: start action={action_id} teams={state['teams']}")
 
+        create_error = None
         try:
-            if action_id == "team_checks":
+            if action_id == "adduser_create_team":
+                # Real feature request: same inline "create a new team"
+                # convenience the website's own Add User screen already has
+                # — goes through the real custom-teams API (same
+                # validation/Slack+Teams-channel auto-creation as creating
+                # one from the website), not a re-implementation.
+                new_name = (_find_by_action_id(
+                    (view.get("state") or {}).get("values") or {}, "new_team_input"
+                ).get("value") or "").strip()
+                if not new_name:
+                    create_error = "Type a name first."
+                else:
+                    try:
+                        resp = slash._call_api(
+                            "/api/admin/users_details/custom-teams/", team_id,
+                            method="post", json_body={"name": new_name}, slack_user_id=slack_user_id,
+                        )
+                    except Exception:
+                        resp = None
+                    if not isinstance(resp, dict) or "id" not in resp:
+                        create_error = (isinstance(resp, dict) and resp.get("detail")) or "Could not create team — try again."
+                    else:
+                        new_code = f"custom:{resp['id']}"
+                        if new_code not in state["teams"]:
+                            state["teams"].append(new_code)
+                        team_code_map[new_code] = resp.get("name") or new_name
+                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+
+            elif action_id == "team_checks":
                 selected = live_action.get("selected_options") or []
                 state["teams"] = [o.get("value") for o in selected if o.get("value")]
                 # A different team set means a different assets/vulns
@@ -26487,6 +26543,11 @@ class SlackInteractivityView(APIView):
             selected_teams=state["teams"], state=state, assets_list=assets_list, vulns_list=vulns_list,
             team_id=team_id,
         )
+        if create_error:
+            new_view["blocks"].append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"⚠️ _{create_error}_"},
+            })
         resp = _http_post(
             "https://slack.com/api/views.update",
             headers={"Authorization": f"Bearer {bot_token}"},
