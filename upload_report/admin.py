@@ -1335,7 +1335,43 @@ class UploadReportAdmin(admin.ModelAdmin):
                     # holds the data.
                     structured = parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom") or bool(parsed_data.get("vulnerabilities_by_host"))
                     from .merge_service import get_merge_target_report_id
+
+                    # Real bug report: several files uploaded through this
+                    # admin panel in quick succession (e.g. re-testing with
+                    # 3-4 files a few seconds apart) each ran get_merge_
+                    # target_report_id BEFORE any sibling had gotten far
+                    # enough to actually create its own nessus_reports
+                    # document — every one of them independently saw "no
+                    # anchor yet" and became its own separate standalone
+                    # report instead of merging into one, even though
+                    # get_merge_target_report_id correctly resolves them
+                    # all to the same report moments later. The website's
+                    # own upload endpoint (upload_report/views.py) already
+                    # guards this exact race with a short per-admin mutex;
+                    # this admin panel never had the same protection. Same
+                    # fix here: wait for any sibling currently deciding
+                    # this for the first time, then make that decision
+                    # myself only once nothing else is mid-decision.
+                    from django.core.cache import cache as _merge_cache
+                    _merge_lock_key = f"upload_merge_lock_{admin_user.id}"
+                    _merge_lock_held = False
+                    for _attempt in range(360):  # up to 180s — matches the lock's own timeout below
+                        if _merge_cache.add(_merge_lock_key, True, timeout=180):
+                            _merge_lock_held = True
+                            break
+                        time.sleep(0.5)
+
                     merge_target = get_merge_target_report_id(admin_user, exclude_pk=obj.pk) if structured else None
+
+                    if merge_target and _merge_lock_held:
+                        # An anchor already exists — this upload will only
+                        # ever merge into it, never create a new one, so
+                        # the race this lock guards against can't happen
+                        # here. Release right away instead of holding it
+                        # for this file's own (possibly slow) processing.
+                        _merge_cache.delete(_merge_lock_key)
+                        _merge_lock_held = False
+
                     upload_report_id = merge_target or str(obj._id)
 
                     # Store in MongoDB — own_upload_id is ALWAYS this
@@ -1352,6 +1388,15 @@ class UploadReportAdmin(admin.ModelAdmin):
                         merge_into_report_id=merge_target,
                         own_upload_id=str(obj._id),
                     )
+
+                    # This file just became the new anchor (no merge target
+                    # existed) — release the mutex now so a sibling request
+                    # waiting on it (see the acquire, above) can proceed
+                    # immediately instead of waiting out the rest of this
+                    # file's own processing.
+                    if _merge_lock_held:
+                        _merge_cache.delete(_merge_lock_key)
+                        _merge_lock_held = False
 
                     if mongodb_stored:
                         self._mark_scope_fulfilled(scope_id, upload_report_id)
