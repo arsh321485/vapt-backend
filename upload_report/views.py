@@ -1017,6 +1017,38 @@ class UploadReportView(APIView):
                             # the report that already exists for today instead
                             # of creating a separate one.
                             report_id = todays_report_id
+                            # Real bug report: this upload flow (website,
+                            # Slack, Teams — all three post to this same
+                            # endpoint) never stamped source_upload_id at
+                            # all, unlike the Django admin panel's own
+                            # upload path (upload_report/admin.py). Without
+                            # it, the admin's per-file "Cards Status"
+                            # column can only ever fall back to the whole
+                            # shared report's total for a file uploaded
+                            # this way, and a claim-link auto-split (see
+                            # UploadReportAdmin._auto_split_duplicate_
+                            # upload) has nothing to work from. Stamped
+                            # onto this upload's own _id — already created
+                            # above — same convention as the admin path.
+                            own_upload_id = str(upload_report._id)
+                            for _host in (parsed_data.get("vulnerabilities_by_host") or []):
+                                for _vuln in (_host.get("vulnerabilities") or []):
+                                    _vuln["source_upload_id"] = own_upload_id
+                            for _host in (locked_hosts or []):
+                                for _vuln in (_host.get("vulnerabilities") or []):
+                                    _vuln["source_upload_id"] = own_upload_id
+                            _get_mongo_client_and_db()[1]["upload_vuln_snapshots"].update_one(
+                                {"upload_id": own_upload_id},
+                                {"$set": {
+                                    "upload_id": own_upload_id,
+                                    "admin_id": str(getattr(target_admin, "id", "") or ""),
+                                    "admin_email": getattr(target_admin, "email", None),
+                                    "vulnerabilities_by_host": parsed_data.get("vulnerabilities_by_host") or [],
+                                    "locked_hosts": locked_hosts or [],
+                                    "created_at": datetime.datetime.utcnow(),
+                                }},
+                                upsert=True,
+                            )
                             hosts_payload = self._prepare_hosts_for_storage(
                                 parsed_data.get("vulnerabilities_by_host", [])
                             )
@@ -1039,6 +1071,32 @@ class UploadReportView(APIView):
                                 mongodb_stored = False
                         else:
                             report_id = str(upload_report._id)
+                            # Real bug report: see the merge branch's own
+                            # comment above — same stamping, same
+                            # snapshot, for the "first upload of the day"
+                            # (standalone, not merged) case. report_id ==
+                            # this upload's own _id here already (it's
+                            # about to create its own standalone
+                            # document), so the tag and the eventual
+                            # report_id agree from the start.
+                            for _host in (parsed_data.get("vulnerabilities_by_host") or []):
+                                for _vuln in (_host.get("vulnerabilities") or []):
+                                    _vuln["source_upload_id"] = report_id
+                            for _host in (locked_hosts or []):
+                                for _vuln in (_host.get("vulnerabilities") or []):
+                                    _vuln["source_upload_id"] = report_id
+                            _get_mongo_client_and_db()[1]["upload_vuln_snapshots"].update_one(
+                                {"upload_id": report_id},
+                                {"$set": {
+                                    "upload_id": report_id,
+                                    "admin_id": str(getattr(target_admin, "id", "") or ""),
+                                    "admin_email": getattr(target_admin, "email", None),
+                                    "vulnerabilities_by_host": parsed_data.get("vulnerabilities_by_host") or [],
+                                    "locked_hosts": locked_hosts or [],
+                                    "created_at": datetime.datetime.utcnow(),
+                                }},
+                                upsert=True,
+                            )
                             mongodb_stored = self._store_in_mongodb(
                                 parsed_data=parsed_data,
                                 report_id=report_id,
