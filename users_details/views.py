@@ -2009,25 +2009,50 @@ class ReportAssetsVulnsAPIView(APIView):
                 if role_filter and role_filter in _FIXED_TEAM_NAMES:
                     from upload_report.team_utils import infer_assigned_team
 
+                    # Real bug report: role_plugins/assigned_team_map used to
+                    # be keyed by plugin_name ALONE — a vulnerability was
+                    # "in" a team if ANY card anywhere in the report had that
+                    # exact finding name assigned there, regardless of which
+                    # specific host that card was actually for. Normally
+                    # invisible, since every card for one upload gets
+                    # classified in the same AI run and a repeated finding
+                    # reuses that SAME classification consistently — but a
+                    # report combining cards from independently-classified
+                    # uploads (e.g. a manual split/merge) can have the exact
+                    # same finding name land in two different teams on two
+                    # different hosts. That inconsistency then leaked every
+                    # host sharing that finding name into BOTH teams' results
+                    # at once — confirmed live: "Add Team Member"'s own
+                    # combined picker showed 55 vulnerabilities selected for
+                    # 4 fixed teams whose TRUE, non-overlapping total (same
+                    # as the Team Performance page, which already keys by
+                    # (host_name, vulnerability_name) — see
+                    # AdminDistributionByTeamDetailAPIView's vuln_team_map)
+                    # was only 46. Keyed by (host_name, plugin_name) now, so
+                    # a finding's team membership is always decided per the
+                    # SPECIFIC host's own card, never borrowed from a
+                    # same-named finding elsewhere in the report.
                     role_plugins = set()
                     covered = set()
                     for card in db[VULN_CARD_COLLECTION].find(
                         {"report_id": report_id},
-                        {"vulnerability_name": 1, "plugin_name": 1, "assigned_team": 1},
+                        {"vulnerability_name": 1, "plugin_name": 1, "assigned_team": 1, "host_name": 1},
                     ):
                         pname = (
                             card.get("vulnerability_name")
                             or card.get("plugin_name")
                             or ""
                         ).strip()
+                        host_key = (card.get("host_name") or "").strip()
                         if not pname:
                             continue
-                        covered.add(pname.lower())
+                        key = (host_key, pname.lower())
+                        covered.add(key)
                         raw_team = (card.get("assigned_team") or "").strip()
                         if raw_team:
-                            assigned_team_map[pname.lower()] = raw_team
+                            assigned_team_map[key] = raw_team
                         if raw_team.lower() == role_filter.lower():
-                            role_plugins.add(pname.lower())
+                            role_plugins.add(key)
 
                     # Real bug report: right after a big upload, this always
                     # returned 0 assets/0 vulns for every team until AI card
@@ -2036,6 +2061,7 @@ class ReportAssetsVulnsAPIView(APIView):
                     # matter what. Infer the team for anything not yet
                     # carded instead of leaving it invisible.
                     for host in (doc.get("vulnerabilities_by_host") or []):
+                        host_key = (host.get("host_name") or "").strip()
                         for v in (host.get("vulnerabilities") or []):
                             pname = (
                                 v.get("plugin_name")
@@ -2043,11 +2069,14 @@ class ReportAssetsVulnsAPIView(APIView):
                                 or v.get("name")
                                 or ""
                             ).strip()
-                            if not pname or pname.lower() in covered:
+                            if not pname:
                                 continue
-                            covered.add(pname.lower())
+                            key = (host_key, pname.lower())
+                            if key in covered:
+                                continue
+                            covered.add(key)
                             if infer_assigned_team(pname).lower() == role_filter.lower():
-                                role_plugins.add(pname.lower())
+                                role_plugins.add(key)
 
                 assets = []
                 vulnerability_free_assets = []
@@ -2083,9 +2112,15 @@ class ReportAssetsVulnsAPIView(APIView):
                         severity = (v.get("risk_factor") or v.get("severity") or "").strip().lower()
                         if severity in ("info", "informational", "none", ""):
                             continue
-                        # Filter by role if requested
-                        if role_plugins is not None and plugin_name.lower() not in role_plugins:
-                            if assigned_team_map.get(plugin_name.lower()):
+                        # Filter by role if requested — keyed by
+                        # (host_name, plugin_name), never plugin_name alone,
+                        # so a finding's team membership is always this
+                        # specific host's own card, never a same-named
+                        # finding's classification elsewhere in the report
+                        # (see role_plugins' own build-up comment above).
+                        vuln_key = (host_name, plugin_name.lower())
+                        if role_plugins is not None and vuln_key not in role_plugins:
+                            if assigned_team_map.get(vuln_key):
                                 # Actually owned by a DIFFERENT real team —
                                 # this host isn't "vulnerability-free", it
                                 # just isn't this role's problem.
