@@ -386,22 +386,51 @@ class UploadReportAdmin(admin.ModelAdmin):
                     {"cards_expected_count": 1, "cards_generated_count": 1,
                      "cards_generation_complete": 1, "cards_generation_started_at": 1},
                 )
-                if not doc:
-                    admin_id = str(getattr(obj.admin, "id", "") or "")
-                    admin_email = obj.admin_email or getattr(obj.admin, "email", None)
-                    owner_query = {"$or": [
-                        c for c in [
-                            {"admin_id": admin_id} if admin_id else None,
-                            {"admin_email": admin_email} if admin_email else None,
-                        ] if c
-                    ]}
-                    if owner_query["$or"]:
-                        doc = db["nessus_reports"].find_one(
-                            owner_query,
-                            {"cards_expected_count": 1, "cards_generated_count": 1,
-                             "cards_generation_complete": 1, "cards_generation_started_at": 1},
-                            sort=[("uploaded_at", -1)],
-                        )
+                if doc:
+                    expected = int(doc.get("cards_expected_count") or 0)
+                    generated = int(doc.get("cards_generated_count") or 0)
+                    complete = bool(doc.get("cards_generation_complete")) or (expected > 0 and generated >= expected)
+                    return generated, expected, complete, doc.get("cards_generation_started_at")
+
+                admin_id = str(getattr(obj.admin, "id", "") or "")
+                admin_email = obj.admin_email or getattr(obj.admin, "email", None)
+                owner_query = {"$or": [
+                    c for c in [
+                        {"admin_id": admin_id} if admin_id else None,
+                        {"admin_email": admin_email} if admin_email else None,
+                    ] if c
+                ]}
+                parent_doc = None
+                if owner_query["$or"]:
+                    parent_doc = db["nessus_reports"].find_one(
+                        owner_query,
+                        {"cards_expected_count": 1, "cards_generated_count": 1,
+                         "cards_generation_complete": 1, "cards_generation_started_at": 1},
+                        sort=[("uploaded_at", -1)],
+                    )
+
+                # Real bug report: a brand-new MERGED upload (own_id matches
+                # no nessus_reports doc directly — its data lives under the
+                # admin's existing, shared report instead) whose own cards
+                # just haven't started generating YET (tagged_count == 0
+                # because nothing has reached this file's vulnerabilities in
+                # the shared report's processing queue yet, not because this
+                # predates source_upload_id tagging) used to fall straight
+                # through to the parent report's own, unrelated, whole-
+                # report expected/generated numbers below — e.g. "183/2142"
+                # for a file whose own parsed_count is 23. Only trust the
+                # parent's numbers when ITS OWN generation is already
+                # marked complete (nothing left queued anywhere, so the
+                # parent doc really is the best information available —
+                # the pre-existing, documented tradeoff for a genuinely
+                # pre-tagging legacy upload); otherwise report this file's
+                # own parsed_count with 0 generated so far, not a borrowed
+                # total from unrelated files.
+                if parent_doc and not parent_doc.get("cards_generation_complete"):
+                    expected = int(obj.parsed_count or 0)
+                    return 0, expected, expected == 0, None
+
+                doc = parent_doc
         except Exception:
             return 0, 0, False, None
 
