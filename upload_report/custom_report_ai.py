@@ -18,6 +18,7 @@ parse as the expected JSON, is treated as invalid. We never guess and never
 fabricate a finding that isn't clearly present in the document.
 """
 
+import bisect
 import datetime
 import json
 import logging
@@ -485,6 +486,183 @@ def _merge_missed_findings(vulnerabilities_by_host: list, missed_hosts: list, fi
             added += 1
     if added:
         logger.info(f"[CustomFileValidation] '{filename}' recall-check pass added {added} missed finding(s)")
+
+
+_AFFECTED_LABEL_RE = re.compile(
+    r"(?:Host|Hosts|IP|IPs|URL|URLs|Asset|Assets)\s*\(?s?\)?\s*Affected\b",
+    re.IGNORECASE,
+)
+_SECTION_HEADING_RE = re.compile(r"(?<![\d.])2\.6\.\d+(?:\.\d+)*[ \t]+([^\n]+)")
+
+
+def _normalize_finding_title(title: str) -> str:
+    t = (title or "").replace("–", "-").replace("—", "-")
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
+def _collect_affected_hosts_groundtruth(document_text: str) -> Dict[str, set]:
+    """
+    Deterministic (no GPT) ground truth for "which hosts does this finding
+    actually affect", built directly from the document's own "Host(s)
+    Affected" / "IP(s) Affected" / "URL(s) Affected" / "Asset(s) Affected"
+    section VaptFix's own report template puts right after every finding's
+    write-up, each followed by a bullet ("•") list of the exact hosts/URLs
+    it affects.
+
+    Real bug report: GPT extraction occasionally attached a finding to a
+    host that ISN'T in its own "Host(s) Affected" list (confirmed real:
+    "Outdated PHP version 8.1.27" attached to Tipco.com.ph when the
+    document's own list for that finding only ever named
+    Fifthdiscipline.com.ph) and, separately, dropped a host ENTIRELY even
+    though it has its own findings section with its own "Affected" list
+    (confirmed real: 122.55.241.122, 10.151.13.131, 10.151.5.43). Both are
+    exactly the kind of mistake a strict, rule-based read of the
+    document's own "Affected" lists can catch and correct, independent of
+    whatever GPT decided.
+
+    Maps normalized finding title -> set of exact host/URL strings as
+    written in that document's own "Affected" list. Best-effort: a
+    document that doesn't use the "2.6.X.X <title>" numbered-heading
+    convention at all (no real heading found) returns {}, which disables
+    the cross-check entirely rather than risk a false correction on a
+    report format this doesn't apply to.
+    """
+    ground_truth: Dict[str, set] = {}
+
+    headings = []  # (char_offset, normalized_title)
+    for m in _SECTION_HEADING_RE.finditer(document_text):
+        title = m.group(1).strip()
+        # A table-of-contents entry repeats the same heading text followed
+        # by a row of dot leaders and a page number — not a real section.
+        if not title or "...." in title:
+            continue
+        headings.append((m.start(), _normalize_finding_title(title)))
+
+    if not headings:
+        return ground_truth
+
+    heading_positions = [h[0] for h in headings]
+    lines = document_text.split("\n")
+    offsets = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    for m in _AFFECTED_LABEL_RE.finditer(document_text):
+        label_pos = m.start()
+        idx = bisect.bisect_right(heading_positions, label_pos) - 1
+        if idx < 0:
+            continue
+        finding_title = headings[idx][1]
+
+        line_idx = bisect.bisect_right(offsets, label_pos) - 1
+        hosts = set()
+        seen_bullet = False
+        blanks_after_bullet = 0
+        j = line_idx + 1
+        while j < len(lines) and j < line_idx + 40:
+            line = lines[j].strip()
+            if line.startswith("•"):
+                host = line.lstrip("•").strip()
+                if host:
+                    hosts.add(host)
+                seen_bullet = True
+                blanks_after_bullet = 0
+            elif not line:
+                if seen_bullet:
+                    blanks_after_bullet += 1
+                    if blanks_after_bullet >= 2:
+                        break
+            else:
+                # Non-bullet, non-blank content — either this label isn't
+                # followed by the expected bullet list (different format)
+                # or the list has ended; either way, stop here.
+                break
+            j += 1
+
+        if hosts:
+            ground_truth.setdefault(finding_title, set()).update(hosts)
+
+    return ground_truth
+
+
+def _apply_host_affected_groundtruth(
+    vulnerabilities_by_host: list, document_text: str, filename: str = ""
+) -> list:
+    """
+    Corrects vulnerabilities_by_host against _collect_affected_hosts_groundtruth's
+    deterministic reading of the document's own "...Affected" lists —
+    drops a (host, finding) pairing GPT invented that isn't in that
+    finding's own list, and adds one GPT missed even though the document's
+    own list names that host. A finding with no ground truth found at all
+    (not every finding necessarily has a detected "Affected" list) is left
+    exactly as GPT returned it — this only ever overrides a confident,
+    directly-read ground truth, never guesses.
+    """
+    ground_truth = _collect_affected_hosts_groundtruth(document_text)
+    if not ground_truth:
+        return vulnerabilities_by_host
+
+    host_index = {h["host_name"]: h for h in vulnerabilities_by_host}
+    removed = 0
+    added = 0
+
+    for h in vulnerabilities_by_host:
+        kept = []
+        for v in h.get("vulnerabilities") or []:
+            title = _normalize_finding_title(v.get("plugin_name") or "")
+            gt_hosts = ground_truth.get(title)
+            if gt_hosts is not None and h["host_name"] not in gt_hosts:
+                removed += 1
+                logger.info(
+                    f"[CustomFileValidation] '{filename}' ground-truth check dropped "
+                    f"{v.get('plugin_name')!r} from {h['host_name']!r} — not in the "
+                    f"document's own Affected list for this finding"
+                )
+                continue
+            kept.append(v)
+        h["vulnerabilities"] = kept
+
+    template_by_title = {}
+    for h in vulnerabilities_by_host:
+        for v in h.get("vulnerabilities") or []:
+            title = _normalize_finding_title(v.get("plugin_name") or "")
+            template_by_title.setdefault(title, v)
+
+    for title, gt_hosts in ground_truth.items():
+        template = template_by_title.get(title)
+        if not template:
+            # GPT never found this finding on ANY host — nothing to copy
+            # the description/risk_factor/solution text from; the recall-
+            # check pass is what's meant to recover a wholly-missed finding.
+            continue
+        for host_name in gt_hosts:
+            target = host_index.get(host_name)
+            if target is None:
+                target = {"host_name": host_name, "host_information": {}, "vulnerabilities": []}
+                vulnerabilities_by_host.append(target)
+                host_index[host_name] = target
+            already = any(
+                _normalize_finding_title(v.get("plugin_name") or "") == title
+                for v in target["vulnerabilities"]
+            )
+            if already:
+                continue
+            target["vulnerabilities"].append(dict(template))
+            added += 1
+            logger.info(
+                f"[CustomFileValidation] '{filename}' ground-truth check added "
+                f"{template.get('plugin_name')!r} to {host_name!r} — present in the "
+                f"document's own Affected list but missing from GPT's extraction"
+            )
+
+    if removed or added:
+        logger.info(
+            f"[CustomFileValidation] '{filename}' ground-truth cross-check: removed "
+            f"{removed} mis-attributed pairing(s), added {added} missing one(s)"
+        )
+    return vulnerabilities_by_host
 
 
 def _get_validation_llm():
@@ -1328,6 +1506,8 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
                 f"recall attempts — giving up, storing what was found."
             )
 
+    vulnerabilities_by_host = _apply_host_affected_groundtruth(vulnerabilities_by_host, truncated, filename)
+
     final_total = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
     return {
         "valid": True,
@@ -1414,6 +1594,17 @@ def validate_and_extract_custom_report_cached(
                 f"had {len(cached_vbh) - len(filtered_vbh)} assessor-own-domain host(s) filtered "
                 f"out on reuse"
             )
+        # Same reasoning as the assessor-own-domain filter just above: the
+        # "Affected"-list ground-truth cross-check (see
+        # _apply_host_affected_groundtruth's own docstring — drops a
+        # finding GPT wrongly attached to a host and adds one it wrongly
+        # omitted, both read directly off the document's own text) also
+        # only ever ran on a fresh GPT extraction. Apply it here too, so a
+        # cache entry written before this correction existed gets fixed on
+        # its next reuse, not just future uploads.
+        document_text = _extract_document_text(parsed_data)
+        filtered_vbh = _apply_host_affected_groundtruth(filtered_vbh, document_text, filename)
+
         logger.info(
             f"[CustomFileValidation] '{filename}' matches a previously verified-complete "
             f"extraction (file_hash={file_hash}, {cached.get('total_vulnerabilities')} "
