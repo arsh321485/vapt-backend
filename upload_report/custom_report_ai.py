@@ -1396,6 +1396,24 @@ def validate_and_extract_custom_report_cached(
         cached = None
 
     if cached:
+        # Real bug report: a cache entry written BEFORE the assessor's-own-
+        # domain filter existed (see _is_assessor_own_domain) kept serving
+        # its stale, already-contaminated vulnerabilities_by_host forever —
+        # the filter only ran on a fresh GPT extraction, never on a cache
+        # hit, so re-uploading the exact same file kept reproducing
+        # "www.secureitlab.com" as a phantom asset even after that filter
+        # was added elsewhere. Apply it here too, on every cache read, so
+        # this is fixed for every file_hash already cached, not just future
+        # extractions — recomputing total_hosts/total_vulnerabilities to
+        # match whatever actually survives the filter.
+        cached_vbh = cached.get("vulnerabilities_by_host", []) or []
+        filtered_vbh = [h for h in cached_vbh if not _is_assessor_own_domain(h.get("host_name", ""))]
+        if len(filtered_vbh) != len(cached_vbh):
+            logger.info(
+                f"[CustomFileValidation] '{filename}' cached extraction (file_hash={file_hash}) "
+                f"had {len(cached_vbh) - len(filtered_vbh)} assessor-own-domain host(s) filtered "
+                f"out on reuse"
+            )
         logger.info(
             f"[CustomFileValidation] '{filename}' matches a previously verified-complete "
             f"extraction (file_hash={file_hash}, {cached.get('total_vulnerabilities')} "
@@ -1405,9 +1423,9 @@ def validate_and_extract_custom_report_cached(
             "valid": True,
             "type": "custom",
             "scan_info": cached.get("scan_info", {"source": "Custom file", "validated_by": "gpt-4o-mini"}),
-            "total_hosts": cached.get("total_hosts", 0),
-            "total_vulnerabilities": cached.get("total_vulnerabilities", 0),
-            "vulnerabilities_by_host": cached.get("vulnerabilities_by_host", []),
+            "total_hosts": len(filtered_vbh),
+            "total_vulnerabilities": sum(len(h.get("vulnerabilities") or []) for h in filtered_vbh),
+            "vulnerabilities_by_host": filtered_vbh,
             "recall_complete": True,
             "reused_from_cache": True,
         }
