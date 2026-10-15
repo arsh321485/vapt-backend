@@ -924,7 +924,7 @@ class FixVulnerabilityCreateAPIView(APIView):
 
         latest_doc = nessus_coll.find_one(
             {"$or": query_conditions},
-            sort=[("uploaded_at", pymongo.DESCENDING)]
+            sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)]
         )
 
         if not latest_doc:
@@ -978,9 +978,12 @@ class FixVulnerabilityCreateAPIView(APIView):
             if admin_email:
                 query_conditions.append({"admin_email": admin_email})
 
+            # Sorted by total_vulnerabilities first, not just uploaded_at —
+            # recency alone can pick a small claim-link auto-split fragment
+            # over this admin's real, bigger, properly-merged report.
             latest_doc = nessus_coll.find_one(
                 {"$or": query_conditions},
-                sort=[("uploaded_at", pymongo.DESCENDING)]
+                sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)]
             )
 
             if not latest_doc:
@@ -3307,9 +3310,12 @@ class SupportRequestByReportAPIView(APIView):
             if admin_email:
                 query_conditions.append({"admin_email": admin_email})
 
+            # Sorted by total_vulnerabilities first, not just uploaded_at —
+            # recency alone can pick a small claim-link auto-split fragment
+            # over this admin's real, bigger, properly-merged report.
             latest_doc = nessus_coll.find_one(
                 {"$or": query_conditions},
-                sort=[("uploaded_at", pymongo.DESCENDING)]
+                sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)]
             )
             if not latest_doc:
                 return Response(
@@ -3535,9 +3541,12 @@ class SupportRequestByHostNameAPIView(APIView):
             if admin_email:
                 query_conditions.append({"admin_email": admin_email})
 
+            # Sorted by total_vulnerabilities first, not just uploaded_at —
+            # recency alone can pick a small claim-link auto-split fragment
+            # over this admin's real, bigger, properly-merged report.
             latest_doc = nessus_coll.find_one(
                 {"$or": query_conditions},
-                sort=[("uploaded_at", pymongo.DESCENDING)]
+                sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)]
             )
             if not latest_doc:
                 return Response(
@@ -4384,10 +4393,13 @@ def _build_report_data(request):
     admin_id = str(request.user.id)
 
     with MongoContext() as db:
+        # Sorted by total_vulnerabilities first, not just uploaded_at —
+        # recency alone can pick a small claim-link auto-split fragment
+        # over this admin's real, bigger, properly-merged report.
         latest_doc = db[NESSUS_COLLECTION].find_one(
             {"$or": [{"admin_id": admin_id}, {"admin_email": admin_email}]},
             {"report_id": 1, "uploaded_at": 1, "file_name": 1},
-            sort=[("uploaded_at", pymongo.DESCENDING)],
+            sort=[("total_vulnerabilities", pymongo.DESCENDING), ("uploaded_at", pymongo.DESCENDING)],
         )
 
     if not latest_doc:
