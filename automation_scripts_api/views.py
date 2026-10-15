@@ -1464,11 +1464,9 @@ def user_download_ai_automation_script(request, card_id):
     # well before the person actually reads the card and clicks
     # Download, so a short debounce window doesn't reliably overlap the
     # two. A 15s window (first attempt at this fix) still wasn't enough
-    # in practice. 300s covers a realistic "render to real click" gap
-    # while still letting a genuinely separate download of the same
-    # script tomorrow count again. Every hit in the window still gets
-    # the real file content, so the download itself is never blocked —
-    # only the counter is debounced.
+    # in practice. Every hit in the window still gets the real file
+    # content, so the download itself is never blocked — only the
+    # counter is debounced.
     #
     # Real bug report #2: the dedupe key included script_type, so a card
     # with BOTH a fix and a verify script (confirmed live: exactly this
@@ -1477,9 +1475,18 @@ def user_download_ai_automation_script(request, card_id):
     # was ever actually clicked. download_count represents "this card's
     # automation got downloaded", not "this exact variant" — key on
     # (card_id, user) only, so fix+verify share the same debounce slot.
+    #
+    # Real request: 300s made two genuinely separate, deliberate website
+    # downloads of the same script within 5 minutes (e.g. testing the
+    # counter itself) silently not count the second one — confusing on
+    # the website, which has no pre-fetch-scanner risk to guard against
+    # in the first place (that's Teams-specific). Narrowed to 30s —
+    # still long enough to absorb a Teams card re-render's pre-fetch
+    # landing moments before the real click, short enough that a
+    # deliberate second download minutes later counts.
     from django.core.cache import cache
     dedupe_key = f"ai_script_dl_dedupe:{card_id}:{request.user.id}"
-    if cache.add(dedupe_key, True, timeout=300):
+    if cache.add(dedupe_key, True, timeout=30):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with MongoContext() as db:
             db[VULN_CARD_COLLECTION].update_one(
