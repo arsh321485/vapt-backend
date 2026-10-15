@@ -79,11 +79,21 @@ class UploadReportAdminForm(forms.ModelForm):
                     {"id": 1, "_id": 1, "email": 1}
                 ))
             # Some records may store identifier as `_id` in Mongo, so support both.
+            picked = []
             for doc in admin_docs:
                 admin_id = doc.get("id") or doc.get("_id")
                 admin_email = doc.get("email")
                 if admin_id and admin_email:
-                    choices.append((str(admin_id), admin_email))
+                    picked.append((str(admin_id), admin_email))
+            # Real bug report: unsorted (Mongo insertion-order) list made it
+            # easy to misclick a similarly-named test admin from this dropdown
+            # (e.g. "yashrohatgi.sitl@gmail.com" vs "yashrohatgi1350@gmail.com")
+            # — the upload then silently landed on the wrong admin's account,
+            # only noticed much later via that admin's own dashboard/register.
+            # Alphabetical order makes the list predictable to scan carefully
+            # before submitting.
+            picked.sort(key=lambda pair: pair[1].lower())
+            choices.extend(picked)
             logger.info(f"[UploadReportAdminForm] Loaded {len(admin_docs)} admins")
         except Exception as e:
             logger.error(f"[UploadReportAdminForm] Failed to load admin list: {e}")
@@ -1298,7 +1308,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                 messages.info(
                     request,
                     (
-                        "Large HTML report queued for background processing. "
+                        f"Large HTML report queued for background processing for admin: {admin_user.email}. "
                         "You can safely leave this page and check the report status later."
                     )
                 )
@@ -1468,10 +1478,22 @@ class UploadReportAdmin(admin.ModelAdmin):
 
                         agent_eta_seconds = self._estimate_agent_seconds(parsed_count, parsed_data.get("type"))
                         total_eta_seconds = upload_estimate_seconds + agent_eta_seconds
+                        # Real bug report: this never named WHICH admin the
+                        # upload was attributed to — with two similarly-
+                        # named test accounts in the picker (e.g.
+                        # "yashrohatgi.sitl@gmail.com" vs
+                        # "yashrohatgi1350@gmail.com"), picking the wrong
+                        # one from "Select Admin" went completely unnoticed
+                        # at upload time; the mistake only surfaced much
+                        # later, when the wrong admin's dashboard/register
+                        # showed the wrong client's data. Naming the admin
+                        # here means a wrong pick is visible immediately,
+                        # right where it can still be corrected.
                         messages.success(
                             request,
                             (
-                                f"File parsed and stored in database. Found {parsed_count} vulnerabilities. "
+                                f"File parsed and stored in database for admin: {admin_user.email}. "
+                                f"Found {parsed_count} vulnerabilities. "
                                 f"Upload processing time: {self._seconds_to_text(upload_actual_seconds)}. "
                                 f"Estimated upload time: {self._seconds_to_text(upload_estimate_seconds)}."
                             )
