@@ -144,6 +144,38 @@ def claim_invite(token: str, new_admin) -> int:
         new_admin.id, new_admin.email, result.modified_count, report_ids,
     )
 
+    # Real request: the link's whole design is "whoever signs up with a
+    # valid token gets it" — the recipient picks their own email at
+    # signup, so there's no "expected" email to validate the claim
+    # against (see this module's own docstring). That means a wrong-
+    # account claim (e.g. testing from an already-logged-in session that
+    # wasn't the intended one) is only ever visible by actually checking —
+    # confirmed real: a set of reports meant for one test admin ended up
+    # claimed by a different, similarly-named one, and nobody noticed
+    # until that admin's own dashboard was checked much later. Notify
+    # whoever GENERATED the link the moment it's actually used, so a
+    # wrong claim is visible within the same session it happened in,
+    # while it's still easy to sort out — not a prevention (the design
+    # can't support one), but it closes the "nobody finds out" gap.
+    created_by_admin_id = data.get("created_by")
+    if result.modified_count > 0 and created_by_admin_id:
+        try:
+            from notifications.utils import create_notification
+            create_notification(
+                created_by_admin_id,
+                "admin",
+                "claim_link_used",
+                "Claim link used",
+                f"Your claim link for {result.modified_count} report(s) was just claimed by {new_admin.email}.",
+                metadata={
+                    "claimed_by_admin_id": str(new_admin.id),
+                    "claimed_by_email": new_admin.email,
+                    "report_ids": report_ids,
+                },
+            )
+        except Exception as e:
+            logger.warning("[ReportInvite] Could not notify link creator %s: %s", created_by_admin_id, e)
+
     # Real request: an admin who received their report via a magic-link
     # invite gets NO Freemium restrictions at all (automation scripts,
     # asset/vuln ceilings, everything) — see billing.enforcement.
