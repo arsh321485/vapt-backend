@@ -9439,8 +9439,13 @@ class SlackEventsView(APIView):
         if not admin.slack_bot_token or not team_names:
             return
 
+        # Same custom-team channel-name fallback as
+        # _invite_member_to_team_channels — without it, a member assigned
+        # to a custom team from the website never got invited to that
+        # team's Slack channel at all (team_name simply wasn't in
+        # TEAM_CHANNELS, so it was silently dropped from `wanted`).
         channel_name_by_team = {v: k for k, v in SlackSlashCommandView.TEAM_CHANNELS.items()}
-        wanted = {(t, channel_name_by_team[t]) for t in team_names if t in channel_name_by_team}
+        wanted = {(t, channel_name_by_team.get(t) or _slack_channel_name_for_custom_team(t)) for t in team_names}
         if not wanted:
             return
 
@@ -18346,19 +18351,25 @@ class SlackSlashCommandView(APIView):
     # has no shared import point with users_details for it).
     _ALL_VAPT_TEAMS = ["Patch Management", "Configuration Management", "Network Security", "Architectural Flaws"]
 
-    def _build_delete_team_user_modal(self, members, selected_detail_id=None, selected_member_teams=None):
+    def _build_delete_team_user_modal(self, members, selected_detail_id=None, selected_member_teams=None, team_id=None):
         """
         "Update User Role" modal (Team tab) — pick an EXISTING VaptFix team
-        member, then check/uncheck any of the 4 teams to sync their roles.
-        Submitting diffs the checked set against the member's current roles:
-        newly-checked teams get added (PATCH .../update-role/), newly-
-        unchecked ones get removed (DELETE .../delete-role/).
+        member, then check/uncheck any team to sync their roles. Submitting
+        diffs the checked set against the member's current roles: newly-
+        checked teams get added (PATCH .../update-role/), newly-unchecked
+        ones get removed (DELETE .../delete-role/).
 
         Real bug report: this used to only ever show the teams the member
         was ALREADY on as checkboxes — an admin could remove a role here,
         but had no way to ADD one (e.g. give someone a second team) from
-        this same modal. Now shows all 4 teams every time, with the
+        this same modal. Now shows every team every time, with the
         member's current ones pre-checked.
+
+        Real bug report #2: the team list was the hardcoded 4-team
+        _ALL_VAPT_TEAMS, so an admin's own custom teams (e.g. "Demo")
+        never appeared here at all — same class of gap as the Add User
+        modal's checkbox list, fixed the same way via
+        _custom_team_code_map(team_id).
         """
         user_options = [
             {
@@ -18396,9 +18407,12 @@ class SlackSlashCommandView(APIView):
 
         if selected_detail_id:
             current_teams = set(selected_member_teams or [])
+            all_team_names = list(dict.fromkeys(
+                self._custom_team_code_map(team_id).values() if team_id else self._ALL_VAPT_TEAMS
+            ))
             team_options = [
                 {"text": {"type": "plain_text", "text": t}, "value": t}
-                for t in self._ALL_VAPT_TEAMS
+                for t in all_team_names
             ]
             team_element = {
                 "type": "checkboxes",
@@ -19438,14 +19452,21 @@ class SlackSlashCommandView(APIView):
         no manual channel join required. Best-effort: a failed invite for
         one team is logged and reported back, never blocks the rest.
         Returns {team_name: True/False}.
+
+        Real bug report: a member assigned to a custom team (e.g. "Demo")
+        via /adduser or the Add User / Update User Role modals never got
+        invited to that team's channel at all — channel_name_by_team only
+        ever knew the 4 fixed teams, so a custom team_name silently fell
+        through to "channel not found" and the member never saw that team
+        on their own Slack side, even though their role was saved in the
+        DB. Fixed by falling back to the same "vaptfix-<slug>-team" naming
+        convention custom-team channels are actually created with (see
+        _slack_channel_name_for_custom_team / ensure_custom_team_slack_channel).
         """
         channel_name_by_team = {v: k for k, v in self.TEAM_CHANNELS.items()}
         results = {}
         for team_name in team_names:
-            channel_name = channel_name_by_team.get(team_name)
-            if not channel_name:
-                results[team_name] = False
-                continue
+            channel_name = channel_name_by_team.get(team_name) or _slack_channel_name_for_custom_team(team_name)
             channel_id = self._get_channel_id_by_name(bot_token, channel_name)
             if not channel_id:
                 logger.warning(f"[SlackCmd] invite: channel not found for team={team_name!r} ({channel_name})")
@@ -24827,7 +24848,7 @@ class SlackInteractivityView(APIView):
                 if not members:
                     return  # already showing "No team members found" from the loading_view
 
-                update_view = slash._build_delete_team_user_modal(members)
+                update_view = slash._build_delete_team_user_modal(members, team_id=team_id)
                 resp2 = _http_post(
                     "https://slack.com/api/views.update",
                     headers={"Authorization": f"Bearer {bot_token}"},
@@ -26582,6 +26603,7 @@ class SlackInteractivityView(APIView):
             selected_teams = (target.get("Member_role") or []) if target else []
             new_view = slash._build_delete_team_user_modal(
                 members, selected_detail_id=selected_detail_id, selected_member_teams=selected_teams,
+                team_id=team_id,
             )
         except Exception:
             self._debug_write(f"_handle_deleteteamuser_modal_live: EXCEPTION\n{traceback.format_exc()}")
