@@ -89,6 +89,17 @@ report that turns out to have NO finding with a genuine, specific host attributi
 invalid with a reason explaining this (e.g. "This report lists alert types in aggregate but does not
 state which specific host/agent each one applies to").
 
+CRITICAL — never treat the report's own AUTHOR/VENDOR as a scanned asset. A pentest/VA report's
+cover page, header, footer, or a "Prepared by" / "Submitted by" / "Assessed by" / contact-us section
+commonly names the security company that PERFORMED the assessment, often including that company's
+own website or domain (e.g. "Prepared by [Assessor Name] — www.[assessor-domain].com") — and since
+this text is typically letterhead, it can repeat on every single page of the document. That company
+is the ASSESSOR, never a target that was scanned, no matter how many times its name/domain appears.
+Never create a host_name, "all_assets" entry, or finding for the assessing company's own
+branding/contact/letterhead domain — only extract an asset if the document's own scope/findings
+sections genuinely identify it as something that was TESTED (has an actual finding, or appears in a
+real scope/target list), never merely because its name/URL is printed somewhere in the document.
+
 Never invent findings that are not clearly present in the text, and never output the same finding
 twice for the same host unless the document itself repeats it with genuinely different specifics
 (e.g. a different port). If a field is not stated, leave it "".
@@ -244,6 +255,12 @@ more hosts than are currently paired with it above.
 Use the exact same host_name convention already used above — if a finding you find here affects a \
 host already named in that list, reuse that exact same host_name string; never introduce a \
 different written form (IP vs hostname vs URL) of an asset already covered above.
+
+Do not introduce a brand-new host that wasn't already named above unless the document genuinely \
+shows it was tested. In particular, never treat the report's own author/vendor (a "Prepared by" / \
+letterhead / contact-us name or domain for the company that PERFORMED this assessment) as a newly \
+found asset — that company is the assessor, not a scanned target, even if its name/domain appears \
+repeatedly throughout the document.
 
 Return ONLY a JSON object with any MISSED host/finding pairs, in this exact schema — nothing else, \
 no markdown fences, no commentary:
@@ -426,6 +443,9 @@ def _merge_missed_findings(vulnerabilities_by_host: list, missed_hosts: list, fi
         host_name = (h.get("host_name") or "").strip()
         if not host_name:
             continue
+        if _is_assessor_own_domain(host_name):
+            logger.info(f"[CustomFileValidation] '{filename}' recall-check dropped assessor's own domain {host_name!r}")
+            continue
         for v in h.get("vulnerabilities") or []:
             if not isinstance(v, dict):
                 continue
@@ -590,6 +610,23 @@ def _normalize_host_token(token: str) -> str:
     """Strip a URL down to its bare domain (scheme + path removed) for alias matching."""
     t = re.sub(r'^https?://', '', token.strip(), flags=re.IGNORECASE)
     return t.split('/')[0].rstrip('.')
+
+
+# Real bug report: a GPT extraction pass over a pentest report that VaptFix
+# itself authored (e.g. for a client like TIPCO) occasionally picked up this
+# own domain from the report's cover page/letterhead/"Prepared by" section
+# and hallucinated it as a scanned asset, with a handful of fabricated
+# findings attached — confirmed via production data, where the exact same
+# uploaded file produced "www.secureitlab.com" as a host across several
+# different admin accounts. VALIDATION_PROMPT now explicitly tells the model
+# never to do this, but this list enforces it deterministically too,
+# independent of whether the model actually follows that instruction.
+_ASSESSOR_OWN_DOMAINS = ("secureitlab.com",)
+
+
+def _is_assessor_own_domain(host_name: str) -> bool:
+    bare = _normalize_host_token(host_name or "").lower()
+    return any(bare == d or bare.endswith("." + d) for d in _ASSESSOR_OWN_DOMAINS)
 
 
 def _looks_like_real_ip(candidate: str) -> bool:
@@ -989,6 +1026,9 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
         vulns_raw = h.get("vulnerabilities") or []
         if not host_name or not isinstance(vulns_raw, list) or not vulns_raw:
             continue
+        if _is_assessor_own_domain(host_name):
+            logger.info(f"[CustomFileValidation] {label} dropped assessor's own domain {host_name!r} (not a scanned asset)")
+            continue
 
         vulns = []
         for v in vulns_raw:
@@ -1071,6 +1111,8 @@ def _validate_and_extract_chunk(document_text: str, filename: str, chunk_label: 
             # differently, e.g. the "ITEM" form when findings used the IP)
             # must not create a second, empty duplicate of it.
             asset_name = alias_map.get(asset_name.lower(), asset_name)
+            if _is_assessor_own_domain(asset_name):
+                continue
             if asset_name.lower() in covered_host_names:
                 continue
             # Real bug report: a scope-list entry that's really just a
