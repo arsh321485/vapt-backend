@@ -26265,21 +26265,53 @@ class SlackInteractivityView(APIView):
                             json_body=payload, slack_user_id=slack_user_id,
                         )
                     if resp_data.get("risk_criteria"):
-                        blocks = slash._text_block(
-                            "✅ Risk criteria saved. Loading your dashboard…"
-                        )
                         # Transition complete — post the real navbar right
                         # after, same as the very first upload would have
                         # if risk criteria had already been set.
-                        try:
-                            admin = User.objects.filter(slack_team_id=team_id).first()
-                            bt = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
-                            if admin and bt:
-                                admin_ch_id = slash._get_admin_channel_id(bt)
+                        #
+                        # Real bug report: saving (the data update itself
+                        # always worked — verified no duplicate/stray
+                        # risk_criteria rows ever got created) sometimes
+                        # needed TWO clicks before the dashboard navbar
+                        # actually showed up — this whole block used to be
+                        # one try/except that silently swallowed any
+                        # transient failure in the 3 sequential live Slack
+                        # calls below (bot token -> channel lookup -> post),
+                        # while the modal still claimed success either way.
+                        # Now retries once on failure (a transient Slack API
+                        # hiccup is the most likely cause), logs each step
+                        # to the debug log so a repeat is diagnosable, and
+                        # only claims the dashboard is loading if it
+                        # genuinely posted.
+                        navbar_posted = False
+                        admin = User.objects.filter(slack_team_id=team_id).first()
+                        bt = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                        for attempt in (1, 2):
+                            try:
+                                admin_ch_id = slash._get_admin_channel_id(bt) if (admin and bt) else None
+                                self._debug_write(
+                                    f"risk_criteria submit: attempt={attempt} "
+                                    f"admin={'yes' if admin else 'no'} bot_token={'yes' if bt else 'no'} "
+                                    f"channel_id={admin_ch_id!r}"
+                                )
                                 if admin_ch_id:
                                     _post_admin_onboarding_message(bt, admin_ch_id, team_id, admin)
-                        except Exception:
-                            logger.exception("[SlackInteractivity] risk criteria submit: failed to post navbar")
+                                    navbar_posted = True
+                                    break
+                            except Exception:
+                                logger.exception(f"[SlackInteractivity] risk criteria submit: failed to post navbar (attempt {attempt})")
+                            if attempt == 1:
+                                time.sleep(1.5)
+                                bt = slash._get_bot_token(team_id, slack_user_id=slack_user_id)
+                        if navbar_posted:
+                            blocks = slash._text_block(
+                                "✅ Risk criteria saved. Loading your dashboard…"
+                            )
+                        else:
+                            blocks = slash._text_block(
+                                "✅ Risk criteria saved — but your dashboard couldn't refresh "
+                                "automatically. Type `/dashboard` to see it."
+                            )
                     else:
                         err = resp_data.get("detail") or resp_data.get("error") or "Could not save risk criteria."
                         blocks = slash._text_block(f"❌ {err}")
