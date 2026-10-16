@@ -510,6 +510,11 @@ _AFFECTED_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _SECTION_HEADING_RE = re.compile(r"(?<![\d.])2\.6\.\d+(?:\.\d+)*[ \t]+([^\n]+)")
+# Marks where a "Host(s) Affected" list has definitely ended, even for a
+# line that would otherwise look blank-adjacent enough to keep scanning —
+# "References"/"Evidence..." always follows the host list in this report
+# template, bulleted or not.
+_SECTION_STOP_RE = re.compile(r"^(references?|evidence(?:\s+and\s+screenshots)?)\s*$", re.IGNORECASE)
 
 
 def _normalize_finding_title(title: str) -> str:
@@ -519,13 +524,24 @@ def _normalize_finding_title(title: str) -> str:
 
 _PORT_PREFIX_RE = re.compile(r"^Port\s+\S+(?:\s*\([^)]*\))?\s*:\s*", re.IGNORECASE)
 _PORT_SUFFIX_RE = re.compile(r"\s*[-–—]\s*(?:TCP|UDP)\s*/?\s*\d+\s*$", re.IGNORECASE)
+_URL_WITH_PATH_RE = re.compile(r"^(https?://)([^/\s]+)(/.+)$", re.IGNORECASE)
+# A candidate line/token only counts as a host if it LOOKS like one (IPv4,
+# a URL, or a dotted domain ending in a letters-only TLD) — guards the
+# relaxed "any non-blank line can be a host, not just bulleted ones" scan
+# below against picking up page-footer/header prose ("PPFC Internal VAPT
+# Report v1.0 October 13, 2026") that happens to land inside the lookahead
+# window, which would otherwise poison the ground truth with a fabricated
+# "host" a later step could even create a bogus asset entry for.
+_PLAUSIBLE_HOST_RE = re.compile(
+    r"^(?:\d{1,3}(?:\.\d{1,3}){3}|https?://\S+|[a-zA-Z0-9][a-zA-Z0-9\-]*(?:\.[a-zA-Z0-9\-]+)+)$"
+)
 
 
 def _extract_host_tokens_from_bullet(line: str) -> list:
     """
-    Pulls bare host/IP/URL tokens out of one "Host(s) Affected" bullet
-    line, tolerating the port annotations this report template sometimes
-    adds around them.
+    Pulls bare host/IP/URL tokens out of one "Host(s) Affected" line,
+    tolerating the port annotations and bare (unbulleted) single-host
+    lines this report template sometimes uses instead of "• host".
 
     Real bug report: a line like "Port 443/tcp (HTTPS): 172.31.10.27,
     172.31.10.28, ..." was stored whole as ONE host_name string
@@ -535,14 +551,30 @@ def _extract_host_tokens_from_bullet(line: str) -> list:
     entry, and the cross-check then wrongly dropped every one of them
     as "not in the Affected list", gutting the whole report down to 1
     survivor out of 24. Same issue for "172.31.10.12 — TCP/445" (a
-    single host with a trailing port suffix instead of a prefix).
+    single host with a trailing port suffix instead of a prefix), and
+    for "http://192.168.1.26/phpinfo.php" (a full URL with a path,
+    where the real extracted host_name is the bare IP/domain only) —
+    yields the bare host as an extra candidate alongside the full URL
+    so either written form can match.
     """
     line = _PORT_PREFIX_RE.sub("", line)
     tokens = []
     for part in line.split(","):
         part = _PORT_SUFFIX_RE.sub("", part.strip()).strip()
-        if part:
-            tokens.append(part)
+        if not part or not _PLAUSIBLE_HOST_RE.match(part):
+            continue
+        # A URL with an actual path beyond root ("http://host/phpinfo.php")
+        # almost never doubles as the real host_name verbatim — use the
+        # bare host instead of the full URL. A root-only URL
+        # ("https://multiplypaper.com.ph/", no path past "/") is kept
+        # as-is: that form IS the real host_name for some reports (see
+        # TIPCO's webapp hosts) — replacing it here would have created an
+        # orphan duplicate host entry alongside the real one instead of
+        # matching it.
+        url_match = _URL_WITH_PATH_RE.match(part)
+        if url_match and url_match.group(3) not in ("", "/"):
+            part = url_match.group(2)
+        tokens.append(part)
     return tokens
 
 
@@ -604,27 +636,41 @@ def _collect_affected_hosts_groundtruth(document_text: str) -> Dict[str, set]:
 
         line_idx = bisect.bisect_right(offsets, label_pos) - 1
         hosts = set()
-        seen_bullet = False
-        blanks_after_bullet = 0
+        seen_content = False
+        blanks_after_content = 0
         j = line_idx + 1
         while j < len(lines) and j < line_idx + 40:
             line = lines[j].strip()
-            if line.startswith("•"):
-                bullet_content = line.lstrip("•").strip().rstrip(",")
-                for host in _extract_host_tokens_from_bullet(bullet_content):
-                    hosts.add(host)
-                seen_bullet = True
-                blanks_after_bullet = 0
-            elif not line:
-                if seen_bullet:
-                    blanks_after_bullet += 1
-                    if blanks_after_bullet >= 2:
+            if not line:
+                if seen_content:
+                    blanks_after_content += 1
+                    if blanks_after_content >= 2:
                         break
-            else:
-                # Non-bullet, non-blank content — either this label isn't
-                # followed by the expected bullet list (different format)
-                # or the list has ended; either way, stop here.
+                j += 1
+                continue
+            if _SECTION_STOP_RE.match(line):
                 break
+            # Real bug report: a "Host(s) Affected" list isn't always
+            # bulleted — one finding gave its single host as a bare line
+            # ("http://192.168.1.26/phpinfo.php", no "•") and was silently
+            # treated as having zero affected hosts because only "•"-
+            # prefixed lines were ever read. Any non-blank line counts now
+            # (bulleted or not); _PLAUSIBLE_HOST_RE inside
+            # _extract_host_tokens_from_bullet is what keeps this from
+            # picking up page-footer/header prose that lands in the window.
+            content = line.lstrip("•").strip().rstrip(",")
+            found_any = False
+            for host in _extract_host_tokens_from_bullet(content):
+                hosts.add(host)
+                found_any = True
+            if not found_any and not line.startswith("•"):
+                # Doesn't look like a host at all and isn't even bulleted —
+                # most likely this label isn't followed by a host list in
+                # this document (different format), or the list already
+                # ended. Stop rather than risk scanning into unrelated text.
+                break
+            seen_content = True
+            blanks_after_content = 0
             j += 1
 
         if hosts:
