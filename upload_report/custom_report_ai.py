@@ -517,6 +517,35 @@ def _normalize_finding_title(title: str) -> str:
     return re.sub(r"\s+", " ", t).strip().lower()
 
 
+_PORT_PREFIX_RE = re.compile(r"^Port\s+\S+(?:\s*\([^)]*\))?\s*:\s*", re.IGNORECASE)
+_PORT_SUFFIX_RE = re.compile(r"\s*[-–—]\s*(?:TCP|UDP)\s*/?\s*\d+\s*$", re.IGNORECASE)
+
+
+def _extract_host_tokens_from_bullet(line: str) -> list:
+    """
+    Pulls bare host/IP/URL tokens out of one "Host(s) Affected" bullet
+    line, tolerating the port annotations this report template sometimes
+    adds around them.
+
+    Real bug report: a line like "Port 443/tcp (HTTPS): 172.31.10.27,
+    172.31.10.28, ..." was stored whole as ONE host_name string
+    (including the "Port 443/tcp (HTTPS): " prefix and every comma-
+    separated IP glued together) instead of 6 separate hosts — so NONE
+    of the document's real host names ever matched this ground-truth
+    entry, and the cross-check then wrongly dropped every one of them
+    as "not in the Affected list", gutting the whole report down to 1
+    survivor out of 24. Same issue for "172.31.10.12 — TCP/445" (a
+    single host with a trailing port suffix instead of a prefix).
+    """
+    line = _PORT_PREFIX_RE.sub("", line)
+    tokens = []
+    for part in line.split(","):
+        part = _PORT_SUFFIX_RE.sub("", part.strip()).strip()
+        if part:
+            tokens.append(part)
+    return tokens
+
+
 def _collect_affected_hosts_groundtruth(document_text: str) -> Dict[str, set]:
     """
     Deterministic (no GPT) ground truth for "which hosts does this finding
@@ -581,8 +610,8 @@ def _collect_affected_hosts_groundtruth(document_text: str) -> Dict[str, set]:
         while j < len(lines) and j < line_idx + 40:
             line = lines[j].strip()
             if line.startswith("•"):
-                host = line.lstrip("•").strip()
-                if host:
+                bullet_content = line.lstrip("•").strip().rstrip(",")
+                for host in _extract_host_tokens_from_bullet(bullet_content):
                     hosts.add(host)
                 seen_bullet = True
                 blanks_after_bullet = 0
