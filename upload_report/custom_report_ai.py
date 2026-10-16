@@ -706,6 +706,100 @@ def _collect_affected_hosts_groundtruth(document_text: str) -> Dict[str, set]:
     return ground_truth
 
 
+_SEVERITY_LINE_RE = re.compile(r"^(critical|high|medium|low|info(?:rmational)?)\s*$", re.IGNORECASE)
+_RISK_DESCRIPTION_LABEL_RE = re.compile(r"^Risk\s+Description\s*$", re.IGNORECASE)
+_RISK_SECTION_BOUNDARY_RE = re.compile(
+    r"^(risk\s+mitigation|summary|host\(?s?\)?\s*affected|references?)\s*$", re.IGNORECASE
+)
+
+
+def _collect_finding_fallback_details(document_text: str) -> Dict[str, dict]:
+    """
+    Deterministic (no GPT) fallback {finding_title: {"risk_factor":...,
+    "description":...}}, read straight from each finding's own "Risk
+    Description" write-up in the document — used only when GPT's own
+    extraction never found a given finding on ANY host at all, so
+    _apply_host_affected_groundtruth has no real template to copy a
+    description/risk_factor from when restoring it onto a host the
+    document's own "Affected" list names.
+
+    Real bug report: a finding GPT missed on every host in one run
+    (non-deterministic — present in GPT's own output on some runs,
+    absent on others for the identical document) could never be
+    restored even though the document's own text states its severity
+    and description in full, right next to its own heading, same
+    document VaptFix's own template structures the same way every time
+    ("<title>" heading, blank lines, a bare severity word on its own
+    line, blank lines, "Risk Description", the write-up itself, then
+    "Risk Mitigation"/"Summary"/"Host(s) Affected").
+    """
+    fallback: Dict[str, dict] = {}
+
+    headings = []
+    for m in _SECTION_HEADING_RE.finditer(document_text):
+        title = m.group(1).strip()
+        if not title or "...." in title:
+            continue
+        headings.append((m.start(), title, _normalize_finding_title(title)))
+    if not headings:
+        return fallback
+
+    lines = document_text.split("\n")
+    offsets = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    for heading_pos, original_title, finding_title in headings:
+        if finding_title in fallback:
+            continue
+        line_idx = bisect.bisect_right(offsets, heading_pos) - 1
+
+        risk_factor = ""
+        j = line_idx + 1
+        while j < len(lines) and j < line_idx + 10:
+            line = lines[j].strip()
+            m = _SEVERITY_LINE_RE.match(line)
+            if m:
+                risk_factor = m.group(1).title()
+                break
+            j += 1
+
+        description_lines = []
+        j = line_idx + 1
+        found_label = False
+        while j < len(lines) and j < line_idx + 60:
+            line = lines[j].strip()
+            if not found_label:
+                if _RISK_DESCRIPTION_LABEL_RE.match(line):
+                    found_label = True
+                j += 1
+                continue
+            if not line:
+                if description_lines:
+                    # One real paragraph is enough context — stop at the
+                    # first blank line after real text, not the whole
+                    # (sometimes multi-paragraph) write-up.
+                    break
+                j += 1
+                continue
+            if _RISK_SECTION_BOUNDARY_RE.match(line):
+                break
+            description_lines.append(line)
+            j += 1
+
+        description = " ".join(description_lines).strip()
+        if risk_factor or description:
+            fallback[finding_title] = {
+                "plugin_name": original_title,
+                "risk_factor": risk_factor,
+                "description": description,
+            }
+
+    return fallback
+
+
 def _apply_host_affected_groundtruth(
     vulnerabilities_by_host: list, document_text: str, filename: str = ""
 ) -> list:
@@ -749,13 +843,44 @@ def _apply_host_affected_groundtruth(
             title = _normalize_finding_title(v.get("plugin_name") or "")
             template_by_title.setdefault(title, v)
 
+    # Real bug report: GPT missing a finding on EVERY host in one run
+    # (non-deterministic — the recall-check pass is supposed to catch
+    # this, but doesn't always) left no template to copy a description/
+    # risk_factor from, so a document-stated finding the "Affected" list
+    # names a host for still never got restored. Built lazily (only if
+    # actually needed) from the document's own "Risk Description" write-
+    # up — deterministic, no GPT call — as a last-resort template.
+    fallback_details = None
+
     for title, gt_hosts in ground_truth.items():
         template = template_by_title.get(title)
         if not template:
-            # GPT never found this finding on ANY host — nothing to copy
-            # the description/risk_factor/solution text from; the recall-
-            # check pass is what's meant to recover a wholly-missed finding.
-            continue
+            if fallback_details is None:
+                fallback_details = _collect_finding_fallback_details(document_text)
+            details = fallback_details.get(title)
+            if not details:
+                # Document's own text didn't yield enough to build even a
+                # minimal fallback either — nothing left to try.
+                continue
+            template = {
+                "plugin_id": None,
+                "plugin_name": details["plugin_name"],
+                "synopsis": "",
+                "description": details["description"],
+                "description_points": [details["description"]] if details["description"] else [],
+                "solution": "",
+                "see_also": [],
+                "risk_factor": details["risk_factor"] or "Low",
+                "cvss_v3_base_score": "",
+                "plugin_information": "",
+                "plugin_output": "",
+                "plugin_output_url": None,
+            }
+            logger.info(
+                f"[CustomFileValidation] '{filename}' built a fallback template for "
+                f"{details['plugin_name']!r} from the document's own text — GPT never "
+                f"extracted this finding on any host"
+            )
         for host_name in gt_hosts:
             target = host_index.get(host_name)
             if target is None:
