@@ -510,11 +510,13 @@ _AFFECTED_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _SECTION_HEADING_RE = re.compile(r"(?<![\d.])2\.6\.\d+(?:\.\d+)*[ \t]+([^\n]+)")
-# Marks where a "Host(s) Affected" list has definitely ended, even for a
-# line that would otherwise look blank-adjacent enough to keep scanning —
-# "References"/"Evidence..." always follows the host list in this report
-# template, bulleted or not.
-_SECTION_STOP_RE = re.compile(r"^(references?|evidence(?:\s+and\s+screenshots)?)\s*$", re.IGNORECASE)
+# Marks where a "Host(s) Affected" list has definitely ended. "References"/
+# "Evidence..." always follows the host list in this report template —
+# search() (not match-the-whole-line) because this heading can itself land
+# on the same physical line as page-footer text after a page-break ("...
+# Confidential  22 References"), same as the "Host(s) Affected" label
+# itself sometimes does (see _SECTION_HEADING_RE).
+_SECTION_STOP_RE = re.compile(r"\b(references?|evidence\s+and\s+screenshots)\b\s*$", re.IGNORECASE)
 
 
 def _normalize_finding_title(title: str) -> str:
@@ -636,41 +638,66 @@ def _collect_affected_hosts_groundtruth(document_text: str) -> Dict[str, set]:
 
         line_idx = bisect.bisect_right(offsets, label_pos) - 1
         hosts = set()
-        seen_content = False
-        blanks_after_content = 0
+        unproductive_run = 0
         j = line_idx + 1
         while j < len(lines) and j < line_idx + 40:
             line = lines[j].strip()
             if not line:
-                if seen_content:
-                    blanks_after_content += 1
-                    if blanks_after_content >= 2:
-                        break
+                # Real bug report: a page break landing right after this
+                # list's last entry left 2 consecutive blank lines before
+                # the NEXT page's content resumed the same list (more real
+                # bullets after a page-footer line) — stopping on "2 blanks
+                # in a row" broke out before ever reaching them. Blank
+                # lines no longer count against anything on their own;
+                # _SECTION_STOP_RE and unproductive_run (real, non-blank
+                # junk content) below are what actually end the scan.
                 j += 1
                 continue
-            if _SECTION_STOP_RE.match(line):
+            if _SECTION_STOP_RE.search(line):
                 break
+            # Real bug report: a page break landing INSIDE a bullet list
+            # interleaves that page's footer/header text mid-list (e.g.
+            # "www.secureitlab.com  •  Confidential  29  • 192.168.1.76 —
+            # TCP/44") — the real bullet is still there, just preceded by
+            # junk on the same physical line. Splitting on "•" first and
+            # processing each piece separately recovers it; a page-footer
+            # segment (with no digits/URL shape) simply yields nothing from
+            # _PLAUSIBLE_HOST_RE and is silently skipped instead of
+            # aborting the whole scan.
+            #
             # Real bug report: a "Host(s) Affected" list isn't always
-            # bulleted — one finding gave its single host as a bare line
-            # ("http://192.168.1.26/phpinfo.php", no "•") and was silently
-            # treated as having zero affected hosts because only "•"-
-            # prefixed lines were ever read. Any non-blank line counts now
-            # (bulleted or not); _PLAUSIBLE_HOST_RE inside
-            # _extract_host_tokens_from_bullet is what keeps this from
-            # picking up page-footer/header prose that lands in the window.
-            content = line.lstrip("•").strip().rstrip(",")
+            # bulleted at all — one finding gave its single host as a bare
+            # line ("http://192.168.1.26/phpinfo.php", no "•") and was
+            # silently treated as having zero affected hosts.
+            segments = line.split("•") if "•" in line else [line]
             found_any = False
-            for host in _extract_host_tokens_from_bullet(content):
-                hosts.add(host)
-                found_any = True
-            if not found_any and not line.startswith("•"):
-                # Doesn't look like a host at all and isn't even bulleted —
-                # most likely this label isn't followed by a host list in
-                # this document (different format), or the list already
-                # ended. Stop rather than risk scanning into unrelated text.
-                break
-            seen_content = True
-            blanks_after_content = 0
+            for seg in segments:
+                content = seg.strip().rstrip(",")
+                if not content:
+                    continue
+                for host in _extract_host_tokens_from_bullet(content):
+                    # A page-footer segment this same split can land on
+                    # ("www.secureitlab.com  •  Confidential  29  • ...")
+                    # looks like a plausible host on its own — this is the
+                    # one place that footer text could sneak back into a
+                    # report as a phantom asset after already being
+                    # filtered everywhere else (see _is_assessor_own_domain
+                    # callers elsewhere in this file).
+                    if _is_assessor_own_domain(host):
+                        continue
+                    hosts.add(host)
+                    found_any = True
+            if found_any:
+                unproductive_run = 0
+            else:
+                # Doesn't look like a host at all — most likely page
+                # furniture that happened to land in this window. Tolerate
+                # a few in a row (the list may resume right after, as in
+                # the page-break case above) but give up once it's clearly
+                # not a host list for this label at all.
+                unproductive_run += 1
+                if unproductive_run >= 3:
+                    break
             j += 1
 
         if hosts:
@@ -1599,6 +1626,17 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
             )
 
     vulnerabilities_by_host = _apply_host_affected_groundtruth(vulnerabilities_by_host, truncated, filename)
+
+    # Final safety net, independent of exactly which step let it through:
+    # confirmed real (non-deterministically — present on some GPT runs for
+    # the same document, absent on others) that the assessor's own domain
+    # could still end up as a bare, zero-finding host entry despite being
+    # filtered everywhere a NEW one gets created. Whatever the exact path,
+    # it should never survive into the stored result.
+    before_count = len(vulnerabilities_by_host)
+    vulnerabilities_by_host = [h for h in vulnerabilities_by_host if not _is_assessor_own_domain(h.get("host_name", ""))]
+    if len(vulnerabilities_by_host) != before_count:
+        logger.info(f"[CustomFileValidation] '{filename}' final sweep dropped {before_count - len(vulnerabilities_by_host)} assessor-own-domain host(s)")
 
     final_total = sum(len(h.get("vulnerabilities") or []) for h in vulnerabilities_by_host)
     return {
