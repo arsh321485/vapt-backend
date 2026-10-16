@@ -360,10 +360,27 @@ def _extract_stated_total(document_text: str) -> Optional[int]:
     differently. Returns None if the document doesn't state one anywhere
     recognizable — extraction still proceeds normally, just without this
     extra guardrail.
+
+    Real bug report, confirmed across multiple real reports: this used to
+    take the FIRST _STATED_TOTAL_ROW_RE match via .search(). The exact
+    same "Security Issues per URL(s)"-style table has its column header
+    ("...Critical High Medium Low Total") immediately followed by every
+    data row, and the header's own "Total" word satisfies this regex just
+    as well as the real grand-total row at the bottom — its greedy capture
+    then swallows some arbitrary prefix of the table's own row-by-row
+    numbers as if THAT were the stated total (e.g. a document whose real
+    total was 65 reported 20 — the row number of the last data row the
+    capture window happened to reach — causing the recall-check retry
+    loop below to think extraction was already complete far too early,
+    silently leaving dozens of real findings/hosts never recovered).
+    Confirmed on 4 separate real reports: the header match is always
+    first and always wrong; the document's own real "Total" row — after
+    every data row, standing alone before its own grand-total numbers —
+    is reliably the LAST match instead.
     """
-    row_match = _STATED_TOTAL_ROW_RE.search(document_text)
-    if row_match:
-        numbers = re.findall(r"\d+", row_match.group(1))
+    row_matches = list(_STATED_TOTAL_ROW_RE.finditer(document_text))
+    if row_matches:
+        numbers = re.findall(r"\d+", row_matches[-1].group(1))
         if numbers:
             try:
                 return int(numbers[-1])
