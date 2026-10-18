@@ -19,6 +19,37 @@ _TEAM_CHANNELS = {
 _ADMIN_CHANNEL = "vaptfix-admin-dashboard"
 
 
+def _resolve_team_slack_channel(team_name, admin):
+    """
+    Real bug report: a team-channel notification for a custom team
+    (assigned_team / member.team_name / Member_role can all legitimately
+    be a custom team's name now — see additional_teams) silently never
+    posted anywhere, because _TEAM_CHANNELS only ever knew the 4 fixed
+    teams. A custom team gets its own on-demand Slack channel when
+    created (users.views.ensure_custom_team_slack_channel), named
+    "vaptfix-<slug>-team" — same convention duplicated here (kept local,
+    not imported from users.views, for the same circular-import reason
+    _TEAM_CHANNELS itself is a local copy — see its own comment above).
+    Only resolves to a channel name when this admin genuinely has a
+    custom team by this exact name, so a stray/misspelled team_name
+    never gets treated as a channel to post into.
+    """
+    if not team_name:
+        return None
+    channel_name = _TEAM_CHANNELS.get(team_name)
+    if channel_name:
+        return channel_name
+    try:
+        import re
+        from users_details.models import CustomTeam
+        if not CustomTeam.objects.filter(admin=admin, name=team_name).exists():
+            return None
+        slug = re.sub(r"[^a-z0-9]+", "-", team_name.strip().lower()).strip("-") or "team"
+        return f"vaptfix-{slug}-team"[:80].rstrip("-")
+    except Exception:
+        return None
+
+
 def _slack_get(method, token, params=None):
     try:
         resp = requests.get(
@@ -370,7 +401,7 @@ def _send_slack_notification(admin_id, recipient_type, notif_type, title, messag
             if member:
                 _slack_dm(token, getattr(member, "slack_member_id", None), blocks, fallback_text, color)
                 team_name = (metadata or {}).get("assigned_team") or member.team_name or next(iter(member.Member_role or []), None)
-                channel_name = _TEAM_CHANNELS.get(team_name)
+                channel_name = _resolve_team_slack_channel(team_name, admin)
                 if channel_name:
                     _slack_channel_post(token, channel_name, blocks, fallback_text, color)
             return
@@ -386,7 +417,7 @@ def _send_slack_notification(admin_id, recipient_type, notif_type, title, messag
         # team channels with something that isn't really team-specific.
         for member in UserDetail.objects.filter(admin=admin):
             _slack_dm(token, getattr(member, "slack_member_id", None), blocks, fallback_text, color)
-        pinned_channel = _TEAM_CHANNELS.get((metadata or {}).get("assigned_team"))
+        pinned_channel = _resolve_team_slack_channel((metadata or {}).get("assigned_team"), admin)
         if pinned_channel:
             _slack_channel_post(token, pinned_channel, blocks, fallback_text, color)
     except Exception:

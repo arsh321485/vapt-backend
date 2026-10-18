@@ -18962,13 +18962,27 @@ class SlackSlashCommandView(APIView):
         return mapping
 
     def _cmd_adduser(self, text, team_id, user_id, role_assignments=None):
+        # Real bug report: this help/error text only ever listed the 4
+        # fixed codes — _custom_team_code_map (below) already accepts a
+        # custom team's own slug code and always has, but an admin with
+        # one had no way to discover it from the bot itself. Built once,
+        # reused for both the usage text and the "unknown code" error.
+        team_code_map = self._custom_team_code_map(team_id)
+        _fixed_codes_line = (
+            "`pm` = Patch Management | `cm` = Configuration Management | "
+            "`ns` = Network Security | `af` = Architectural Flaws"
+        )
+        _custom_codes_line = " | ".join(
+            f"`{code}` = {name}" for code, name in team_code_map.items() if code not in ("pm", "cm", "ns", "af")
+        )
+        _all_codes_text = _fixed_codes_line + (f"\n*Your own teams:* {_custom_codes_line}" if _custom_codes_line else "")
+
         parts = text.strip().split()
         # Minimum: @mention  type  team
         if len(parts) < 3:
             return self._text_block(
                 "*Usage:* `/adduser @username external|internal pm|cm|ns|af [pm|cm|ns|af ...]`\n"
-                "*Teams:* `pm` = Patch Management | `cm` = Configuration Management | "
-                "`ns` = Network Security | `af` = Architectural Flaws\n"
+                f"*Teams:* {_all_codes_text}\n"
                 "*Example:* `/adduser @Ritu external pm cm`"
             )
 
@@ -18978,12 +18992,11 @@ class SlackSlashCommandView(APIView):
 
         # Validate team codes — merged with this admin's own custom-team
         # slug codes, see _custom_team_code_map's docstring.
-        team_code_map = self._custom_team_code_map(team_id)
         unknown = [c for c in team_codes if c not in team_code_map]
         if unknown:
             return self._text_block(
                 f"❌ Unknown team code(s): `{'`, `'.join(unknown)}`\n"
-                "Valid codes: `pm` | `cm` | `ns` | `af`"
+                f"Valid codes: {_all_codes_text}"
             )
 
         team_names  = [team_code_map[c] for c in team_codes]
