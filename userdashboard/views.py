@@ -317,13 +317,24 @@ class UserTotalAssetsAPIView(APIView):
                 # team_utils.infer_assigned_team() (deterministic keyword
                 # match, no AI call) for any plugin with no card, or a card
                 # with no/invalid team.
-                from upload_report.team_utils import infer_assigned_team
+                from upload_report.team_utils import infer_assigned_team, is_fixed_team
 
+                # Real bug report: a brand-new custom team like "testing"
+                # with only a few assets genuinely checkbox-assigned still
+                # showed ALL 49 report assets as "Total Assets" — raw_team/
+                # infer_assigned_team below only ever resolve to one of the
+                # 4 fixed teams, so a custom team NEVER matched a single
+                # card here, and every host fell through to the clean_hosts
+                # fallback instead (added to every active team below).
+                # additional_teams (written by the checkbox Add User picker
+                # and AssignTeamAPIView) is a custom team's only real
+                # classification pool — matched here the same per-plugin-
+                # name granularity this view already uses for assigned_team.
                 plugin_team_map = {}
                 _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1}
+                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1}
                 ):
                     pname = (card.get("vulnerability_name") or "").strip()
                     if not pname:
@@ -333,6 +344,10 @@ class UserTotalAssetsAPIView(APIView):
                     matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
                     if matched:
                         plugin_team_map.setdefault(pname, set()).add(matched)
+                    for extra_team in (card.get("additional_teams") or []):
+                        extra_matched = teams_lower.get((extra_team or "").strip().lower())
+                        if extra_matched:
+                            plugin_team_map.setdefault(pname, set()).add(extra_matched)
 
                 for _host in (nessus_doc.get("vulnerabilities_by_host") or []):
                     for _v in (_host.get("vulnerabilities") or []):
@@ -397,8 +412,14 @@ class UserTotalAssetsAPIView(APIView):
                     if not has_active_vuln:
                         clean_hosts.add(h_name)
 
+                # A custom team only gets credit for what's genuinely
+                # assigned to it (via additional_teams above) — the
+                # "clean asset belongs to all of them equally" fallback
+                # stays fixed-team-only, same reasoning as userasset.
+                # views.UserAssetsAPIView's own _custom_team_only_view.
                 for t in active_teams:
-                    by_team[t] |= clean_hosts
+                    if is_fixed_team(t):
+                        by_team[t] |= clean_hosts
 
                 by_team_count = {t: len(hosts) for t, hosts in by_team.items()}
                 # total_assets = unique hosts across all teams (host in multiple teams counted once)
@@ -468,15 +489,18 @@ class UserAvgScoreAPIView(APIView):
                 report_id = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
 
                 # Build plugin_name -> set of matched_teams from vulnerability_cards.
-                # Same "no card yet" fallback as UserTotalAssetsAPIView — see
-                # that view's comment for the full real-bug-report context.
-                from upload_report.team_utils import infer_assigned_team
+                # Same "no card yet" fallback, and same additional_teams
+                # matching for a custom team, as UserTotalAssetsAPIView —
+                # see that view's comment for the full real-bug-report
+                # context (this view feeds the same dashboard summary and
+                # must agree with it for the exact same report/team).
+                from upload_report.team_utils import infer_assigned_team, is_fixed_team
 
                 plugin_team_map = {}
                 _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1}
+                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1}
                 ):
                     pname = (card.get("vulnerability_name") or "").strip()
                     if not pname:
@@ -486,6 +510,10 @@ class UserAvgScoreAPIView(APIView):
                     matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
                     if matched:
                         plugin_team_map.setdefault(pname, set()).add(matched)
+                    for extra_team in (card.get("additional_teams") or []):
+                        extra_matched = teams_lower.get((extra_team or "").strip().lower())
+                        if extra_matched:
+                            plugin_team_map.setdefault(pname, set()).add(extra_matched)
 
                 for _host in (nessus_doc.get("vulnerabilities_by_host") or []):
                     for _v in (_host.get("vulnerabilities") or []):
@@ -559,8 +587,13 @@ class UserAvgScoreAPIView(APIView):
                     if h_name and not has_active_vuln:
                         clean_hosts.add(h_name)
 
+                # Fixed-team-only fallback — see UserTotalAssetsAPIView's
+                # own comment for why a custom team doesn't get clean
+                # hosts for free any more now that additional_teams gives
+                # it a real classification pool.
                 for t in active_teams:
-                    by_team[t] |= clean_hosts
+                    if is_fixed_team(t):
+                        by_team[t] |= clean_hosts
 
                 # "0, not null" when there's no scored vulnerability data —
                 # same fix as admindashboard's AdminAvgScoreAPIView.
@@ -659,13 +692,26 @@ class UserVulnerabilitiesAPIView(APIView):
 
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1, "host_name": 1, "_id": 0},
+                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1, "host_name": 1, "_id": 0},
                 ):
                     pname     = (card.get("vulnerability_name") or "").strip()
                     card_host = (card.get("host_name") or "").strip()
                     card_covered_pairs.add((pname, card_host))
                     raw_team = (card.get("assigned_team") or "").strip()
-                    matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+                    # Real bug report: a custom team's dashboard "Vulnerabilities
+                    # by Severity" always counted zero — raw_team/infer_assigned_
+                    # team only ever resolve to one of the 4 fixed teams, so a
+                    # custom team never matched a single card here. additional_
+                    # teams (see UserTotalAssetsAPIView's own comment) is a
+                    # custom team's real classification pool.
+                    matched = (
+                        teams_lower.get(raw_team.lower())
+                        or teams_lower.get(infer_assigned_team(pname).lower())
+                        or next(
+                            (teams_lower[t.lower()] for t in (card.get("additional_teams") or []) if t and t.lower() in teams_lower),
+                            None,
+                        )
+                    )
                     if not matched:
                         continue
                     if card_host and card_host not in active_host_names:
@@ -756,14 +802,18 @@ class UserVulnerabilitiesFixedAPIView(APIView):
                 _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1, "_id": 0},
+                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1, "_id": 0},
                 ):
                     pname = (card.get("vulnerability_name") or "").strip()
                     if not pname:
                         continue
                     _card_covered.add(pname)
                     raw_team = (card.get("assigned_team") or "").strip()
-                    if teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower()):
+                    # Real bug report: same additional_teams gap as
+                    # UserVulnerabilitiesAPIView — a custom team never
+                    # matched a card here either.
+                    has_extra = any((t or "").lower() in teams_lower for t in (card.get("additional_teams") or []))
+                    if teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower()) or has_extra:
                         team_plugins.add(pname)
 
                 for _host in nessus_doc.get("vulnerabilities_by_host", []):
@@ -965,14 +1015,18 @@ class UserSupportRequestsAPIView(APIView):
                 report_id = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
                 admin_id  = str(admin_user.id)
 
-                # Get plugin_names belonging to user's teams
+                # Get plugin_names belonging to user's teams. Also matches
+                # additional_teams — see UserTotalAssetsAPIView's own
+                # comment; without it a custom team's support-request count
+                # always came back 0.
                 team_plugins = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1, "_id": 0},
+                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1, "_id": 0},
                 ):
                     raw_team = (card.get("assigned_team") or "").strip()
-                    if teams_lower.get(raw_team.lower()):
+                    has_extra = any((t or "").lower() in teams_lower for t in (card.get("additional_teams") or []))
+                    if teams_lower.get(raw_team.lower()) or has_extra:
                         pname = (card.get("vulnerability_name") or "").strip()
                         if pname:
                             team_plugins.add(pname)
@@ -1064,7 +1118,17 @@ class UserPatchManagementAPIView(APIView):
                         continue
                     _card_covered.add(pname)
                     raw_team = (card.get("assigned_team") or "").strip()
-                    matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+                    # Real bug report: same additional_teams gap as
+                    # UserTotalAssetsAPIView — a custom team never matched
+                    # a card here either.
+                    matched = (
+                        teams_lower.get(raw_team.lower())
+                        or teams_lower.get(infer_assigned_team(pname).lower())
+                        or next(
+                            (teams_lower[t.lower()] for t in (card.get("additional_teams") or []) if t and t.lower() in teams_lower),
+                            None,
+                        )
+                    )
                     if not matched:
                         continue
                     plugin_team_map[pname] = matched

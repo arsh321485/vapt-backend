@@ -362,6 +362,20 @@ class UserAssetsAPIView(APIView):
             active_teams  = [selected_team] if selected_team and selected_team in teams else teams
 
             teams_lower = _normalize_teams(active_teams)
+            # Real bug report: a brand-new custom team like "testing" with
+            # only 3 assets genuinely checkbox-assigned still showed 41 of
+            # the report's 49 assets — every clean (0-vuln) host, because
+            # of the "show a clean host to every team" rule a few lines
+            # down. That rule makes sense for the 4 fixed teams (clean
+            # infra is everyone's business, not owned by whichever team
+            # happened to find something on it first) but defeats the
+            # whole point of a custom team's explicit, additional_teams-
+            # scoped access — a custom team should see exactly what was
+            # assigned to it, clean hosts included only if THEY were
+            # assigned. True only when every active team is custom (a
+            # mixed admin/member view spanning a fixed team stays as-is).
+            from upload_report.team_utils import is_fixed_team
+            _custom_team_only_view = bool(active_teams) and not any(is_fixed_team(t) for t in active_teams)
             admin_id    = str(admin_user.id)
             admin_email = getattr(admin_user, "email", None)
             search_q    = (request.query_params.get("q") or "").strip().lower()
@@ -442,6 +456,11 @@ class UserAssetsAPIView(APIView):
                             for v in host.get("vulnerabilities", [])
                         )
                         if has_any_active_vuln:
+                            continue
+                        # A custom-team-only view skips the "show clean
+                        # host to every team" fallback above — see
+                        # _custom_team_only_view's own comment.
+                        if _custom_team_only_view:
                             continue
 
                     if host_name not in assets:
@@ -652,6 +671,11 @@ class UserReportAssetsAPIView(APIView):
             active_teams  = [selected_team] if selected_team and selected_team in teams else teams
 
             teams_lower = _normalize_teams(active_teams)
+            # Same fix as UserAssetsAPIView's own _custom_team_only_view —
+            # a custom-team-only view should never fall back to "show
+            # every clean host", only genuinely-assigned ones.
+            from upload_report.team_utils import is_fixed_team
+            _custom_team_only_view = bool(active_teams) and not any(is_fixed_team(t) for t in active_teams)
             search_q    = (request.query_params.get("q") or "").strip().lower()
 
             with MongoContext() as db:
@@ -722,6 +746,11 @@ class UserReportAssetsAPIView(APIView):
                             for v in host.get("vulnerabilities", [])
                         )
                         if has_any_active_vuln:
+                            continue
+                        # A custom-team-only view skips the "show clean
+                        # host to every team" fallback above — see
+                        # _custom_team_only_view's own comment.
+                        if _custom_team_only_view:
                             continue
 
                     if host_name not in assets:
