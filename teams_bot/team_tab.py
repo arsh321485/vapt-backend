@@ -531,9 +531,19 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
     """
     body = [{"type": "TextBlock", "text": f"Assets & Vulnerabilities for {', '.join(team_names)}:", "size": "Small", "weight": "Bolder", "spacing": "Medium", "wrap": True}]
 
-    assets, vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
+    assets, all_vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
     sel_assets = [a.strip() for a in (form_data.get("au_assets") or "").split(",") if a.strip()]
     sel_vulns = [v.strip() for v in (form_data.get("au_vulns") or "").split(",") if v.strip()]
+    # Real bug report: the Vulnerabilities list showed every vulnerability
+    # for the whole team regardless of which Assets were checked above —
+    # "mene jo asset pr click kru uske according hi vulns show hona
+    # chahiye". Checking an asset checkbox alone can't live-filter this
+    # (Adaptive Cards has no client-side onChange — see this function's
+    # own docstring), so the narrowed list only appears on the NEXT
+    # round-trip, e.g. clicking "🔄 Show Assets & Vulnerabilities for
+    # selected Team(s)" again after checking assets — same round-trip
+    # every other value on this card already needs to take effect.
+    vulns = [v for v in all_vulns if v.get("host") in sel_assets] if sel_assets else []
 
     def _int_offset(key):
         try:
@@ -576,6 +586,8 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
             a_element["value"] = ",".join(o["value"] for o in a_initial)
         body.append(a_element)
         body.extend(_asset_vuln_pagination_row(a_offset, a_total, "assets", v_offset))
+        if not sel_assets and all_vulns:
+            body.append({"type": "TextBlock", "text": "_Check asset(s) above, then tap 🔄 Show Assets & Vulnerabilities for selected Team(s) again to see just their vulnerabilities here._", "size": "Small", "isSubtle": True, "spacing": "Small", "wrap": True})
     if vulns:
         v_total = len(vulns)
         shown = vulns[v_offset:v_offset + PAGE_SIZE]
@@ -596,7 +608,7 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
             v_element["value"] = ",".join(o["value"] for o in v_initial)
         body.append(v_element)
         body.extend(_asset_vuln_pagination_row(v_offset, v_total, "vulns", a_offset))
-    if not assets and not vulns:
+    if not assets and not all_vulns:
         body.append({"type": "TextBlock", "text": "_No assets/vulnerabilities found for the selected team(s) yet — you can still add the user with team-level access._", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
     return body
 
@@ -644,6 +656,16 @@ def _apply_select_all(admin, form_data, which, select):
     if which == "assets":
         updated["au_assets"] = ",".join(a["id"] for a in assets) if select else ""
     else:
+        # Real bug report: "Select All Vulnerabilities (N)" must select
+        # exactly the N shown — i.e. scoped to whichever assets are
+        # currently checked, same as _assets_vulns_picker_blocks' own
+        # vulns filter — not silently fall back to EVERY vuln on the
+        # whole team regardless of asset selection.
+        sel_assets = [a.strip() for a in (form_data.get("au_assets") or "").split(",") if a.strip()]
+        if sel_assets:
+            vulns = [v for v in vulns if v.get("host") in sel_assets]
+        else:
+            vulns = []
         updated["au_vulns"] = ",".join(v["id"] for v in vulns) if select else ""
     return updated
 
