@@ -1092,10 +1092,11 @@ class AdminAssetsByTeamAPIView(APIView):
                 from upload_report.team_utils import infer_assigned_team
 
                 plugin_team_map = {}
+                plugin_additional_teams_map = {}
                 _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1}
+                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1}
                 ):
                     pname = (card.get("vulnerability_name") or "").strip()
                     if not pname:
@@ -1107,6 +1108,9 @@ class AdminAssetsByTeamAPIView(APIView):
                     )
                     if matched_team:
                         plugin_team_map[pname] = matched_team
+                    plugin_additional_teams_map.setdefault(pname, set()).update(
+                        t for t in (card.get("additional_teams") or []) if t
+                    )
 
                 for _host in (doc.get("vulnerabilities_by_host") or []):
                     for _v in (_host.get("vulnerabilities") or []):
@@ -1137,7 +1141,13 @@ class AdminAssetsByTeamAPIView(APIView):
                 }
 
                 # Step 2: Loop nessus hosts, resolve host_name, group by team
-                team_hosts = {name: set() for name in TEAM_NAMES}
+                # — 4 fixed teams + this admin's own custom teams (see
+                # additional_teams below).
+                from users_details.models import CustomTeam
+                custom_team_names = list(
+                    CustomTeam.objects.filter(admin=request.user).values_list("name", flat=True)
+                )
+                team_hosts = {name: set() for name in TEAM_NAMES + custom_team_names}
                 all_hosts = set()
 
                 for host in (doc.get("vulnerabilities_by_host") or []):
@@ -1166,6 +1176,12 @@ class AdminAssetsByTeamAPIView(APIView):
                         matched_team = plugin_team_map.get(pname)
                         if matched_team:
                             team_hosts[matched_team].add(host_name)
+                        # Additive — this host also counts toward any
+                        # custom team this finding was specifically
+                        # assigned to (additional_teams).
+                        for _extra_team in plugin_additional_teams_map.get(pname) or set():
+                            if _extra_team in team_hosts and _extra_team != matched_team:
+                                team_hosts[_extra_team].add(host_name)
 
                 total_assets = len(all_hosts) or doc.get("total_hosts", 0)
 
@@ -1901,15 +1917,28 @@ class AdminDistributionByTeamAPIView(APIView):
                 # (unlike the old vulnerability_cards-based approach, whose
                 # cards are a static snapshot never updated by hold/delete).
                 vuln_team_map = {}
+                vuln_additional_teams_map = {}
                 for card in vuln_card_coll.find(
-                    {"report_id": report_id}, {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1}
+                    {"report_id": report_id}, {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "additional_teams": 1}
                 ):
-                    vuln_team_map[(
+                    _key = (
                         (card.get("vulnerability_name") or "").strip(),
                         (card.get("host_name") or "").strip(),
-                    )] = (card.get("assigned_team") or "").strip()
+                    )
+                    vuln_team_map[_key] = (card.get("assigned_team") or "").strip()
+                    vuln_additional_teams_map[_key] = [t for t in (card.get("additional_teams") or []) if t]
 
-                counts = {name: 0 for name in TEAM_NAMES}
+                # Real feature request: an admin's own custom team(s) now
+                # genuinely own whichever findings were checkbox/manually
+                # assigned to them (vulnerability_cards.additional_teams —
+                # see AssignTeamAPIView / the Add User picker's write
+                # path), so they belong in this distribution too, not just
+                # the 4 fixed teams.
+                from users_details.models import CustomTeam
+                custom_team_names = list(
+                    CustomTeam.objects.filter(admin=request.user).values_list("name", flat=True)
+                )
+                counts = {name: 0 for name in TEAM_NAMES + custom_team_names}
                 counts["Unassigned"] = 0
                 total = 0
 
@@ -1947,6 +1976,14 @@ class AdminDistributionByTeamAPIView(APIView):
                         else:
                             counts["Unassigned"] += 1
                         total += 1
+
+                        # Additive — a finding can also count toward a
+                        # custom team it was specifically assigned to,
+                        # on top of (not instead of) its fixed-team count
+                        # above.
+                        for _extra_team in vuln_additional_teams_map.get(key) or []:
+                            if _extra_team in counts and _extra_team != matched_team:
+                                counts[_extra_team] += 1
 
                 distribution = [
                     {
