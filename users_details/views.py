@@ -2126,10 +2126,24 @@ class ReportAssetsVulnsAPIView(APIView):
                 # own — only the 4 fixed teams ever get an assigned_team
                 # stamped on a vulnerability_cards document at generation
                 # time (upload_report/mitigation_tool.py's _resolve_
-                # assigned_team). A role_filter that isn't one of those 4
-                # is a custom team name — role_plugins is deliberately left
-                # None for it (same as role_filter being empty), which the
-                # filtering below already treats as "show everything".
+                # assigned_team). A custom team's own data instead comes
+                # from vulnerability_cards.additional_teams — written
+                # additively by AssignTeamAPIView (manual, single-card) and
+                # by the Add User checkbox picker (UserDetailCreateView's
+                # _apply_role_assignments_to_cards) — see the branch below.
+                #
+                # Real bug report: before additional_teams existed, a
+                # custom team had no real data of its own at all, so
+                # role_plugins was deliberately left None here (same as no
+                # role_filter), which this whole view treats as "show
+                # everything" — correct as a stopgap back then, but once an
+                # admin could actually assign specific items to a custom
+                # team, "show everything regardless of what was checkbox-
+                # selected" became the bug itself (confirmed live: 4 assets
+                # specifically selected while adding a user, the team's own
+                # Fix tab still showed all 49). Now filters a custom team
+                # exactly like a fixed one, just reading additional_teams
+                # instead of assigned_team.
                 if role_filter and role_filter in _FIXED_TEAM_NAMES:
                     from upload_report.team_utils import infer_assigned_team
 
@@ -2201,6 +2215,37 @@ class ReportAssetsVulnsAPIView(APIView):
                             covered.add(key)
                             if infer_assigned_team(pname).lower() == role_filter.lower():
                                 role_plugins.add(key)
+
+                elif role_filter:
+                    # Custom team — match additional_teams instead of
+                    # assigned_team, same (host_name, plugin_name.lower())
+                    # keying as the fixed-team branch above for the same
+                    # reason (a finding name alone isn't a reliable team
+                    # key once a report combines independently-classified
+                    # uploads). Still populates assigned_team_map (from
+                    # assigned_team OR additional_teams) so "Vulnerability-
+                    # Free Assets" below can correctly tell "genuinely
+                    # clean" apart from "has findings, just not this
+                    # custom team's" for a custom-team view too.
+                    role_plugins = set()
+                    for card in db[VULN_CARD_COLLECTION].find(
+                        {"report_id": report_id},
+                        {"vulnerability_name": 1, "plugin_name": 1, "host_name": 1, "assigned_team": 1, "additional_teams": 1},
+                    ):
+                        pname = (
+                            card.get("vulnerability_name")
+                            or card.get("plugin_name")
+                            or ""
+                        ).strip()
+                        if not pname:
+                            continue
+                        host_key = (card.get("host_name") or "").strip()
+                        key = (host_key, pname.lower())
+                        card_additional_teams = card.get("additional_teams") or []
+                        if (card.get("assigned_team") or "").strip() or card_additional_teams:
+                            assigned_team_map[key] = card.get("assigned_team") or card_additional_teams[0]
+                        if role_filter in card_additional_teams:
+                            role_plugins.add(key)
 
                 assets = []
                 vulnerability_free_assets = []
