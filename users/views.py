@@ -2037,11 +2037,19 @@ def ensure_custom_team_teams_channel(admin, custom_team):
         return None
 
     headers = {"Authorization": f"Bearer {graph_token}", "Content-Type": "application/json"}
+    # Real bug report: this used the raw custom team name verbatim
+    # ("Demo") — every one of the 4 FIXED Teams channels instead follows
+    # "vaptfix <name> team" (see TEAMS_CHANNEL_DISPLAY_NAMES above, e.g.
+    # "vaptfix Network Security team"), and Slack's own custom-team
+    # channel already mirrors that exact convention
+    # (_slack_channel_name_for_custom_team: "vaptfix-<slug>-team") — only
+    # the Teams side was inconsistent.
+    display_name = f"vaptfix {custom_team.name} team"
     ch_resp = _http_post(
         f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels",
         headers=headers,
         json={
-            "displayName": custom_team.name,
+            "displayName": display_name,
             "description": f"{custom_team.name} channel",
             "membershipType": "standard",
         },

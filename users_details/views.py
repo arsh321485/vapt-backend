@@ -33,6 +33,104 @@ _FIXED_TEAM_NAMES = {
     "Architectural Flaws",
 }
 
+
+def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role_assignments):
+    """
+    Layers the given team name(s) onto whichever vulnerability_cards the
+    admin specifically checkbox-selected while adding this user
+    (role_assignments: {"assets": [...], "vulnerabilities": [...]}), via
+    vulnerability_cards.additional_teams — purely ADDITIVE, never touches
+    assigned_team (the AI's own original classification at card-generation
+    time is left exactly as it was).
+
+    Real feature request: a checkbox selection here used to be stored on
+    the new UserDetail's own role_assignments field and never acted on
+    anywhere — picking specific assets/vulnerabilities while adding
+    someone to a (fixed or custom) team had no actual effect on which
+    data that team owns. Now it does: a vulnerability already classified
+    "Patch Management" that gets checkbox-assigned to a custom team here
+    shows up under BOTH from then on (additional_teams is a list, never a
+    replacement for assigned_team).
+
+    "assets" entries are bare host_name values — every vulnerability on
+    that host gets every team in team_names added. "vulnerabilities"
+    entries are "{host_name}||{plugin_name}" composite ids (the exact
+    shape _get_team_assets_vulns_combined / ReportAssetsVulnsAPIView
+    build this picker's options from) — just that one (host, finding)
+    pair gets it, independent of whether its host was also selected.
+
+    Best-effort: never raises — a Mongo hiccup here must never fail the
+    Add User flow that triggered it.
+    """
+    if not role_assignments or not team_names:
+        return
+    assets = role_assignments.get("assets") or []
+    vulns = role_assignments.get("vulnerabilities") or []
+    if not assets and not vulns:
+        return
+
+    try:
+        coll = db[NESSUS_COLLECTION]
+        # Same "real, primary report" resolution as ReportAssetsVulnsAPIView
+        # (the same endpoint this picker's own options came from) — total_
+        # vulnerabilities first, not recency, so this never targets a
+        # different report than the one the checkboxes were actually built
+        # from.
+        _latest_sort = [("total_vulnerabilities", -1), ("uploaded_at", -1)]
+        doc = coll.find_one(
+            {"admin_id": admin_id},
+            {"report_id": 1, "vulnerabilities_by_host": 1},
+            sort=_latest_sort,
+        )
+        if not doc and admin_email:
+            doc = coll.find_one(
+                {"admin_email": admin_email},
+                {"report_id": 1, "vulnerabilities_by_host": 1},
+                sort=_latest_sort,
+            )
+        if not doc:
+            return
+        report_id = str(doc.get("report_id") or doc.get("_id", ""))
+
+        pairs = set()
+        if assets:
+            host_set = set(assets)
+            for host in doc.get("vulnerabilities_by_host") or []:
+                host_name = host.get("host_name")
+                if host_name in host_set:
+                    for v in host.get("vulnerabilities") or []:
+                        plugin_name = v.get("plugin_name")
+                        if plugin_name:
+                            pairs.add((host_name, plugin_name))
+        for vid in vulns:
+            if not isinstance(vid, str) or "||" not in vid:
+                continue
+            host_name, plugin_name = vid.split("||", 1)
+            if host_name and plugin_name:
+                pairs.add((host_name, plugin_name))
+
+        if not pairs:
+            return
+
+        cards_coll = db["vulnerability_cards"]
+        team_list = list(dict.fromkeys(team_names))
+        for host_name, plugin_name in pairs:
+            cards_coll.update_many(
+                {
+                    "admin_id": admin_id,
+                    "report_id": report_id,
+                    "host_name": host_name,
+                    "vulnerability_name": plugin_name,
+                },
+                {"$addToSet": {"additional_teams": {"$each": team_list}}},
+            )
+        logger.info(
+            f"[UserDetailCreateView] role_assignments applied: {len(pairs)} finding(s) "
+            f"layered onto team(s) {team_list} for admin_id={admin_id}"
+        )
+    except Exception:
+        logger.exception("[UserDetailCreateView] _apply_role_assignments_to_cards failed")
+
 REQUEST_TIMEOUT_SECONDS = 15
 
 def _http_get(url, **kwargs):
@@ -1006,6 +1104,21 @@ class UserDetailCreateView(generics.CreateAPIView):
             roles = user_detail.Member_role or []
 
             logger.info(f"Creating user detail for {email} with roles: {roles}")
+
+            # Checkbox-selected assets/vulnerabilities (role_assignments,
+            # from the Slack/Teams/website Add User picker — same field,
+            # same shape, all 3 platforms) now actually do something: layer
+            # `roles` onto those specific vulnerability_cards via
+            # additional_teams. Best-effort — never blocks user creation.
+            if user_detail.role_assignments:
+                try:
+                    with MongoContext() as _ra_db:
+                        _apply_role_assignments_to_cards(
+                            _ra_db, str(admin_user.id), getattr(admin_user, "email", None),
+                            roles, user_detail.role_assignments,
+                        )
+                except Exception:
+                    logger.exception("[UserDetailCreateView] role_assignments processing failed")
 
             # Create Django User for this member and generate set-password link
             from django.utils.http import urlsafe_base64_encode

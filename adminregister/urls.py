@@ -12,6 +12,7 @@ from .views import (
     SupportRequestByReportAPIView,
     SupportRequestByHostNameAPIView,
     FixVulnerabilityStepsAPIView,
+    AssignTeamAPIView,
     FixStepFeedbackAPIView,
     FixVulnerabilityFinalFeedbackAPIView,
     # FixVulnerabilityDetailAPIView,
@@ -62,11 +63,18 @@ urlpatterns = [
         name="closed-vulnerabilities-by-asset"
     ),
 
-#create Fix Vulnerability Steps 
+#create Fix Vulnerability Steps
     path(
         "fix-vulnerability/<str:fix_vuln_id>/step-complete/",
         FixVulnerabilityStepsAPIView.as_view(),
         name="fix-vulnerability-steps"
+    ),
+
+    # Manually assign/add a team (fixed or custom) to one vulnerability
+    path(
+        "fix-vulnerability/<str:fix_vuln_id>/assign-team/",
+        AssignTeamAPIView.as_view(),
+        name="fix-vulnerability-assign-team"
     ),
 
     # Feedback API for fix steps (per-step feedback)

@@ -1984,6 +1984,16 @@ class FixVulnerabilityStepsAPIView(APIView):
             assigned_team = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
             if not assigned_team:
                 assigned_team = self._infer_assigned_team(plugin_name)
+            # Manually-added team(s) on top of the AI's own original
+            # classification above (see AssignTeamAPIView / the Add User
+            # checkbox picker's additional_teams write path) — additive,
+            # so a vulnerability already "Patch Management" that also got
+            # assigned to a custom team "demo" shows both, in order.
+            additional_teams = [
+                t for t in (vuln_card.get("additional_teams") or fix_doc.get("additional_teams") or [])
+                if t and t != assigned_team
+            ]
+            all_assigned_teams = ([assigned_team] if assigned_team else []) + additional_teams
             # Live lookup, not a stale snapshot — fix_doc.assigned_team_members was
             # only ever set (if at all) when the fix-vulnerability record was first
             # created, so it never reflected team members added afterwards. Same
@@ -2214,6 +2224,8 @@ class FixVulnerabilityStepsAPIView(APIView):
                     "description": description,
                     "operating_system": operating_system,
                     "assigned_team": assigned_team,
+                    "additional_teams": additional_teams,
+                    "all_assigned_teams": all_assigned_teams,
                     "deadline": deadline,
                     "artifacts_tools": artifacts_tools,
                     "post_mitigation_troubleshooting_guide": post_mitigation_troubleshooting_guide if isinstance(post_mitigation_troubleshooting_guide, list) else ([post_mitigation_troubleshooting_guide] if post_mitigation_troubleshooting_guide else []),
@@ -2489,6 +2501,98 @@ class FixVulnerabilityStepsAPIView(APIView):
                 status=status.HTTP_200_OK,
             )
   
+
+_FIXED_TEAM_NAMES_ASSIGN = {
+    "Patch Management",
+    "Configuration Management",
+    "Network Security",
+    "Architectural Flaws",
+}
+
+
+class AssignTeamAPIView(APIView):
+    """
+    POST /api/admin/adminregister/fix-vulnerability/<fix_vuln_id>/assign-team/
+    Body: {"team_name": "<one of the 4 fixed teams, or this admin's own custom team>"}
+
+    Real feature request: the "manual fix ki steps" page shows an
+    "Assigned team name" field, but it was always read-only — there was
+    no endpoint anywhere that let an admin actually set/change which
+    team a specific vulnerability belongs to, and a custom team had no
+    way at all to end up owning a finding. Layers team_name onto this
+    ONE vulnerability's vulnerability_cards doc via additional_teams —
+    purely ADDITIVE, never touches assigned_team (the AI's own original
+    classification from card-generation time stays exactly as it was).
+    Assigning a vulnerability already under "Patch Management" to a
+    custom team "demo" this way means it now shows up under BOTH, not
+    one replacing the other.
+
+    Same fix_vuln_id identifier FixVulnerabilityStepsAPIView's own GET
+    already resolves (a fix_vulnerabilities / fix_vulnerabilities_closed
+    doc) — reused here so this works from the exact same page without a
+    second lookup round-trip on the frontend.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    def post(self, request, fix_vuln_id):
+        team_name = (request.data.get("team_name") or "").strip()
+        if not team_name:
+            return Response({"detail": "team_name is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        admin_id = str(request.user.id)
+
+        if team_name not in _FIXED_TEAM_NAMES_ASSIGN:
+            from users_details.models import CustomTeam
+            if not CustomTeam.objects.filter(admin=request.user, name=team_name).exists():
+                return Response(
+                    {"detail": f'"{team_name}" is not one of your teams — pick one of the 4 standard teams or one of your own custom teams.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        try:
+            with MongoContext() as db:
+                fix_coll = db[FIX_VULN_COLLECTION]
+                closed_coll = db[FIX_VULN_CLOSED_COLLECTION]
+
+                fix_doc = fix_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+                source_coll = fix_coll
+                if not fix_doc:
+                    fix_doc = closed_coll.find_one({"_id": ObjectId(fix_vuln_id)})
+                    source_coll = closed_coll
+                if not fix_doc:
+                    return Response({"detail": "Fix vulnerability not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                report_id = fix_doc.get("report_id", "")
+                host_name = fix_doc.get("host_name", "")
+                plugin_name = fix_doc.get("plugin_name", "")
+
+                card_result = db[VULN_CARD_COLLECTION].update_one(
+                    {"report_id": report_id, "vulnerability_name": plugin_name, "host_name": host_name},
+                    {"$addToSet": {"additional_teams": team_name}},
+                )
+                if card_result.matched_count == 0:
+                    # Same fallback FixVulnerabilityStepsAPIView.get uses when a
+                    # host-scoped match comes up empty.
+                    db[VULN_CARD_COLLECTION].update_one(
+                        {"report_id": report_id, "vulnerability_name": plugin_name},
+                        {"$addToSet": {"additional_teams": team_name}},
+                    )
+                # Mirror onto the fix_vulnerabilities(_closed) doc itself too —
+                # it carries its own copy of assigned_team from Fix-Now-
+                # creation time, and the GET view's own display falls back to
+                # that copy when no vulnerability_cards match exists.
+                source_coll.update_one(
+                    {"_id": ObjectId(fix_vuln_id)},
+                    {"$addToSet": {"additional_teams": team_name}},
+                )
+
+            logger.info(f"[AssignTeamAPIView] admin_id={admin_id} assigned team={team_name!r} to fix_vuln_id={fix_vuln_id}")
+            return Response({"detail": f'Assigned to "{team_name}".', "team_name": team_name}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception(f"[AssignTeamAPIView] failed for fix_vuln_id={fix_vuln_id}")
+            return Response({"detail": f"Could not assign team: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 # FIX STEP FEEDBACK API (per step feedback)
 class FixStepFeedbackAPIView(APIView):
