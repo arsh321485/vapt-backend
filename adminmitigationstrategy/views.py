@@ -205,7 +205,7 @@ class MitigationStrategyByTeamAPIView(APIView):
                 vuln_cards = {}
                 for card in vuln_card_coll.find(
                     {"report_id": report_id},
-                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "automation_card.automation_status": 1},
+                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "additional_teams": 1, "automation_card.automation_status": 1},
                 ):
                     key = (
                         card.get("vulnerability_name", ""),
@@ -235,8 +235,14 @@ class MitigationStrategyByTeamAPIView(APIView):
                     p: len(assets) for p, assets in plugin_asset_map.items()
                 }
 
-                # Initialize team buckets
-                teams = {name: [] for name in TEAM_NAMES}
+                # Initialize team buckets — 4 fixed + this admin's own
+                # custom teams (a vulnerability can now land in a custom
+                # team's bucket too via additional_teams, see below).
+                from users_details.models import CustomTeam
+                custom_team_names = list(
+                    CustomTeam.objects.filter(admin_id=current_admin_id).values_list("name", flat=True)
+                )
+                teams = {name: [] for name in TEAM_NAMES + custom_team_names}
                 teams["Unassigned"] = []
 
                 # Real bug report: the same vulnerability on the same host
@@ -358,6 +364,17 @@ class MitigationStrategyByTeamAPIView(APIView):
                         else:
                             teams["Unassigned"].append(row)
 
+                        # Real bug report: a custom team only ever existed
+                        # in this response as an empty bucket — no finding
+                        # ever landed in it, since nothing checked
+                        # additional_teams (see AssignTeamAPIView / the Add
+                        # User checkbox picker's write path). Additive —
+                        # the row still appears under its original
+                        # assigned_team bucket above too.
+                        for _extra_team in (card or {}).get("additional_teams") or []:
+                            if _extra_team and _extra_team in teams and _extra_team != assigned_team:
+                                teams[_extra_team].append(row)
+
                 teams_response = {
                     team_name: {
                         "count": len(vulns),
@@ -441,18 +458,25 @@ class VulnerabilityAssetCountAPIView(APIView):
 
                 report_id = str(latest_doc.get("report_id", ""))
 
-                # Build plugin_name -> assigned_team from vulnerability_cards
-                # Normalize slug ("patch-management") → Title Case ("Patch Management")
+                # Build plugin_name -> assigned_team (+ additional_teams,
+                # union across every card with this plugin_name) from
+                # vulnerability_cards. Normalize slug ("patch-management")
+                # → Title Case ("Patch Management").
                 plugin_team_map = {}
+                plugin_additional_teams_map = {}
                 for card in vuln_card_coll.find(
                     {"report_id": report_id},
-                    {"vulnerability_name": 1, "assigned_team": 1}
+                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1}
                 ):
                     vname    = card.get("vulnerability_name", "")
                     raw_team = (card.get("assigned_team", "") or "").strip().lower()
                     team     = _SLUG_TO_TEAM.get(raw_team, card.get("assigned_team", "") or "")
                     if vname and vname not in plugin_team_map:
                         plugin_team_map[vname] = team
+                    if vname:
+                        plugin_additional_teams_map.setdefault(vname, set()).update(
+                            t for t in (card.get("additional_teams") or []) if t
+                        )
 
                 # Group: plugin_name -> set of host_names
                 plugin_map = {}
@@ -475,8 +499,14 @@ class VulnerabilityAssetCountAPIView(APIView):
                             plugin_map[plugin_name] = set()
                         plugin_map[plugin_name].add(host_name)
 
-                # Initialize team buckets
-                teams = {name: [] for name in TEAM_NAMES}
+                # Initialize team buckets — 4 fixed + this admin's own
+                # custom teams (a vulnerability can now land in a custom
+                # team's bucket too via additional_teams, see below).
+                from users_details.models import CustomTeam
+                custom_team_names = list(
+                    CustomTeam.objects.filter(admin_id=current_admin_id).values_list("name", flat=True)
+                )
+                teams = {name: [] for name in TEAM_NAMES + custom_team_names}
                 teams["Unassigned"] = []
 
                 for plugin_name, assets in plugin_map.items():
@@ -496,6 +526,13 @@ class VulnerabilityAssetCountAPIView(APIView):
                         teams[assigned_team].append(entry)
                     else:
                         teams["Unassigned"].append(entry)
+
+                    # Additive — a custom team's bucket is no longer always
+                    # empty (see additional_teams, written by
+                    # AssignTeamAPIView / the Add User checkbox picker).
+                    for _extra_team in plugin_additional_teams_map.get(plugin_name) or set():
+                        if _extra_team in teams and _extra_team != assigned_team:
+                            teams[_extra_team].append(entry)
 
                 # Sort each team's vulnerabilities by asset_count descending
                 teams_response = {

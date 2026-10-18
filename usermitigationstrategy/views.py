@@ -229,7 +229,24 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                             # catches up and writes the real assigned_team.
                             assigned_team = infer_assigned_team(plugin_name)
 
-                        if assigned_team not in member_teams_normalized:
+                        # Real bug report: a member whose ONLY team is a
+                        # custom team always saw an empty list here — this
+                        # only ever checked the AI's own assigned_team
+                        # (always one of the 4 fixed teams, or forced there
+                        # by infer_assigned_team's fallback above), never
+                        # additional_teams (see AssignTeamAPIView / the Add
+                        # User checkbox picker's write path), so a card
+                        # manually/checkbox-assigned to a custom team could
+                        # never match member_teams_normalized. A card now
+                        # can genuinely belong to more than one team at
+                        # once (e.g. "Patch Management" AND a custom
+                        # "demo") — match against the union and add the
+                        # SAME row to every one of the member's teams it
+                        # matches, not just one.
+                        card_teams = {assigned_team} if assigned_team else set()
+                        card_teams.update(t for t in (card or {}).get("additional_teams") or [] if t)
+                        matched_teams = card_teams & member_teams_normalized
+                        if not matched_teams:
                             continue
 
                         dedup_key = (host_name, plugin_name)
@@ -237,28 +254,30 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                         if existing_row is not None:
                             if existing_row["status"] != "closed" and vuln_status == "closed":
                                 existing_row["status"] = "closed"
-                            continue
+                            row = existing_row
+                        else:
+                            # Real bug report: same "In Progress" badge gap as
+                            # the admin-side by-team endpoint — always present
+                            # (None -> JSON null), never an omitted key.
+                            automation_status = ((card or {}).get("automation_card") or {}).get("automation_status")
 
-                        # Real bug report: same "In Progress" badge gap as
-                        # the admin-side by-team endpoint — always present
-                        # (None -> JSON null), never an omitted key.
-                        automation_status = ((card or {}).get("automation_card") or {}).get("automation_status")
+                            row = {
+                                "id":                str(uuid.uuid4()),
+                                "host_name":         host_name,
+                                "os":                os_value,
+                                "plugin_name":       plugin_name,
+                                "asset_count":       plugin_asset_counts.get(plugin_name, 0),
+                                "risk_factor":       risk_factor,
+                                "port":              port,
+                                "protocol":          protocol,
+                                "status":            vuln_status,
+                                "assigned_team":     assigned_team,
+                                "automation_status": automation_status,
+                            }
+                            seen_host_vuln_row[dedup_key] = row
 
-                        row = {
-                            "id":                str(uuid.uuid4()),
-                            "host_name":         host_name,
-                            "os":                os_value,
-                            "plugin_name":       plugin_name,
-                            "asset_count":       plugin_asset_counts.get(plugin_name, 0),
-                            "risk_factor":       risk_factor,
-                            "port":              port,
-                            "protocol":          protocol,
-                            "status":            vuln_status,
-                            "assigned_team":     assigned_team,
-                            "automation_status": automation_status,
-                        }
-                        seen_host_vuln_row[dedup_key] = row
-                        teams[assigned_team].append(row)
+                        for team_name in matched_teams:
+                            teams.setdefault(team_name, []).append(row)
 
                 teams_response = {
                     team_name: {
@@ -355,16 +374,24 @@ class UserVulnerabilityAssetCountAPIView(APIView):
 
                 report_id = str(latest_doc.get("report_id", ""))
 
-                # Step 3: Build plugin_name -> assigned_team from vulnerability_cards
+                # Step 3: Build plugin_name -> assigned_team (+ additional_teams,
+                # union across every card with this plugin_name — this view
+                # aggregates at plugin_name granularity, not per-host) from
+                # vulnerability_cards.
                 plugin_team_map = {}
+                plugin_additional_teams_map = {}
                 for card in vuln_card_coll.find(
                     {"report_id": report_id},
-                    {"vulnerability_name": 1, "assigned_team": 1}
+                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1}
                 ):
                     vname = card.get("vulnerability_name", "")
                     team  = _normalize_team_name(card.get("assigned_team", "") or "")
                     if vname and vname not in plugin_team_map:
                         plugin_team_map[vname] = team
+                    if vname:
+                        plugin_additional_teams_map.setdefault(vname, set()).update(
+                            t for t in (card.get("additional_teams") or []) if t
+                        )
 
                 # Step 4: Group plugin_name -> set of host_names
                 plugin_map = {}
@@ -398,14 +425,25 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                         # silently dropping this row until AI generation
                         # catches up and writes the real assigned_team.
                         assigned_team = infer_assigned_team(plugin_name)
-                    if assigned_team not in member_teams_normalized:
+
+                    # Same multi-team fix as UserMitigationStrategyByTeamAPIView
+                    # above — a custom-team-only member must match against
+                    # additional_teams too, not just the AI's own
+                    # assigned_team, and a finding can land in more than one
+                    # of the member's teams at once.
+                    plugin_teams = {assigned_team} if assigned_team else set()
+                    plugin_teams.update(plugin_additional_teams_map.get(plugin_name) or set())
+                    matched_teams = plugin_teams & member_teams_normalized
+                    if not matched_teams:
                         continue
 
-                    teams[assigned_team].append({
+                    entry = {
                         "plugin_name": plugin_name,
                         "asset_count": len(assets),
                         "assets":      sorted(assets),
-                    })
+                    }
+                    for team_name in matched_teams:
+                        teams.setdefault(team_name, []).append(entry)
 
                 teams_response = {
                     team_name: {
