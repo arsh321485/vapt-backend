@@ -124,6 +124,29 @@ def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role
                 },
                 {"$addToSet": {"additional_teams": {"$each": team_list}}},
             )
+
+        # Real bug report: a support request raised for a vulnerability
+        # that's ALSO (via additional_teams, from this exact picker)
+        # genuinely assigned to a custom team only ever notified the
+        # vulnerability's original 4-fixed-team channel — the custom
+        # team's own channel never heard about it. Root cause: a support
+        # request's team routing (userregister.views.
+        # UserRaiseSupportRequestAPIView) reads additional_teams off the
+        # fix_vulnerabilities(_closed) DOCUMENT itself, not off this
+        # vulnerability_cards update above — and this function only ever
+        # touched the card. adminregister.views.AssignTeamAPIView (the
+        # manual "Assign Team" button) already mirrors onto that doc too;
+        # doing the same here so a checkbox-driven assignment and a
+        # manual one leave the fix_vuln doc in the same state.
+        pair_conditions = [
+            {"host_name": h, "plugin_name": p} for h, p in pairs
+        ]
+        for coll_name in ("fix_vulnerabilities", "fix_vulnerabilities_closed"):
+            db[coll_name].update_many(
+                {"report_id": report_id, "$or": pair_conditions},
+                {"$addToSet": {"additional_teams": {"$each": team_list}}},
+            )
+
         logger.info(
             f"[UserDetailCreateView] role_assignments applied: {len(pairs)} finding(s) "
             f"layered onto team(s) {team_list} for admin_id={admin_id}"

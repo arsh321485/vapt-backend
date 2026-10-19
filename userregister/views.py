@@ -3187,8 +3187,19 @@ class UserRaiseSupportRequestAPIView(APIView):
                 )
 
             # ── Team validation ──────────────────────────────────────────────
+            # Real bug report: only ever checked assigned_team (always one
+            # of the 4 fixed teams) — a member belonging ONLY to a custom
+            # team this vulnerability was checkbox/manually assigned to
+            # (via additional_teams, not assigned_team) was wrongly denied
+            # permission to raise a support request on "their own"
+            # vulnerability at all.
             assigned_team = (vuln.get("assigned_team") or "").strip()
-            if assigned_team.lower() not in teams_lower_set:
+            extra_teams_for_vuln = vuln.get("additional_teams") or []
+            member_team = next(
+                (t for t in [assigned_team, *extra_teams_for_vuln] if t and t.lower() in teams_lower_set),
+                None,
+            )
+            if not member_team:
                 return Response(
                     {"detail": "You do not have permission to raise a support request for this vulnerability"},
                     status=status.HTTP_403_FORBIDDEN,
@@ -3259,6 +3270,26 @@ class UserRaiseSupportRequestAPIView(APIView):
                         f"{support_doc.get('host_name')} (Step {step_number}) has been submitted successfully."
                     )
                     create_notification(admin_user, 'user', 'support_request_received', _user_title, _user_msg, _n_meta, recipient_email=request.user.email)
+
+                    # Real bug report: a vulnerability genuinely owned by
+                    # MORE than one team at once (assigned_team PLUS
+                    # additional_teams — a custom team checkbox/manually
+                    # assigned to it, see AssignTeamAPIView and
+                    # users_details.views._apply_role_assignments_to_cards)
+                    # only ever notified assigned_team's own channel here
+                    # — the custom team never heard about a support
+                    # request on "its own" vulnerability. Tell every OTHER
+                    # team genuinely holding this finding too.
+                    _extra_teams = [
+                        t for t in (vuln.get("additional_teams") or [])
+                        if t and t != assigned_team
+                    ]
+                    if _extra_teams:
+                        from notifications.utils import notify_team_channels
+                        notify_team_channels(
+                            admin_user, _extra_teams, 'support_request_received',
+                            _user_title, _user_msg, _n_meta,
+                        )
                 else:
                     _log.getLogger(__name__).warning("support_request notification skipped: admin_user is None for user %s", request.user.email)
             except Exception as _e:

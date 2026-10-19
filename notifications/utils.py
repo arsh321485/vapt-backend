@@ -732,3 +732,65 @@ def _bust_notif_cache(admin_id, recipient_type, recipient_email):
             cache.delete(f"notif_user_list_{admin_id}_{email}")
     except Exception:
         logger.exception("[Notify] _bust_notif_cache failed")
+
+
+def notify_team_channels(admin, team_names, notif_type, title, message, metadata=None):
+    """
+    Posts into EACH of the given teams' own Slack/Teams channels only —
+    no DM, no admin channel, no in-app bell record (create_notification
+    already made exactly one of those for the vulnerability's PRIMARY
+    team; this is purely the "also tell these other teams" supplement).
+
+    Real bug report: a vulnerability genuinely owned by more than one
+    team at once (assigned_team PLUS one or more additional_teams — see
+    vulnerability_cards' own docstring) only ever notified its single
+    assigned_team's channel when a support request was raised against
+    it — a custom team the vulnerability was ALSO checkbox/manually
+    assigned to never heard about it at all, even though every other
+    team genuinely holding that same vulnerability did. Called once with
+    every team BEYOND the one create_notification's own metadata.
+    assigned_team already covered.
+    """
+    if not team_names:
+        return
+    try:
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        admin_user = admin if not isinstance(admin, str) else User.objects.filter(id=admin).first()
+        if not admin_user:
+            return
+
+        # Slack
+        token = getattr(admin_user, "slack_bot_token", None)
+        if token:
+            card_builder = _NOTIF_CARD_BUILDERS.get(notif_type)
+            if card_builder:
+                blocks, fallback_text, color = card_builder(title, message, metadata)
+            else:
+                blocks, fallback_text, color = _build_notification_blocks(title, message)
+            for team_name in team_names:
+                channel_name = _resolve_team_slack_channel(team_name, admin_user)
+                if channel_name:
+                    _slack_channel_post(token, channel_name, blocks, fallback_text, color)
+
+        # Teams
+        team_id = getattr(admin_user, "ms_team_id", None)
+        if team_id:
+            from teams_bot import bot_api
+            from teams_bot.cards import _card
+            from teams_bot.conversation_store import get_team_channel_reference, get_sub_channel_id
+            ref = get_team_channel_reference(team_id)
+            service_url = ref.get("service_url") if ref else None
+            if service_url:
+                builder = _teams_notification_body(notif_type, title, message)
+                body = builder(title, message, metadata) if builder else [
+                    {"type": "TextBlock", "text": f"🔔 {title}"[:150], "weight": "Bolder", "size": "Medium", "wrap": True},
+                    {"type": "TextBlock", "text": message, "wrap": True, "spacing": "Small"},
+                ]
+                message_obj = bot_api.card_message(_card(body))
+                for team_name in team_names:
+                    channel_id = get_sub_channel_id(team_id, team_name)
+                    if channel_id:
+                        bot_api.send_activity(service_url, channel_id, message_obj)
+    except Exception:
+        logger.exception("[Notify] notify_team_channels failed")
