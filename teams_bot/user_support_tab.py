@@ -77,7 +77,13 @@ def list_support_requests(admin, member_user, team_name, offset=0):
     from vaptfix.mongo_client import MongoContext
 
     report_id = fix._fetch_team_data(member_user, team_name).get("report_id")
-    query = {"assigned_team": team_name}
+    # Real bug report: matched assigned_team alone — a request genuinely
+    # ALSO owned by this custom team (additional_teams, written by
+    # userregister.views.UserRaiseSupportRequestAPIView) never showed up
+    # in that team's own Support Status tab at all, even for the member
+    # who raised it, since assigned_team is always one of the 4 fixed
+    # teams.
+    query = {"$or": [{"assigned_team": team_name}, {"additional_teams": team_name}]}
     if report_id:
         query["report_id"] = str(report_id)
     with MongoContext() as db:
@@ -120,7 +126,13 @@ def view_body(admin, member_user, team_name, idx, back_offset=0):
     from vaptfix.mongo_client import MongoContext
 
     report_id = fix._fetch_team_data(member_user, team_name).get("report_id")
-    query = {"assigned_team": team_name}
+    # Real bug report: matched assigned_team alone — a request genuinely
+    # ALSO owned by this custom team (additional_teams, written by
+    # userregister.views.UserRaiseSupportRequestAPIView) never showed up
+    # in that team's own Support Status tab at all, even for the member
+    # who raised it, since assigned_team is always one of the 4 fixed
+    # teams.
+    query = {"$or": [{"assigned_team": team_name}, {"additional_teams": team_name}]}
     if report_id:
         query["report_id"] = str(report_id)
     with MongoContext() as db:

@@ -3495,6 +3495,13 @@ class SupportRequestByReportAPIView(APIView):
                     "host_name": doc.get("host_name"),
                     "severity": severity,
                     "assigned_team": doc.get("assigned_team"),
+                    # Real bug report: never returned at all — a request
+                    # genuinely also owned by a custom team (see
+                    # userregister.views.UserRaiseSupportRequestAPIView,
+                    # which writes this) was invisible to that team's own
+                    # filter pill in teams_bot.reminder_tab, even though
+                    # the document itself already had the data.
+                    "additional_teams": doc.get("additional_teams") or [],
                     "assigned_team_members": doc.get("assigned_team_members", []),
                     # "steps": doc.get("steps", []),
                     # Real bug report: "step_requested" was never actually
