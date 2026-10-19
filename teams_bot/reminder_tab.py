@@ -320,7 +320,13 @@ def support_list_body(admin, st="all", team="all", offset=0):
     for i, r in enumerate(page):
         name = r.get("vul_name") or "General Request"
         host = r.get("host_name") or "—"
-        team_name = r.get("assigned_team") or "—"
+        # Real bug report: "team testing" filter pill correctly found
+        # this request (via additional_teams), but the row itself still
+        # only ever showed the primary assigned_team — showing "Network
+        # Security" even while filtered to "team testing" looked like
+        # the filter wasn't really working. Show every team this request
+        # genuinely belongs to.
+        team_name = ", ".join(t for t in [r.get("assigned_team")] + (r.get("additional_teams") or []) if t) or "—"
         requester = r.get("requested_by") or "Unknown"
         when = str(r.get("requested_at") or "")[:10]
         st_val = (r.get("status") or "open").strip().lower()
@@ -352,7 +358,7 @@ def support_detail_body(admin, idx, st="all", team="all", back_offset=0):
         "facts": [
             {"title": "Status", "value": st_label},
             {"title": "Asset", "value": str(r.get("host_name") or "—")},
-            {"title": "Team", "value": str(r.get("assigned_team") or "—")},
+            {"title": "Team", "value": ", ".join(t for t in [r.get("assigned_team")] + (r.get("additional_teams") or []) if t) or "—"},
             {"title": "Requested By", "value": str(r.get("requested_by") or "—")},
             {"title": "Requested At", "value": str(r.get("requested_at") or "—")[:16].replace("T", " ")},
         ],
