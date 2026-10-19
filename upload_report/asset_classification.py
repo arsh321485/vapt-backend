@@ -117,10 +117,25 @@ _SERVER_SOFTWARE_KEYWORDS = [
 # Associated Weak Cipher Suites", "Weak SSH Configuration (Weak MAC
 # Algorithms Enabled)") that real classification feedback said must count
 # as "server", not inherit whatever the host's overall type is.
+#
+# Real bug report: "cipher suite"/"weak cipher" forced EVERY host to
+# "server" for a cipher-suite finding (e.g. "SSL Medium Strength Cipher
+# Suites Supported (SWEET32)") regardless of the host's own real type —
+# including a host with a deliberate, manual classify_finding_type
+# override (category_overrides) to "web_app". Unlike ssh/ftp/telnet/
+# rdp/smb/snmp (genuinely infrastructure-service-specific — a web app
+# itself is never "the SSH service"), a TLS cipher-suite weakness is a
+# transport-layer property any host can have regardless of what runs on
+# top of it, same reasoning that already applies to the sibling "tls
+# 1.0"/"tls 1.1" entries below not matching this report's actual finding
+# title ("TLS Version 1.0 Protocol Detection" has no "tls 1.0" substring
+# — "version" sits in between — so it already correctly falls through to
+# the host's own type). Removed so a cipher-suite finding does the same:
+# respects the host's own classification instead of forcing "server".
 _SERVER_FINDING_KEYWORDS = [
     "ssh", "openssh", "terrapin", "zookeeper", "kafka", "ftp", "telnet",
-    "rdp", "remote desktop", "smb", "samba", "snmp", "cipher suite",
-    "weak cipher", "tls 1.0", "tls 1.1", "sslv2", "sslv3", "ssl 2.0", "ssl 3.0",
+    "rdp", "remote desktop", "smb", "samba", "snmp",
+    "tls 1.0", "tls 1.1", "sslv2", "sslv3", "ssl 2.0", "ssl 3.0",
     "weak mac algorithm",
 ]
 
