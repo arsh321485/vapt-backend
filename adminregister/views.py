@@ -4701,10 +4701,21 @@ def _render_report_html(data):
             return "team-pill-architectural"
         return "team-pill-configuration"
 
+    def team_pills_cell(v):
+        # Real bug report: a vulnerability ALSO genuinely owned by a
+        # custom team (checkbox/manually assigned — additional_teams)
+        # only ever showed its single original assigned_team pill here.
+        # One pill per genuinely-owning team now, primary first.
+        teams = [v.get("assigned_team") or "Unassigned"] + list(v.get("additional_teams") or [])
+        return "".join(
+            f'<span class="team-pill {team_pill_class(t)}">{esc(t)}</span>'
+            for t in teams
+        )
+
     table_rows = "".join(
         f'<tr><td>{i + 1}</td><td class="vname">{esc(v.get("vulnerability_name"))}</td>'
         f'<td>{esc(v.get("assets"))}</td>'
-        f'<td><span class="team-pill {team_pill_class(v.get("assigned_team"))}">{esc(v.get("assigned_team") or "Unassigned")}</span></td>'
+        f'<td>{team_pills_cell(v)}</td>'
         f'<td><span class="sev-pill sev-{esc(v.get("risk_factor")).lower()}">{esc(v.get("risk_factor"))}</span></td>'
         f'<td>{esc((v.get("found_date") or "—")[:10] if v.get("found_date") else "—")}</td>'
         f'<td><span class="status-pill status-{esc(v.get("status")).lower().replace("/", "-")}">{esc(v.get("status"))}</span></td></tr>'

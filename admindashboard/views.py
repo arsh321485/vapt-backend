@@ -2363,8 +2363,8 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                 # ── card lookup ──────────────────────────────────────────────────
                 # Primary key: (plugin_name, host_name) for exact per-host match.
                 # Fallback key: plugin_name only (for cards with empty host_name).
-                card_by_host = {}   # (plugin_name, host_name) -> {assigned_team, found_date}
-                card_by_name = {}   # plugin_name -> {assigned_team, found_date} (fallback)
+                card_by_host = {}   # (plugin_name, host_name) -> {assigned_team, additional_teams, found_date}
+                card_by_name = {}   # plugin_name -> {assigned_team, additional_teams, found_date} (fallback)
                 for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id}):
                     vname = (card.get("vulnerability_name") or "").strip()
                     hname = (card.get("host_name") or "").strip()
@@ -2372,6 +2372,13 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                         continue
                     info = {
                         "assigned_team": (card.get("assigned_team") or "").strip(),
+                        # Real bug report: the downloadable report's own
+                        # "Detailed Vulnerability Log" showed only the
+                        # single original assigned_team — a vulnerability
+                        # ALSO genuinely owned by a custom team (checkbox/
+                        # manually assigned, see additional_teams) never
+                        # showed that team here at all.
+                        "additional_teams": [t for t in (card.get("additional_teams") or []) if t],
                         "found_date":    card.get("created_at"),
                     }
                     if hname:
@@ -2444,6 +2451,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             "assets":             h_name,
                             "port":               port,
                             "assigned_team":      assigned_team,
+                            "additional_teams":   info.get("additional_teams") or [],
                             "risk_factor":        risk_factor or "",
                             "found_date":         found_date.isoformat() if hasattr(found_date, "isoformat") else str(found_date) if found_date else None,
                             "status":             vuln_status,
@@ -2470,6 +2478,7 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                         "assets":             hname,
                         "port":               doc_c.get("port", ""),
                         "assigned_team":      assigned_team,
+                        "additional_teams":   info.get("additional_teams") or [],
                         "risk_factor":        risk_factor,
                         "found_date":         found_date.isoformat() if hasattr(found_date, "isoformat") else str(found_date) if found_date else None,
                         "status":             "closed",
