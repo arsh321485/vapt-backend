@@ -123,7 +123,7 @@ _SERVER_SOFTWARE_KEYWORDS = [
 # Suites Supported (SWEET32)") regardless of the host's own real type —
 # including a host with a deliberate, manual classify_finding_type
 # override (category_overrides) to "web_app". Unlike ssh/ftp/telnet/
-# rdp/smb/snmp (genuinely infrastructure-service-specific — a web app
+# rdp/snmp (genuinely infrastructure-service-specific — a web app
 # itself is never "the SSH service"), a TLS cipher-suite weakness is a
 # transport-layer property any host can have regardless of what runs on
 # top of it, same reasoning that already applies to the sibling "tls
@@ -132,9 +132,19 @@ _SERVER_SOFTWARE_KEYWORDS = [
 # — "version" sits in between — so it already correctly falls through to
 # the host's own type). Removed so a cipher-suite finding does the same:
 # respects the host's own classification instead of forcing "server".
+#
+# Real bug report (follow-up): "SMB Signing Not Required" had the exact
+# same problem — forced hosts 10.151.5.40/10.151.5.41 (both genuinely
+# "other" — confirmed on the Assets tab, no override, no OS/software
+# signal) to "server" for this one finding, same mismatch as SWEET32
+# above. "smb"/"samba" removed for the same reason: an SMB config
+# weakness is a network-protocol-level property a host can have no
+# matter what it's otherwise classified as, not a signal that the host
+# itself IS a dedicated server (unlike ssh/ftp/telnet/rdp, which this
+# report's own feedback confirmed should still force "server").
 _SERVER_FINDING_KEYWORDS = [
     "ssh", "openssh", "terrapin", "zookeeper", "kafka", "ftp", "telnet",
-    "rdp", "remote desktop", "smb", "samba", "snmp",
+    "rdp", "remote desktop", "snmp",
     "tls 1.0", "tls 1.1", "sslv2", "sslv3", "ssl 2.0", "ssl 3.0",
     "weak mac algorithm",
 ]
