@@ -1705,10 +1705,18 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                 plugin_severity = _build_plugin_severity_map(report_doc)
 
                 # Validate user has access to selected vulnerability in selected asset/team.
+                # Real bug report: only ever checked assigned_team (always
+                # one of the 4 fixed teams) — a member belonging ONLY to a
+                # custom team this card was checkbox/manually assigned to
+                # (additional_teams) was wrongly denied here, same gap as
+                # userregister.views.UserRaiseSupportRequestAPIView's own
+                # team validation fixed earlier today.
                 selected_card = None
+                member_extra_teams = []
                 for card in db[VULN_CARD_COLLECTION].find({"report_id": report_id, "host_name": asset, "vulnerability_name": vulnerability_name}):
                     team_name = (card.get("assigned_team") or "").strip()
-                    if not team_lookup.get(team_name.lower()):
+                    card_extra_teams = [t for t in (card.get("additional_teams") or []) if t and team_lookup.get(t.lower())]
+                    if not team_lookup.get(team_name.lower()) and not card_extra_teams:
                         continue
                     members = card.get("assigned_team_members") or []
                     if members:
@@ -1722,6 +1730,7 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                         if not is_assigned:
                             continue
                     selected_card = card
+                    member_extra_teams = card_extra_teams
                     break
 
                 if not selected_card:
@@ -1791,7 +1800,15 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                         "reason":             reason,
                         "report_id":          report_id,
                         "request_id":         str(result.inserted_id),
-                        "assigned_team":      payload["team_name"],
+                        # Real bug report: always showed the card's
+                        # original AI-classified team (e.g. "Network
+                        # Security") even when the member genuinely
+                        # raised this as a custom team they belong to
+                        # (member_extra_teams, from additional_teams) —
+                        # "jahan se raise ki wahi naam aana chahiye".
+                        # Shows every team this member and this finding
+                        # both genuinely belong to, not just the primary.
+                        "assigned_team":      ", ".join([payload["team_name"]] + member_extra_teams) if member_extra_teams else payload["team_name"],
                     }
                     create_notification(admin_user, 'admin', 'extension_requested', _n_title, _n_msg, _n_meta)
                 except Exception:

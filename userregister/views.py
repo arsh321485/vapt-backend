@@ -1742,10 +1742,18 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     )
 
                     try:
-                        from notifications.utils import create_notification
+                        from notifications.utils import create_notification, notify_team_channels
                         _vuln_name = fix_doc.get("plugin_name", "")
                         _asset     = fix_doc.get("host_name", "")
                         _team      = fix_doc.get("assigned_team", "")
+                        # Real bug report: a vulnerability genuinely owned
+                        # by more than one team at once (assigned_team
+                        # PLUS additional_teams, now also mirrored onto
+                        # this very doc — see AssignTeamAPIView /
+                        # _apply_role_assignments_to_cards) only ever
+                        # showed/notified its original fixed team here —
+                        # same gap already fixed for support requests.
+                        _extra_teams = [t for t in (fix_doc.get("additional_teams") or []) if t and t != _team]
                         _n_title = f"Vulnerability Closed: {_vuln_name[:80]}"
                         _n_msg   = (
                             f"All remediation steps completed for '{_vuln_name}' on {_asset}. "
@@ -1759,8 +1767,19 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                             "closed_by_name":       _closer_name,
                         }
                         if _admin_id_cache:
-                            create_notification(_admin_id_cache, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
+                            # Admin's own notice can show every genuinely-
+                            # owning team — no channel-routing dependency
+                            # on this field for the admin branch.
+                            _admin_meta = dict(_n_meta)
+                            if _extra_teams:
+                                _admin_meta["assigned_team"] = ", ".join([_team] + _extra_teams)
+                            create_notification(_admin_id_cache, 'admin', 'vuln_closed', _n_title, _n_msg, _admin_meta)
+                            # Keep _n_meta's single, real team name here —
+                            # this broadcast also resolves ONE team
+                            # channel to post into from this same field.
                             create_notification(_admin_id_cache, 'user', 'vuln_closed', _n_title, _n_msg, _n_meta)
+                            if _extra_teams:
+                                notify_team_channels(_admin_id_cache, _extra_teams, 'vuln_closed', _n_title, _n_msg, _n_meta)
                     except Exception:
                         pass  # nosec B110 - best-effort, intentionally non-fatal
 
@@ -1893,11 +1912,12 @@ class UserSendVerificationAPIView(APIView):
                         _clear_admin_dashboard_cache(_admin_id_retest)
 
                     try:
-                        from notifications.utils import create_notification
+                        from notifications.utils import create_notification, notify_team_channels
                         from users.models import User as _UserModel
                         _vuln_name = closed_doc.get("plugin_name", "")
                         _asset     = closed_doc.get("host_name", "")
                         _team      = closed_doc.get("assigned_team", "")
+                        _extra_teams = [t for t in (closed_doc.get("additional_teams") or []) if t and t != _team]
                         _requester_name = ""
                         try:
                             _rd = UserDetail.objects.filter(email=request.user.email).first() if UserDetail else None
@@ -1918,11 +1938,16 @@ class UserSendVerificationAPIView(APIView):
                             "fix_vulnerability_id": fix_vuln_id,
                             "requested_by":         _requester_name,
                         }
+                        _admin_meta = dict(_n_meta)
+                        if _extra_teams:
+                            _admin_meta["assigned_team"] = ", ".join([_team] + _extra_teams)
                         for _su in _UserModel.objects.filter(is_superuser=True):
-                            create_notification(str(_su.id), 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
+                            create_notification(str(_su.id), 'admin', 'vuln_verification_request', _n_title, _n_msg, _admin_meta)
                         if _admin_id_retest:
-                            create_notification(_admin_id_retest, 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
+                            create_notification(_admin_id_retest, 'admin', 'vuln_verification_request', _n_title, _n_msg, _admin_meta)
                             create_notification(_admin_id_retest, 'user', 'vuln_verification_request', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                            if _extra_teams:
+                                notify_team_channels(_admin_id_retest, _extra_teams, 'vuln_verification_request', _n_title, _n_msg, _n_meta)
                     except Exception:
                         pass  # nosec B110 - best-effort, intentionally non-fatal
 
@@ -2017,11 +2042,12 @@ class UserSendVerificationAPIView(APIView):
                 )
 
                 try:
-                    from notifications.utils import create_notification
+                    from notifications.utils import create_notification, notify_team_channels
                     from users.models import User as _UserModel
                     _vuln_name = fix_doc.get("plugin_name", "")
                     _asset     = fix_doc.get("host_name", "")
                     _team      = fix_doc.get("assigned_team", "")
+                    _extra_teams = [t for t in (fix_doc.get("additional_teams") or []) if t and t != _team]
                     _admin_id  = fix_doc.get("admin_id", "") or fix_doc.get("created_by", "")
                     _requester_name = ""
                     try:
@@ -2043,11 +2069,16 @@ class UserSendVerificationAPIView(APIView):
                         "fix_vulnerability_id": fix_vuln_id,
                         "requested_by":         _requester_name,
                     }
+                    _admin_meta = dict(_n_meta)
+                    if _extra_teams:
+                        _admin_meta["assigned_team"] = ", ".join([_team] + _extra_teams)
                     for _su in _UserModel.objects.filter(is_superuser=True):
-                        create_notification(str(_su.id), 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
+                        create_notification(str(_su.id), 'admin', 'vuln_verification_request', _n_title, _n_msg, _admin_meta)
                     if _admin_id:
-                        create_notification(_admin_id, 'admin', 'vuln_verification_request', _n_title, _n_msg, _n_meta)
+                        create_notification(_admin_id, 'admin', 'vuln_verification_request', _n_title, _n_msg, _admin_meta)
                         create_notification(_admin_id, 'user', 'vuln_verification_request', _n_title, _n_msg, _n_meta, recipient_email=request.user.email)
+                        if _extra_teams:
+                            notify_team_channels(_admin_id, _extra_teams, 'vuln_verification_request', _n_title, _n_msg, _n_meta)
                 except Exception:
                     pass  # nosec B110 - best-effort, intentionally non-fatal
 
