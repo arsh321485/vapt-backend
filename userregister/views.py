@@ -3235,6 +3235,13 @@ class UserRaiseSupportRequestAPIView(APIView):
                     {"detail": "You do not have permission to raise a support request for this vulnerability"},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+            # Every OTHER team this vulnerability genuinely belongs to
+            # (not just ones the raising member happens to be on) —
+            # stored on the request below so admin-side team filters
+            # (teams_bot.reminder_tab's Support pills) and anything else
+            # reading support_requests can find it under a custom team
+            # too, same additive pattern as Timeline Extension requests.
+            support_doc_extra_teams = [t for t in extra_teams_for_vuln if t and t != assigned_team]
 
             # ── Duplicate check: one request per step per user ───────────────
             existing = support_coll.find_one({
@@ -3258,6 +3265,7 @@ class UserRaiseSupportRequestAPIView(APIView):
                 "vul_name":              vuln.get("plugin_name"),
                 "host_name":             vuln.get("host_name"),
                 "assigned_team":         assigned_team,
+                "additional_teams":      support_doc_extra_teams,
                 "assigned_team_members": vuln.get("assigned_team_members", []),
                 "step_number":           step_number,
                 "description":           description,

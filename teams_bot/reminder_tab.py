@@ -47,6 +47,27 @@ _SUPPORT_TEAM_MATCH = {
 }
 
 
+def _support_team_filters_for_admin(admin):
+    """(options, code_to_name) — SUPPORT_TEAM_FILTERS plus this admin's
+    own custom teams, coded "custom:<team _id>" same scheme as team_tab.
+    _team_code_to_name_map. An admin's custom team never had a filter
+    pill here at all, so a support request genuinely raised through one
+    (or whose underlying vulnerability also carries it in
+    additional_teams) could only ever be found under "All Teams", never
+    isolated on its own. code_to_name is the single forward mapping
+    both the pill labels and _match_support_team resolve a code through
+    — built once per render rather than a second DB round trip to
+    reverse-resolve a clicked code back to a name."""
+    from users_details.models import CustomTeam
+    code_to_name = dict(_SUPPORT_TEAM_MATCH)
+    options = list(SUPPORT_TEAM_FILTERS)
+    for ct in CustomTeam.objects.filter(admin=admin):
+        code = f"custom:{ct._id}"
+        code_to_name[code] = ct.name.strip().lower()
+        options.append((code, ct.name[:14]))
+    return options, code_to_name
+
+
 def reminder_subnav_columnset(active_sub):
     # One row — see REMINDER_SUBTABS' own comment for the real-Teams-
     # testing status of this. Revert to cards.two_row_pill_columnset(
@@ -231,12 +252,21 @@ def _match_support_status(record, st_filter):
     return st == "closed"
 
 
-def _match_support_team(record, team_filter):
+def _match_support_team(record, team_filter, code_to_name=None):
     if team_filter == "all":
         return True
-    target = _SUPPORT_TEAM_MATCH.get(team_filter, "")
+    lookup = code_to_name if code_to_name is not None else _SUPPORT_TEAM_MATCH
+    target = lookup.get(team_filter, "")
+    if not target:
+        return False
     raw = (record.get("assigned_team") or "").strip().lower()
-    return raw == target or (target and target in raw)
+    if raw == target or target in raw:
+        return True
+    # Real bug report: a request whose underlying vulnerability is ALSO
+    # genuinely owned by a custom team (additional_teams, written by
+    # UserRaiseSupportRequestAPIView) never matched that team's own
+    # filter pill — only its original assigned_team ever did.
+    return any((t or "").strip().lower() == target for t in (record.get("additional_teams") or []))
 
 
 def _fetch_support_requests(admin):
@@ -256,13 +286,14 @@ def _fetch_support_requests(admin):
 
 def support_list_body(admin, st="all", team="all", offset=0):
     raw = _fetch_support_requests(admin)
+    team_options, code_to_name = _support_team_filters_for_admin(admin)
 
     st_counts = {
-        "all": len([r for r in raw if _match_support_team(r, team)]),
-        "open": sum(1 for r in raw if _match_support_team(r, team) and _match_support_status(r, "open")),
-        "closed": sum(1 for r in raw if _match_support_team(r, team) and _match_support_status(r, "closed")),
+        "all": len([r for r in raw if _match_support_team(r, team, code_to_name)]),
+        "open": sum(1 for r in raw if _match_support_team(r, team, code_to_name) and _match_support_status(r, "open")),
+        "closed": sum(1 for r in raw if _match_support_team(r, team, code_to_name) and _match_support_status(r, "closed")),
     }
-    filtered = [r for r in raw if _match_support_status(r, st) and _match_support_team(r, team)]
+    filtered = [r for r in raw if _match_support_status(r, st) and _match_support_team(r, team, code_to_name)]
     total = len(filtered)
     page = filtered[offset:offset + PAGE_SIZE]
 
@@ -273,8 +304,13 @@ def support_list_body(admin, st="all", team="all", offset=0):
             [(k, f"{label} {st_counts.get(k, 0)}") for k, label in SUPPORT_STATUS_FILTERS], st,
             lambda k: {"action_id": "remind_sup_filter", "st": k, "team": team, "offset": 0},
         ),
-        cards.pill_columnset(
-            SUPPORT_TEAM_FILTERS, team,
+        # Real bug report: pill_columnset's single ColumnSet row is a
+        # tested-good fit for the original fixed 5 options — an admin
+        # with several custom teams now appended here would overflow it
+        # badly. two_row_pill_columnset is this codebase's own existing
+        # fix for "too many pills for one row" (see its own docstring).
+        cards.two_row_pill_columnset(
+            team_options, team,
             lambda k: {"action_id": "remind_sup_filter", "st": st, "team": k, "offset": 0},
         ),
     ]
@@ -300,7 +336,8 @@ def support_list_body(admin, st="all", team="all", offset=0):
 
 def support_detail_body(admin, idx, st="all", team="all", back_offset=0):
     raw = _fetch_support_requests(admin)
-    filtered = [r for r in raw if _match_support_status(r, st) and _match_support_team(r, team)]
+    _, code_to_name = _support_team_filters_for_admin(admin)
+    filtered = [r for r in raw if _match_support_status(r, st) and _match_support_team(r, team, code_to_name)]
 
     body = [fix_tab._back_action("← Back to Support Requests", "remind_sup_back", {"st": st, "team": team, "offset": back_offset})]
     if idx is None or idx < 0 or idx >= len(filtered):
