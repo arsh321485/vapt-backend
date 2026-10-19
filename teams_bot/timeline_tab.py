@@ -35,7 +35,11 @@ def _fetch_requests(admin):
 
 
 def _row_subtitle(r):
-    team = r.get("requested_by") or "Unknown"
+    # Real bug report: showed only requested_by (the single original
+    # team) — a request genuinely ALSO raised through a custom team
+    # (all_teams, see AdminMitigationTimelineExtensionReportAPIView's
+    # own comment) never showed that team here at all.
+    team = ", ".join(r.get("all_teams") or [r.get("requested_by") or "Unknown"])
     days = r.get("extension_days", 0)
     reason = r.get("reason") or "—"
     return f"Team: {team}   ·   +{days} days   ·   Reason: {reason}"
@@ -164,7 +168,7 @@ def history_detail_body(admin, request_id, view="approve", back_offset=0):
         "type": "FactSet",
         "facts": [
             {"title": "Status", "value": st_label},
-            {"title": "Team", "value": str(r.get("requested_by") or "—")},
+            {"title": "Team", "value": ", ".join(r.get("all_teams") or [r.get("requested_by") or "—"])},
             # Real bug report: "Team" alone doesn't say WHO on the team
             # actually asked — requested_by_email is the real submitter,
             # already stored at request-creation time, now also returned

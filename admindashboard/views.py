@@ -851,7 +851,10 @@ class AdminMitigationTimelineExtensionReportAPIView(APIView):
                     if not severity_key:
                         continue
                     team_name = (doc.get("team_name") or "").strip()
-                    if team_filter and team_name.lower() != team_filter:
+                    _doc_extra_teams = [t for t in (doc.get("additional_teams") or []) if t]
+                    if team_filter and team_name.lower() != team_filter and not any(
+                        t.lower() == team_filter for t in _doc_extra_teams
+                    ):
                         continue
                     if severity_filter and severity_key != severity_filter:
                         continue
@@ -865,6 +868,14 @@ class AdminMitigationTimelineExtensionReportAPIView(APIView):
                         "vul_name": doc.get("vulnerability_name"),
                         "status": doc.get("status", "review"),
                         "requested_by": doc.get("team_name"),
+                        # Real bug report: a request genuinely ALSO raised
+                        # through a custom team (additional_teams, see
+                        # UserMitigationTimelineExtensionCreateAPIView's
+                        # own comment) only ever showed its original fixed
+                        # team here. Every genuinely-owning team, same
+                        # all_teams shape the user-side report view
+                        # already returns.
+                        "all_teams": [team_name] + [t for t in _doc_extra_teams if t != team_name],
                         # Same fields added to the user-side report view —
                         # kept consistent so admin can see who actually
                         # submitted it (not just which team) and their own

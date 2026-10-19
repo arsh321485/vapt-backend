@@ -1496,10 +1496,20 @@ def _combined_common_vulns_team(grouped):
     # correctly under its real team (config/pm/ns/af), and again from the
     # "all" bucket itself, mislabeled "Team: All Teams" — exactly the
     # duplicate rows seen in the Common Vulnerabilities > All Teams list.
+    #
+    # Real bug report: once _group_common_vulns_by_team started also
+    # returning a bucket per CUSTOM team, this loop started double-
+    # counting too — a vuln genuinely owned by both its original fixed
+    # team AND a custom team (additional_teams is additive, never a
+    # replacement) appeared under BOTH of those buckets here, so it got
+    # added twice. Only the 4 fixed team buckets are combined into "All
+    # Teams" — same scope _group_common_vulns_by_team's own "all" key
+    # already uses, for the same reason.
+    _fixed_keys = {k for k, _ in cards.COMMON_VULNS_TEAMS if k != "all"}
     all_vulns = []
     totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for key, team in (grouped or {}).items():
-        if key == "all":
+        if key not in _fixed_keys:
             continue
         for v in team.get("vulns") or []:
             tagged = dict(v)
@@ -1511,14 +1521,17 @@ def _combined_common_vulns_team(grouped):
     return {"display_name": "All Teams", "severity": totals, "vulns": all_vulns}
 
 
-def common_vulns_list_body(admin, team_key="all", sev="all", st="all", offset=0, prefix="fix_common"):
+def common_vulns_list_body(admin, team_key="all", sev="all", st="all", offset=0, prefix="fix_common", grouped=None):
     """`prefix` lets the user (member) side reuse this exact function with
     its own "ufix_common_*" action-id family instead of admin's "fix_common_*"
     — the member-side dispatcher (user_actions.py's _FIX_ACTION_IDS) only
     recognizes the "ufix_"-prefixed ones, so passing admin's default here
     for a member card would leave every pagination/filter click on it
-    unrecognized."""
-    grouped = _fetch_common_vulns_grouped(admin)
+    unrecognized. `grouped` lets a caller that already fetched it (e.g.
+    fix_tab_body, to also build the team filter row) pass it straight
+    through instead of a second, redundant fetch."""
+    if grouped is None:
+        grouped = _fetch_common_vulns_grouped(admin)
     if team_key == "all":
         team = _combined_common_vulns_team(grouped)
     else:
@@ -1679,8 +1692,21 @@ def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="all"
         if active_sub == "fix_sub_vulns":
             body.extend(grouped_vulns_list_body(admin, cls=cls, offset=offset))
         elif active_sub == "fix_sub_common":
-            body.append(cards._common_vulns_team_columnset(common_team))
-            body.extend(common_vulns_list_body(admin, team_key=common_team, sev=sev, st=st, offset=offset))
+            # Real bug report: cards._common_vulns_team_columnset only
+            # ever rendered the 4 fixed teams (COMMON_VULNS_TEAMS is a
+            # hardcoded module constant) — a custom team's own bucket
+            # already exists in the grouped data (see
+            # _group_common_vulns_by_team) but never got a filter pill
+            # here. Fetch once, build the pill row from it, and pass it
+            # straight through to common_vulns_list_body instead of a
+            # second, redundant fetch.
+            grouped = _fetch_common_vulns_grouped(admin)
+            _ordered_keys = ["all"] + [k for k in grouped.keys() if k != "all"]
+            team_options = [(k, grouped.get(k, {}).get("display_name") or k) for k in _ordered_keys]
+            body.append(cards.pill_columnset(
+                team_options, common_team, lambda k: {"action_id": "fix_common_team", "team": k},
+            ))
+            body.extend(common_vulns_list_body(admin, team_key=common_team, sev=sev, st=st, offset=offset, grouped=grouped))
         else:
             body.extend(assets_list_body(admin, sev=sev, st=st, cls=cls, offset=offset))
     except Exception:

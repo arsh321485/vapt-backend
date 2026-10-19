@@ -13882,9 +13882,14 @@ class SlackSlashCommandView(APIView):
 
     def _team_fix_subtab_blocks(self, sub_action_id, team_id, user_id, vapt_team, sev_filter="all", st_filter="all", offset=0, class_filter="all"):
         if sub_action_id == "tfix_sub_common":
-            team_key = next(
-                (k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "config",
-            )
+            # Real bug report: reverse-looking-up vapt_team through
+            # _COMMON_TEAM_KEY_TO_NAME (only the 4 fixed teams) silently
+            # fell back to "config" for a custom team — a custom team's
+            # own Common Vulnerabilities sub-tab showed Configuration
+            # Management's data by default, not its own. Use the same
+            # deterministic key _group_common_vulns_by_team itself
+            # assigns a custom team.
+            team_key = self._common_team_key_for_name(vapt_team)
             allowed_teams = self._resolve_member_teams(vapt_team, team_id, user_id)
             section = self._common_vulns_tab_blocks(
                 team_id, user_id, team_key=team_key, offset=offset, allowed_teams=allowed_teams,
@@ -15488,8 +15493,18 @@ class SlackSlashCommandView(APIView):
         data = self._fetch_support_report_data(team_id, user_id)
         if not data or data.get("detail"):
             return []
-        team_key = next((k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "")
-        raw_results = [r for r in (data.get("results") or []) if self._match_support_team_filter(r, team_key)]
+        # Real bug report: same gap as _format_team_support_tab (now
+        # fixed) — reverse-looking-up vapt_team through _COMMON_TEAM_
+        # KEY_TO_NAME (the wrong dict even for a fixed team's own short
+        # code, and never matches a custom team's name at all) returned
+        # "" for a custom team, which _match_support_team_filter then
+        # matched against nothing. Match directly by name instead.
+        _vt = self._normalize_support_team(vapt_team)
+        raw_results = [
+            r for r in (data.get("results") or [])
+            if self._normalize_support_team(r.get("assigned_team")) == _vt
+            or any(self._normalize_support_team(t) == _vt for t in (r.get("additional_teams") or []))
+        ]
         return self._assign_severity_short_ids([
             dict(r, severity=self._resolve_support_row_severity(r) or r.get("severity", ""))
             for r in raw_results
@@ -17444,6 +17459,30 @@ class SlackSlashCommandView(APIView):
             "vulns": vulns,
         }
 
+    def _common_team_key_for_name(self, name):
+        """Safe action-value key for ANY team name — one of _COMMON_TEAM_
+        KEY_TO_NAME's existing short codes for a fixed team, or a
+        deterministic "custom:<hash>" for anything else. A custom team's
+        name is admin-typed free text and could contain characters (e.g.
+        "|") that collide with this feature's own value-splitting
+        conventions (VT markers, "key|offset" pagination values, etc.), so
+        it's never used as the raw key itself."""
+        for k, v in self._COMMON_TEAM_KEY_TO_NAME.items():
+            if v == name:
+                return k
+        import hashlib
+        return "custom:" + hashlib.md5(name.encode()).hexdigest()[:12]
+
+    def _is_valid_common_team_key(self, key):
+        """True for one of the 4 fixed short codes (+ "all") or a
+        _common_team_key_for_name-shaped "custom:<hash>" key. Every
+        Common Vulns action handler that parses a team_key back out of a
+        button value validates it this way before trusting it — a custom
+        team's key was previously never recognized by any of them (they
+        only checked membership in the static _COMMON_TEAM_KEY_TO_NAME
+        dict), silently redirecting every click to "config" instead."""
+        return bool(key) and (key in self._COMMON_TEAM_KEY_TO_NAME or key.startswith("custom:"))
+
     def _group_common_vulns_by_team(self, data):
         """
         Transform by-team API flat rows into:
@@ -17453,10 +17492,22 @@ class SlackSlashCommandView(APIView):
         from every real team's rows combined, same grouping/sorting as a
         single team so it reads as one coherent list rather than four
         stapled together.
+
+        Real bug report: a custom team's own bucket already exists in the
+        backend response (adminmitigationstrategy.views.
+        MitigationStrategyByTeamAPIView includes one per CustomTeam, with
+        genuinely-assigned rows via additional_teams) but this only ever
+        iterated the 4 fixed team keys — a custom team's rows were right
+        there in `data` and never read. Added below, keyed via
+        _common_team_key_for_name. Deliberately NOT folded into "all"'s
+        combined rows — every custom-team row is additive on top of an
+        already-counted fixed-team row (additional_teams never replaces
+        assigned_team), so including it there would double-count it.
         """
         teams_raw = (data or {}).get("teams") or {}
         result = {}
         all_rows = []
+        covered_names = set()
         for key, display_name in self._COMMON_TEAM_KEY_TO_NAME.items():
             if key == "all":
                 continue  # built last, from every other team's rows combined
@@ -17464,13 +17515,24 @@ class SlackSlashCommandView(APIView):
             rows = bucket.get("vulnerabilities") or []
             all_rows.extend(rows)
             result[key] = self._build_common_vuln_team_entry(display_name, rows)
+            covered_names.add(display_name)
+        for display_name, bucket in teams_raw.items():
+            if display_name in covered_names or display_name == "Unassigned":
+                continue
+            rows = bucket.get("vulnerabilities") or []
+            key = self._common_team_key_for_name(display_name)
+            result[key] = self._build_common_vuln_team_entry(display_name, rows)
         result["all"] = self._build_common_vuln_team_entry(
             self._COMMON_TEAM_KEY_TO_NAME["all"], all_rows
         )
         return result
 
     def _default_common_team_key(self, grouped, allowed_keys=None):
-        keys = [k for k, _ in self._COMMON_TEAM_FILTERS if allowed_keys is None or k in allowed_keys]
+        # Real bug report: only ever considered the 4 fixed keys (+ "all")
+        # — grouped now also carries one entry per custom team (see
+        # _group_common_vulns_by_team), so build the candidate list from
+        # grouped itself instead of the static _COMMON_TEAM_FILTERS list.
+        keys = [k for k in grouped.keys() if allowed_keys is None or k in allowed_keys]
         # Real request: land on the "All Teams" overview by default instead
         # of whichever single real team happened to be first (in filter
         # order) with a nonzero common-vuln count — that used to put
@@ -17552,9 +17614,19 @@ class SlackSlashCommandView(APIView):
         grouped = self._group_common_vulns_by_team(data)
         allowed_keys = None
         if allowed_teams is not None:
+            # Real bug report: built purely from _COMMON_TEAM_KEY_TO_NAME
+            # (the 4 fixed teams) — a member whose allowed_teams was a
+            # custom team's name never matched anything here, so
+            # allowed_keys came back empty and they couldn't see Common
+            # Vulns for their own team at all. grouped now has an entry
+            # (with its own real display_name) for every team, fixed or
+            # custom — match against that instead.
             allowed_lower = {t.strip().lower() for t in allowed_teams}
-            allowed_keys = {k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v.strip().lower() in allowed_lower}
-        if not team_key or team_key not in self._COMMON_TEAM_KEY_TO_NAME or (allowed_keys is not None and team_key not in allowed_keys):
+            allowed_keys = {
+                k for k, v in grouped.items()
+                if k != "all" and (v.get("display_name") or "").strip().lower() in allowed_lower
+            }
+        if not team_key or team_key not in grouped or (allowed_keys is not None and team_key not in allowed_keys):
             team_key = self._default_common_team_key(grouped, allowed_keys=allowed_keys)
         return self._format_common_vulns_tab(grouped, team_key=team_key, offset=offset, allowed_keys=allowed_keys)
 
@@ -17585,9 +17657,18 @@ class SlackSlashCommandView(APIView):
         # Team filter row — full team names, no counts. Restricted to
         # allowed_keys when set (team-channel access), so a member can only
         # ever pick their own assigned team(s), never another team's.
+        #
+        # Real bug report: built from the static _COMMON_TEAM_FILTERS (4
+        # fixed teams only) — grouped now carries an entry per custom team
+        # too (see _group_common_vulns_by_team), so a custom team never
+        # got a filter button here even though its data was one click
+        # away. "all" ordered first (same as _COMMON_TEAM_FILTERS always
+        # did), skipped entirely when allowed_keys restricts to real teams
+        # only (team-channel access — a member never sees the aggregate).
+        _ordered_keys = ["all"] + [k for k in grouped.keys() if k != "all"]
         visible_filters = [
-            (k, label) for k, label in self._COMMON_TEAM_FILTERS
-            if allowed_keys is None or k in allowed_keys
+            (k, grouped.get(k, {}).get("display_name") or k) for k in _ordered_keys
+            if (k == "all" and allowed_keys is None) or (k != "all" and (allowed_keys is None or k in allowed_keys))
         ]
         blocks.append({
             "type": "actions",
@@ -17871,7 +17952,7 @@ class SlackSlashCommandView(APIView):
         origin_tag = None
         if len(parts) >= 6 and parts[1] == "common":
             common_ctx = {
-                "team_key": parts[2] if parts[2] in self._COMMON_TEAM_KEY_TO_NAME else "config",
+                "team_key": parts[2] if self._is_valid_common_team_key(parts[2]) else "config",
                 "vuln_idx": int(parts[3]) if parts[3].isdigit() else 0,
                 "list_offset": int(parts[4]) if parts[4].isdigit() else 0,
                 "assets_offset": int(parts[5]) if parts[5].isdigit() else 0,
@@ -18092,7 +18173,10 @@ class SlackSlashCommandView(APIView):
             f"*Severity:* {icon} {(r.get('severity') or '—').title()}",
             f"*Requested Extension:* +{r.get('extension_days', 0)} day(s)",
             f"*Status:* {status_label}",
-            f"*Requested By:* {r.get('requested_by') or '—'}"
+            # "Requested By" here is really the TEAM (requested_by_email
+            # is the actual person) — real bug report: showed only the
+            # single original team; now every genuinely-owning team.
+            f"*Requested By:* {', '.join(r.get('all_teams') or [r.get('requested_by') or '—'])}"
             + (f" ({r.get('requested_by_email')})" if r.get("requested_by_email") else ""),
             f"*Requested On:* {(r.get('request_date') or '—')[:10] if r.get('request_date') else '—'}",
         ]
@@ -21307,7 +21391,12 @@ class SlackSlashCommandView(APIView):
             return blocks + self._text_block("✅ No pending extension requests — all caught up.")
         for r in results[:8]:
             sid   = r.get("short_id", "?")
-            team  = r.get("requested_by") or "Unknown"
+            # Real bug report: showed only requested_by (the single
+            # original team) — a request genuinely ALSO raised through a
+            # custom team (all_teams, see
+            # AdminMitigationTimelineExtensionReportAPIView's own
+            # comment) never showed that team here at all.
+            team  = ", ".join(r.get("all_teams") or [r.get("requested_by") or "Unknown"])
             vuln  = r.get("vul_name") or "Unknown"
             sev   = (r.get("severity") or "").capitalize()
             days  = r.get("extension_days", 0)
@@ -25312,7 +25401,7 @@ class SlackInteractivityView(APIView):
             if action_id.startswith("fix_common_team_"):
                 value, vt_team = slash._split_vt_marker(value)
                 parts = value.split("|")
-                team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else action_id.replace("fix_common_team_", "")
+                team_key = parts[0] if parts and slash._is_valid_common_team_key(parts[0]) else action_id.replace("fix_common_team_", "")
                 page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 allowed_teams = slash._resolve_member_teams(vt_team, team_id, slack_user_id) if vt_team else None
                 section = slash._common_vulns_tab_blocks(
@@ -25339,7 +25428,7 @@ class SlackInteractivityView(APIView):
             if action_id.startswith("fix_common_list_pg_"):
                 value, vt_team = slash._split_vt_marker(value)
                 parts = value.split("|")
-                team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                team_key = parts[0] if parts and slash._is_valid_common_team_key(parts[0]) else "config"
                 page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 allowed_teams = slash._resolve_member_teams(vt_team, team_id, slack_user_id) if vt_team else None
                 section = slash._common_vulns_tab_blocks(
@@ -25366,7 +25455,7 @@ class SlackInteractivityView(APIView):
             if action_id == "fix_common_back":
                 value, vt_team = slash._split_vt_marker(value)
                 parts = value.split("|")
-                team_key = parts[0] if parts and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                team_key = parts[0] if parts and slash._is_valid_common_team_key(parts[0]) else "config"
                 page_offset = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 allowed_teams = slash._resolve_member_teams(vt_team, team_id, slack_user_id) if vt_team else None
                 section = slash._common_vulns_tab_blocks(
@@ -25395,7 +25484,7 @@ class SlackInteractivityView(APIView):
                 # team_key|vuln_idx|list_offset (no filter applied yet).
                 value, vt_team = slash._split_vt_marker(value)
                 parts = value.split("|")
-                team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                team_key = parts[0] if len(parts) > 0 and slash._is_valid_common_team_key(parts[0]) else "config"
                 vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                 data = slash._fetch_common_vulns_data(team_id, slack_user_id)
@@ -25430,7 +25519,7 @@ class SlackInteractivityView(APIView):
                 parts = value.split("|")
                 if action_id.startswith("fix_common_assets_pg_"):
                     # value: team_key|vuln_idx|list_offset|sev_filter|st_filter|assets_offset
-                    team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                    team_key = parts[0] if len(parts) > 0 and slash._is_valid_common_team_key(parts[0]) else "config"
                     vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                     list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                     sev_filter = parts[3] if len(parts) > 3 and parts[3] else "all"
@@ -25443,7 +25532,7 @@ class SlackInteractivityView(APIView):
                     sev_filter = parts[0] if len(parts) > 0 and parts[0] else "all"
                     st_filter = parts[1] if len(parts) > 1 and parts[1] else "all"
                     assets_offset = 0
-                    team_key = parts[3] if len(parts) > 3 and parts[3] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                    team_key = parts[3] if len(parts) > 3 and slash._is_valid_common_team_key(parts[3]) else "config"
                     vuln_idx = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
                     list_offset = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
                 data = slash._fetch_common_vulns_data(team_id, slack_user_id)
@@ -25474,7 +25563,7 @@ class SlackInteractivityView(APIView):
                 # value: team_key|vuln_idx|list_offset|assets_offset|host|sev_filter|st_filter[|VT:<team>]
                 value, vt_team = slash._split_vt_marker(value)
                 parts = value.split("|")
-                team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                team_key = parts[0] if len(parts) > 0 and slash._is_valid_common_team_key(parts[0]) else "config"
                 vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                 assets_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
@@ -25542,7 +25631,7 @@ class SlackInteractivityView(APIView):
                 # value: team_key|vuln_idx|list_offset|assets_offset|sev_filter|st_filter
                 value, vt_team = slash._split_vt_marker(value)
                 parts = value.split("|")
-                team_key = parts[0] if len(parts) > 0 and parts[0] in slash._COMMON_TEAM_KEY_TO_NAME else "config"
+                team_key = parts[0] if len(parts) > 0 and slash._is_valid_common_team_key(parts[0]) else "config"
                 vuln_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 list_offset = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                 assets_offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0

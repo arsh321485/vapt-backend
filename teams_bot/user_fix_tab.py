@@ -42,6 +42,21 @@ UFIX_SUBTABS = [
 _TEAM_NAME_TO_COMMON_KEY = {v: k for k, v in _cards_mod.COMMON_VULNS_TEAMS}
 
 
+def _common_team_key_for_team_name(team_name):
+    """Real bug report: _TEAM_NAME_TO_COMMON_KEY only maps the 4 fixed
+    teams — every call site below fell back to "config" for a custom
+    team, showing Configuration Management's Common Vulns instead of
+    the member's own team's. fix_tab._fetch_common_vulns_grouped's
+    backing data (users.views.SlackSlashCommandView.
+    _group_common_vulns_by_team) already keys a custom team's own
+    bucket via that exact same class's _common_team_key_for_name — reuse
+    it here so the two always agree on the same key for the same name."""
+    if team_name in _TEAM_NAME_TO_COMMON_KEY:
+        return _TEAM_NAME_TO_COMMON_KEY[team_name]
+    from users.views import SlackSlashCommandView
+    return SlackSlashCommandView()._common_team_key_for_name(team_name)
+
+
 def _fix_subnav_columnset(active_sub):
     return cards.pill_columnset(UFIX_SUBTABS, active_sub, lambda action_id: {"action_id": action_id})
 
@@ -483,7 +498,7 @@ def fix_tab_body(member_user, admin, team_name, sub_action_id="ufix_sub_assets",
 # already-resolved admin — see user_actions.py's call site).
 
 def _common_vulns_for_team(admin, team_name, sev="all", st="all", offset=0):
-    team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
+    team_key = _common_team_key_for_team_name(team_name)
     # prefix="ufix_common" — real bug fixed alongside this: without it,
     # this reused admin's own "fix_common_*" action ids on a MEMBER's
     # card, which user_actions.py's _FIX_ACTION_IDS never recognized (only
@@ -493,7 +508,7 @@ def _common_vulns_for_team(admin, team_name, sev="all", st="all", offset=0):
 
 
 def common_vuln_detail_for_team(admin, team_name, idx, back_offset=0, asset_offset=0):
-    team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
+    team_key = _common_team_key_for_team_name(team_name)
     return common_vuln_detail_body(admin, team_key, idx, back_offset=back_offset, asset_offset=asset_offset, prefix="ufix_common")
 
 
@@ -519,7 +534,7 @@ def common_vuln_asset_detail_for_team(member_user, admin, team_id, team_name, id
     see that function's own docstring for why "cv_idx"/"cv_offset" are
     used instead of "idx"/"offset" in extra_value."""
     from . import fix_tab as _admin_fix_tab
-    team_key = _TEAM_NAME_TO_COMMON_KEY.get(team_name, "config")
+    team_key = _common_team_key_for_team_name(team_name)
     grouped = _admin_fix_tab._fetch_common_vulns_grouped(admin)
     team = grouped.get(team_key) or {"vulns": []}
     vulns = team.get("vulns") or []
