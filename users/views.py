@@ -11877,15 +11877,13 @@ def _build_team_performance_html(data):
             for k, label in labels
         )
 
-    cards = []
-    for api_name, display_name, subtitle in _TEAM_PERF_META:
-        stats = lower_map.get(api_name.lower()) or {}
+    def _render_card(display_name, subtitle, stats):
         total = int(stats.get("total") or 0)
         open_v = int(stats.get("open") or 0)
         closed = int(stats.get("closed") or 0)
         rate = round((closed / total) * 100) if total else 0
         severity = _sev_counts(stats)
-        cards.append(f"""
+        return f"""
       <div class="team-card">
         <div class="team-card-inner">
           <div class="team-title">{display_name}</div>
@@ -11908,7 +11906,26 @@ def _build_team_performance_html(data):
           {_render_bar(severity)}
           <div class="sev-grid">{_render_sev_boxes(severity)}</div>
         </div>
-      </div>""")
+      </div>"""
+
+    cards = [
+        _render_card(display_name, subtitle, lower_map.get(api_name.lower()) or {})
+        for api_name, display_name, subtitle in _TEAM_PERF_META
+    ]
+
+    # Real bug report: this grid only ever rendered the 4 fixed teams —
+    # _TEAM_PERF_META is a hardcoded module constant, so an admin's own
+    # custom team(s) (which AdminDistributionByTeamDetailAPIView's own
+    # `teams` dict already includes, same key as team_map here) never
+    # got a card at all, no matter how much data they genuinely had.
+    # Add one card per custom team present in the data, in the order the
+    # API returned them.
+    _fixed_names_lower = {api_name.lower() for api_name, _, _ in _TEAM_PERF_META}
+    for team_name, stats in teams_map.items():
+        key = (team_name or "").strip()
+        if not key or key.lower() in _fixed_names_lower or key.lower() == "unassigned":
+            continue
+        cards.append(_render_card(key, "Custom Team", stats))
 
     grid_html = "".join(cards) if cards else '<p class="no-data">No team data available.</p>'
     body = f"""  <div class="dash">

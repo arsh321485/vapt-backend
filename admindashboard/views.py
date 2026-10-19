@@ -2041,14 +2041,15 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                 risk_levels = ["Critical", "High", "Medium", "Low"]
 
                 # Real feature request: an admin's own custom team(s) (see
-                # users_details.models.CustomTeam / upload_report.
-                # team_utils.is_fixed_team) have no classification pool of
-                # their own — every vulnerability belongs to them too, same
-                # "show everything" rule every member-facing view already
-                # follows (Phase 2a). Added as extra buckets below the 4
-                # fixed ones; each gets the SAME counts as the report's
-                # grand total, not a disjoint slice — that's the defined
-                # behavior for a custom team, not a bug.
+                # users_details.models.CustomTeam) get their own bucket
+                # below, alongside the 4 fixed ones. Real bug report: this
+                # used to give every custom team the SAME counts as the
+                # report's grand total — a stopgap from before additional_
+                # teams existed, when a custom team had no classification
+                # pool of its own at all. Now that additional_teams gives
+                # it a real one (see the main loop below, vuln_extra_teams_
+                # map), each custom team's bucket only counts what it was
+                # genuinely assigned.
                 from users_details.models import CustomTeam
                 custom_team_names = list(
                     CustomTeam.objects.filter(admin=request.user).values_list("name", flat=True)
@@ -2116,17 +2117,22 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                     for d in db["deleted_vulnerabilities"].find({"report_id": report_id})
                 }
 
-                # ── assigned_team lookup only — vulnerability_cards has one
-                # card per (vuln, host) regardless of how many ports it was
-                # found on, so this is safe purely for a team-name lookup.
+                # ── assigned_team (+ additional_teams) lookup — vulnerability_
+                # cards has one card per (vuln, host) regardless of how many
+                # ports it was found on, so this is safe purely for a team-
+                # name lookup.
                 vuln_team_map = {}
+                vuln_extra_teams_map = {}
                 for card in db[VULN_CARD_COLLECTION].find(
-                    {"report_id": report_id}, {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1}
+                    {"report_id": report_id},
+                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "additional_teams": 1},
                 ):
-                    vuln_team_map[(
+                    _key = (
                         (card.get("vulnerability_name") or "").strip(),
                         (card.get("host_name") or "").strip(),
-                    )] = (card.get("assigned_team") or "").strip()
+                    )
+                    vuln_team_map[_key] = (card.get("assigned_team") or "").strip()
+                    vuln_extra_teams_map[_key] = [t for t in (card.get("additional_teams") or []) if t]
 
                 # ── initialize team buckets ─────────────────────────────────────
                 all_teams = TEAM_NAMES + custom_team_names + ["Unassigned"]
@@ -2184,10 +2190,19 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                             _infer_assigned_team(plugin_name).lower()
                         ) or "Unassigned"
 
-                        # Every custom team sees everything too — same
-                        # increments as whichever fixed-team/Unassigned
-                        # bucket this vulnerability actually landed in.
-                        affected_buckets = [teams[team_key]] + [teams[n] for n in custom_team_names]
+                        # Real bug report: every custom team used to see
+                        # EVERYTHING (same totals as the report's grand
+                        # total) — a deliberate stopgap from before
+                        # additional_teams existed, when a custom team had
+                        # no classification pool of its own. Now only
+                        # genuinely-assigned findings count toward a custom
+                        # team's card here, same additional_teams-based
+                        # matching every other team-scoped view already
+                        # uses.
+                        extra_teams = [
+                            n for n in vuln_extra_teams_map.get(key, []) if n in teams and n != team_key
+                        ]
+                        affected_buckets = [teams[team_key]] + [teams[n] for n in extra_teams]
                         for bucket in affected_buckets:
                             if key in closed_vuln_keys:
                                 # Summary (AdminVulnerabilitiesAPIView) excludes
@@ -2215,8 +2230,9 @@ class AdminDistributionByTeamDetailAPIView(APIView):
                         _infer_assigned_team(plugin_name).lower()
                     ) or "Unassigned"
                     teams[team_key]["closed"] += 1
-                    for custom_name in custom_team_names:
-                        teams[custom_name]["closed"] += 1
+                    for extra_name in vuln_extra_teams_map.get(key, []):
+                        if extra_name in teams and extra_name != team_key:
+                            teams[extra_name]["closed"] += 1
 
                 return Response(
                     {
