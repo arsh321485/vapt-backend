@@ -12814,6 +12814,25 @@ class SlackSlashCommandView(APIView):
         "arch": "architectural flaws",
     }
 
+    def _support_team_filters_for_admin(self, admin):
+        """(filters, code_to_name) — _SUPPORT_TEAM_FILTERS/_SUPPORT_TEAM_MATCH
+        plus this admin's own custom teams, coded "custom:<team _id>" same
+        scheme as teams_bot.team_tab._team_code_to_name_map. Real bug
+        report: the admin-side Support Requests team filter only ever
+        listed the 4 fixed teams — a custom team had no filter button at
+        all here, same gap already fixed in teams_bot.reminder_tab's
+        equivalent Teams-bot tab."""
+        if not admin:
+            return list(self._SUPPORT_TEAM_FILTERS), dict(self._SUPPORT_TEAM_MATCH)
+        from users_details.models import CustomTeam
+        code_to_name = dict(self._SUPPORT_TEAM_MATCH)
+        filters = list(self._SUPPORT_TEAM_FILTERS)
+        for ct in CustomTeam.objects.filter(admin=admin):
+            code = f"custom:{ct._id}"
+            code_to_name[code] = ct.name.strip().lower()
+            filters.append((code, ct.name[:20]))
+        return filters, code_to_name
+
     def post(self, request):
         # Verify signature FIRST — before request.POST is accessed.
         # Accessing request.POST causes DRF to consume the body stream, after which
@@ -14975,11 +14994,24 @@ class SlackSlashCommandView(APIView):
         # "requested_by" on each row is actually the TEAM name (extension
         # requests are recorded per-team, not per-individual), so this is a
         # belt-and-suspenders re-filter for multi-team members viewing a
-        # SPECIFIC team's channel, not a bug — falls back to the full set if
-        # nothing matches (e.g. requested_by wasn't populated on old rows).
+        # SPECIFIC team's channel.
+        #
+        # Real bug report: exact-matched requested_by alone (always the
+        # single original fixed team) and fell back to the FULL unfiltered
+        # set whenever that match came up empty — for a custom team, which
+        # requested_by never equals, this meant literally every team's
+        # requests showed up in a custom team's own channel, same
+        # "show everything" bug already fixed elsewhere. The API now
+        # returns an all_teams list per result (every team — original plus
+        # additional_teams — the request genuinely belongs to, see
+        # userdashboard.views.UserMitigationTimelineExtensionReportAPIView's
+        # own comment) — match membership in that instead, same fix as
+        # teams_bot.user_extend_tab's identical _fetch_requests.
+        _vt = vapt_team.strip().lower()
         team_results = [
-            r for r in results if (r.get("requested_by") or "").strip().lower() == vapt_team.strip().lower()
-        ] or results
+            r for r in results
+            if _vt in {t.strip().lower() for t in (r.get("all_teams") or [r.get("requested_by") or ""])}
+        ]
 
         status_icons = {"review": "⏳", "approved": "✅", "rejected": "❌"}
         total = len(team_results)
@@ -15311,11 +15343,20 @@ class SlackSlashCommandView(APIView):
         Reminder tab's Support sub-tab which shows every team).
         """
         PAGE_SIZE = 5
-        # _match_support_team_filter expects a short key ("config") not the
-        # full display name ("Configuration Management") — same scheme as
-        # _COMMON_TEAM_KEY_TO_NAME, reversed here.
-        team_key = next((k for k, v in self._COMMON_TEAM_KEY_TO_NAME.items() if v == vapt_team), "")
-        raw_results = [r for r in (data.get("results") or []) if self._match_support_team_filter(r, team_key)]
+        # Real bug report: _COMMON_TEAM_KEY_TO_NAME only maps the 4 fixed
+        # teams, so reverse-looking-up vapt_team through it to get a short
+        # key for _match_support_team_filter silently returned "" for a
+        # custom team — which _match_support_team_filter then matched
+        # against nothing, showing every custom team's own Support Status
+        # tab as permanently empty. Match directly by name instead
+        # (against assigned_team OR additional_teams), which works for
+        # any team, fixed or custom, with no key indirection needed.
+        _vt = self._normalize_support_team(vapt_team)
+        raw_results = [
+            r for r in (data.get("results") or [])
+            if self._normalize_support_team(r.get("assigned_team")) == _vt
+            or any(self._normalize_support_team(t) == _vt for t in (r.get("additional_teams") or []))
+        ]
 
         st_counts = {
             "all": len(raw_results),
@@ -20164,7 +20205,14 @@ class SlackSlashCommandView(APIView):
             import pymongo as _pymongo
             _, report_id, _ = self._get_team_vulns(team_name, team_id, user_id)
             with MongoContext() as db:
-                query = {"assigned_team": team_name}
+                # Real bug report: matched assigned_team alone — a
+                # request genuinely ALSO owned by this custom team
+                # (additional_teams, written by userregister.views.
+                # UserRaiseSupportRequestAPIView) never showed up in
+                # /support status at all, since assigned_team is always
+                # one of the 4 fixed teams. Same fix as teams_bot.
+                # user_support_tab.py's identical query.
+                query = {"$or": [{"assigned_team": team_name}, {"additional_teams": team_name}]}
                 if report_id:
                     query["report_id"] = report_id
                 tickets = list(db["support_requests"].find(
@@ -20593,12 +20641,25 @@ class SlackSlashCommandView(APIView):
             return st == "closed"
         return True
 
-    def _match_support_team_filter(self, record, team_filter):
+    def _match_support_team_filter(self, record, team_filter, code_to_name=None):
         if team_filter == "all":
             return True
-        target = self._SUPPORT_TEAM_MATCH.get(team_filter, "")
+        lookup = code_to_name if code_to_name is not None else self._SUPPORT_TEAM_MATCH
+        target = lookup.get(team_filter, "")
+        if not target:
+            return False
         raw = self._normalize_support_team(record.get("assigned_team"))
-        return raw == target or (target and target in raw)
+        if raw == target or target in raw:
+            return True
+        # Real bug report: a request whose underlying vulnerability is
+        # ALSO genuinely owned by a custom team (additional_teams,
+        # written by userregister.views.UserRaiseSupportRequestAPIView)
+        # never matched that team's own filter — only its original
+        # assigned_team ever did.
+        return any(
+            self._normalize_support_team(t) == target
+            for t in (record.get("additional_teams") or [])
+        )
 
     def _fetch_support_report_data(self, team_id, user_id):
         report_id = self._get_workspace_report_id(team_id)
@@ -20626,8 +20687,9 @@ class SlackSlashCommandView(APIView):
             return self._text_block("❌ No report found for this workspace.")
         if data.get("detail"):
             return self._text_block(f"❌ {data['detail']}")
+        admin = User.objects.filter(slack_team_id=team_id).first()
         return self._format_support_tab(
-            data, st_filter=st_filter, team_filter=team_filter, offset=offset,
+            data, st_filter=st_filter, team_filter=team_filter, offset=offset, admin=admin,
         )
 
     def _format_supportdata(self, data, st_filter="all", team_filter="all", offset=0):
@@ -20636,24 +20698,27 @@ class SlackSlashCommandView(APIView):
             data, st_filter=st_filter, team_filter=team_filter, offset=offset,
         )
 
-    def _format_support_tab(self, data, st_filter="all", team_filter="all", offset=0):
+    def _format_support_tab(self, data, st_filter="all", team_filter="all", offset=0, admin=None):
         """
         Support tab UI (Slack Block Kit) — mirrors Register tab layout:
         status + team filters, 5 rows/page, View on the right, divider after each row.
+        `admin` (when known) extends the team filter row with this admin's
+        own custom teams — see _support_team_filters_for_admin.
         """
         PAGE_SIZE = 5
+        team_filters, team_code_to_name = self._support_team_filters_for_admin(admin)
         raw_results = data.get("results") or []
 
         st_counts = {
-            "all": len([r for r in raw_results if self._match_support_team_filter(r, team_filter)]),
+            "all": len([r for r in raw_results if self._match_support_team_filter(r, team_filter, team_code_to_name)]),
             "open": sum(
                 1 for r in raw_results
-                if self._match_support_team_filter(r, team_filter)
+                if self._match_support_team_filter(r, team_filter, team_code_to_name)
                 and self._match_support_status_filter(r, "open")
             ),
             "closed": sum(
                 1 for r in raw_results
-                if self._match_support_team_filter(r, team_filter)
+                if self._match_support_team_filter(r, team_filter, team_code_to_name)
                 and self._match_support_status_filter(r, "closed")
             ),
         }
@@ -20661,9 +20726,9 @@ class SlackSlashCommandView(APIView):
             key: sum(
                 1 for r in raw_results
                 if self._match_support_status_filter(r, st_filter)
-                and (key == "all" or self._match_support_team_filter(r, key))
+                and (key == "all" or self._match_support_team_filter(r, key, team_code_to_name))
             )
-            for key, _ in self._SUPPORT_TEAM_FILTERS
+            for key, _ in team_filters
         }
 
         all_items = self._assign_severity_short_ids([
@@ -20673,7 +20738,7 @@ class SlackSlashCommandView(APIView):
         filtered = [
             r for r in all_items
             if self._match_support_status_filter(r, st_filter)
-            and self._match_support_team_filter(r, team_filter)
+            and self._match_support_team_filter(r, team_filter, team_code_to_name)
         ]
         count = len(filtered)
 
@@ -20726,7 +20791,7 @@ class SlackSlashCommandView(APIView):
                     "value": f"{st_filter}|{k}|0",
                     **({"style": "primary"} if k == team_filter else {}),
                 }
-                for k, label in self._SUPPORT_TEAM_FILTERS
+                for k, label in team_filters
             ],
         })
 
@@ -23141,10 +23206,15 @@ class SlackSlashCommandView(APIView):
 
     def _format_team_extend_status(self, data, team_name):
         results = data.get("results") or []
+        # Same fix as _format_team_extend_list — match the all_teams list
+        # (assigned_team plus additional_teams) instead of exact-equality
+        # against requested_by alone, which a custom team never matches
+        # and previously fell back to showing every team's requests.
+        _tn = team_name.strip().lower()
         team_results = [
             r for r in results
-            if (r.get("requested_by") or "").lower() == team_name.lower()
-        ] or results
+            if _tn in {t.strip().lower() for t in (r.get("all_teams") or [r.get("requested_by") or ""])}
+        ]
         status_icons = {"review": "🔵", "approved": "✅", "rejected": "❌"}
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": f"⏳ {team_name} — Extension Requests", "emoji": True}},
