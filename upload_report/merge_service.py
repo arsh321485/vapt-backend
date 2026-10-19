@@ -16,6 +16,7 @@ document (and downstream vulnerability_cards) are keyed off the shared
 import datetime
 import logging
 import re
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def _normalize_plugin_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
 
 
-def get_merge_target_report_id(admin, exclude_pk=None) -> str | None:
+def get_merge_target_report_id(admin, exclude_pk=None) -> Optional[str]:
     """
     Returns the report_id of this admin's most recent successfully-stored
     upload, regardless of day — every new upload (magic link or normal)
@@ -77,7 +78,7 @@ def get_merge_target_report_id(admin, exclude_pk=None) -> str | None:
     return None
 
 
-def get_todays_report_id(admin) -> str | None:
+def get_todays_report_id(admin) -> Optional[str]:
     """
     Returns the report_id (str) of this admin's FIRST successfully-processed
     upload today, or None if they haven't uploaded anything yet today.
@@ -107,7 +108,7 @@ DOWNSTREAM_REPORT_ID_COLLECTIONS = (
 )
 
 
-def heal_todays_reports(db, admin_id: str = None, admin_email: str = None) -> str | None:
+def heal_todays_reports(db, admin_id: str = None, admin_email: str = None) -> Optional[str]:
     """
     Real bug report: the upload-time mutex (UploadReportView.post()) that's
     supposed to prevent same-day uploads splitting into separate reports
