@@ -176,6 +176,19 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                 # merging to "open" if any port instance is still open.
                 seen_host_vuln_row = {}
 
+                # Real bug report: "4+ assets" (multi_asset_plugins above)
+                # was decided once, GLOBALLY across the whole report — a
+                # finding common enough report-wide still showed up under a
+                # team whose own assets barely touch it, with asset_count
+                # reflecting the global total instead of that team's own.
+                # Collect rows per team first, then decide per-team whether
+                # a plugin genuinely has 4+ of THAT team's own assets.
+                all_rows = []  # [(row, matched_teams)]
+                team_plugin_hosts = {}
+
+                def _add_team_plugin_host(team_name, plugin_name, host_name):
+                    team_plugin_hosts.setdefault(team_name, {}).setdefault(plugin_name, set()).add(host_name)
+
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
                     host_info = host.get("host_information") or {}
@@ -275,8 +288,23 @@ class UserMitigationStrategyByTeamAPIView(APIView):
                                 "automation_status": automation_status,
                             }
                             seen_host_vuln_row[dedup_key] = row
+                            for team_name in matched_teams:
+                                _add_team_plugin_host(team_name, plugin_name, host_name)
+                            all_rows.append((row, matched_teams))
 
-                        for team_name in matched_teams:
+                # Per-team "4+ assets" qualification — see the real bug
+                # report above.
+                team_qualified_plugins = {
+                    team_name: {
+                        p for p, hosts in plugin_map.items()
+                        if _qualifies_for_mitigation_strategy(len(hosts))
+                    }
+                    for team_name, plugin_map in team_plugin_hosts.items()
+                }
+                for row, matched_teams in all_rows:
+                    pname = row["plugin_name"]
+                    for team_name in matched_teams:
+                        if pname in team_qualified_plugins.get(team_name, ()):
                             teams.setdefault(team_name, []).append(row)
 
                 teams_response = {
@@ -415,10 +443,19 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                 # Step 5: Group by member's teams, filter 4+ assets
                 teams = {name: [] for name in member_teams_normalized}
 
-                for plugin_name, assets in plugin_map.items():
-                    if not _qualifies_for_mitigation_strategy(len(assets)):
-                        continue
+                # Real bug report: same fix as the admin-side endpoint
+                # (adminmitigationstrategy.VulnerabilityAssetCountAPIView)
+                # — "4+ assets" was decided once globally per plugin, then
+                # the same global asset list got attached to every matched
+                # team, so a team whose own assets barely touch a finding
+                # still showed it with a misleadingly large asset_count
+                # that was really the whole report's, not that team's own.
+                team_plugin_hosts = {}
 
+                def _add_team_plugin_hosts(team_name, plugin_name, hosts):
+                    team_plugin_hosts.setdefault(team_name, {}).setdefault(plugin_name, set()).update(hosts)
+
+                for plugin_name, assets in plugin_map.items():
                     assigned_team = plugin_team_map.get(plugin_name, "")
                     if assigned_team not in _SLUG_TO_TEAM.values():
                         # No card yet — infer deterministically instead of
@@ -437,13 +474,18 @@ class UserVulnerabilityAssetCountAPIView(APIView):
                     if not matched_teams:
                         continue
 
-                    entry = {
-                        "plugin_name": plugin_name,
-                        "asset_count": len(assets),
-                        "assets":      sorted(assets),
-                    }
                     for team_name in matched_teams:
-                        teams.setdefault(team_name, []).append(entry)
+                        _add_team_plugin_hosts(team_name, plugin_name, assets)
+
+                for team_name, plugin_map_for_team in team_plugin_hosts.items():
+                    for plugin_name, hosts in plugin_map_for_team.items():
+                        if not _qualifies_for_mitigation_strategy(len(hosts)):
+                            continue
+                        teams.setdefault(team_name, []).append({
+                            "plugin_name": plugin_name,
+                            "asset_count": len(hosts),
+                            "assets":      sorted(hosts),
+                        })
 
                 teams_response = {
                     team_name: {

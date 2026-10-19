@@ -1702,8 +1702,25 @@ def fix_tab_body(admin, active_sub="fix_sub_assets", offset=0, common_team="all"
             # second, redundant fetch.
             grouped = _fetch_common_vulns_grouped(admin)
             _ordered_keys = ["all"] + [k for k in grouped.keys() if k != "all"]
-            team_options = [(k, grouped.get(k, {}).get("display_name") or k) for k in _ordered_keys]
-            body.append(cards.pill_columnset(
+            # Real bug report: using grouped's own full display_name here
+            # ("Configuration Management", 25 chars) reintroduced the
+            # exact label-overflow COMMON_VULNS_TEAMS's own short labels
+            # ("Config Mgmt") were there to avoid — keep those short
+            # labels for the 4 fixed teams, truncate a custom team's own
+            # (shorter, but still unbounded free-text) name instead.
+            _fixed_short_labels = dict(cards.COMMON_VULNS_TEAMS)
+            team_options = [
+                (k, _fixed_short_labels.get(k) or (grouped.get(k, {}).get("display_name") or k)[:14])
+                for k in _ordered_keys
+            ]
+            # Real bug report: pill_columnset's single-row layout is a
+            # tested-good fit for the original 4-5 fixed options — an
+            # admin with several custom teams now appended here squeezed
+            # every label down to an unreadable "t..." — same overflow
+            # already fixed in reminder_tab.py's own Support team pills.
+            # two_row_pill_columnset is this codebase's own existing fix
+            # for "too many pills for one row".
+            body.append(cards.two_row_pill_columnset(
                 team_options, common_team, lambda k: {"action_id": "fix_common_team", "team": k},
             ))
             body.extend(common_vulns_list_body(admin, team_key=common_team, sev=sev, st=st, offset=offset, grouped=grouped))

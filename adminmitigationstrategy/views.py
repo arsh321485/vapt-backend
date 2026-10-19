@@ -260,6 +260,27 @@ class MitigationStrategyByTeamAPIView(APIView):
                 # "closed" once every port instance of it is.
                 seen_host_vuln_row = {}
 
+                # Real bug report: "4+ assets" was evaluated once, GLOBALLY,
+                # across the whole report — a finding common enough
+                # report-wide still showed up under a team whose OWN
+                # assets it barely touches (confirmed live: a custom team
+                # with only 2 total assets still showed findings tagged
+                # "2 assets", when the feature's entire point is "appears
+                # on 4+ assets, BY TEAM" — a team that owns fewer than 4
+                # assets total can never genuinely have one). Collect every
+                # row that passes the (still-valid, since a team's own
+                # count can never exceed the global one) multi_asset_
+                # plugins pre-filter first, tagged with every team it
+                # belongs to, then decide per TEAM whether a plugin
+                # actually qualifies using that team's own asset count —
+                # same fix needed, and made, in usermitigationstrategy.
+                # views.UserMitigationStrategyByTeamAPIView.
+                all_rows = []  # [(row, assigned_team, additional_teams)]
+                team_plugin_hosts = {}  # {team: {plugin_name: {host_name, ...}}}
+
+                def _add_team_plugin_host(team_name, plugin_name, host_name):
+                    team_plugin_hosts.setdefault(team_name, {}).setdefault(plugin_name, set()).add(host_name)
+
                 for host in latest_doc.get("vulnerabilities_by_host", []):
                     host_name = host.get("host_name") or host.get("host") or ""
                     host_info = host.get("host_information") or {}
@@ -359,21 +380,39 @@ class MitigationStrategyByTeamAPIView(APIView):
                         }
                         seen_host_vuln_row[dedup_key] = row
 
-                        if assigned_team in teams:
-                            teams[assigned_team].append(row)
-                        else:
-                            teams["Unassigned"].append(row)
-
+                        bucket_team = assigned_team if assigned_team in teams else "Unassigned"
                         # Real bug report: a custom team only ever existed
                         # in this response as an empty bucket — no finding
                         # ever landed in it, since nothing checked
                         # additional_teams (see AssignTeamAPIView / the Add
                         # User checkbox picker's write path). Additive —
-                        # the row still appears under its original
-                        # assigned_team bucket above too.
-                        for _extra_team in (card or {}).get("additional_teams") or []:
-                            if _extra_team and _extra_team in teams and _extra_team != assigned_team:
-                                teams[_extra_team].append(row)
+                        # the row still belongs under its original
+                        # assigned_team bucket too.
+                        extra_teams = [
+                            t for t in (card or {}).get("additional_teams") or []
+                            if t and t in teams and t != bucket_team
+                        ]
+                        _add_team_plugin_host(bucket_team, plugin_name, host_name)
+                        for _extra_team in extra_teams:
+                            _add_team_plugin_host(_extra_team, plugin_name, host_name)
+                        all_rows.append((row, bucket_team, extra_teams))
+
+                # Per-team "4+ assets" qualification — see the real bug
+                # report above this loop.
+                team_qualified_plugins = {
+                    team_name: {
+                        p for p, hosts in plugin_map.items()
+                        if _qualifies_for_mitigation_strategy(len(hosts))
+                    }
+                    for team_name, plugin_map in team_plugin_hosts.items()
+                }
+                for row, bucket_team, extra_teams in all_rows:
+                    pname = row["plugin_name"]
+                    if pname in team_qualified_plugins.get(bucket_team, ()):
+                        teams[bucket_team].append(row)
+                    for _extra_team in extra_teams:
+                        if pname in team_qualified_plugins.get(_extra_team, ()):
+                            teams[_extra_team].append(row)
 
                 teams_response = {
                     team_name: {
@@ -509,30 +548,45 @@ class VulnerabilityAssetCountAPIView(APIView):
                 teams = {name: [] for name in TEAM_NAMES + custom_team_names}
                 teams["Unassigned"] = []
 
+                # Real bug report: same fix as MitigationStrategyByTeamAPIView
+                # — "4+ assets" was decided once globally per plugin, then
+                # the SAME global asset list got attached to every team's
+                # bucket (primary + additional_teams), so a team whose own
+                # assets barely touch a finding still showed it with a
+                # misleadingly large "asset_count" that was really the
+                # whole report's count, not that team's own. Resolve team
+                # membership per plugin first, build each team's own
+                # host set, and only keep (and count) what's genuinely
+                # 4+ WITHIN that team.
+                team_plugin_hosts = {}
+
+                def _add_team_plugin_hosts(team_name, plugin_name, hosts):
+                    team_plugin_hosts.setdefault(team_name, {}).setdefault(plugin_name, set()).update(hosts)
+
                 for plugin_name, assets in plugin_map.items():
-                    if not _qualifies_for_mitigation_strategy(len(assets)):
-                        continue
-                    entry = {
-                        "plugin_name": plugin_name,
-                        "asset_count": len(assets),
-                        "assets":      sorted(assets),
-                    }
                     assigned_team = plugin_team_map.get(plugin_name, "")
                     if assigned_team not in teams:
                         # No card yet — infer deterministically instead of
                         # dumping into "Unassigned" until AI generation catches up.
                         assigned_team = infer_assigned_team(plugin_name)
-                    if assigned_team in teams:
-                        teams[assigned_team].append(entry)
-                    else:
-                        teams["Unassigned"].append(entry)
+                    bucket_team = assigned_team if assigned_team in teams else "Unassigned"
+                    extra_teams = [
+                        t for t in (plugin_additional_teams_map.get(plugin_name) or set())
+                        if t in teams and t != bucket_team
+                    ]
+                    _add_team_plugin_hosts(bucket_team, plugin_name, assets)
+                    for _extra_team in extra_teams:
+                        _add_team_plugin_hosts(_extra_team, plugin_name, assets)
 
-                    # Additive — a custom team's bucket is no longer always
-                    # empty (see additional_teams, written by
-                    # AssignTeamAPIView / the Add User checkbox picker).
-                    for _extra_team in plugin_additional_teams_map.get(plugin_name) or set():
-                        if _extra_team in teams and _extra_team != assigned_team:
-                            teams[_extra_team].append(entry)
+                for team_name, plugin_map_for_team in team_plugin_hosts.items():
+                    for plugin_name, hosts in plugin_map_for_team.items():
+                        if not _qualifies_for_mitigation_strategy(len(hosts)):
+                            continue
+                        teams[team_name].append({
+                            "plugin_name": plugin_name,
+                            "asset_count": len(hosts),
+                            "assets":      sorted(hosts),
+                        })
 
                 # Sort each team's vulnerabilities by asset_count descending
                 teams_response = {
