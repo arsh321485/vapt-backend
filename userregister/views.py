@@ -161,60 +161,24 @@ def _load_latest_report(db, admin_id, admin_email):
     return doc
 
 
-def _get_team_plugin_names(db, report_id, teams_lower):
-    """
-    Returns (team_plugins_set, plugin_team_map) — covers EVERY plugin_name
-    present in the report, not just ones with a generated card.
-
-    Real bug report: this only ever read vulnerability_cards.assigned_team
-    (the AI's own classification, written by a slow background job that
-    can take many minutes on a large report) — a vulnerability without a
-    card yet was completely invisible to every team, so right after a big
-    upload the user Register list (and everything built on this helper)
-    showed wrong/incomplete data until AI generation fully caught up.
-    Falls back to team_utils.infer_assigned_team() (deterministic keyword
-    match, no AI call) whenever a plugin has no card, or a card with no/
-    invalid team — same fallback already proven correct elsewhere in the
-    app.
-    """
-    from upload_report.team_utils import infer_assigned_team
-
-    team_plugins = set()
-    plugin_team_map = {}  # plugin_name -> matched_team (original case)
-    covered = set()
-    for card in db[VULN_CARD_COLLECTION].find(
-        {"report_id": str(report_id)},
-        {"vulnerability_name": 1, "assigned_team": 1}
-    ):
-        pname = (card.get("vulnerability_name") or "").strip()
-        if not pname:
-            continue
-        covered.add(pname.lower())
-        raw_team = (card.get("assigned_team") or "").strip()
-        matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
-        if matched:
-            team_plugins.add(pname)
-            plugin_team_map[pname] = matched
-
-    # Fill in every plugin_name that has NO card at all yet.
-    nessus_doc = db[NESSUS_COLLECTION].find_one(
-        {"report_id": str(report_id)},
-        {"vulnerabilities_by_host.vulnerabilities.plugin_name": 1,
-         "vulnerabilities_by_host.vulnerabilities.pluginname": 1,
-         "vulnerabilities_by_host.vulnerabilities.name": 1},
-    )
-    for host in (nessus_doc or {}).get("vulnerabilities_by_host", []):
-        for v in host.get("vulnerabilities", []):
-            pname = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
-            if not pname or pname.lower() in covered:
-                continue
-            covered.add(pname.lower())
-            matched = teams_lower.get(infer_assigned_team(pname).lower())
-            if matched:
-                team_plugins.add(pname)
-                plugin_team_map[pname] = matched
-
-    return team_plugins, plugin_team_map
+# Real bug report: this file used to carry its own, independently-
+# maintained copy of _get_team_plugin_names — identical in spirit but
+# keyed by bare plugin_name, never updated when userasset.views.
+# _get_team_plugin_names (the canonical version) was fixed to (a) match
+# additional_teams (a custom team's real classification pool) and (b)
+# key by (host_name, plugin_name.lower()) instead of plugin_name alone
+# (a finding name shared by cards on two different, independently-
+# classified hosts was otherwise attributed to BOTH their teams at
+# once). Both gaps were confirmed live: a custom team's Register tab
+# showed 0 rows despite genuinely-assigned cards (missing additional_
+# teams), and once that was patched locally without the host-aware key,
+# OTHER hosts that merely shared a finding NAME leaked into the same
+# team's Register (161.126.58.87/.88/.86/.92/.98 showing up for a team
+# only ever assigned .89/.91/.93). Every call site below now imports
+# the real function locally (same lazy-import convention this file
+# already uses for upload_report.team_utils etc.) instead of
+# re-diverging a second copy, and builds its plugin_team_map lookup
+# key as (host_name, plugin_name.lower()).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,6 +233,7 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                 uploaded_at = latest_doc.get("uploaded_at")
 
                 # Step 1: Build plugin_name -> assigned_team map (team-filtered)
+                from userasset.views import _get_team_plugin_names
                 _, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
 
                 # Real bug report: this view never checked hold_vulnerabilities/
@@ -380,8 +345,11 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                         if (plugin_name, host_name) in _held_vuln_set or (plugin_name, host_name) in _deleted_vuln_set:
                             continue
 
-                        # Only include if assigned to user's team
-                        assigned_team = plugin_team_map.get(plugin_name)
+                        # Only include if assigned to user's team — keyed by
+                        # (host_name, plugin_name.lower()), never plugin_name
+                        # alone (see this file's import comment above
+                        # _get_team_plugin_names).
+                        assigned_team = plugin_team_map.get((host_name, plugin_name.lower()))
                         if not assigned_team:
                             continue
 
@@ -446,7 +414,7 @@ class UserLatestVulnerabilityRegisterAPIView(APIView):
                     if _key in _seen_vuln_asset_rows or _key in _held_vuln_set or _key in _deleted_vuln_set:
                         continue
                     _pname, _hname = _key
-                    _assigned_team = plugin_team_map.get(_pname)
+                    _assigned_team = plugin_team_map.get((_hname, _pname.lower()))
                     if not _assigned_team:
                         continue
                     _risk_raw = (_fdoc.get("risk_factor") or "").strip().title()
@@ -545,8 +513,9 @@ class UserFixVulnerabilityCreateAPIView(APIView):
                     )
 
                 # Validate vulnerability belongs to user's team
+                from userasset.views import _get_team_plugin_names
                 _, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
-                assigned_team = plugin_team_map.get(plugin_name_req)
+                assigned_team = plugin_team_map.get((host_name, plugin_name_req.lower()))
                 if not assigned_team:
                     return Response(
                         {"detail": "This vulnerability is not assigned to your team."},
@@ -794,6 +763,7 @@ class UserFixVulnerabilityCreateAPIView(APIView):
                 vuln_card_coll = db[VULN_CARD_COLLECTION]
 
                 # Team plugin filter
+                from userasset.views import _get_team_plugin_names
                 _, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
 
                 # Real bug report: "created_by": user_id required THIS
@@ -817,7 +787,7 @@ class UserFixVulnerabilityCreateAPIView(APIView):
                         "report_id": str(report_id),
                         "host_name": host_name,
                     }).sort("created_at", -1)
-                    if (d.get("plugin_name") or "") in plugin_team_map
+                    if (host_name, (d.get("plugin_name") or "").lower()) in plugin_team_map
                 ]
 
                 nessus_doc = nessus_coll.find_one({
@@ -3523,13 +3493,16 @@ class UserTicketByReportAPIView(APIView):
             # entry existed kept its create-time team guess FOREVER, never
             # reconciled once the real AI card landed. Resolve the team
             # live the same way every other team view in this file does.
+            from userasset.views import _get_team_plugin_names
             _, plugin_team_map = _get_team_plugin_names(db, report_id, _normalize_teams(active_teams))
 
         results = []
         for doc in tickets:
             fix_doc = fix_map.get(doc.get("fix_vulnerability_id"), {})
+            _h = doc.get("host_name") or fix_doc.get("host_name") or ""
+            _p = (doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
             resolved_team = (
-                plugin_team_map.get(doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
+                plugin_team_map.get((_h, _p.lower()))
                 or (fix_doc.get("assigned_team") or "").strip()
             )
             if resolved_team.lower() not in teams_lower_set:
@@ -3632,6 +3605,7 @@ class UserTicketOpenListAPIView(APIView):
             # Same live-resolution fix as UserTicketByReportAPIView — don't
             # trust a fix doc's own stored assigned_team, which can be a
             # stale create-time guess never reconciled with the real card.
+            from userasset.views import _get_team_plugin_names
             _, plugin_team_map = _get_team_plugin_names(db, report_id, _normalize_teams(active_teams))
 
         results = []
@@ -3641,8 +3615,10 @@ class UserTicketOpenListAPIView(APIView):
                 continue
             fix_doc = fix_map.get(fid, {})
             # Team filter — only show tickets for user's teams
+            _h = doc.get("host_name") or fix_doc.get("host_name") or ""
+            _p = (doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
             resolved_team = (
-                plugin_team_map.get(doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
+                plugin_team_map.get((_h, _p.lower()))
                 or (fix_doc.get("assigned_team") or "").strip()
             )
             if resolved_team.lower() not in teams_lower_set:
@@ -3732,6 +3708,7 @@ class UserTicketClosedListAPIView(APIView):
             # trust a closed fix doc's own stored assigned_team, which can
             # be a stale create-time guess never reconciled with the real
             # card once it was generated.
+            from userasset.views import _get_team_plugin_names
             _, plugin_team_map = _get_team_plugin_names(db, report_id, _normalize_teams(active_teams))
 
         results = []
@@ -3741,8 +3718,10 @@ class UserTicketClosedListAPIView(APIView):
                 continue
             fix_doc = closed_fix_map.get(fid, {})
             # Team filter
+            _h = doc.get("host_name") or fix_doc.get("host_name") or ""
+            _p = (doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
             resolved_team = (
-                plugin_team_map.get(doc.get("plugin_name") or fix_doc.get("plugin_name") or "")
+                plugin_team_map.get((_h, _p.lower()))
                 or (fix_doc.get("assigned_team") or "").strip()
             )
             if resolved_team.lower() not in teams_lower_set:
@@ -3822,12 +3801,14 @@ class UserTicketDetailAPIView(APIView):
             # resolve it at all.
             report_id_for_ticket = ticket.get("report_id") or fix_doc.get("report_id") or ""
             plugin_name_for_ticket = ticket.get("plugin_name") or fix_doc.get("plugin_name") or ""
+            host_name_for_ticket = ticket.get("host_name") or fix_doc.get("host_name") or ""
             assigned_team = (fix_doc.get("assigned_team") or "").strip()
             if report_id_for_ticket and plugin_name_for_ticket:
+                from userasset.views import _get_team_plugin_names
                 _, plugin_team_map = _get_team_plugin_names(
                     db, report_id_for_ticket, _normalize_teams(teams)
                 )
-                assigned_team = plugin_team_map.get(plugin_name_for_ticket) or assigned_team
+                assigned_team = plugin_team_map.get((host_name_for_ticket, plugin_name_for_ticket.lower())) or assigned_team
 
         if assigned_team.lower() not in teams_lower_set:
             return Response(
@@ -3942,6 +3923,7 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                 # instead of trusting the stored field, so this always
                 # agrees with the rest of the app.
                 teams_lower = _normalize_teams(active_teams)
+                from userasset.views import _get_team_plugin_names
                 _, plugin_team_map = _get_team_plugin_names(db, report_id, teams_lower)
 
                 closed_cursor = db[FIX_VULN_CLOSED_COLLECTION].find(
@@ -3953,7 +3935,7 @@ class UserClosedVulnerabilitiesAPIView(APIView):
                 for doc in closed_cursor:
                     host_name = doc.get("host_name", "")
                     plugin_name = doc.get("plugin_name", "")
-                    resolved_team = plugin_team_map.get(plugin_name) or doc.get("assigned_team", "")
+                    resolved_team = plugin_team_map.get((host_name, plugin_name.lower())) or doc.get("assigned_team", "")
                     if resolved_team not in active_teams:
                         continue
                     # Use stored OS first; fall back to nessus host_information; default Windows
