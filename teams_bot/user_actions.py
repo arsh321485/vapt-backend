@@ -538,7 +538,7 @@ def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id
 
     if action_id == "usup_step_submit":
         step = _as_int(value.get("step")) or 1
-        ok, error = fix.submit_step_support_request(member_user, r, data.get("report_id"), step, value.get("usup_step_message"))
+        ok, error = fix.submit_step_support_request(member_user, r, data.get("report_id"), step, value.get("usup_step_message"), team_name=team_name)
         banner = _result_banner(ok, "Your admin has been notified about this step." if ok else (error or "Could not raise support request."))
         return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step, admin=admin)
 

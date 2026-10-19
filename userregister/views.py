@@ -3164,6 +3164,12 @@ from rest_framework import serializers as drf_serializers
 class _RaiseSupportRequestSerializer(drf_serializers.Serializer):
     step_number  = drf_serializers.IntegerField(min_value=1)
     description  = drf_serializers.CharField()
+    # Optional — which team channel/tab the member was actually viewing
+    # when they raised this (see UserRaiseSupportRequestAPIView's own
+    # docstring on member_team resolution for why this is needed). Not
+    # sent by the website today, so it's optional and the old behavior
+    # is unchanged when it's absent.
+    team_name    = drf_serializers.CharField(required=False, allow_blank=True)
 
 
 # ─── UserRaiseSupportRequestAPIView ──────────────────────────────────────────
@@ -3185,6 +3191,7 @@ class UserRaiseSupportRequestAPIView(APIView):
 
         step_number = serializer.validated_data["step_number"]
         description = serializer.validated_data["description"]
+        raised_from_team = (serializer.validated_data.get("team_name") or "").strip()
         user_id     = str(request.user.id)
 
         # Get user's teams
@@ -3226,10 +3233,31 @@ class UserRaiseSupportRequestAPIView(APIView):
             # vulnerability at all.
             assigned_team = (vuln.get("assigned_team") or "").strip()
             extra_teams_for_vuln = vuln.get("additional_teams") or []
-            member_team = next(
-                (t for t in [assigned_team, *extra_teams_for_vuln] if t and t.lower() in teams_lower_set),
-                None,
-            )
+            # Real bug report: a member who belongs to MANY teams at once
+            # (e.g. added to every fixed team plus several custom ones over
+            # time) always got attributed to whichever team happened to be
+            # FIRST in [assigned_team, *extra_teams_for_vuln] — almost
+            # always the vulnerability's own base assigned_team — even when
+            # they clearly raised this from a specific custom team's own
+            # channel/tab. "Support Request — Configuration Management"
+            # showed up instead of "Support Request — team testing 4" for
+            # exactly this reason. When the caller tells us which team
+            # channel/tab the member was actually viewing (raised_from_team
+            # — see teams_bot.user_fix_tab.submit_step_support_request),
+            # prefer that one over the blind first-match, as long as it's
+            # genuinely one of this vulnerability's own teams AND the
+            # member actually belongs to it (never trust the client for
+            # permission — only for which-of-several-valid-teams to pick).
+            member_team = None
+            if raised_from_team:
+                valid_vuln_teams_lower = {t.lower() for t in [assigned_team, *extra_teams_for_vuln] if t}
+                if raised_from_team.lower() in valid_vuln_teams_lower and raised_from_team.lower() in teams_lower_set:
+                    member_team = raised_from_team
+            if not member_team:
+                member_team = next(
+                    (t for t in [assigned_team, *extra_teams_for_vuln] if t and t.lower() in teams_lower_set),
+                    None,
+                )
             if not member_team:
                 return Response(
                     {"detail": "You do not have permission to raise a support request for this vulnerability"},
@@ -3288,7 +3316,12 @@ class UserRaiseSupportRequestAPIView(APIView):
                     "vulnerability_id":   fix_vuln_id,
                     "vul_name":           support_doc.get("vul_name"),
                     "host_name":          support_doc.get("host_name"),
-                    "assigned_team":      assigned_team,
+                    # member_team (not the raw assigned_team) — the
+                    # notification title/body should show whichever team
+                    # this was actually raised under (see member_team's own
+                    # resolution above), which for a custom-team member can
+                    # genuinely differ from the vulnerability's base team.
+                    "assigned_team":      member_team,
                     "step_number":        step_number,
                     "severity":           vuln.get("risk_factor", ""),
                     "requested_by":       request.user.email,
@@ -3299,7 +3332,7 @@ class UserRaiseSupportRequestAPIView(APIView):
                     _admin_msg   = (
                         f"A support request has been raised for vulnerability "
                         f"'{support_doc.get('vul_name')}' on {support_doc.get('host_name')} "
-                        f"by {request.user.email}. Team: {assigned_team}."
+                        f"by {request.user.email}. Team: {member_team}."
                     )
                     create_notification(admin_user, 'admin', 'support_request_created', _admin_title, _admin_msg, _n_meta)
 

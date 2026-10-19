@@ -320,7 +320,7 @@ def step_support_form_body(step_number, value_base):
     ]
 
 
-def submit_step_support_request(member_user, r, report_id, step_number, message):
+def submit_step_support_request(member_user, r, report_id, step_number, message, team_name=None):
     message = (message or "").strip()
     if not message:
         return False, "Please describe what you need help with."
@@ -329,10 +329,20 @@ def submit_step_support_request(member_user, r, report_id, step_number, message)
         return False, "Could not start a fix record for this vulnerability."
     from userregister.views import UserRaiseSupportRequestAPIView
     from .actions import _call_view_in_process
+    post_data = {"step_number": step_number, "description": message}
+    if team_name:
+        # Real bug report: a member who's on several teams at once always
+        # got attributed to the vulnerability's own base assigned_team in
+        # the admin notification ("Support Request — Configuration
+        # Management"), even when raised from their own custom team's
+        # channel ("team testing 4") — see
+        # UserRaiseSupportRequestAPIView's own docstring. team_name is
+        # exactly which team tab/channel this call came from.
+        post_data["team_name"] = team_name
     status_code, data = _call_view_in_process(
         UserRaiseSupportRequestAPIView, member_user, method="post",
         url_kwargs={"fix_vuln_id": fix_vuln_id},
-        data={"step_number": step_number, "description": message}, request_format="json",
+        data=post_data, request_format="json",
     )
     if status_code >= 300:
         return False, (data or {}).get("detail") or "Could not raise support request."
