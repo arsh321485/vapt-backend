@@ -19077,7 +19077,7 @@ class SlackSlashCommandView(APIView):
             # their existing Member_role directly via the ORM instead.
             try:
                 from users_details.models import UserDetail
-                from users_details.views import _ud_set
+                from users_details.views import _ud_set, _apply_role_assignments_to_cards
                 existing = UserDetail.objects.filter(admin=admin_user, email=email).first()
                 if existing:
                     current_roles = [r for r in (existing.Member_role or []) if r != "Viewer"]
@@ -19087,8 +19087,42 @@ class SlackSlashCommandView(APIView):
                     _upd = {"Member_role": current_roles, "user_type": user_type}
                     if not existing.team_name:
                         _upd["team_name"] = primary_team
+                    if role_assignments:
+                        _upd["role_assignments"] = role_assignments
                     _ud_set(existing, **_upd)  # djongo's .save(update_fields=...) is unreliable here
                     updated_existing = True
+                    # Real bug report: this merge-existing-user branch only
+                    # ever updated Member_role — role_assignments (the
+                    # modal's checkbox-selected assets/vulns, built above
+                    # and already sent to the API) was silently discarded
+                    # for every team added AFTER a member's first one, since
+                    # the create API's own role_assignments handling (see
+                    # UserDetailCreateView.create) never runs once it's
+                    # rejected the request as a 409 duplicate. Apply it here
+                    # instead, scoped to the team(s) actually requested in
+                    # THIS /adduser call — before team_names gets widened to
+                    # the full merged list just below.
+                    if role_assignments:
+                        try:
+                            from vaptfix.mongo_client import MongoContext
+                            with MongoContext() as _ra_db:
+                                _apply_role_assignments_to_cards(
+                                    _ra_db, str(admin_user.id), getattr(admin_user, "email", None),
+                                    team_names, role_assignments,
+                                )
+                        except Exception:
+                            logger.exception(f"[SlackCmd] /adduser: role_assignments processing failed for existing user {email}")
+                        # additional_teams just changed — bust this
+                        # member's own cached dashboard/register data (20-
+                        # 60s TTLs) so it doesn't keep showing pre-
+                        # assignment state for up to a minute.
+                        try:
+                            from userasset.views import _clear_user_dashboard_cache
+                            member_user = User.objects.filter(email=email).first()
+                            if member_user:
+                                _clear_user_dashboard_cache(member_user.id, current_roles)
+                        except Exception:
+                            logger.exception(f"[SlackCmd] /adduser: cache bust failed for existing user {email}")
                     team_names = current_roles  # reflect the full merged list in the reply
             except Exception:
                 logger.exception(f"[SlackCmd] /adduser: failed to merge roles for existing user {email}")

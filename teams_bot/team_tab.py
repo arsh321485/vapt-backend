@@ -746,7 +746,7 @@ def submit_add_user(admin, form_data):
     # record with no real access yet" as a hard failure.
     try:
         from users_details.models import UserDetail
-        from users_details.views import _ud_set
+        from users_details.views import _ud_set, _apply_role_assignments_to_cards
         existing = UserDetail.objects.filter(admin=admin, email=email).first()
         if not existing:
             return False, str(err)
@@ -757,7 +757,45 @@ def submit_add_user(admin, form_data):
         upd = {"Member_role": current_roles, "user_type": user_type}
         if not existing.team_name:
             upd["team_name"] = team_names[0]
+        if role_assignments:
+            upd["role_assignments"] = role_assignments
         _ud_set(existing, **upd)
+        # Real bug report: this "already exists" merge path only ever
+        # updated Member_role — the checkbox-selected assets/vulns
+        # (role_assignments) this very function built a few lines above
+        # were silently thrown away, never reaching additional_teams, for
+        # every team added to an existing user after their first one
+        # (e.g. "testing" added to a member who already had 11 other
+        # teams) — confirmed live via a custom team whose Fix/Home tabs
+        # showed nothing despite assets having been checked in this
+        # picker. create()'s own role_assignments handling (see
+        # UserDetailCreateView.create) never runs for this branch at all
+        # since it returns 409 before the serializer saves — apply it
+        # here instead, same as that view does.
+        if role_assignments:
+            try:
+                from vaptfix.mongo_client import MongoContext
+                with MongoContext() as _ra_db:
+                    _apply_role_assignments_to_cards(
+                        _ra_db, str(admin.id), getattr(admin, "email", None),
+                        team_names, role_assignments,
+                    )
+            except Exception:
+                logger.exception("[TeamsBot] role_assignments processing failed for existing user %s", email)
+            # additional_teams just changed — bust this member's own
+            # cached dashboard/register/fix-tab data (20-60s TTLs) so the
+            # newly-assigned team shows up immediately instead of on its
+            # own stale schedule.
+            try:
+                from django.contrib.auth import get_user_model
+                from userasset.views import _clear_user_dashboard_cache
+                member_user = get_user_model().objects.filter(email=email).first()
+                if member_user:
+                    _clear_user_dashboard_cache(member_user.id, current_roles)
+                    for _t in team_names:
+                        fix_tab.bust_asset_vuln_caches(member_user, as_member=True, team_name=_t)
+            except Exception:
+                logger.exception("[TeamsBot] cache bust failed after role_assignments merge for %s", email)
         return True, f"{first} ({email})'s access now includes: {', '.join(current_roles)}."
     except Exception:
         logger.exception("[TeamsBot] failed to merge roles for existing user %s", email)
