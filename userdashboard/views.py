@@ -1769,6 +1769,17 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                     "report_id": report_id,
                     "admin_id": str(admin_user.id),
                     "team_name": (selected_card.get("assigned_team") or "").strip(),
+                    # Real bug report: a member raising this as a custom
+                    # team they belong to (member_extra_teams, from the
+                    # card's own additional_teams) never saw it in THAT
+                    # team's own "Extension Requests" list — team_name is
+                    # a single stored field, and UserMitigationTimeline
+                    # ExtensionReportAPIView only ever matched against it.
+                    # Stored here too so that view (and anything else
+                    # reading this document) can recognize every team this
+                    # request genuinely belongs to, same additive pattern
+                    # as vulnerability_cards.additional_teams.
+                    "additional_teams": member_extra_teams,
                     "asset": asset,
                     "vulnerability_name": vulnerability_name,
                     "severity": severity,
@@ -1859,7 +1870,17 @@ class UserMitigationTimelineExtensionReportAPIView(APIView):
                 severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                 for doc in docs:
                     team_name = (doc.get("team_name") or "").strip()
-                    if not team_lookup.get(team_name.lower()):
+                    doc_extra_teams = [t for t in (doc.get("additional_teams") or []) if t]
+                    # Real bug report: only ever matched the single stored
+                    # team_name — a member whose only team is a custom one
+                    # this request was ALSO raised through (additional_
+                    # teams, see this view's own create-side comment)
+                    # never saw their own request here at all, and even
+                    # for a member in both teams it never showed up under
+                    # the custom team's OWN list (see user_extend_tab.py's
+                    # per-team filter, which needs all_teams below).
+                    all_teams = [team_name] + [t for t in doc_extra_teams if t != team_name]
+                    if not any(team_lookup.get(t.lower()) for t in all_teams if t):
                         continue
 
                     severity = _normalize_severity_key(doc.get("severity"))
@@ -1876,6 +1897,11 @@ class UserMitigationTimelineExtensionReportAPIView(APIView):
                         "vul_name": doc.get("vulnerability_name"),
                         "status": doc.get("status", "review"),
                         "requested_by": team_name,
+                        # Every team this request genuinely belongs to —
+                        # lets a per-team view (user_extend_tab.py) match
+                        # by membership instead of exact-equality against
+                        # the single primary team_name above.
+                        "all_teams": all_teams,
                         # Real bug report: the actual submitter's email IS
                         # already stored (requested_by_email, set at create
                         # time) but was never returned here — "requested_by"

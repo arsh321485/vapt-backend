@@ -69,7 +69,13 @@ def _fetch_requests(member_user, team_name):
         # This endpoint's own response oddly stores the TEAM name (not the
         # requester's identity) under "requested_by" — see
         # UserMitigationTimelineExtensionReportAPIView's own payload build.
-        return [r for r in (data.get("results") or []) if r.get("requested_by") == team_name]
+        # Real bug report: filtering by "requested_by == team_name" (an
+        # exact-equality match on the single ORIGINAL team) meant a
+        # request genuinely ALSO raised through a custom team (which
+        # that endpoint now also returns, as "all_teams") never showed up
+        # in that custom team's own Extension Requests list — only in its
+        # original fixed team's list. Match by membership instead.
+        return [r for r in (data.get("results") or []) if team_name in (r.get("all_teams") or [r.get("requested_by")])]
     return fix_tab.cached_fetch(f"user_extend_requests:{member_user.id}:{team_name}", 20, _fetch)
 
 
