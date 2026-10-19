@@ -712,6 +712,27 @@ def submit_add_user(admin, form_data):
     sel_vulns = [v.strip() for v in (form_data.get("au_vulns") or "").split(",") if v.strip()]
     role_assignments = {"assets": sel_assets, "vulnerabilities": sel_vulns} if (sel_assets or sel_vulns) else None
 
+    # Real bug report: a checked asset with ZERO vulnerabilities in this
+    # report (e.g. an in-scope host the scanner found nothing on) silently
+    # never showed up anywhere for the team afterwards — team ownership is
+    # tracked per-FINDING via vulnerability_cards.additional_teams
+    # (_apply_role_assignments_to_cards), so a host with no findings has no
+    # card to tag at all, no matter how deliberately it was checked here.
+    # Not fixable by "trying harder" to assign it (there's nothing to
+    # assign it TO) — surfaced as an explicit heads-up instead of a silent
+    # no-op, so the admin isn't left wondering why Total Assets/Fix/
+    # Dashboard never reflect it.
+    no_finding_assets = []
+    if sel_assets:
+        _, _vulns_for_check = _fetch_team_assets_vulns(admin, team_names)
+        _hosts_with_findings = {v.get("host") for v in _vulns_for_check}
+        no_finding_assets = [a for a in sel_assets if a not in _hosts_with_findings]
+    warning_suffix = (
+        f" ⚠️ {', '.join(no_finding_assets)} {'has' if len(no_finding_assets) == 1 else 'have'} "
+        f"no vulnerabilities in this report, so {'it' if len(no_finding_assets) == 1 else 'they'} "
+        f"won't appear under this team's Assets/Fix/Dashboard counts."
+    ) if no_finding_assets else ""
+
     teams_label = ", ".join(team_names)
     post_data = {
         "admin_id": str(admin.id),
@@ -729,7 +750,7 @@ def submit_add_user(admin, form_data):
         data=post_data,
     )
     if status_code < 300:
-        return True, f"{first} ({email}) added to {teams_label}. A welcome email has been sent."
+        return True, f"{first} ({email}) added to {teams_label}. A welcome email has been sent.{warning_suffix}"
 
     err = (data or {}).get("error") or (data or {}).get("detail") or (data or {}).get("email")
     already_exists = "already exists" in str(err or "")
@@ -796,7 +817,7 @@ def submit_add_user(admin, form_data):
                         fix_tab.bust_asset_vuln_caches(member_user, as_member=True, team_name=_t)
             except Exception:
                 logger.exception("[TeamsBot] cache bust failed after role_assignments merge for %s", email)
-        return True, f"{first} ({email})'s access now includes: {', '.join(current_roles)}."
+        return True, f"{first} ({email})'s access now includes: {', '.join(current_roles)}.{warning_suffix}"
     except Exception:
         logger.exception("[TeamsBot] failed to merge roles for existing user %s", email)
         return False, str(err)
