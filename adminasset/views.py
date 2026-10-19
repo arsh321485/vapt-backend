@@ -1426,6 +1426,15 @@ class AllVulnerabilitiesAPIView(APIView):
                         if (h.get("host_name") or "").strip()
                     ],
                 )
+                # Real bug report: the Assets tab (AdminAssetsAPIView)
+                # already lets an admin manually correct a host's
+                # classification (category_overrides, e.g. forcing
+                # "andapower.com.ph" to "web_app" when the auto-classifier
+                # had called it "other") — this view never checked that
+                # override at all, so the SAME host showed its ORIGINAL,
+                # un-corrected type here, disagreeing with what the Assets
+                # tab (and the admin's own manual correction) says.
+                category_overrides = get_category_overrides_for_report(db, doc.get("admin_id") or str(request.user.id))
 
                 # Real bug report: the frontend's "Automation Script: In
                 # Progress" badge had no real signal to read at all on this
@@ -1531,6 +1540,8 @@ class AllVulnerabilitiesAPIView(APIView):
                         entry = vuln_map[plugin_name]
                         entry["total_assets"] += 1
                         host_asset_type = asset_type_map.get(host_name, "other")
+                        if host_name in category_overrides:
+                            host_asset_type = category_overrides[host_name][0]
                         asset_type = classify_finding_type(plugin_name, host_asset_type)
                         _astatus = automation_status_by_key.get((plugin_name, host_name)) or "pending"
                         if _astatus not in entry["automation_status_counts"]:
@@ -1655,6 +1666,12 @@ class VulnAssetListAPIView(APIView):
                         if (h.get("host_name") or "").strip()
                     ],
                 )
+                # Real bug report: same gap as AllVulnerabilitiesAPIView —
+                # an admin's manual classification correction
+                # (category_overrides) was never applied here, so this
+                # list (used by the frontend's checkbox UI) could disagree
+                # with the Assets tab for the exact same host.
+                category_overrides = get_category_overrides_for_report(db, doc.get("admin_id") or str(request.user.id))
 
                 assets = []
                 seen_hosts = set()
@@ -1673,12 +1690,15 @@ class VulnAssetListAPIView(APIView):
                             vuln_status = "held"
                         else:
                             vuln_status = _fix_status.get(host_name, "open")
+                        _host_asset_type = asset_type_map.get(host_name, "other")
+                        if host_name in category_overrides:
+                            _host_asset_type = category_overrides[host_name][0]
                         assets.append({
                             "host_name": host_name,
                             "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
                             "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
                             "status": vuln_status,
-                            "asset_type": asset_type_map.get(host_name, "other"),
+                            "asset_type": _host_asset_type,
                             # "full"/"partial" -> script ready, "not_possible"
                             # -> genuinely no automation for this finding,
                             # null/missing -> AI card hasn't finished yet

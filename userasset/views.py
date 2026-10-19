@@ -1722,6 +1722,12 @@ class UserAllVulnerabilitiesAPIView(APIView):
                         if (h.get("host_name") or "").strip()
                     ],
                 )
+                # Real bug report: same gap as the admin-side
+                # AllVulnerabilitiesAPIView — an admin's manual
+                # classification correction (category_overrides) was
+                # never applied here, so this list could disagree with
+                # the Assets tab for the exact same host.
+                category_overrides = get_category_overrides_for_report(db, admin_id)
 
                 # Real bug report: see the admin-side AllVulnerabilitiesAPIView's
                 # own comment — this response never carried automation_status,
@@ -1747,6 +1753,12 @@ class UserAllVulnerabilitiesAPIView(APIView):
                     fix_id_by_key.setdefault(key, str(fdoc["_id"]))
 
                 vuln_map = {}
+                # Real bug report: same missing dedup as the admin-side
+                # AllVulnerabilitiesAPIView — a finding present on the
+                # SAME host across more than one port got appended to
+                # entry["hosts"] once per port, showing the same asset
+                # twice under one vulnerability.
+                seen_vuln_host_pairs = set()
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
                     for v in host.get("vulnerabilities", []):
@@ -1758,6 +1770,10 @@ class UserAllVulnerabilitiesAPIView(APIView):
                             continue
                         if (plugin_name, host_name) in closed_set:
                             continue
+                        _pair_key = (plugin_name, host_name)
+                        if _pair_key in seen_vuln_host_pairs:
+                            continue
+                        seen_vuln_host_pairs.add(_pair_key)
 
                         if plugin_name not in vuln_map:
                             vuln_map[plugin_name] = {
@@ -1787,6 +1803,8 @@ class UserAllVulnerabilitiesAPIView(APIView):
                         entry = vuln_map[plugin_name]
                         entry["total_assets"] += 1
                         host_asset_type = asset_type_map.get(host_name, "other")
+                        if host_name in category_overrides:
+                            host_asset_type = category_overrides[host_name][0]
                         asset_type = classify_finding_type(plugin_name, host_asset_type)
                         _astatus = automation_status_by_key.get((plugin_name, host_name)) or "pending"
                         if _astatus not in entry["automation_status_counts"]:
@@ -1924,6 +1942,10 @@ class UserVulnAssetListAPIView(APIView):
                         if (h.get("host_name") or "").strip()
                     ],
                 )
+                # Real bug report: same gap as the admin-side
+                # VulnAssetListAPIView — an admin's manual classification
+                # correction (category_overrides) was never applied here.
+                category_overrides = get_category_overrides_for_report(db, str(admin_user.id))
 
                 assets = []
                 seen_hosts = set()
@@ -1948,12 +1970,15 @@ class UserVulnAssetListAPIView(APIView):
                             vuln_status = "held"
                         else:
                             vuln_status = _fix_status.get(host_name, "open")
+                        _host_asset_type = asset_type_map.get(host_name, "other")
+                        if host_name in category_overrides:
+                            _host_asset_type = category_overrides[host_name][0]
                         assets.append({
                             "host_name": host_name,
                             "severity": (v.get("risk_factor") or v.get("severity") or "").title(),
                             "cvss_score": str(v.get("cvss_v3_base_score") or v.get("cvss") or ""),
                             "status": vuln_status,
-                            "asset_type": asset_type_map.get(host_name, "other"),
+                            "asset_type": _host_asset_type,
                             "automation_status": automation_status_by_host.get(host_name),
                         })
                         break
