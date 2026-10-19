@@ -1458,6 +1458,19 @@ class AllVulnerabilitiesAPIView(APIView):
                     fix_id_by_key.setdefault(key, str(fdoc["_id"]))
 
                 vuln_map = {}
+                # Real bug report: no dedup by (plugin_name, host_name) at
+                # all — a finding present on the SAME host across more than
+                # one port (e.g. a TLS/SSL finding on both 443 and 8443)
+                # got counted and appended to entry["hosts"] once per port,
+                # showing the same asset twice (or more) under one
+                # vulnerability and inflating total_assets/open_count/
+                # asset_type_counts beyond the real distinct-asset count.
+                # Status only ever depends on (plugin_name, host_name) —
+                # never the port — for held_set/deleted_set/fix_id_by_key
+                # below, so every port occurrence would resolve to the
+                # identical row anyway; simply skip repeats instead of
+                # merging.
+                seen_vuln_host_pairs = set()
                 for host in doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or "").strip()
                     for v in host.get("vulnerabilities", []):
@@ -1466,6 +1479,10 @@ class AllVulnerabilitiesAPIView(APIView):
                             continue
                         if (plugin_name, host_name) in closed_set:
                             continue
+                        _pair_key = (plugin_name, host_name)
+                        if _pair_key in seen_vuln_host_pairs:
+                            continue
+                        seen_vuln_host_pairs.add(_pair_key)
 
                         if plugin_name not in vuln_map:
                             vuln_map[plugin_name] = {
