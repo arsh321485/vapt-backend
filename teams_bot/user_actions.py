@@ -518,7 +518,7 @@ def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id
         value_base["rem_sub"] = value.get("rem_sub")
 
     if action_id == "ufix_mark_mitigated":
-        ok, error = fix.mark_mitigated(member_user, r, data.get("report_id"))
+        ok, error = fix.mark_mitigated(member_user, r, data.get("report_id"), team_name=team_name)
         banner = _result_banner(ok, f"{r.get('vul_name') or 'This vulnerability'} on {r.get('asset') or '—'} marked mitigated — your admin can verify it in the dashboard." if ok else (error or "Could not update fix status."))
         return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", admin=admin)
 

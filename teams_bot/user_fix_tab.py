@@ -175,7 +175,7 @@ def _fetch_fix_steps(member_user, fix_vuln_id):
     return data
 
 
-def mark_mitigated(member_user, r, report_id):
+def mark_mitigated(member_user, r, report_id, team_name=None):
     """Marks every step complete for this vuln's fix record — creates the
     record first if it doesn't exist yet (a member can mark something
     mitigated without ever opening Manual Fix first)."""
@@ -184,9 +184,19 @@ def mark_mitigated(member_user, r, report_id):
         return False, "Could not start a fix record for this vulnerability."
     from userregister.views import UserFixVulnerabilityStepsAPIView
     from .actions import _call_view_in_process
+    post_data = {"step_number": 1, "complete_all": True}
+    if team_name:
+        # Real bug report: "Mark Mitigated" (complete-all-at-once) is a
+        # SEPARATE call site from complete_step (step-by-step) but hits
+        # the exact same auto-close notification code — missing this
+        # same team_name thread-through meant closing via Mark Mitigated
+        # specifically still showed the wrong/joined team, even after
+        # complete_step's own fix. See UserFixVulnerabilityStepsAPIView's
+        # own docstring.
+        post_data["team_name"] = team_name
     status_code, data = _call_view_in_process(
         UserFixVulnerabilityStepsAPIView, member_user, method="post", url_kwargs={"fix_vuln_id": fix_vuln_id},
-        data={"step_number": 1, "complete_all": True}, request_format="json",
+        data=post_data, request_format="json",
     )
     if status_code >= 300:
         return False, (data or {}).get("detail") or "Could not update fix status."
