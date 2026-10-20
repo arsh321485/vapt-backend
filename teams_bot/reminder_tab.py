@@ -320,13 +320,26 @@ def support_list_body(admin, st="all", team="all", offset=0):
     for i, r in enumerate(page):
         name = r.get("vul_name") or "General Request"
         host = r.get("host_name") or "—"
-        # Real bug report: "team testing" filter pill correctly found
-        # this request (via additional_teams), but the row itself still
-        # only ever showed the primary assigned_team — showing "Network
-        # Security" even while filtered to "team testing" looked like
-        # the filter wasn't really working. Show every team this request
-        # genuinely belongs to.
-        team_name = ", ".join(t for t in [r.get("assigned_team")] + (r.get("additional_teams") or []) if t) or "—"
+        # Real bug report (reversing the earlier "show every team"
+        # version): joining every team this request belongs to into one
+        # line ("Configuration Management, demo 1, Patch Management,
+        # Network Security, Architectural Flaws") made the row unreadable
+        # and defeated the point of filtering by a specific team pill at
+        # all. Real request: viewing under one specific team's own pill
+        # (e.g. "Patch Mgmt") should show THAT team's name on the row —
+        # it's already scoped to that context by the filter itself; the
+        # same request still correctly shows up again under any OTHER
+        # team's own pill it genuinely belongs to (e.g. a custom team),
+        # each time labeled with that pill's own team, which is what
+        # "dono jagah show hona chahiye" actually asks for. "All Teams"
+        # falls back to the request's own primary assigned_team.
+        row_teams = [t for t in [r.get("assigned_team")] + (r.get("additional_teams") or []) if t]
+        team_name = r.get("assigned_team") or "—"
+        if team != "all":
+            target_lower = (code_to_name.get(team) or "").strip().lower()
+            matched = next((t for t in row_teams if t.strip().lower() == target_lower), None)
+            if matched:
+                team_name = matched
         requester = r.get("requested_by") or "Unknown"
         when = str(r.get("requested_at") or "")[:10]
         st_val = (r.get("status") or "open").strip().lower()
@@ -353,12 +366,21 @@ def support_detail_body(admin, idx, st="all", team="all", back_offset=0):
     st_val = (r.get("status") or "open").strip().lower()
     st_label = "🟢 Closed" if st_val == "closed" else "🔴 Open"
     body.append({"type": "TextBlock", "text": r.get("vul_name") or "General Request", "weight": "Bolder", "size": "Medium", "wrap": True, "spacing": "Medium"})
+    # Same single-team-in-context fix as support_list_body's own row —
+    # see its docstring.
+    row_teams = [t for t in [r.get("assigned_team")] + (r.get("additional_teams") or []) if t]
+    detail_team_name = r.get("assigned_team") or "—"
+    if team != "all":
+        target_lower = (code_to_name.get(team) or "").strip().lower()
+        matched = next((t for t in row_teams if t.strip().lower() == target_lower), None)
+        if matched:
+            detail_team_name = matched
     body.append({
         "type": "FactSet",
         "facts": [
             {"title": "Status", "value": st_label},
             {"title": "Asset", "value": str(r.get("host_name") or "—")},
-            {"title": "Team", "value": ", ".join(t for t in [r.get("assigned_team")] + (r.get("additional_teams") or []) if t) or "—"},
+            {"title": "Team", "value": detail_team_name},
             {"title": "Requested By", "value": str(r.get("requested_by") or "—")},
             {"title": "Requested At", "value": str(r.get("requested_at") or "—")[:16].replace("T", " ")},
         ],
