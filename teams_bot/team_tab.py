@@ -772,6 +772,22 @@ def submit_add_user(admin, form_data):
         if not existing:
             return False, str(err)
         current_roles = [r for r in (existing.Member_role or []) if r != "Viewer"]
+        # Real bug report: a member added to their FIRST team (new-user
+        # creation, UserDetailCreateView.create()) gets a real welcome
+        # email per team (send_team_welcome_emails) plus a welcome card in
+        # that team's own Teams channel — but being added to MORE teams
+        # later always goes through THIS "already exists" merge branch
+        # instead, which only ever updated Member_role, never sent
+        # anything for the newly granted team(s) at all. Confirmed live:
+        # a member added to demo-1 (their first team, brand new) got the
+        # proper welcome email/card there; added afterward to Patch
+        # Management/Configuration Management/Network Security/
+        # Architectural Flaws, NONE of those four ever got a welcome
+        # email or card. Capture which of team_names are genuinely NEW
+        # (not already in Member_role) before appending them below, so
+        # the email only goes out for the team(s) actually being granted
+        # right now — never re-sent for a team they already had.
+        newly_added_roles = [t for t in team_names if t not in current_roles]
         for team_name in team_names:
             if team_name not in current_roles:
                 current_roles.append(team_name)
@@ -781,6 +797,23 @@ def submit_add_user(admin, form_data):
         if role_assignments:
             upd["role_assignments"] = role_assignments
         _ud_set(existing, **upd)
+
+        if newly_added_roles:
+            try:
+                import threading
+                from users_details.views import UserDetailCreateView
+                _udcv = UserDetailCreateView()
+                threading.Thread(
+                    target=_udcv.send_team_welcome_emails,
+                    kwargs={
+                        "email": email, "first_name": first, "last_name": last,
+                        "roles": newly_added_roles, "admin_email": getattr(admin, "email", None),
+                    },
+                    daemon=True,
+                ).start()
+            except Exception:
+                logger.exception("[TeamsBot] team welcome email failed for existing user %s, new roles=%s", email, newly_added_roles)
+
         # Real bug report: this "already exists" merge path only ever
         # updated Member_role — the checkbox-selected assets/vulns
         # (role_assignments) this very function built a few lines above
