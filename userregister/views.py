@@ -1506,6 +1506,7 @@ class UserFixVulnerabilityStepsAPIView(APIView):
             deadline       = request.data.get("deadline")
             assigned_member_id = request.data.get("assigned_member_id")
             complete_all   = bool(request.data.get("complete_all", False))
+            raised_from_team = (request.data.get("team_name") or "").strip()
 
             with MongoContext() as db:
                 fix_coll    = db[FIX_VULN_COLLECTION]
@@ -1742,18 +1743,40 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                     )
 
                     try:
-                        from notifications.utils import create_notification, notify_team_channels
+                        from notifications.utils import create_notification
                         _vuln_name = fix_doc.get("plugin_name", "")
                         _asset     = fix_doc.get("host_name", "")
-                        _team      = fix_doc.get("assigned_team", "")
-                        # Real bug report: a vulnerability genuinely owned
-                        # by more than one team at once (assigned_team
-                        # PLUS additional_teams, now also mirrored onto
-                        # this very doc — see AssignTeamAPIView /
-                        # _apply_role_assignments_to_cards) only ever
-                        # showed/notified its original fixed team here —
-                        # same gap already fixed for support requests.
-                        _extra_teams = [t for t in (fix_doc.get("additional_teams") or []) if t and t != _team]
+                        _base_team = fix_doc.get("assigned_team", "")
+                        # Real bug report (reversing the earlier "join
+                        # every team"/broadcast-to-every-team version): a
+                        # member on many teams at once always got EVERY
+                        # team this card belongs to joined into both the
+                        # admin AND the member's own notification — "Team:
+                        # Configuration Management, demo 1, Patch
+                        # Management, Network Security, Architectural
+                        # Flaws" — even when genuinely closed from just
+                        # ONE team's own tab ("demo 1"), AND that same
+                        # wrong joined/base value leaked into the closing
+                        # member's own channel notification too (real
+                        # report: closed from "demo 1", but that team's
+                        # own channel showed "Configuration Management").
+                        # Same root cause and same fix as
+                        # UserRaiseSupportRequestAPIView's own member_team
+                        # resolution: prefer the single team the caller
+                        # says this was actually closed from (team_name —
+                        # see teams_bot.user_fix_tab.complete_step, which
+                        # already has it in scope), falling back to the
+                        # card's own base team when that's absent/invalid.
+                        # No more notify_team_channels broadcast either —
+                        # only the team that genuinely closed it hears
+                        # about it, same restraint already applied to
+                        # support requests.
+                        _extra_teams = [t for t in (fix_doc.get("additional_teams") or []) if t and t != _base_team]
+                        _valid_teams_lower = {_base_team.lower()} | {t.lower() for t in _extra_teams}
+                        if raised_from_team and raised_from_team.lower() in _valid_teams_lower:
+                            _team = raised_from_team
+                        else:
+                            _team = _base_team
                         _n_title = f"Vulnerability Closed: {_vuln_name[:80]}"
                         _n_msg   = (
                             f"All remediation steps completed for '{_vuln_name}' on {_asset}. "
@@ -1767,19 +1790,8 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                             "closed_by_name":       _closer_name,
                         }
                         if _admin_id_cache:
-                            # Admin's own notice can show every genuinely-
-                            # owning team — no channel-routing dependency
-                            # on this field for the admin branch.
-                            _admin_meta = dict(_n_meta)
-                            if _extra_teams:
-                                _admin_meta["assigned_team"] = ", ".join([_team] + _extra_teams)
-                            create_notification(_admin_id_cache, 'admin', 'vuln_closed', _n_title, _n_msg, _admin_meta)
-                            # Keep _n_meta's single, real team name here —
-                            # this broadcast also resolves ONE team
-                            # channel to post into from this same field.
+                            create_notification(_admin_id_cache, 'admin', 'vuln_closed', _n_title, _n_msg, _n_meta)
                             create_notification(_admin_id_cache, 'user', 'vuln_closed', _n_title, _n_msg, _n_meta)
-                            if _extra_teams:
-                                notify_team_channels(_admin_id_cache, _extra_teams, 'vuln_closed', _n_title, _n_msg, _n_meta)
                     except Exception:
                         pass  # nosec B110 - best-effort, intentionally non-fatal
 

@@ -213,7 +213,7 @@ def submit_retest(member_user, r, report_id):
     return True, None
 
 
-def complete_step(member_user, r, report_id, step_number):
+def complete_step(member_user, r, report_id, step_number, team_name=None):
     """Marks ONE specific step done (not the whole vuln) — matches Slack's
     /mitigated [vuln-id] [step-id]."""
     fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
@@ -221,9 +221,19 @@ def complete_step(member_user, r, report_id, step_number):
         return False, "Could not start a fix record for this vulnerability."
     from userregister.views import UserFixVulnerabilityStepsAPIView
     from .actions import _call_view_in_process
+    post_data = {"step_number": step_number}
+    if team_name:
+        # Real bug report: closing the last step of a vuln auto-closes
+        # it, and the resulting notification (to both admin and the
+        # closing member's own channel) always showed/broadcast EVERY
+        # team this card belongs to instead of just the one it was
+        # genuinely closed from — see
+        # UserFixVulnerabilityStepsAPIView's own docstring. team_name
+        # is exactly which team tab this call came from.
+        post_data["team_name"] = team_name
     status_code, data = _call_view_in_process(
         UserFixVulnerabilityStepsAPIView, member_user, method="post", url_kwargs={"fix_vuln_id": fix_vuln_id},
-        data={"step_number": step_number}, request_format="json",
+        data=post_data, request_format="json",
     )
     if status_code >= 300:
         return False, (data or {}).get("detail") or "Could not update this step."

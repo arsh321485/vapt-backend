@@ -525,7 +525,7 @@ def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id
     if action_id in ("ufix_step_nav", "ufix_step_complete"):
         step = _as_int(value.get("step")) or 1
         if action_id == "ufix_step_complete":
-            ok, error = fix.complete_step(member_user, r, data.get("report_id"), step)
+            ok, error = fix.complete_step(member_user, r, data.get("report_id"), step, team_name=team_name)
             if not ok:
                 banner = _result_banner(False, error or "Could not update this step.")
                 return [banner] + _render_full_detail(member_user, team_id, team_name, vctx, idx, host, offset, value, sub="manual", step_number=step, admin=admin)
