@@ -3465,6 +3465,30 @@ class SupportRequestByReportAPIView(APIView):
                     ):
                         closed_vuln_ids.add(cdoc.get("fix_vulnerability_id", ""))
 
+            # Real bug report: "additional_teams" below was the FROZEN
+            # snapshot captured on the support_request doc at the moment
+            # it was raised (UserRaiseSupportRequestAPIView) — if the
+            # underlying vulnerability_cards doc later gained MORE teams
+            # (e.g. via Add User's checkbox picker, assigning this
+            # finding to another team AFTER this request already
+            # existed), the support request's own stale copy never
+            # caught up, so it kept missing that team's own filter pill
+            # in teams_bot.reminder_tab / the website, even though the
+            # card itself genuinely belongs to it now. Refresh from the
+            # LIVE card's own additional_teams at read time instead of
+            # trusting the stored snapshot, keyed the same
+            # (host_name, vulnerability_name) way every other per-team
+            # view in this app already does.
+            live_extra_teams_by_key = {}
+            for card in db[VULN_CARD_COLLECTION].find(
+                {"report_id": str(report_id)},
+                {"host_name": 1, "vulnerability_name": 1, "additional_teams": 1, "_id": 0},
+            ):
+                hname = (card.get("host_name") or "").strip()
+                pname = (card.get("vulnerability_name") or "").strip()
+                if hname and pname:
+                    live_extra_teams_by_key[(hname, pname)] = card.get("additional_teams") or []
+
             results = []
 
             for doc in support_docs:
@@ -3500,8 +3524,15 @@ class SupportRequestByReportAPIView(APIView):
                     # userregister.views.UserRaiseSupportRequestAPIView,
                     # which writes this) was invisible to that team's own
                     # filter pill in teams_bot.reminder_tab, even though
-                    # the document itself already had the data.
-                    "additional_teams": doc.get("additional_teams") or [],
+                    # the document itself already had the data. Prefer
+                    # the LIVE card lookup above over the stored snapshot
+                    # (see its own comment) — falls back to the stored
+                    # value only when this (host, vuln) pair has no card
+                    # at all anymore.
+                    "additional_teams": live_extra_teams_by_key.get(
+                        ((doc.get("host_name") or "").strip(), (doc.get("vul_name") or "").strip()),
+                        doc.get("additional_teams") or [],
+                    ),
                     "assigned_team_members": doc.get("assigned_team_members", []),
                     # "steps": doc.get("steps", []),
                     # Real bug report: "step_requested" was never actually
