@@ -3343,25 +3343,20 @@ class UserRaiseSupportRequestAPIView(APIView):
                     )
                     create_notification(admin_user, 'user', 'support_request_received', _user_title, _user_msg, _n_meta, recipient_email=request.user.email)
 
-                    # Real bug report: a vulnerability genuinely owned by
-                    # MORE than one team at once (assigned_team PLUS
-                    # additional_teams — a custom team checkbox/manually
-                    # assigned to it, see AssignTeamAPIView and
-                    # users_details.views._apply_role_assignments_to_cards)
-                    # only ever notified assigned_team's own channel here
-                    # — the custom team never heard about a support
-                    # request on "its own" vulnerability. Tell every OTHER
-                    # team genuinely holding this finding too.
-                    _extra_teams = [
-                        t for t in (vuln.get("additional_teams") or [])
-                        if t and t != assigned_team
-                    ]
-                    if _extra_teams:
-                        from notifications.utils import notify_team_channels
-                        notify_team_channels(
-                            admin_user, _extra_teams, 'support_request_received',
-                            _user_title, _user_msg, _n_meta,
-                        )
+                    # Real bug report (reversing the earlier version of this
+                    # block): this used to also broadcast the "Support
+                    # Request Submitted" confirmation to every OTHER team
+                    # that happens to co-own this vulnerability via
+                    # additional_teams (e.g. a finding checkbox/manually
+                    # assigned to 5 different teams over time) — confirmed
+                    # live: raising a support request from ONE team's own
+                    # channel posted the exact same "submitted" card into
+                    # 4 unrelated teams' channels too (demo 1, Patch
+                    # Management, Configuration Management, Architectural
+                    # Flaws), even though only the raising member's own
+                    # team actually raised anything. Real request: only the
+                    # team that genuinely raised this specific request
+                    # should ever see its own confirmation — removed.
                 else:
                     _log.getLogger(__name__).warning("support_request notification skipped: admin_user is None for user %s", request.user.email)
             except Exception as _e:
