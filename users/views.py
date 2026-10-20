@@ -2766,10 +2766,105 @@ class MicrosoftTeamsCallbackView(APIView):
             tenant_id = _decode_jwt_tid(token_data.get("id_token", ""))
 
             if token_response.status_code != 200 or "access_token" not in token_data:
-                return JsonResponse({
-                    "error": "Token exchange failed",
-                    "details": token_data
-                }, status=400)
+                # Real bug report: a bare JsonResponse here — unlike every
+                # other failure branch in this view (see the Slack-conflict
+                # error below) — rendered as inert raw JSON text inside the
+                # OAuth popup, with no postMessage to the opener and no way
+                # for the frontend to know the popup should close. Most
+                # commonly hit as AADSTS54005 "authorization code was
+                # already redeemed" — Microsoft's single-use `code` getting
+                # consumed twice (a double-click on Connect, the popup
+                # reloading, a link-scanner prefetching the redirect URL,
+                # etc.). When that happens, ONE of the two attempts usually
+                # already succeeded and saved real Teams tokens for this
+                # admin seconds earlier — so before treating this as a hard
+                # failure, check for that and tell the user they're already
+                # connected instead of showing a scary error for something
+                # that actually worked.
+                # Real constraint: ms_access_token is written via
+                # User.objects.filter(pk=...).update(...) below (not
+                # .save()), so Django's auto_now updated_at field is never
+                # actually refreshed by a real Teams connect — there's no
+                # reliable "connected N seconds ago" timestamp to check
+                # here. invalid_grant/code-already-redeemed can only really
+                # happen from a double-submit of the SAME code, so simply
+                # having Teams tokens on file at all for this admin is a
+                # strong enough signal the other, near-simultaneous attempt
+                # already succeeded.
+                ms_error = (token_data or {}).get("error") or ""
+                already_connected_user = None
+                if ms_error == "invalid_grant" and admin_id_from_state:
+                    _candidate = User.objects.filter(id=admin_id_from_state).first()
+                    if _candidate and _candidate.login_provider == "microsoft_teams" and _candidate.ms_access_token:
+                        already_connected_user = _candidate
+
+                if already_connected_user:
+                    logger.info(
+                        f"[TeamsOAuth] invalid_grant for admin_id={admin_id_from_state} but Teams tokens "
+                        f"already exist for this admin — treating as already-connected, not an error."
+                    )
+                    already_connected_html = f"""
+                    <html>
+                    <head><title>Microsoft Teams OAuth</title></head>
+                    <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
+                        <h2>Microsoft Teams is already connected</h2>
+                        <p>You can close this window.</p>
+                        <script>
+                            (function() {{
+                                var frontendUrl = {json.dumps(frontend_redirect)};
+                                var frontendOrigin = frontendUrl;
+                                try {{ frontendOrigin = new URL(frontendUrl).origin; }} catch (e) {{}}
+                                if (window.opener) {{
+                                    window.opener.postMessage({{
+                                        type: "TEAMS_CONNECTED",
+                                        success: true,
+                                        already_connected: true
+                                    }}, frontendOrigin);
+                                    setTimeout(function() {{
+                                        try {{ window.close(); }} catch (e) {{}}
+                                    }}, 1500);
+                                }} else {{
+                                    window.location.replace(frontendUrl);
+                                }}
+                            }})();
+                        </script>
+                    </body>
+                    </html>
+                    """
+                    return HttpResponse(already_connected_html, status=200)
+
+                token_error = token_data.get("error_description") or token_data.get("error") or "Token exchange failed"
+                token_error_html = f"""
+                <html>
+                <head><title>Microsoft Teams OAuth</title></head>
+                <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
+                    <h2>Could not connect Microsoft Teams</h2>
+                    <p>{token_error}</p>
+                    <p style="color:#888; font-size:13px;">Please close this window and try connecting again.</p>
+                    <script>
+                        (function() {{
+                            var frontendUrl = {json.dumps(frontend_redirect)};
+                            var frontendOrigin = frontendUrl;
+                            try {{ frontendOrigin = new URL(frontendUrl).origin; }} catch (e) {{}}
+                            if (window.opener) {{
+                                window.opener.postMessage({{
+                                    type: "TEAMS_CONNECTED",
+                                    success: false,
+                                    error: {json.dumps(token_error)}
+                                }}, frontendOrigin);
+                                setTimeout(function() {{
+                                    try {{ window.close(); }} catch (e) {{}}
+                                }}, 4000);
+                            }} else {{
+                                window.location.replace(frontendUrl);
+                            }}
+                        }})();
+                    </script>
+                </body>
+                </html>
+                """
+                logger.warning(f"[TeamsOAuth] Token exchange failed: {_redacted_token_data}")
+                return HttpResponse(token_error_html, status=400)
 
             access_token = token_data["access_token"]
 
