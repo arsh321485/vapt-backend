@@ -818,47 +818,60 @@ class UserVulnerabilitiesFixedAPIView(APIView):
                 report_id   = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
                 plugin_risk = _build_plugin_risk_map(nessus_doc)
 
-                # Get plugin_names that belong to user's teams. Falls back to
-                # team_utils.infer_assigned_team() for any plugin with no
-                # card yet (or a card with no/invalid team) — same "no card
-                # yet" gap as every other team-scoped view in this app; see
-                # UserTotalAssetsAPIView's comment for the full context.
+                # Get (host_name, plugin_name) pairs that belong to user's
+                # teams. Falls back to team_utils.infer_assigned_team() for
+                # any plugin with no card yet (or a card with no/invalid
+                # team) — same "no card yet" gap as every other team-scoped
+                # view in this app; see UserTotalAssetsAPIView's comment
+                # for the full context.
+                #
+                # Real bug report: this used to key by bare plugin_name
+                # only — the SAME finding name on a different, unrelated
+                # host (owned by a different team) leaked its closed-count
+                # into this team's total too. Keyed by (host_name,
+                # plugin_name) now, same fix as UserSupportRequestsAPIView.
                 from upload_report.team_utils import infer_assigned_team
 
-                team_plugins = set()
+                team_pairs = set()
                 _card_covered = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1, "_id": 0},
+                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "additional_teams": 1, "_id": 0},
                 ):
                     pname = (card.get("vulnerability_name") or "").strip()
-                    if not pname:
+                    hname = (card.get("host_name") or "").strip()
+                    if not pname or not hname:
                         continue
-                    _card_covered.add(pname)
+                    _card_covered.add((hname, pname))
                     raw_team = (card.get("assigned_team") or "").strip()
                     # Real bug report: same additional_teams gap as
                     # UserVulnerabilitiesAPIView — a custom team never
                     # matched a card here either.
                     has_extra = any((t or "").lower() in teams_lower for t in (card.get("additional_teams") or []))
                     if teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower()) or has_extra:
-                        team_plugins.add(pname)
+                        team_pairs.add((hname, pname))
 
                 for _host in nessus_doc.get("vulnerabilities_by_host", []):
+                    _hname = (_host.get("host_name") or "").strip()
                     for _v in _host.get("vulnerabilities", []):
                         _pname = (_v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or "").strip()
-                        if not _pname or _pname in _card_covered:
+                        if not _pname or not _hname:
                             continue
-                        _card_covered.add(_pname)
+                        _key = (_hname, _pname)
+                        if _key in _card_covered:
+                            continue
+                        _card_covered.add(_key)
                         if teams_lower.get(infer_assigned_team(_pname).lower()):
-                            team_plugins.add(_pname)
+                            team_pairs.add(_key)
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                 for vuln in db[FIX_VULN_CLOSED_COLLECTION].find(
                     {"status": "closed", "report_id": str(report_id)},
-                    {"plugin_name": 1, "risk_factor": 1, "severity": 1, "_id": 0},
+                    {"plugin_name": 1, "host_name": 1, "risk_factor": 1, "severity": 1, "_id": 0},
                 ):
                     pname = (vuln.get("plugin_name") or "").strip()
-                    if pname not in team_plugins:
+                    hname = (vuln.get("host_name") or "").strip()
+                    if (hname, pname) not in team_pairs:
                         continue
                     risk = (vuln.get("risk_factor") or vuln.get("severity") or "").strip().lower()
                     if risk.startswith("crit"):
@@ -1042,42 +1055,51 @@ class UserSupportRequestsAPIView(APIView):
                 report_id = nessus_doc.get("report_id") or str(nessus_doc.get("_id", ""))
                 admin_id  = str(admin_user.id)
 
-                # Get plugin_names belonging to user's teams. Also matches
-                # additional_teams — see UserTotalAssetsAPIView's own
-                # comment; without it a custom team's support-request count
-                # always came back 0.
-                team_plugins = set()
+                # Get (host_name, plugin_name) pairs belonging to user's
+                # teams. Also matches additional_teams — see
+                # UserTotalAssetsAPIView's own comment; without it a
+                # custom team's support-request count always came back 0.
+                #
+                # Real bug report: this used to key by bare plugin_name
+                # only, then match support_requests by vul_name alone —
+                # the SAME finding name on a completely different,
+                # unrelated host (owned by a different team entirely)
+                # leaked into this team's count too, and conversely a
+                # team genuinely NOT assigned that specific host's card
+                # still saw the count because another host happened to
+                # share the vulnerability's name. Keyed by (host_name,
+                # vulnerability_name) now, same convention already used
+                # elsewhere (e.g. userasset.views._get_team_plugin_names).
+                team_pairs = set()
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
-                    {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1, "_id": 0},
+                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "additional_teams": 1, "_id": 0},
                 ):
                     raw_team = (card.get("assigned_team") or "").strip()
                     has_extra = any((t or "").lower() in teams_lower for t in (card.get("additional_teams") or []))
                     if teams_lower.get(raw_team.lower()) or has_extra:
                         pname = (card.get("vulnerability_name") or "").strip()
-                        if pname:
-                            team_plugins.add(pname)
+                        hname = (card.get("host_name") or "").strip()
+                        if pname and hname:
+                            team_pairs.add((hname, pname))
 
-                # Support requests for those plugins
+                # Support requests for those (host, vuln) pairs — Python-
+                # side filter since the collection has no combined index
+                # to match pairs directly, and per-report volume is small.
                 support_coll = db[SUPPORT_REQUEST_COLLECTION]
-                base_q = {
-                    "admin_id": admin_id,
-                    "report_id": str(report_id),
-                    "vul_name": {"$in": list(team_plugins)}
-                }
-
-                status_counts = list(support_coll.aggregate([
-                    {"$match": base_q},
-                    {
-                        "$group": {
-                            "_id": {"$cond": [{"$eq": ["$status", "closed"]}, "closed", "pending"]},
-                            "count": {"$sum": 1},
-                        }
-                    },
-                ]))
-                counts_map = {str(row.get("_id")): int(row.get("count") or 0) for row in status_counts}
-                pending = counts_map.get("pending", 0)
-                closed = counts_map.get("closed", 0)
+                pending = 0
+                closed = 0
+                for doc in support_coll.find(
+                    {"admin_id": admin_id, "report_id": str(report_id)},
+                    {"vul_name": 1, "host_name": 1, "status": 1, "_id": 0},
+                ):
+                    key = ((doc.get("host_name") or "").strip(), (doc.get("vul_name") or "").strip())
+                    if key not in team_pairs:
+                        continue
+                    if doc.get("status") == "closed":
+                        closed += 1
+                    else:
+                        pending += 1
 
                 result = {
                     "report_id": report_id,
