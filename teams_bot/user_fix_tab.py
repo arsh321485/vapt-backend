@@ -466,18 +466,27 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
     return body
 
 
-def submit_extension_request(member_user, r):
+def submit_extension_request(member_user, r, team_name=None):
     from userdashboard.views import UserMitigationTimelineExtensionCreateAPIView
     from .actions import _call_view_in_process
+    post_data = {
+        "severity": (r.get("severity") or "Medium").strip().title(),
+        "asset": r.get("asset") or "",
+        "vulnerability_name": r.get("vul_name") or "",
+        "requested_extension_days": r.get("_requested_days") or 7,
+        "reason": r.get("_reason") or "",
+    }
+    if team_name:
+        # Real bug report: a member on several teams at once always got
+        # every one of them joined into the admin notification title
+        # ("Timeline Extension Request — CM, demo 1, PM, CM, NS, AF"),
+        # even when raised from just one team's own tab — see
+        # UserMitigationTimelineExtensionCreateAPIView's own docstring.
+        # team_name is exactly which team tab this call came from.
+        post_data["team_name"] = team_name
     status_code, data = _call_view_in_process(
         UserMitigationTimelineExtensionCreateAPIView, member_user, method="post",
-        data={
-            "severity": (r.get("severity") or "Medium").strip().title(),
-            "asset": r.get("asset") or "",
-            "vulnerability_name": r.get("vul_name") or "",
-            "requested_extension_days": r.get("_requested_days") or 7,
-            "reason": r.get("_reason") or "",
-        },
+        data=post_data,
         request_format="json",
     )
     if status_code >= 300 or not isinstance(data, dict) or not data.get("request_id"):

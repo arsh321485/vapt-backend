@@ -257,7 +257,7 @@ def submit_new_request(member_user, team_name, selected_asset, idx, deadline_cho
     if not days:
         return False, "Please pick an extended deadline."
     merged = dict(asset_vulns[idx], _requested_days=days, _reason=reason)
-    return fix.submit_extension_request(member_user, merged)
+    return fix.submit_extension_request(member_user, merged, team_name=team_name)
 
 
 def extend_tab_body(member_user, team_name, active_sub="uex_sub_list", offset=0, selected_asset=None, selected_idx=None):

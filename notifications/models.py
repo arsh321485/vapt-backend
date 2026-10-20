@@ -13,6 +13,7 @@ class Notification(models.Model):
         ('support_request_created',   'Support Request Created'),
         ('support_request_received',  'Support Request Received'),
         ('extension_requested',       'Extension Requested'),
+        ('extension_request_received', 'Extension Request Received'),
         ('extension_approved',        'Extension Approved'),
         ('extension_rejected',        'Extension Rejected'),
         ('asset_unhold',              'Asset Unhold'),

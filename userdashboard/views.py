@@ -1689,6 +1689,7 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
             vulnerability_name = (request.data.get("vulnerability_name") or "").strip()
             reason = (request.data.get("reason") or "").strip()
             requested_extension_days = int(request.data.get("requested_extension_days") or 0)
+            raised_from_team = (request.data.get("team_name") or "").strip()
 
             if not severity or not asset or not vulnerability_name or requested_extension_days <= 0 or not reason:
                 return Response({"detail": "severity, asset, vulnerability_name, requested_extension_days, reason are required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -1802,6 +1803,27 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                         f"deadline extension for {vulnerability_name} on {asset}. "
                         f"Requested: {requested_extension_days} day(s). Reason: {reason}"
                     )
+                    # Real bug report (reversing the earlier "join every
+                    # team" version): a member on MANY teams at once (every
+                    # fixed team plus several custom ones) always got EVERY
+                    # one of them joined into the title — "Timeline
+                    # Extension Request — Configuration Management, demo 1,
+                    # Patch Management, Configuration Management, Network
+                    # Security, Architectural Flaws" — for a request raised
+                    # from just ONE team's own tab, with the base team
+                    # duplicated into the bargain. Same root cause and same
+                    # fix as UserRaiseSupportRequestAPIView's own
+                    # member_team resolution: prefer the single team the
+                    # caller says this was actually raised from (team_name
+                    # — see teams_bot.user_extend_tab's own team_name
+                    # param, already in scope there), falling back to the
+                    # card's own base team when that's absent or invalid.
+                    _base_team = payload["team_name"]
+                    _valid_teams_lower = {_base_team.lower()} | {t.lower() for t in member_extra_teams}
+                    if raised_from_team and raised_from_team.lower() in _valid_teams_lower:
+                        _notif_team = raised_from_team
+                    else:
+                        _notif_team = _base_team
                     _n_meta = {
                         "vulnerability_name": vulnerability_name,
                         "asset":              asset,
@@ -1811,17 +1833,27 @@ class UserMitigationTimelineExtensionCreateAPIView(APIView):
                         "reason":             reason,
                         "report_id":          report_id,
                         "request_id":         str(result.inserted_id),
-                        # Real bug report: always showed the card's
-                        # original AI-classified team (e.g. "Network
-                        # Security") even when the member genuinely
-                        # raised this as a custom team they belong to
-                        # (member_extra_teams, from additional_teams) —
-                        # "jahan se raise ki wahi naam aana chahiye".
-                        # Shows every team this member and this finding
-                        # both genuinely belong to, not just the primary.
-                        "assigned_team":      ", ".join([payload["team_name"]] + member_extra_teams) if member_extra_teams else payload["team_name"],
+                        "assigned_team":      _notif_team,
                     }
                     create_notification(admin_user, 'admin', 'extension_requested', _n_title, _n_msg, _n_meta)
+
+                    # Real bug report: raising a timeline extension never
+                    # notified the raising member/team at all — only the
+                    # admin heard about it, unlike a support request
+                    # (which already posts a "Submitted successfully"
+                    # confirmation back to the raising member's own
+                    # channel). Same pattern as
+                    # UserRaiseSupportRequestAPIView's own
+                    # support_request_received confirmation.
+                    _user_title = f"Extension Request Submitted: {vulnerability_name[:80]}"
+                    _user_msg = (
+                        f"Your extension request for '{vulnerability_name}' on {asset} "
+                        f"has been submitted successfully."
+                    )
+                    create_notification(
+                        admin_user, 'user', 'extension_request_received', _user_title, _user_msg,
+                        _n_meta, recipient_email=request.user.email,
+                    )
                 except Exception:
                     pass  # nosec B110 - best-effort, intentionally non-fatal
 

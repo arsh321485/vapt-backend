@@ -195,6 +195,25 @@ def _card_extension_requested(title, message, metadata):
     return blocks, f"⏳ {title_text}", "#1264a3"
 
 
+def _card_extension_request_submitted(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vulnerability_name", "")
+    asset = meta.get("asset", "")
+    days = meta.get("requested_days")
+    facts = [
+        ("Vulnerability", vuln, True),
+        ("Asset / IP", asset, False),
+        ("Requested", f"+{days} day(s)" if days else "", False),
+        ("Status", "Submitted successfully", True),
+    ]
+    body = "Your timeline extension request has been submitted and is waiting for admin response."
+    blocks = _rich_card_blocks(
+        "🔔", f"Extension Request Submitted: {vuln}", "success", "Request created successfully",
+        body, facts, ["Added by vaptfix", "Extension request"],
+    )
+    return blocks, f"🔔 Extension Request Submitted: {vuln}", "#1264a3"
+
+
 def _card_extension_approved(title, message, metadata):
     meta = metadata or {}
     vuln = meta.get("vulnerability_name", "")
@@ -324,6 +343,7 @@ def _card_vuln_closed(title, message, metadata):
 # notif_type -> (title, message, metadata) -> (blocks, fallback_text, color)
 _NOTIF_CARD_BUILDERS = {
     "extension_requested":       _card_extension_requested,
+    "extension_request_received": _card_extension_request_submitted,
     "extension_approved":        _card_extension_approved,
     "extension_rejected":        _card_extension_rejected,
     "support_request_received":  _card_support_submitted,
@@ -465,6 +485,22 @@ def _teams_card_extension_requested(title, message, metadata):
     ]
 
 
+def _teams_card_extension_request_submitted(title, message, metadata):
+    meta = metadata or {}
+    vuln = meta.get("vulnerability_name", "")
+    asset = meta.get("asset", "")
+    days = meta.get("requested_days")
+    facts = _teams_facts([
+        ("Vulnerability", vuln, True), ("Asset / IP", asset, False),
+        ("Requested", f"+{days} day(s)" if days else "", False),
+    ])
+    return [
+        {"type": "TextBlock", "text": f"🔔 Extension Request Submitted: {vuln}"[:150], "weight": "Bolder", "size": "Medium", "wrap": True},
+        {"type": "TextBlock", "text": "Your timeline extension request has been submitted and is waiting for admin response.", "wrap": True, "isSubtle": True, "spacing": "Small"},
+        {"type": "FactSet", "facts": facts},
+    ]
+
+
 def _teams_card_extension_approved(title, message, metadata):
     meta = metadata or {}
     vuln = meta.get("vulnerability_name", "")
@@ -574,6 +610,7 @@ def _teams_card_vuln_closed(title, message, metadata):
 # same keys as _NOTIF_CARD_BUILDERS above, one-to-one.
 _TEAMS_NOTIF_CARD_BUILDERS = {
     "extension_requested":       _teams_card_extension_requested,
+    "extension_request_received": _teams_card_extension_request_submitted,
     "extension_approved":        _teams_card_extension_approved,
     "extension_rejected":        _teams_card_extension_rejected,
     "support_request_received":  _teams_card_support_submitted,
