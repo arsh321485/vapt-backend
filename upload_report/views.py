@@ -3033,13 +3033,32 @@ class UploadCardsStatusAPIView(APIView):
         )
 
         if tagged_count:
-            cards_total = int(getattr(report, "parsed_count", 0) or 0)
-            cards_generated = tagged_count
-            complete = cards_total == 0 or cards_generated >= cards_total
             counts_doc = db[NESSUS_COLLECTION].find_one(
                 {"report_id": resolved_report_id},
-                {"cards_generation_started_at": 1, "vulnerabilities_by_host": 1, "locked_hosts": 1},
+                {"cards_generation_started_at": 1, "vulnerabilities_by_host": 1, "locked_hosts": 1, "cards_expected_count": 1},
             ) or {}
+            # Real bug report: this used report.parsed_count (the raw,
+            # un-deduped vulnerability count parsed from the file — the
+            # SAME number documented elsewhere in this file as always >=
+            # the true card count, since the same plugin on the same host
+            # across multiple ports collapses into ONE card) as the
+            # denominator here, instead of the already-correct, deduped
+            # cards_expected_count the sibling (non-tagged) branch below
+            # uses. A report with any multi-port duplicate findings (e.g.
+            # 93 raw vulnerabilities, 65 distinct cards) got stuck showing
+            # "65/93" and cards_generation_complete=false FOREVER — the
+            # frontend's progress bar never reached 100%, with "This is
+            # taking longer than usual" shown indefinitely even though
+            # generation had genuinely finished. Prefer cards_expected_
+            # count (set by _auto_generate_cards_bg once it knows which
+            # vulns will actually get a card), same fallback as the other
+            # branch for older reports generated before that field existed.
+            if "cards_expected_count" in counts_doc:
+                cards_total = int(counts_doc.get("cards_expected_count") or 0)
+            else:
+                cards_total = int(getattr(report, "parsed_count", 0) or 0)
+            cards_generated = tagged_count
+            complete = cards_total == 0 or cards_generated >= cards_total
             started_at = counts_doc.get("cards_generation_started_at")
             automation_filter = {"source_upload_id": own_id, "report_id": resolved_report_id}
         else:
