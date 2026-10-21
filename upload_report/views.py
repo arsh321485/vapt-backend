@@ -1939,6 +1939,91 @@ def _ensure_fix_vulnerability_record(db, report_id, host_name, plugin_name, risk
     return True
 
 
+def _normalize_team_and_automation_consistency(db, report_id: str):
+    """
+    Final safety net for a whole report's vulnerability_cards: whatever
+    path put them there (this run's own main loop, a cache hit, an
+    earlier partial run, a same-day merge, a snapshot clone — see
+    _auto_generate_cards_bg's own call site for the real bug report this
+    exists for), make sure every card sharing a vulnerability_name ends
+    up on the SAME assigned_team, and every card sharing a
+    (vulnerability_name, os_category) ends up with the SAME
+    automation_card.automation_status — majority wins; ties keep
+    whichever value is already most common first in iteration order.
+    Never raises — this must never fail the generation run it's cleaning
+    up after.
+    """
+    try:
+        cards = list(db[VULN_CARD_COLLECTION].find(
+            {"report_id": report_id},
+            {"_id": 1, "vulnerability_name": 1, "os_category": 1, "assigned_team": 1, "automation_card": 1},
+        ))
+        if not cards:
+            return
+
+        import collections
+
+        by_vuln = collections.defaultdict(list)
+        for c in cards:
+            vname = c.get("vulnerability_name")
+            if vname:
+                by_vuln[vname].append(c)
+
+        team_fixed = 0
+        for vname, group in by_vuln.items():
+            teams = [c.get("assigned_team") for c in group if c.get("assigned_team")]
+            if not teams:
+                continue
+            canonical_team = collections.Counter(teams).most_common(1)[0][0]
+            for c in group:
+                if c.get("assigned_team") != canonical_team:
+                    db[VULN_CARD_COLLECTION].update_one(
+                        {"_id": c["_id"]}, {"$set": {"assigned_team": canonical_team}}
+                    )
+                    team_fixed += 1
+
+        by_vuln_os = collections.defaultdict(list)
+        for c in cards:
+            vname = c.get("vulnerability_name")
+            if vname:
+                by_vuln_os[(vname, c.get("os_category"))].append(c)
+
+        automation_fixed = 0
+        for key, group in by_vuln_os.items():
+            statuses = [
+                (c.get("automation_card") or {}).get("automation_status")
+                for c in group
+                if (c.get("automation_card") or {}).get("automation_status")
+            ]
+            if not statuses:
+                continue
+            canonical_status = collections.Counter(statuses).most_common(1)[0][0]
+            canonical_automation_card = next(
+                c["automation_card"] for c in group
+                if (c.get("automation_card") or {}).get("automation_status") == canonical_status
+            )
+            for c in group:
+                current_status = (c.get("automation_card") or {}).get("automation_status")
+                if current_status and current_status != canonical_status:
+                    new_ac = dict(canonical_automation_card)
+                    new_ac["download_count"] = (c.get("automation_card") or {}).get("download_count", 0)
+                    new_ac["last_downloaded_at"] = (c.get("automation_card") or {}).get("last_downloaded_at")
+                    db[VULN_CARD_COLLECTION].update_one(
+                        {"_id": c["_id"]}, {"$set": {"automation_card": new_ac}}
+                    )
+                    automation_fixed += 1
+
+        if team_fixed or automation_fixed:
+            print(
+                f"[AutoGenCards] Consistency sweep for report_id={report_id}: "
+                f"normalized {team_fixed} card(s)' assigned_team, {automation_fixed} card(s)' "
+                f"automation_status",
+                flush=True,
+            )
+    except Exception:
+        logger.exception(f"[AutoGenCards] team/automation consistency sweep failed for report_id={report_id}")
+
+
 def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
     """
     Background thread: auto-generate vulnerability cards after file upload.
@@ -2513,6 +2598,27 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
         # write this one as soon as the main generation loop (the thing
         # cards_expected_count/cards_generated_count actually describe) is
         # done, not after the slower, separate step that follows.
+        # Real bug report: the same vulnerability_name still landed on
+        # different teams across different hosts (and the same
+        # (vulnerability_name, os_category) still got different
+        # automation_status) even WITH the per-card consistency checks
+        # earlier in this loop — confirmed live, repeatedly, on several
+        # fresh reports: every affected host's own journalctl trail
+        # showed "Already exists, skipping" for that exact finding, i.e.
+        # its card was already sitting in vulnerability_cards for THIS
+        # report_id before this run's main loop ever reached it — created
+        # by some earlier pass (a retry, a prior partial run, a
+        # same-file/same-day merge) this loop's own per-card checks never
+        # got a chance to run against, since those only fire for a card
+        # this SPECIFIC call is about to write, never retroactively for
+        # one that already exists. Rather than keep chasing every
+        # possible path a card can be created through, sweep the WHOLE
+        # report's cards once, right here, after generation is done:
+        # whatever inconsistency slipped through any upstream path, this
+        # guarantees the final, persisted state is self-consistent before
+        # cards_generation_complete ever flips to true.
+        _normalize_team_and_automation_consistency(db, report_id)
+
         actual_count = db[VULN_CARD_COLLECTION].count_documents({"report_id": report_id})
         is_complete = actual_count >= cards_expected_count
         db[NESSUS_COLLECTION].update_one(
@@ -2573,6 +2679,11 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 f"pre-existing card(s) for report_id={report_id}"
             )
             _run_existing_card_automation_backfill(existing_cards_missing_automation)
+            # The backfill above generates automation_card independently
+            # per card (no sibling-consistency check of its own) — sweep
+            # again so any inconsistency it just introduced doesn't
+            # survive past this run either.
+            _normalize_team_and_automation_consistency(db, report_id)
 
         # Real, repeatedly observed bug: the frontend's Manual Fix/
         # Automated Fix tabs show "Generating..." forever unless a
