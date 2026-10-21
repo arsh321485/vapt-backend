@@ -1222,6 +1222,22 @@ class MitigationGenerationTool:
                 tasks=tasks,
                 process=Process.sequential,
                 verbose=False,
+                # Real bug report: the SAME vulnerability_name/host showed
+                # a different assigned_team or automation_status every
+                # time this exact finding was re-processed (even across
+                # totally unrelated reports/admins, weeks apart) —
+                # confirmed live via generated_at timestamps from over a
+                # week earlier still showing up on freshly-generated
+                # cards. CrewAI's own Crew defaults to caching a tool's
+                # result by (tool name, tool input) — invisible from this
+                # file, since nothing here ever calls a cache API
+                # directly — so an identical finding+host input silently
+                # replayed whatever answer the crew happened to give the
+                # very first time it ever saw that exact input, forever,
+                # regardless of report_id or which admin triggered
+                # generation. Disabled so every card genuinely gets its
+                # own fresh run.
+                cache=False,
             )
 
             logger.info(
@@ -1324,6 +1340,7 @@ def generate_automation_for_existing_card(card: dict) -> dict:
             tasks=[task],
             process=Process.sequential,
             verbose=False,
+            cache=False,  # see the other Crew(...) construction's comment
         )
         logger.info(f"[AutomationBackfill] Starting standalone automation task for card_id={card.get('card_id')}")
         crew.kickoff()
