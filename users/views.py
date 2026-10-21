@@ -6285,11 +6285,12 @@ class SlackOAuthUrlView(APIView):
                     base_url = request.build_absolute_uri("/").rstrip("/")
             redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/slack/callback/"
         client_id = settings.SLACK_CLIENT_ID
+        scopes = ",".join(settings.SLACK_SCOPES)
 
         slack_url = (
             f"https://slack.com/oauth/v2/authorize?"
             f"client_id={client_id}"
-            f"&scope=chat:write,channels:read,channels:manage,channels:join,groups:read,groups:write,mpim:write,im:write,users:read,users:read.email,commands,files:write,files:read"
+            f"&scope={scopes}"
             f"&user_scope=identity.basic,identity.email,identity.avatar,identity.team"
             f"&redirect_uri={redirect_uri}"
             f"&state={state}"
@@ -9817,12 +9818,7 @@ class SlackInstallView(APIView):
         if not redirect_uri:
             redirect_uri = request.build_absolute_uri("/").rstrip("/") + "/api/admin/users/slack/callback/"
 
-        scopes = ",".join(getattr(settings, "SLACK_SCOPES", [
-            "chat:write", "channels:manage", "channels:join",
-            "mpim:write", "groups:write", "im:write",
-            "users:read", "users:read.email", "commands", "files:write",
-            "files:read",
-        ]))
+        scopes = ",".join(settings.SLACK_SCOPES)
         user_scopes = "identity.basic,identity.email,identity.avatar,identity.team"
 
         auth_url = (

@@ -251,22 +251,34 @@ VAPTFIX_BACKEND_URL = os.getenv("VAPTFIX_BACKEND_URL", "https://vaptbackend.secu
 SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"  # nosec B105 - public API endpoint URL, not a secret
 
+# Single source of truth for the "Add to Slack" bot scope list — every OAuth
+# URL builder (SlackOAuthUrlView, SlackInstallView) reads this instead of
+# keeping its own hardcoded copy, so the requested scopes can't drift apart
+# again. Must be kept in sync with the Bot Token Scopes configured on the
+# Slack App dashboard (OAuth & Permissions page).
 SLACK_SCOPES = [
     'channels:read',
-    'channels:write',
+    'channels:manage',  # replaces the deprecated channels:write
+    'channels:join',
+    'channels:history',
     'chat:write',
     'users:read',
     'users:read.email',
     'groups:read',
     'groups:write',
+    'groups:history',
     'im:read',
     'im:write',
+    'im:history',
     'mpim:read',
     'mpim:write',
+    'mpim:history',
     'team:read',
     'commands',
     'files:write',
     'files:read',  # needed to download a report file the admin uploads via the Slack "Upload Report" modal
+    'pins:write',  # used when pinning the automation report message (pins.add)
+    'app_mentions:read',  # used by the @vaptfix mention event handler
 ]
 
 JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "")
