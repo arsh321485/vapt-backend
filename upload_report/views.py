@@ -2453,6 +2453,42 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             if _existing_team_card and _existing_team_card.get("assigned_team"):
                 document["assigned_team"] = _existing_team_card["assigned_team"]
 
+            # Real bug report: "TLS Version 1.1 Deprecated Protocol" showed
+            # AUTOMATABLE on one asset and NON AUTOMATABLE on another in
+            # the SAME report, SAME os_category ("windows" both) — not
+            # explained by the OS-scoped cache above (genuinely a
+            # cache-query miss both times: neither card's cached_from_
+            # card_id was set, meaning both got their own independent
+            # GPT-4o automation call for the identical finding+OS, which
+            # simply disagreed on automation_status). Whether a fix CAN be
+            # automated is a property of the mitigation steps themselves,
+            # not of which specific host happened to be processed first —
+            # when os_category genuinely matches, it should never vary.
+            # Same "first card establishes it" rule as assigned_team
+            # above, scoped by (vulnerability_name, os_category) this
+            # time since automation CONTENT can legitimately differ
+            # across different OSes for the same finding name.
+            if run_automation:
+                _existing_automation_card = db[VULN_CARD_COLLECTION].find_one(
+                    {
+                        "report_id":          report_id,
+                        "vulnerability_name": vuln_plugin_name,
+                        "os_category":        vuln_os_category,
+                        "automation_card.automation_status": {"$exists": True},
+                    },
+                    {"automation_card": 1},
+                    sort=[("created_at", 1)],
+                )
+                if _existing_automation_card and (_existing_automation_card.get("automation_card") or {}).get("automation_status"):
+                    document["automation_card"] = {
+                        **(_existing_automation_card["automation_card"]),
+                        # Same reasoning as the existing cache-hit branch
+                        # above — download stats are this card's own, not
+                        # copied from the source it borrowed the verdict from.
+                        "download_count": 0,
+                        "last_downloaded_at": None,
+                    }
+
             try:
                 db[VULN_CARD_COLLECTION].update_one(
                     {
