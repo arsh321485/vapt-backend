@@ -2425,63 +2425,54 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
             # different teams for different hosts within the SAME report
             # (e.g. "TLS Version 1.0 Protocol Detection" — 10 hosts'
             # cards "Configuration Management", one host "Patch
-            # Management") — confirmed live: that one host had a
-            # different os_category, which scopes the cache lookup above
-            # (cache_query includes os_category), so it missed the cache
-            # the other 10 hosts shared and triggered its own independent
-            # GPT-4o call, which answered differently for the exact same
-            # finding name. The mitigation CONTENT genuinely varies by OS
-            # (that's why the cache is OS-scoped), but which TEAM owns a
-            # given vulnerability conceptually should not — it fragmented
-            # the team's own dashboard/common-vulns/mitigation-strategy
-            # counts for that finding (one host's instance silently
-            # excluded from every view, since it belonged to neither
-            # team's expected bucket). The first card ever written for
-            # this (report, vulnerability_name) establishes the team
-            # every later host's card for the SAME finding must match,
-            # regardless of its own os_category or which generation path
-            # produced it.
-            _existing_team_card = db[VULN_CARD_COLLECTION].find_one(
-                {
-                    "report_id":          report_id,
-                    "vulnerability_name": vuln_plugin_name,
-                    "assigned_team":      {"$exists": True, "$nin": [None, ""]},
-                },
-                {"assigned_team": 1},
-                sort=[("created_at", 1)],
+            # Management"), and separately "TLS Version 1.1 Deprecated
+            # Protocol" showed AUTOMATABLE on one asset and NON
+            # AUTOMATABLE on another, same os_category both. Root cause,
+            # confirmed live on a fresh report: cards for hosts sharing
+            # one vulnerability_name can land in this loop with
+            # near-identical created_at timestamps (within the same
+            # millisecond) despite neither having cached_from_card_id
+            # set — i.e. genuinely concurrent independent GPT-4o calls,
+            # not a sequential cache-then-reuse pattern this single-
+            # threaded-looking loop would suggest. A plain "read the
+            # earliest existing card, then write" check (the first
+            # version of this fix) has a race window exactly here: two
+            # cards for the same (report, vulnerability_name) can both
+            # read "nothing exists yet" before either has written,
+            # and both then write their own, possibly-different GPT
+            # answer. Using an atomic find_one_and_update against a
+            # dedicated canonical-value collection closes that window —
+            # whichever card gets there first (by document-level lock,
+            # not by read-then-write timing) permanently establishes the
+            # value via $setOnInsert; every other card, concurrent or
+            # not, reads that SAME value back from the very same atomic
+            # call. Mitigation CONTENT genuinely varies by OS (why the
+            # cache above is OS-scoped) but which TEAM owns a finding,
+            # and whether it's automatable for a given OS, should not.
+            _team_canon = db["card_gen_team_canon"].find_one_and_update(
+                {"report_id": report_id, "vulnerability_name": vuln_plugin_name},
+                {"$setOnInsert": {"assigned_team": document.get("assigned_team")}},
+                upsert=True,
+                return_document=pymongo.ReturnDocument.AFTER,
             )
-            if _existing_team_card and _existing_team_card.get("assigned_team"):
-                document["assigned_team"] = _existing_team_card["assigned_team"]
+            if _team_canon and _team_canon.get("assigned_team"):
+                document["assigned_team"] = _team_canon["assigned_team"]
 
-            # Real bug report: "TLS Version 1.1 Deprecated Protocol" showed
-            # AUTOMATABLE on one asset and NON AUTOMATABLE on another in
-            # the SAME report, SAME os_category ("windows" both) — not
-            # explained by the OS-scoped cache above (genuinely a
-            # cache-query miss both times: neither card's cached_from_
-            # card_id was set, meaning both got their own independent
-            # GPT-4o automation call for the identical finding+OS, which
-            # simply disagreed on automation_status). Whether a fix CAN be
-            # automated is a property of the mitigation steps themselves,
-            # not of which specific host happened to be processed first —
-            # when os_category genuinely matches, it should never vary.
-            # Same "first card establishes it" rule as assigned_team
-            # above, scoped by (vulnerability_name, os_category) this
-            # time since automation CONTENT can legitimately differ
-            # across different OSes for the same finding name.
             if run_automation:
-                _existing_automation_card = db[VULN_CARD_COLLECTION].find_one(
+                _auto_canon = db["card_gen_automation_canon"].find_one_and_update(
                     {
                         "report_id":          report_id,
                         "vulnerability_name": vuln_plugin_name,
                         "os_category":        vuln_os_category,
-                        "automation_card.automation_status": {"$exists": True},
                     },
-                    {"automation_card": 1},
-                    sort=[("created_at", 1)],
+                    {"$setOnInsert": {"automation_card": document.get("automation_card") or {}}},
+                    upsert=True,
+                    return_document=pymongo.ReturnDocument.AFTER,
                 )
-                if _existing_automation_card and (_existing_automation_card.get("automation_card") or {}).get("automation_status"):
+                _canon_automation = (_auto_canon or {}).get("automation_card") or {}
+                if _canon_automation.get("automation_status"):
                     document["automation_card"] = {
-                        **(_existing_automation_card["automation_card"]),
+                        **_canon_automation,
                         # Same reasoning as the existing cache-hit branch
                         # above — download stats are this card's own, not
                         # copied from the source it borrowed the verdict from.
