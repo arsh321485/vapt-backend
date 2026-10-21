@@ -2421,6 +2421,38 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                     "automation_card":    result.get("automation_card", {}),
                 }
 
+            # Real bug report: the same vulnerability_name landed on
+            # different teams for different hosts within the SAME report
+            # (e.g. "TLS Version 1.0 Protocol Detection" — 10 hosts'
+            # cards "Configuration Management", one host "Patch
+            # Management") — confirmed live: that one host had a
+            # different os_category, which scopes the cache lookup above
+            # (cache_query includes os_category), so it missed the cache
+            # the other 10 hosts shared and triggered its own independent
+            # GPT-4o call, which answered differently for the exact same
+            # finding name. The mitigation CONTENT genuinely varies by OS
+            # (that's why the cache is OS-scoped), but which TEAM owns a
+            # given vulnerability conceptually should not — it fragmented
+            # the team's own dashboard/common-vulns/mitigation-strategy
+            # counts for that finding (one host's instance silently
+            # excluded from every view, since it belonged to neither
+            # team's expected bucket). The first card ever written for
+            # this (report, vulnerability_name) establishes the team
+            # every later host's card for the SAME finding must match,
+            # regardless of its own os_category or which generation path
+            # produced it.
+            _existing_team_card = db[VULN_CARD_COLLECTION].find_one(
+                {
+                    "report_id":          report_id,
+                    "vulnerability_name": vuln_plugin_name,
+                    "assigned_team":      {"$exists": True, "$nin": [None, ""]},
+                },
+                {"assigned_team": 1},
+                sort=[("created_at", 1)],
+            )
+            if _existing_team_card and _existing_team_card.get("assigned_team"):
+                document["assigned_team"] = _existing_team_card["assigned_team"]
+
             try:
                 db[VULN_CARD_COLLECTION].update_one(
                     {
