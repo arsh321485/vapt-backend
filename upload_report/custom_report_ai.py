@@ -909,6 +909,138 @@ def _apply_host_affected_groundtruth(
     return vulnerabilities_by_host
 
 
+_SCOPE_SECTION_HEADING_RE = re.compile(
+    r"\b(?:scope\s+of\s+assessment|in-?scope\s+(?:systems|assets)|target\(s\)|assets?\s+tested)\b",
+    re.IGNORECASE,
+)
+# A line starting a new numbered section ("2.3 Overall findings") ends the
+# scope table — same idea as _SECTION_STOP_RE for "Host(s) Affected" lists.
+_SCOPE_SECTION_STOP_RE = re.compile(r"^\d+\.\d+(?:\.\d+)*\s+\S")
+
+
+def _collect_scope_groundtruth(document_text: str) -> set:
+    """
+    Deterministic (no GPT) ground truth for the document's own Scope/
+    Target inventory table (e.g. "2.2 Scope of Assessment"), independent
+    of whatever GPT's own "all_assets" extraction happened to notice.
+
+    Real bug report: a host listed ONLY in the Scope table, with no
+    findings of its own anywhere (so no finding-level "Host(s) Affected"
+    list ever names it either), depends entirely on GPT's own "all_assets"
+    field for the clean-host backfill lower in this file — and GPT can
+    (confirmed real, on a PPFC internal VAPT report) simply drop one row
+    out of a ~25-row scope table on a given run, same ordinary LLM list-
+    completion noise _collect_affected_hosts_groundtruth already works
+    around for per-finding host lists. A PyPDF2 text glitch (see
+    _fix_broken_ip_dots) made this particular miss easier to reproduce but
+    isn't the only way a row can get skipped, so the fix has to be a
+    direct, regex-based read of the table itself — not just cleaner text
+    handed to the same non-deterministic extraction step.
+
+    Best-effort: a document with no recognizable scope/target section
+    heading returns an empty set, which disables the cross-check rather
+    than risk inventing hosts from an unrelated table that happens to
+    have a similar shape.
+    """
+    heading_positions = [m.start() for m in _SCOPE_SECTION_HEADING_RE.finditer(document_text)]
+    if not heading_positions:
+        return set()
+
+    lines = document_text.split("\n")
+    offsets = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    hosts: set = set()
+    for start_pos in heading_positions:
+        line_idx = bisect.bisect_right(offsets, start_pos) - 1
+        unproductive_run = 0
+        j = line_idx + 1
+        while j < len(lines) and j < line_idx + 400:
+            line = lines[j].strip()
+            if not line:
+                j += 1
+                continue
+            # A table-of-contents entry repeats this same heading text
+            # followed by a row of dot leaders and a page number, not the
+            # real table — skip past it (don't treat it as the stop
+            # condition) so a later, real heading occurrence still gets
+            # scanned.
+            if "...." in line:
+                j += 1
+                continue
+            if _SCOPE_SECTION_STOP_RE.match(line):
+                break
+            found_any = False
+            tokens = _extract_host_tokens_from_bullet(line)
+            if not tokens:
+                parts = line.split()
+                if parts and _PLAUSIBLE_HOST_RE.match(parts[-1]):
+                    tokens = [parts[-1]]
+            for host in tokens:
+                if _is_assessor_own_domain(host):
+                    continue
+                hosts.add(host)
+                found_any = True
+            if found_any:
+                unproductive_run = 0
+            else:
+                # Doesn't look like a host row at all — tolerate a few in a
+                # row (the table header itself, e.g. "Description  IP", is
+                # one) but give up once it's clearly not this table.
+                unproductive_run += 1
+                if unproductive_run >= 5:
+                    break
+            j += 1
+
+    return hosts
+
+
+def _apply_scope_groundtruth(vulnerabilities_by_host: list, document_text: str, filename: str = "") -> list:
+    """
+    Adds any host named in _collect_scope_groundtruth's deterministic
+    reading of the document's own Scope/Target table but missing entirely
+    from vulnerabilities_by_host, as a clean (zero-finding) asset — same
+    shape as the GPT "all_assets" backfill in _validate_and_extract_chunk,
+    just driven by a direct read of the table instead of trusting GPT to
+    have transcribed every row of it.
+    """
+    ground_truth = _collect_scope_groundtruth(document_text)
+    if not ground_truth:
+        return vulnerabilities_by_host
+
+    covered = {h["host_name"].lower() for h in vulnerabilities_by_host}
+    covered_normalized = {_normalize_host_token(h["host_name"]).lower() for h in vulnerabilities_by_host}
+    added = 0
+    for host_name in ground_truth:
+        if host_name.lower() in covered:
+            continue
+        normalized = _normalize_host_token(host_name).lower()
+        if normalized in covered_normalized:
+            continue
+        covered.add(host_name.lower())
+        covered_normalized.add(normalized)
+        vulnerabilities_by_host.append({
+            "host_name": host_name,
+            "host_information": {},
+            "vulnerabilities": [],
+        })
+        added += 1
+        logger.info(
+            f"[CustomFileValidation] '{filename}' scope-table ground-truth added "
+            f"{host_name!r} as a clean asset — present in the document's own Scope "
+            f"table but missing from GPT's extraction"
+        )
+    if added:
+        logger.info(
+            f"[CustomFileValidation] '{filename}' scope-table ground-truth check: "
+            f"added {added} host(s) GPT's own extraction missed entirely"
+        )
+    return vulnerabilities_by_host
+
+
 def _get_validation_llm():
     """
     LangChain ChatOpenAI LLM — same construction pattern as
@@ -938,6 +1070,7 @@ def _get_validation_llm():
 
 
 _BROKEN_HYPHEN_RE = re.compile(r"(\w) -(\w)")
+_BROKEN_IP_DOT_RE = re.compile(r"(\d) \.(\d)")
 
 
 def _fix_broken_hyphens(text: str) -> str:
@@ -955,13 +1088,30 @@ def _fix_broken_hyphens(text: str) -> str:
     return _BROKEN_HYPHEN_RE.sub(r"\1-\2", text)
 
 
+def _fix_broken_ip_dots(text: str) -> str:
+    """
+    Same PyPDF2 kerning glitch as _fix_broken_hyphens, but before a dot
+    instead of a hyphen — e.g. a Scope table's "192.168.1.102" comes out as
+    "192.168 .1.102". Confirmed real: a PPFC internal VAPT report's own
+    Scope of Assessment table had exactly this for one IP, and nothing
+    else in the whole document — the GPT extraction step silently never
+    listed that IP under "hosts" or "all_assets", so it never appeared in
+    vulnerabilities_by_host at all (unlike every other clean/zero-finding
+    scope host, which still gets backfilled further down this file).
+    Only collapses "<digit> .<digit>" (dot immediately followed by another
+    digit, no space after it) — a real sentence boundary like "...port 80.
+    Also note..." always has a space AFTER the period too and is untouched.
+    """
+    return _BROKEN_IP_DOT_RE.sub(r"\1.\2", text)
+
+
 def _extract_document_text(parsed_data: Dict[str, Any]) -> str:
     """Pull the best available raw text out of whatever the generic parsers produced."""
     report_type = parsed_data.get("type")
 
     if report_type in ("pdf", "docx", "doc"):
         text = parsed_data.get("text_full") or parsed_data.get("text_preview") or ""
-        return _fix_broken_hyphens(text)
+        return _fix_broken_ip_dots(_fix_broken_hyphens(text))
 
     if report_type == "html":
         return parsed_data.get("text_preview") or ""
@@ -1751,6 +1901,7 @@ def validate_and_extract_custom_report(parsed_data: Dict[str, Any], filename: st
             )
 
     vulnerabilities_by_host = _apply_host_affected_groundtruth(vulnerabilities_by_host, truncated, filename)
+    vulnerabilities_by_host = _apply_scope_groundtruth(vulnerabilities_by_host, truncated, filename)
 
     # Final safety net, independent of exactly which step let it through:
     # confirmed real (non-deterministically — present on some GPT runs for
