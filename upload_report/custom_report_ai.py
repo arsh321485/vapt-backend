@@ -2010,6 +2010,15 @@ def validate_and_extract_custom_report_cached(
         # its next reuse, not just future uploads.
         document_text = _extract_document_text(parsed_data)
         filtered_vbh = _apply_host_affected_groundtruth(filtered_vbh, document_text, filename)
+        # Same reasoning again: the Scope-table ground-truth check (see
+        # _apply_scope_groundtruth's own docstring) also only ever ran on a
+        # fresh GPT extraction. A file_hash cached BEFORE this check existed
+        # (e.g. the PPFC Internal report's own 192.168.1.102, missing from
+        # GPT's extraction, cached as the "verified-complete" result before
+        # this fix) kept serving that same incomplete host list forever on
+        # every later re-upload of the identical file — apply it here too so
+        # a stale cache entry gets corrected on its next reuse.
+        filtered_vbh = _apply_scope_groundtruth(filtered_vbh, document_text, filename)
 
         logger.info(
             f"[CustomFileValidation] '{filename}' matches a previously verified-complete "
