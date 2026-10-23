@@ -1087,6 +1087,18 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
             body = [team_tab.team_subnav_columnset("team_sub_deleteteamuser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
+    if action_id == "team_role_add_do":
+        detail_id = value.get("detail_id") or ""
+        role = value.get("role") or ""
+        offset = int(value.get("offset") or 0)
+        try:
+            ok, message = team_tab.do_add_role(admin, detail_id, role)
+            body = [team_tab.team_subnav_columnset("team_sub_deleteteamuser"), cards._header("✅ Done" if ok else "❌ Failed"), cards._body_text(message)]
+        except Exception:
+            logger.exception("[TeamsBot] team_role_add_do failed")
+            body = [team_tab.team_subnav_columnset("team_sub_deleteteamuser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
     if action_id == "team_ext_pg":
         offset = int(value.get("offset") or 0)
         try:

@@ -1012,6 +1012,22 @@ def update_role_detail_body(admin, detail_id, offset=0):
         for role in roles
     ]
     body.append({"type": "ActionSet", "spacing": "Medium", "actions": actions_list})
+
+    # Real feature request: this screen only ever let you remove a team —
+    # adding one meant leaving the bot for the website's own Update User
+    # Role page. Reuses UserDetailRoleUpdateView in-process (do_add_role,
+    # below) — the SAME endpoint that page calls — so validation/allowed-
+    # team logic is identical, not a re-implementation. Non-destructive
+    # (unlike remove), so no confirm step, same as team_adduser_create_team.
+    all_team_names = [name for _, name in _team_options_for_admin(admin)]
+    missing_teams = [name for name in all_team_names if name not in roles]
+    if missing_teams:
+        body.append({"type": "TextBlock", "text": "Tap a team to add this member to it:", "size": "Small", "weight": "Bolder", "spacing": "Medium"})
+        add_actions = [
+            cards._execute_action(f"➕ Add to {name}", {"action_id": "team_role_add_do", "detail_id": detail_id, "role": name, "offset": offset})
+            for name in missing_teams
+        ]
+        body.append({"type": "ActionSet", "spacing": "Medium", "actions": add_actions})
     return body
 
 
@@ -1034,6 +1050,19 @@ def do_remove_role(admin, detail_id, role):
         err = (data or {}).get("detail") or f"status {status_code}"
         return False, f"Could not remove {role} — {err}."
     return True, f"Removed from {role}."
+
+
+def do_add_role(admin, detail_id, role):
+    from users_details.views import UserDetailRoleUpdateView
+    from .actions import _call_view_in_process
+    status_code, data = _call_view_in_process(
+        UserDetailRoleUpdateView, admin, method="patch", request_format="json",
+        data={"new_roles": [role]}, url_kwargs={"detail_id": detail_id},
+    )
+    if status_code >= 300:
+        err = (data or {}).get("detail") or f"status {status_code}"
+        return False, f"Could not add {role} — {err}."
+    return True, f"Added to {role}."
 
 
 # ── External User ─────────────────────────────────────────────────────
