@@ -1039,9 +1039,30 @@ def role_remove_confirm_body(detail_id, role, offset):
     )
 
 
+def _member_name_by_detail_id(detail_id):
+    """
+    Direct UserDetail lookup by id — cheap (one DB read), unlike
+    _fetch_members() which re-syncs live from the MS Graph API on every
+    call. Used by do_add_role/do_remove_role only to put a name in their
+    own success message, not worth a Graph round-trip for.
+    """
+    from bson import ObjectId
+    from users_details.models import UserDetail
+    try:
+        ud = UserDetail.objects.get(_id=ObjectId(detail_id))
+    except Exception:
+        return None
+    name = f"{(ud.first_name or '').strip()} {(ud.last_name or '').strip()}".strip()
+    return name or ud.email or None
+
+
 def do_remove_role(admin, detail_id, role):
     from users_details.views import UserDetailRoleDeleteView
     from .actions import _call_view_in_process
+    # Looked up BEFORE the call — removing a member's only remaining role
+    # deletes their whole UserDetail record, so there'd be nothing left to
+    # look up afterward.
+    member_name = _member_name_by_detail_id(detail_id)
     status_code, data = _call_view_in_process(
         UserDetailRoleDeleteView, admin, method="delete", request_format="json",
         data={"confirm": True, "member_role": role}, url_kwargs={"detail_id": detail_id},
@@ -1049,12 +1070,14 @@ def do_remove_role(admin, detail_id, role):
     if status_code >= 300:
         err = (data or {}).get("detail") or f"status {status_code}"
         return False, f"Could not remove {role} — {err}."
-    return True, f"Removed from {role}."
+    who = f"{member_name} removed" if member_name else "Removed"
+    return True, f"{who} from {role}."
 
 
 def do_add_role(admin, detail_id, role):
     from users_details.views import UserDetailRoleUpdateView
     from .actions import _call_view_in_process
+    member_name = _member_name_by_detail_id(detail_id)
     status_code, data = _call_view_in_process(
         UserDetailRoleUpdateView, admin, method="patch", request_format="json",
         data={"new_roles": [role]}, url_kwargs={"detail_id": detail_id},
@@ -1062,7 +1085,8 @@ def do_add_role(admin, detail_id, role):
     if status_code >= 300:
         err = (data or {}).get("detail") or f"status {status_code}"
         return False, f"Could not add {role} — {err}."
-    return True, f"Added to {role}."
+    who = f"{member_name} added" if member_name else "Added"
+    return True, f"{who} to {role}."
 
 
 # ── External User ─────────────────────────────────────────────────────
