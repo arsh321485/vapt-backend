@@ -13,7 +13,11 @@ from .models import BillingCustomer, Subscription, Invoice, StripeWebhookEvent
 from .plans import (
     PLAN_PREMIUM, PLAN_CUSTOM,
     MODE_MANAGEMENT, MODE_MANAGEMENT_TESTING,
-    MANAGEMENT_BILLING_CYCLES, MANAGEMENT_TESTING_RATE_PER_IP_YEAR,
+    CYCLE_QUARTERLY, CYCLE_SEMI_ANNUAL, CYCLE_ANNUAL,
+    MANAGEMENT_ONLY_FLAT_FEE, MANAGEMENT_ONLY_PERIOD_MONTHS,
+    MANAGEMENT_TESTING_PLATFORM_FEE, MANAGEMENT_TESTING_PERIOD_MONTHS,
+    MANAGEMENT_TESTING_RATE_PER_IP, MANAGEMENT_TESTING_RATE_PER_WEB_APP, MANAGEMENT_TESTING_RATE_PER_MOBILE_APP,
+    CUSTOM_RATE_PER_IP_ANNUAL,
     calculate_management_amount, calculate_management_testing_amount, calculate_custom_amount,
 )
 
@@ -56,27 +60,86 @@ def create_setup_intent(admin) -> dict:
     return {"client_secret": intent["client_secret"], "customer_id": customer_id}
 
 
-def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_count: int, source: str = None) -> dict:
+def create_premium_checkout_session(
+    admin, mode: str, asset_count: int = 0,
+    ip_count: int = 0, web_app_count: int = 0, mobile_app_count: int = 0,
+    source: str = None,
+) -> dict:
     """
-    Builds a Stripe Checkout Session with a dynamic per-IP price (price_data) —
-    no pre-created Stripe Price objects needed since the unit quantity (asset
-    count) differs per admin.
+    Builds a Stripe Checkout Session with dynamic prices (price_data) — no
+    pre-created Stripe Price objects needed.
+
+    Management Only is a single flat-fee line item (quantity 1) regardless
+    of asset_count — it's informational only here (stored on the
+    Subscription row for display), not part of the Stripe price. Management
+    + Testing is a platform-fee line item plus one line item per asset type
+    actually present (IP/web app/mobile app), each priced per-unit with the
+    real quantity — so the Checkout page itself shows the same per-type
+    breakdown as the pricing page's "Where your money goes" box, not just a
+    single opaque total.
     """
     customer_id = get_or_create_customer(admin)
 
     if mode == MODE_MANAGEMENT:
-        cfg = MANAGEMENT_BILLING_CYCLES[billing_cycle]
-        unit_amount_cents = int(cfg["rate_per_ip"] * cfg["months"] * 100)
-        recurring = {"interval": cfg["stripe_interval"], "interval_count": cfg["stripe_interval_count"]}
-        product_name = f"VaptFix Premium — Management ({billing_cycle})"
-        amount_due = calculate_management_amount(asset_count, billing_cycle)
-        price_per_ip = cfg["rate_per_ip"]
+        recurring = {"interval": "month", "interval_count": MANAGEMENT_ONLY_PERIOD_MONTHS}
+        line_items = [{
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": "VaptFix Premium — Management Only (3 months)"},
+                "unit_amount": int(MANAGEMENT_ONLY_FLAT_FEE * 100),
+                "recurring": recurring,
+            },
+            "quantity": 1,
+        }]
+        amount_due = calculate_management_amount()
+        resolved_billing_cycle = CYCLE_QUARTERLY
+        price_per_ip = None
+        total_asset_count = asset_count
     elif mode == MODE_MANAGEMENT_TESTING:
-        unit_amount_cents = int(MANAGEMENT_TESTING_RATE_PER_IP_YEAR * 100)
-        recurring = {"interval": "year", "interval_count": 1}
-        product_name = "VaptFix Premium — Management + Testing (Annual)"
-        amount_due = calculate_management_testing_amount(asset_count)
-        price_per_ip = MANAGEMENT_TESTING_RATE_PER_IP_YEAR
+        recurring = {"interval": "month", "interval_count": MANAGEMENT_TESTING_PERIOD_MONTHS}
+        line_items = [{
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": "VaptFix Premium — Management + Testing platform fee (6 months)"},
+                "unit_amount": int(MANAGEMENT_TESTING_PLATFORM_FEE * 100),
+                "recurring": recurring,
+            },
+            "quantity": 1,
+        }]
+        if ip_count:
+            line_items.append({
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": "VaptFix Premium — Management + Testing, per IP (6 months)"},
+                    "unit_amount": int(MANAGEMENT_TESTING_RATE_PER_IP * 100),
+                    "recurring": recurring,
+                },
+                "quantity": ip_count,
+            })
+        if web_app_count:
+            line_items.append({
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": "VaptFix Premium — Management + Testing, per web app (6 months)"},
+                    "unit_amount": int(MANAGEMENT_TESTING_RATE_PER_WEB_APP * 100),
+                    "recurring": recurring,
+                },
+                "quantity": web_app_count,
+            })
+        if mobile_app_count:
+            line_items.append({
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": "VaptFix Premium — Management + Testing, per mobile app (6 months)"},
+                    "unit_amount": int(MANAGEMENT_TESTING_RATE_PER_MOBILE_APP * 100),
+                    "recurring": recurring,
+                },
+                "quantity": mobile_app_count,
+            })
+        amount_due = calculate_management_testing_amount(ip_count, web_app_count, mobile_app_count)
+        resolved_billing_cycle = CYCLE_SEMI_ANNUAL
+        price_per_ip = MANAGEMENT_TESTING_RATE_PER_IP
+        total_asset_count = ip_count + web_app_count + mobile_app_count
     else:
         raise ValueError(f"Unknown premium mode: {mode}")
 
@@ -84,8 +147,11 @@ def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_
         "admin_id": str(admin.id),
         "plan": "premium",
         "mode": mode,
-        "billing_cycle": billing_cycle,
-        "asset_count": str(asset_count),
+        "billing_cycle": resolved_billing_cycle,
+        "asset_count": str(total_asset_count),
+        "ip_count": str(ip_count),
+        "web_app_count": str(web_app_count),
+        "mobile_app_count": str(mobile_app_count),
     }
 
     frontend_url = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
@@ -96,15 +162,7 @@ def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_
         customer=customer_id,
         mode="subscription",
         payment_method_types=["card"],
-        line_items=[{
-            "price_data": {
-                "currency": "usd",
-                "product_data": {"name": product_name},
-                "unit_amount": unit_amount_cents,
-                "recurring": recurring,
-            },
-            "quantity": max(int(asset_count), 1),
-        }],
+        line_items=line_items,
         success_url=success_url,
         cancel_url=f"{frontend_url}/billing/cancel",
         metadata=metadata,
@@ -115,9 +173,9 @@ def create_premium_checkout_session(admin, mode: str, billing_cycle: str, asset_
         admin=admin,
         plan="premium",
         mode=mode,
-        billing_cycle=billing_cycle if mode == MODE_MANAGEMENT else "annual",
-        asset_count=asset_count,
-        price_per_ip=str(price_per_ip),
+        billing_cycle=resolved_billing_cycle,
+        asset_count=total_asset_count,
+        price_per_ip=str(price_per_ip) if price_per_ip is not None else None,
         amount_due=str(amount_due),
         status="incomplete",
         stripe_checkout_session_id=session["id"],
@@ -138,12 +196,11 @@ def create_custom_checkout_session(admin, asset_count: int, source: str = None) 
     """
     customer_id = get_or_create_customer(admin)
 
-    cfg = MANAGEMENT_BILLING_CYCLES["annual"]
-    unit_amount_cents = int(cfg["rate_per_ip"] * cfg["months"] * 100)
-    recurring = {"interval": cfg["stripe_interval"], "interval_count": cfg["stripe_interval_count"]}
+    unit_amount_cents = int(CUSTOM_RATE_PER_IP_ANNUAL * 12 * 100)
+    recurring = {"interval": "year", "interval_count": 1}
     product_name = "VaptFix Custom — Management (Annual)"
     amount_due = calculate_custom_amount(asset_count)
-    price_per_ip = cfg["rate_per_ip"]
+    price_per_ip = CUSTOM_RATE_PER_IP_ANNUAL
 
     metadata = {
         "admin_id": str(admin.id),
@@ -207,8 +264,29 @@ def cancel_subscription(subscription: Subscription):
 
 
 def update_subscription_asset_quantity(subscription: Subscription, new_asset_count: int):
-    """Called when a new report changes the admin's billable asset count —
-    updates Stripe's subscription item quantity with proration."""
+    """
+    Called when a new report changes the admin's billable asset count.
+
+    Premium Management Only (plan=premium, mode=management) is now a flat
+    $300/3-months fee (see billing.plans) — its single Stripe line item is
+    always quantity 1 regardless of asset count, so there is nothing to
+    sync to Stripe; just keep the local asset_count current for display
+    (and so SubscriptionSyncAssetsView's own "has this changed" check
+    doesn't keep re-entering this function every time it's called).
+
+    Custom tier (plan=custom, mode=management) is unaffected by this
+    pricing redesign — still billed per-IP, annual-only — so it still
+    updates Stripe's subscription item quantity with proration exactly as
+    before.
+    """
+    from .plans import PLAN_CUSTOM, CUSTOM_RATE_PER_IP_ANNUAL
+    from decimal import Decimal
+
+    if subscription.plan != PLAN_CUSTOM:
+        subscription.asset_count = new_asset_count
+        subscription.save(update_fields=["asset_count", "updated_at"])
+        return
+
     if not subscription.stripe_subscription_item_id:
         logger.warning(
             f"[Billing] Cannot update quantity for subscription {subscription._id} — "
@@ -221,12 +299,7 @@ def update_subscription_asset_quantity(subscription: Subscription, new_asset_cou
         proration_behavior="create_prorations",
     )
     subscription.asset_count = new_asset_count
-    if subscription.price_per_ip is not None:
-        # Re-derive amount_due for display purposes (actual charge is Stripe's).
-        from decimal import Decimal
-        months = MANAGEMENT_BILLING_CYCLES.get(subscription.billing_cycle, {}).get("months", 1) \
-            if subscription.mode == MODE_MANAGEMENT else 1
-        subscription.amount_due = str(Decimal(subscription.price_per_ip) * new_asset_count * months)
+    subscription.amount_due = str(CUSTOM_RATE_PER_IP_ANNUAL * 12 * new_asset_count)
     subscription.save(update_fields=["asset_count", "amount_due", "updated_at"])
 
 

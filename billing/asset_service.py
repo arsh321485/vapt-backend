@@ -141,6 +141,54 @@ def get_admin_billable_asset_count(admin_id: str) -> int:
         return 0
 
 
+def get_admin_vulnerability_count(admin_id: str) -> int:
+    """
+    Total vulnerability-finding count (visible + locked, same union
+    get_admin_billable_asset_count counts hosts over) across this admin's
+    uploaded reports — Management Only's own 1,000-vulnerability cap (see
+    billing.plans.MANAGEMENT_ONLY_VULN_CAP) is checked against this, not
+    asset count alone.
+    """
+    try:
+        conditions = [{"admin_id": str(admin_id)}]
+        try:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            admin_user = User.objects.filter(id=admin_id).first()
+            if admin_user and admin_user.email:
+                conditions.append({"admin_email": admin_user.email})
+        except Exception:
+            logger.exception(f"[Billing] could not resolve admin_email for admin_id={admin_id}")
+
+        with MongoContext() as db:
+            pipeline = [
+                {"$match": {"$or": conditions}},
+                {"$project": {
+                    "count": {"$add": [
+                        {"$sum": {
+                            "$map": {
+                                "input": {"$ifNull": ["$vulnerabilities_by_host", []]},
+                                "as": "h",
+                                "in": {"$size": {"$ifNull": ["$$h.vulnerabilities", []]}},
+                            }
+                        }},
+                        {"$sum": {
+                            "$map": {
+                                "input": {"$ifNull": ["$locked_hosts", []]},
+                                "as": "h",
+                                "in": {"$size": {"$ifNull": ["$$h.vulnerabilities", []]}},
+                            }
+                        }},
+                    ]},
+                }},
+            ]
+            reports = list(db[NESSUS_COLLECTION].aggregate(pipeline))
+            return sum(int(r.get("count") or 0) for r in reports)
+    except Exception as e:
+        logger.error(f"[Billing] vulnerability count aggregation failed for admin_id={admin_id}: {e}")
+        return 0
+
+
 def get_admin_locked_asset_count(admin_id: str) -> int:
     """
     Sum of locked_hosts entries across every report for this admin — the
@@ -340,6 +388,35 @@ def get_admin_scope_asset_breakdown(admin_id: str) -> dict:
         return {"total": 0, "internal_count": 0, "external_count": 0, "has_external": False, "has_web_asset": False}
 
 
+def get_admin_scope_asset_type_counts(admin_id: str) -> dict:
+    """
+    Management + Testing is priced per asset TYPE ($25/IP, $1,250/web app,
+    $1,250/mobile app — see billing.plans.calculate_management_testing_amount),
+    unlike get_admin_scope_asset_breakdown's internal/external split or its
+    single has_web_asset boolean, neither of which separates web from
+    mobile or gives per-type counts. Entry types "internal_ip"/
+    "external_ip"/"subnet" all bill as IP (a subnet too large to expand at
+    submission time is still one billable unit, same as every other scope
+    asset-count helper in this file treats it).
+    """
+    try:
+        from scope.models import ScopeEntry
+        seen = {"ip": set(), "web_url": set(), "mobile_url": set()}
+        for value, entry_type in ScopeEntry.objects.filter(scope__admin_id=admin_id).values_list("value", "entry_type"):
+            if not value:
+                continue
+            bucket = "web_url" if entry_type == "web_url" else "mobile_url" if entry_type == "mobile_url" else "ip"
+            seen[bucket].add(value.lower())
+        return {
+            "ip_count": len(seen["ip"]),
+            "web_app_count": len(seen["web_url"]),
+            "mobile_app_count": len(seen["mobile_url"]),
+        }
+    except Exception as e:
+        logger.error(f"[Billing] scope asset type counts failed for admin_id={admin_id}: {e}")
+        return {"ip_count": 0, "web_app_count": 0, "mobile_app_count": 0}
+
+
 def _latest_report_uploaded_at(admin_id: str):
     """Most recent uploaded_at across this admin's reports, or None.
     Same admin_id-OR-admin_email match as get_admin_asset_count, for the
@@ -423,6 +500,26 @@ def resolve_management_testing_asset_count(admin_id: str):
     if scope_count:
         return scope_count, "scope"
     return 0, "scope"
+
+
+def resolve_management_testing_asset_type_counts(admin_id: str):
+    """
+    Same (report, scope) recency logic as resolve_management_testing_asset_count,
+    but returning the per-type breakdown Management + Testing is actually
+    priced on (see get_admin_scope_asset_type_counts). A report has no
+    asset-type information of its own (just host_name strings) — scope
+    submission is the normal path for this mode in practice ("scope se
+    upload karta hai to management_testing se hi jayega"), so the report
+    fallback counts everything as IP rather than guessing a type from the
+    host_name string.
+
+    Returns (counts_dict, source) — counts_dict has ip_count/web_app_count/
+    mobile_app_count, source is "report" or "scope".
+    """
+    count, source = resolve_management_testing_asset_count(admin_id)
+    if source == "scope":
+        return get_admin_scope_asset_type_counts(admin_id), source
+    return {"ip_count": count, "web_app_count": 0, "mobile_app_count": 0}, source
 
 
 def get_admin_asset_breakdown(admin_id: str):

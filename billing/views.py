@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from users.utils import Util
 from .asset_service import (
     get_admin_asset_count, get_admin_scope_asset_count, resolve_management_testing_asset_count,
+    resolve_management_testing_asset_type_counts, get_admin_vulnerability_count,
     get_admin_billable_asset_count, get_admin_asset_breakdown_counts,
 )
 from .models import Subscription, SalesLead
@@ -18,7 +19,9 @@ from .plans import (
     PLAN_FREEMIUM, PLAN_PREMIUM, PLAN_CUSTOM,
     MODE_MANAGEMENT, MODE_MANAGEMENT_TESTING,
     FREEMIUM_LIMITS, PREMIUM_ASSET_CEILING,
-    MANAGEMENT_BILLING_CYCLES, MANAGEMENT_TESTING_RATE_PER_IP_YEAR,
+    CYCLE_QUARTERLY, CYCLE_SEMI_ANNUAL,
+    MANAGEMENT_ONLY_ASSET_CAP, MANAGEMENT_ONLY_VULN_CAP,
+    MANAGEMENT_TESTING_RATE_PER_IP, MANAGEMENT_TESTING_RATE_PER_WEB_APP, MANAGEMENT_TESTING_RATE_PER_MOBILE_APP,
     calculate_management_amount, calculate_management_testing_amount,
 )
 from .serializers import (
@@ -43,7 +46,6 @@ class PlanEstimateView(APIView):
         serializer.is_valid(raise_exception=True)
         plan = serializer.validated_data["plan"]
         mode = serializer.validated_data.get("mode")
-        billing_cycle = serializer.validated_data.get("billing_cycle")
 
         if plan == PLAN_FREEMIUM:
             asset_count = get_admin_asset_count(str(request.user.id))
@@ -63,24 +65,52 @@ class PlanEstimateView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Mode A bills on uploaded-report assets. Mode B prefers that
-            # SAME report's asset count when one already exists (an admin
-            # who already uploaded a report just wants testing added on
-            # top, not a separate target list) — falls back to the scope
-            # submitted via /api/admin/scope/create/ only when there's no
-            # report at all.
-            #
-            # Premium billing uses get_admin_billable_asset_count (the
-            # ORIGINAL file size — visible + locked), never
-            # get_admin_asset_count (Freemium's visible-only cap of 5) —
-            # real bug confirmed by the frontend: a 15-IP file uploaded on
-            # Freemium (showing 5, 10 saved as locked_hosts) was still
-            # pricing Premium at 5 IPs after the admin chose to upgrade.
-            asset_source = "report"
             if mode == MODE_MANAGEMENT:
+                # Management Only is now a flat $300/3-months fee (see
+                # billing.plans) — not billed per asset. Still uses
+                # get_admin_billable_asset_count (the ORIGINAL file size —
+                # visible + locked), never get_admin_asset_count
+                # (Freemium's visible-only cap of 5), so the 100-asset/
+                # 1,000-vulnerability cap check below reflects the file's
+                # real size, same reasoning as the old per-IP pricing had.
                 asset_count = get_admin_billable_asset_count(str(request.user.id))
-            else:
-                asset_count, asset_source = resolve_management_testing_asset_count(str(request.user.id))
+                vuln_count = get_admin_vulnerability_count(str(request.user.id))
+                asset_source = "report"
+
+                amount = calculate_management_amount()
+                response_data = {
+                    "plan": plan,
+                    "mode": mode,
+                    "billing_cycle": CYCLE_QUARTERLY,
+                    "asset_count": asset_count,
+                    "vulnerability_count": vuln_count,
+                    "asset_cap": MANAGEMENT_ONLY_ASSET_CAP,
+                    "vulnerability_cap": MANAGEMENT_ONLY_VULN_CAP,
+                    # Informational only — going over either cap does NOT
+                    # block this estimate or checkout (Management Only has
+                    # no per-asset price to scale), it just means the next
+                    # 3-month period needs its own $300 (see the pricing
+                    # page's "Over the limit: Next 3-month period, +$300").
+                    "over_limit": asset_count > MANAGEMENT_ONLY_ASSET_CAP or vuln_count > MANAGEMENT_ONLY_VULN_CAP,
+                    "amount_due": str(amount),
+                    "currency": "usd",
+                }
+                response_data.update(get_admin_asset_breakdown_counts(str(request.user.id)))
+                return Response(response_data)
+
+            # Management + Testing — scope-priced per asset type (IP/web
+            # app/mobile app). Mode prefers the SAME uploaded report's
+            # asset count when one already exists (an admin who already
+            # uploaded a report just wants testing added on top), falling
+            # back to the scope submitted via /api/admin/scope/create/ only
+            # when there's no report at all — see
+            # resolve_management_testing_asset_type_counts(). A report has
+            # no type information, so that fallback counts everything as IP.
+            counts, asset_source = resolve_management_testing_asset_type_counts(str(request.user.id))
+            ip_count = counts["ip_count"]
+            web_app_count = counts["web_app_count"]
+            mobile_app_count = counts["mobile_app_count"]
+            asset_count = ip_count + web_app_count + mobile_app_count
 
             if asset_count > PREMIUM_ASSET_CEILING:
                 return Response({
@@ -91,52 +121,35 @@ class PlanEstimateView(APIView):
                     "message": "More than 250 assets — this account must use the Custom plan.",
                 })
 
-            if mode == MODE_MANAGEMENT:
-                if not billing_cycle:
-                    return Response(
-                        {"billing_cycle": "billing_cycle is required for Management mode."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                amount = calculate_management_amount(asset_count, billing_cycle)
-                rate = MANAGEMENT_BILLING_CYCLES[billing_cycle]["rate_per_ip"]
-            else:
-                amount = calculate_management_testing_amount(asset_count)
-                rate = MANAGEMENT_TESTING_RATE_PER_IP_YEAR
-                billing_cycle = "annual"
+            amount = calculate_management_testing_amount(ip_count, web_app_count, mobile_app_count)
 
             response_data = {
                 "plan": plan,
                 "mode": mode,
-                "billing_cycle": billing_cycle,
+                "billing_cycle": CYCLE_SEMI_ANNUAL,
                 "asset_count": asset_count,
-                "price_per_ip": str(rate),
+                "ip_count": ip_count,
+                "web_app_count": web_app_count,
+                "mobile_app_count": mobile_app_count,
+                "rate_per_ip": str(MANAGEMENT_TESTING_RATE_PER_IP),
+                "rate_per_web_app": str(MANAGEMENT_TESTING_RATE_PER_WEB_APP),
+                "rate_per_mobile_app": str(MANAGEMENT_TESTING_RATE_PER_MOBILE_APP),
                 "amount_due": str(amount),
                 "currency": "usd",
-            }
-            # Explicit billing breakdown so the frontend never has to guess
-            # which count is which — visible/locked only differ from
-            # original/billable for a Management-mode admin who has
-            # Freemium-trimmed hosts; Management+Testing (scope-based, no
-            # report trimming involved) reports the same value for all four.
-            if mode == MODE_MANAGEMENT:
-                response_data.update(get_admin_asset_breakdown_counts(str(request.user.id)))
-            else:
-                response_data.update({
-                    "visible_asset_count": asset_count,
-                    "locked_asset_count": 0,
-                    "original_asset_count": asset_count,
-                    "billable_asset_count": asset_count,
-                })
-            if mode == MODE_MANAGEMENT_TESTING:
+                "visible_asset_count": asset_count,
+                "locked_asset_count": 0,
+                "original_asset_count": asset_count,
+                "billable_asset_count": asset_count,
                 # Lets the frontend show "priced from your uploaded report"
                 # vs "priced from your submitted scope".
-                response_data["asset_source"] = asset_source
+                "asset_source": asset_source,
+            }
 
             # Only genuinely nothing to price on — no uploaded report AND
             # no submitted scope. $0.00 alone would read as a real (wrong)
             # total, so flag it explicitly and point the frontend at the
             # endpoint that actually unblocks it.
-            if mode == MODE_MANAGEMENT_TESTING and asset_count == 0:
+            if asset_count == 0:
                 response_data["needs_scope"] = True
                 response_data["message"] = (
                     "No report or scope found yet — pricing can't be calculated until "
@@ -247,20 +260,27 @@ class PremiumCheckoutView(APIView):
         serializer = PremiumCheckoutRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         mode = serializer.validated_data["mode"]
-        billing_cycle = serializer.validated_data.get("billing_cycle") or "annual"
 
         admin = request.user
-        # Mode A bills on uploaded-report assets. Mode B prefers that SAME
-        # report's asset count when one exists, falling back to the
+        # Management Only bills on uploaded-report assets (flat fee — see
+        # billing.plans, asset_count here is informational/display only,
+        # not part of the Stripe price). Management + Testing prefers the
+        # SAME report's asset count when one exists, falling back to the
         # submitted scope only when there's no report at all — see
-        # resolve_management_testing_asset_count(). Same billable-count fix
-        # as PlanEstimateView — checkout must never create a Stripe session
-        # for the Freemium visible-only count when locked_hosts exist.
+        # resolve_management_testing_asset_type_counts(). Same billable-
+        # count fix as PlanEstimateView — checkout must never create a
+        # Stripe session for the Freemium visible-only count when
+        # locked_hosts exist.
+        ip_count = web_app_count = mobile_app_count = 0
         if mode == MODE_MANAGEMENT:
             asset_count = get_admin_billable_asset_count(str(admin.id))
             no_assets_detail = "Upload a report first — no assets found to bill for."
         else:
-            asset_count, _asset_source = resolve_management_testing_asset_count(str(admin.id))
+            counts, _asset_source = resolve_management_testing_asset_type_counts(str(admin.id))
+            ip_count = counts["ip_count"]
+            web_app_count = counts["web_app_count"]
+            mobile_app_count = counts["mobile_app_count"]
+            asset_count = ip_count + web_app_count + mobile_app_count
             no_assets_detail = "Upload a report or provide your scope first — no targets found to bill for."
 
         if asset_count > PREMIUM_ASSET_CEILING:
@@ -276,7 +296,8 @@ class PremiumCheckoutView(APIView):
 
         try:
             result = stripe_service.create_premium_checkout_session(
-                admin, mode=mode, billing_cycle=billing_cycle, asset_count=asset_count,
+                admin, mode=mode, asset_count=asset_count,
+                ip_count=ip_count, web_app_count=web_app_count, mobile_app_count=mobile_app_count,
                 source=serializer.validated_data.get("source"),
             )
         except Exception as e:

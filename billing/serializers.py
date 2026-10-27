@@ -11,6 +11,10 @@ class PlanEstimateRequestSerializer(serializers.Serializer):
 
 class PremiumCheckoutRequestSerializer(serializers.Serializer):
     mode = serializers.ChoiceField(choices=MODE_CHOICES)
+    # No longer a real admin choice — Management Only is a fixed 3-month
+    # period and Management + Testing a fixed 6-month period (see
+    # billing.plans), each with exactly one cycle. Kept accepting the field
+    # (ignored) so an older frontend build that still sends one doesn't 400.
     billing_cycle = serializers.ChoiceField(choices=CYCLE_CHOICES, required=False)
     # Where the admin arrived from before landing on the pricing page
     # (e.g. "slack", "teams") — same value the pricing-handoff link already
@@ -18,13 +22,6 @@ class PremiumCheckoutRequestSerializer(serializers.Serializer):
     # /billing/success page knows to show "head back to Slack/Teams" after
     # payment instead of a platform-agnostic "you're all set".
     source = serializers.CharField(required=False, allow_blank=True, max_length=32)
-
-    def validate(self, attrs):
-        if attrs["mode"] == "management" and not attrs.get("billing_cycle"):
-            raise serializers.ValidationError(
-                {"billing_cycle": "billing_cycle is required for Management mode."}
-            )
-        return attrs
 
 
 class CustomCheckoutRequestSerializer(serializers.Serializer):
