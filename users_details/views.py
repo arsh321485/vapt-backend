@@ -1091,7 +1091,18 @@ class UserDetailCreateView(generics.CreateAPIView):
             if admin_id and email:
                 if UserDetail.objects.filter(admin__id=admin_id, email=email).exists():
                     return Response(
-                        {"error": f"User with email '{email}' already exists for this admin."},
+                        {"error": "This email already exists for this admin."},
+                        status=status.HTTP_409_CONFLICT
+                    )
+
+                # Real request: the same email also can't be added as a
+                # team member under a DIFFERENT admin — only reached once
+                # the same-admin check above has already ruled out "it's
+                # this admin's own existing member", so any match here is
+                # necessarily a different admin's.
+                if UserDetail.objects.filter(email=email).exists():
+                    return Response(
+                        {"error": "This email is already registered as a team member under another admin and cannot be added again."},
                         status=status.HTTP_409_CONFLICT
                     )
 
