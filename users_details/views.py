@@ -1087,11 +1087,30 @@ class UserDetailCreateView(generics.CreateAPIView):
         try:
             # Check for duplicate: same admin + same email
             admin_id = request.data.get("admin_id")
-            email = request.data.get("email")
+            email = (request.data.get("email") or "").strip().lower()
             if admin_id and email:
                 if UserDetail.objects.filter(admin__id=admin_id, email=email).exists():
                     return Response(
                         {"error": f"User with email '{email}' already exists for this admin."},
+                        status=status.HTTP_409_CONFLICT
+                    )
+
+            # Real request: an email that already belongs to a genuine
+            # admin account (is_staff=True — not every User row is one,
+            # see the member-login auto-provision at users/views.py's
+            # SlackMemberLoginView etc., which creates a User row with
+            # is_staff left False) must never also be addable as someone
+            # else's team member — a person can't be both at once.
+            if email:
+                # djongo can't translate a BooleanField (is_staff) combined
+                # into a WHERE clause (confirmed real — SQLDecodeError,
+                # same djongo limitation billing.models.PromoCode's own
+                # docstring already documents for is_active) — filter by
+                # email only, check is_staff in Python after.
+                _existing_admin = get_user_model().objects.filter(email=email).first()
+                if _existing_admin and _existing_admin.is_staff:
+                    return Response(
+                        {"error": f"'{email}' is already registered as an admin account and cannot be added as a team user."},
                         status=status.HTTP_409_CONFLICT
                     )
 

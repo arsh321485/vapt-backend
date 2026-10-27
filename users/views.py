@@ -342,6 +342,18 @@ class AdminSignupSendOTPView(APIView):
                 status=400,
             )
 
+        # Real request: an email already added as someone's team member
+        # (users_details.models.UserDetail) can't also sign up for its own
+        # separate admin account — a person can't be both at once. Checked
+        # here (before the OTP is even sent) rather than only at verify
+        # time, so the rejection happens on the very first step.
+        from users_details.models import UserDetail
+        if UserDetail.objects.filter(email=email).exists():
+            return Response(
+                {"error": "This email is already registered as a team member and cannot sign up for its own admin account."},
+                status=400,
+            )
+
         # reCAPTCHA
         ok, msg = verify_recaptcha(recaptcha)
         if not ok:
@@ -2939,6 +2951,45 @@ class MicrosoftTeamsCallbackView(APIView):
                     user, created = found_user, False
                     logger.info(f"[TeamsOAuth][DIAG] Found existing user on retry — avoided creating a duplicate: id={user.id}")
                 else:
+                    # Real request: an email already added as someone's
+                    # team member (users_details.models.UserDetail) can't
+                    # also sign up for its own separate admin account —
+                    # only reachable here (not an existing-user lookup
+                    # above), since this branch is genuinely about to
+                    # CREATE a brand-new admin User row for this email.
+                    from users_details.models import UserDetail
+                    if UserDetail.objects.filter(email=email).exists():
+                        team_member_error_html = f"""
+                        <html>
+                        <head><title>Microsoft Teams OAuth</title></head>
+                        <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
+                            <h2>Could not create admin account</h2>
+                            <p>This email is already registered as a team member and cannot sign up for its own admin account.</p>
+                            <p style="color:#888; font-size:13px;">Please close this window and sign in with a different email.</p>
+                            <script>
+                                (function() {{
+                                    var frontendUrl = {json.dumps(frontend_redirect)};
+                                    var frontendOrigin = frontendUrl;
+                                    try {{ frontendOrigin = new URL(frontendUrl).origin; }} catch (e) {{}}
+                                    if (window.opener) {{
+                                        window.opener.postMessage({{
+                                            type: "TEAMS_CONNECTED",
+                                            success: false,
+                                            error: "This email is already registered as a team member and cannot sign up for its own admin account."
+                                        }}, frontendOrigin);
+                                        setTimeout(function() {{
+                                            try {{ window.close(); }} catch (e) {{}}
+                                        }}, 4000);
+                                    }} else {{
+                                        window.location.replace(frontendUrl);
+                                    }}
+                                }})();
+                            </script>
+                        </body>
+                        </html>
+                        """
+                        return HttpResponse(team_member_error_html, status=400)
+
                     user, created = User.objects.get_or_create(
                         email=email,
                         defaults={
@@ -6421,6 +6472,18 @@ class SlackOAuthCallbackView(APIView):
 
             newly_created = False
             if not user:
+                # Real request: an email already added as someone's team
+                # member (users_details.models.UserDetail) can't also sign
+                # up for its own separate admin account — only reachable
+                # here (no admin_id_from_state match above), since this
+                # branch is genuinely about to CREATE a brand-new admin
+                # User row for this email.
+                from users_details.models import UserDetail
+                if UserDetail.objects.filter(email=email).exists():
+                    return self._html_response(
+                        success=False,
+                        error="This email is already registered as a team member and cannot sign up for its own admin account.",
+                    )
                 user, newly_created = User.objects.get_or_create(
                     email=email,
                     defaults={"login_provider": "slack", "password": make_password(None)},
@@ -6637,6 +6700,19 @@ class SlackLoginView(APIView):
                     {"success": False, "error": "No email found in Slack profile"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+
+            # Real request: an email already added as someone's team
+            # member (users_details.models.UserDetail) can't also sign up
+            # for its own separate admin account. Only checked when this
+            # email has no admin User row yet — an EXISTING admin logging
+            # in again here must never be blocked by this.
+            if not User.objects.filter(email=slack_email).exists():
+                from users_details.models import UserDetail
+                if UserDetail.objects.filter(email=slack_email).exists():
+                    return Response(
+                        {"success": False, "error": "This email is already registered as a team member and cannot sign up for its own admin account."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
 
             # 2. IDENTIFY existing user OR create new
             user, created = User.objects.get_or_create(
