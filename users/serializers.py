@@ -938,9 +938,13 @@ class SlackOAuthCodeSerializer(serializers.Serializer):
             if not user_token:
                 raise serializers.ValidationError("User access token not found in Slack response.")
 
-            # Fetch user info
+            # Fetch user info via OpenID Connect — users.identity is
+            # Slack's deprecated "Sign in with Slack" API, tied to the
+            # legacy identity.* scopes App Review no longer approves;
+            # openid.connect.userInfo is the replacement (see
+            # SlackOAuthUrlView's own comment on this same change).
             user_info_response = _http_get(
-                "https://slack.com/api/users.identity",
+                "https://slack.com/api/openid.connect.userInfo",
                 headers={"Authorization": f"Bearer {user_token}"},
                 timeout=10
             )
@@ -949,10 +953,9 @@ class SlackOAuthCodeSerializer(serializers.Serializer):
             if not user_info_data.get("ok"):
                 raise serializers.ValidationError(f"Slack user info fetch failed: {user_info_data.get('error')}")
 
-            user = user_info_data.get("user", {})
-            email = user.get("email")
-            name = user.get("name", "")
-            image = user.get("image_192", "")
+            email = user_info_data.get("email")
+            name = user_info_data.get("name", "") or ""
+            image = user_info_data.get("picture", "")
 
             if not email:
                 raise serializers.ValidationError("Email not found in Slack user profile.")
@@ -964,7 +967,7 @@ class SlackOAuthCodeSerializer(serializers.Serializer):
                 "lastname": " ".join(name.split(" ")[1:]) if len(name.split(" ")) > 1 else "",
                 "display_name": name,
                 "image": image,
-                "user_id": user.get("id", ""),
+                "user_id": user_info_data.get("https://slack.com/user_id") or user_info_data.get("sub", ""),
                 "bot_access_token": bot_access_token,
                 "bot_user_id": bot_user_id,
                 "user_access_token": user_token,

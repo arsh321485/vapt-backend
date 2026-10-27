@@ -6291,7 +6291,12 @@ class SlackOAuthUrlView(APIView):
             f"https://slack.com/oauth/v2/authorize?"
             f"client_id={client_id}"
             f"&scope={scopes}"
-            f"&user_scope=identity.basic,identity.email,identity.avatar,identity.team"
+            # Slack App Review no longer approves the legacy identity.*
+            # "Sign in with Slack" scopes — openid/email/profile are the
+            # OpenID Connect replacement (see SlackLoginView/
+            # SlackValidateTokenView, which read openid.connect.userInfo
+            # instead of the old users.identity for this same purpose).
+            f"&user_scope=openid,email,profile"
             f"&redirect_uri={redirect_uri}"
             f"&state={state}"
         )
@@ -6580,9 +6585,14 @@ class SlackLoginView(APIView):
         user_token = serializer.validated_data["user_access_token"]
 
         try:
-            # 1. Get Slack user identity (PRIMARY email source)
+            # 1. Get Slack user identity via OpenID Connect (PRIMARY email
+            # source) — users.identity is Slack's deprecated "Sign in with
+            # Slack" API tied to the legacy identity.* scopes App Review no
+            # longer approves; openid.connect.userInfo is the replacement,
+            # scoped by the openid/email/profile user_scope now requested
+            # (see SlackOAuthUrlView/SlackInstallView).
             user_identity = _http_get(
-                "https://slack.com/api/users.identity",
+                "https://slack.com/api/openid.connect.userInfo",
                 headers={"Authorization": f"Bearer {user_token}"}, timeout=15
             ).json()
 
@@ -6594,11 +6604,13 @@ class SlackLoginView(APIView):
             profile = {}
 
             if user_identity.get("ok"):
-                slack_user = user_identity.get("user", {})
-                slack_team = user_identity.get("team", {})
-                slack_email = slack_user.get("email")
-                slack_user_id = slack_user.get("id")
-                slack_name = slack_user.get("name")
+                slack_email = user_identity.get("email")
+                slack_user_id = user_identity.get("https://slack.com/user_id") or user_identity.get("sub")
+                slack_name = user_identity.get("name")
+                slack_team = {
+                    "id": user_identity.get("https://slack.com/team_id"),
+                    "name": user_identity.get("https://slack.com/team_name"),
+                }
             else:
                 # Fallback: bot token users.info
                 bot_response = _http_get(
@@ -6921,14 +6933,17 @@ class SlackValidateTokenView(APIView):
                 user_profile = user_data.get('user', {}).get('profile', {})
                 email = user_profile.get('email')
 
-                # If email is null (bot token used), try users.identity for human user email
+                # If email is null (bot token used), try the OpenID Connect
+                # userInfo endpoint for the human user's email — replaces
+                # users.identity (deprecated, tied to the legacy identity.*
+                # scopes App Review no longer approves).
                 if not email:
                     identity_resp = _http_get(
-                        'https://slack.com/api/users.identity',
+                        'https://slack.com/api/openid.connect.userInfo',
                         headers=headers, timeout=15
                     ).json()
                     if identity_resp.get('ok'):
-                        email = identity_resp.get('user', {}).get('email')
+                        email = identity_resp.get('email')
 
                 return Response({
                     'success': True,
@@ -9819,7 +9834,9 @@ class SlackInstallView(APIView):
             redirect_uri = request.build_absolute_uri("/").rstrip("/") + "/api/admin/users/slack/callback/"
 
         scopes = ",".join(settings.SLACK_SCOPES)
-        user_scopes = "identity.basic,identity.email,identity.avatar,identity.team"
+        # Legacy identity.* scopes replaced with OpenID Connect scopes — see
+        # SlackOAuthUrlView's own comment on this same change.
+        user_scopes = "openid,email,profile"
 
         auth_url = (
             f"https://slack.com/oauth/v2/authorize"
