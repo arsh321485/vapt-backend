@@ -18,7 +18,7 @@ from .plans import (
     MANAGEMENT_TESTING_PLATFORM_FEE, MANAGEMENT_TESTING_PERIOD_MONTHS,
     MANAGEMENT_TESTING_RATE_PER_IP, MANAGEMENT_TESTING_RATE_PER_WEB_APP, MANAGEMENT_TESTING_RATE_PER_MOBILE_APP,
     CUSTOM_RATE_PER_IP_ANNUAL,
-    calculate_management_amount, calculate_management_testing_amount, calculate_custom_amount,
+    calculate_management_amount, calculate_management_blocks, calculate_management_testing_amount, calculate_custom_amount,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def create_setup_intent(admin) -> dict:
 
 
 def create_premium_checkout_session(
-    admin, mode: str, asset_count: int = 0,
+    admin, mode: str, asset_count: int = 0, vuln_count: int = 0,
     ip_count: int = 0, web_app_count: int = 0, mobile_app_count: int = 0,
     source: str = None,
 ) -> dict:
@@ -69,18 +69,22 @@ def create_premium_checkout_session(
     Builds a Stripe Checkout Session with dynamic prices (price_data) — no
     pre-created Stripe Price objects needed.
 
-    Management Only is a single flat-fee line item (quantity 1) regardless
-    of asset_count — it's informational only here (stored on the
-    Subscription row for display), not part of the Stripe price. Management
-    + Testing is a platform-fee line item plus one line item per asset type
-    actually present (IP/web app/mobile app), each priced per-unit with the
-    real quantity — so the Checkout page itself shows the same per-type
-    breakdown as the pricing page's "Where your money goes" box, not just a
-    single opaque total.
+    Management Only is a single flat-fee line item, quantity = however
+    many 100-asset/1,000-vulnerability "blocks" this report needs (see
+    billing.plans.calculate_management_blocks) — so a report over one
+    block's worth is paid for IN FULL in this one checkout (Stripe's own
+    receipt shows "$300 x 2" etc.), instead of leaving the overflow
+    locked for a separate future purchase. Management + Testing is a
+    platform-fee line item plus one line item per asset type actually
+    present (IP/web app/mobile app), each priced per-unit with the real
+    quantity — so the Checkout page itself shows the same per-type
+    breakdown as the pricing page's "Where your money goes" box, not just
+    a single opaque total.
     """
     customer_id = get_or_create_customer(admin)
 
     if mode == MODE_MANAGEMENT:
+        blocks_needed = calculate_management_blocks(asset_count, vuln_count)
         recurring = {"interval": "month", "interval_count": MANAGEMENT_ONLY_PERIOD_MONTHS}
         line_items = [{
             "price_data": {
@@ -89,9 +93,9 @@ def create_premium_checkout_session(
                 "unit_amount": int(MANAGEMENT_ONLY_FLAT_FEE * 100),
                 "recurring": recurring,
             },
-            "quantity": 1,
+            "quantity": blocks_needed,
         }]
-        amount_due = calculate_management_amount()
+        amount_due = calculate_management_amount(asset_count, vuln_count)
         resolved_billing_cycle = CYCLE_QUARTERLY
         price_per_ip = None
         total_asset_count = asset_count

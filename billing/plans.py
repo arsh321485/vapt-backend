@@ -87,15 +87,37 @@ CUSTOM_RATE_PER_IP_ANNUAL = Decimal("1.25")
 PREMIUM_ASSET_CEILING = 250
 
 
-def calculate_management_amount(asset_count: int = 0) -> Decimal:
+def calculate_management_blocks(asset_count: int = 0, vuln_count: int = 0) -> int:
     """
-    Management Only is a flat $300 for a 3-month period, regardless of
-    asset count — the 100-asset/1,000-vulnerability cap is enforced
-    separately (see billing.enforcement), not reflected in the price
-    itself. asset_count is accepted (unused) so existing callers that
-    still pass it don't need their own special-casing.
+    How many $300/100-asset/1,000-vulnerability "blocks" a report needs to
+    be FULLY covered by a single Management Only checkout — e.g. 150
+    assets or 1,500 vulnerabilities (whichever ratio is higher) needs 2
+    blocks ($600), 250 assets or 2,500 vulnerabilities needs 3 ($900).
+    Real requirement: an admin whose upload is already bigger than one
+    block pays for the whole thing in ONE checkout instead of paying $300
+    now and having to come back and pay again later for the rest (see
+    billing.enforcement.select_management_only_active_hosts, which still
+    locks the overflow as a safety net for a report that grows AFTER a
+    smaller payment — this just makes the common "pay once for what I
+    have right now" case charge the right amount upfront instead of
+    always exactly $300). Always at least 1 — $300 is the floor even for
+    a tiny report.
     """
-    return MANAGEMENT_ONLY_FLAT_FEE
+    import math
+    asset_ratio = asset_count / MANAGEMENT_ONLY_ASSET_CAP if MANAGEMENT_ONLY_ASSET_CAP else 0
+    vuln_ratio = vuln_count / MANAGEMENT_ONLY_VULN_CAP if MANAGEMENT_ONLY_VULN_CAP else 0
+    return max(1, math.ceil(max(asset_ratio, vuln_ratio)))
+
+
+def calculate_management_amount(asset_count: int = 0, vuln_count: int = 0) -> Decimal:
+    """
+    Management Only charges MANAGEMENT_ONLY_FLAT_FEE per block needed to
+    fully cover this report (see calculate_management_blocks) — $300 for
+    up to 100 assets/1,000 vulnerabilities, $600 for up to 200/2,000, and
+    so on. Not billed per-asset within a block; only the block count
+    scales.
+    """
+    return MANAGEMENT_ONLY_FLAT_FEE * calculate_management_blocks(asset_count, vuln_count)
 
 
 def calculate_management_testing_amount(ip_count: int = 0, web_app_count: int = 0, mobile_app_count: int = 0) -> Decimal:

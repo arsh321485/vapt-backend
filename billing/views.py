@@ -22,7 +22,7 @@ from .plans import (
     CYCLE_QUARTERLY, CYCLE_SEMI_ANNUAL,
     MANAGEMENT_ONLY_ASSET_CAP, MANAGEMENT_ONLY_VULN_CAP,
     MANAGEMENT_TESTING_RATE_PER_IP, MANAGEMENT_TESTING_RATE_PER_WEB_APP, MANAGEMENT_TESTING_RATE_PER_MOBILE_APP,
-    calculate_management_amount, calculate_management_testing_amount,
+    calculate_management_amount, calculate_management_blocks, calculate_management_testing_amount,
 )
 from .serializers import (
     PlanEstimateRequestSerializer, PremiumCheckoutRequestSerializer, CustomCheckoutRequestSerializer,
@@ -66,18 +66,20 @@ class PlanEstimateView(APIView):
                 )
 
             if mode == MODE_MANAGEMENT:
-                # Management Only is now a flat $300/3-months fee (see
-                # billing.plans) — not billed per asset. Still uses
-                # get_admin_billable_asset_count (the ORIGINAL file size —
-                # visible + locked), never get_admin_asset_count
-                # (Freemium's visible-only cap of 5), so the 100-asset/
-                # 1,000-vulnerability cap check below reflects the file's
-                # real size, same reasoning as the old per-IP pricing had.
+                # Management Only charges $300 per 100-asset/1,000-
+                # vulnerability "block" needed to fully cover this report
+                # in ONE checkout (see billing.plans.calculate_management_
+                # blocks) — not billed per individual asset within a
+                # block. Still uses get_admin_billable_asset_count (the
+                # ORIGINAL file size — visible + locked), never
+                # get_admin_asset_count (Freemium's visible-only cap of
+                # 5), so pricing reflects the file's real size.
                 asset_count = get_admin_billable_asset_count(str(request.user.id))
                 vuln_count = get_admin_vulnerability_count(str(request.user.id))
                 asset_source = "report"
 
-                amount = calculate_management_amount()
+                blocks_needed = calculate_management_blocks(asset_count, vuln_count)
+                amount = calculate_management_amount(asset_count, vuln_count)
                 response_data = {
                     "plan": plan,
                     "mode": mode,
@@ -86,12 +88,12 @@ class PlanEstimateView(APIView):
                     "vulnerability_count": vuln_count,
                     "asset_cap": MANAGEMENT_ONLY_ASSET_CAP,
                     "vulnerability_cap": MANAGEMENT_ONLY_VULN_CAP,
-                    # Informational only — going over either cap does NOT
-                    # block this estimate or checkout (Management Only has
-                    # no per-asset price to scale), it just means the next
-                    # 3-month period needs its own $300 (see the pricing
-                    # page's "Over the limit: Next 3-month period, +$300").
-                    "over_limit": asset_count > MANAGEMENT_ONLY_ASSET_CAP or vuln_count > MANAGEMENT_ONLY_VULN_CAP,
+                    "blocks_needed": blocks_needed,
+                    # True once this report needs more than 1 block — the
+                    # $300 shown elsewhere on the pricing page is for a
+                    # SINGLE block; amount_due below is already the real,
+                    # full price for this specific report.
+                    "over_limit": blocks_needed > 1,
                     "amount_due": str(amount),
                     "currency": "usd",
                 }
@@ -262,18 +264,21 @@ class PremiumCheckoutView(APIView):
         mode = serializer.validated_data["mode"]
 
         admin = request.user
-        # Management Only bills on uploaded-report assets (flat fee — see
-        # billing.plans, asset_count here is informational/display only,
-        # not part of the Stripe price). Management + Testing prefers the
-        # SAME report's asset count when one exists, falling back to the
-        # submitted scope only when there's no report at all — see
-        # resolve_management_testing_asset_type_counts(). Same billable-
-        # count fix as PlanEstimateView — checkout must never create a
-        # Stripe session for the Freemium visible-only count when
-        # locked_hosts exist.
+        # Management Only bills on uploaded-report assets AND
+        # vulnerabilities (blocks of 100/1,000 — see billing.plans.
+        # calculate_management_blocks), asset_count/vuln_count here feed
+        # that calculation directly, not just display. Management +
+        # Testing prefers the SAME report's asset count when one exists,
+        # falling back to the submitted scope only when there's no report
+        # at all — see resolve_management_testing_asset_type_counts().
+        # Same billable-count fix as PlanEstimateView — checkout must
+        # never create a Stripe session for the Freemium visible-only
+        # count when locked_hosts exist.
         ip_count = web_app_count = mobile_app_count = 0
+        vuln_count = 0
         if mode == MODE_MANAGEMENT:
             asset_count = get_admin_billable_asset_count(str(admin.id))
+            vuln_count = get_admin_vulnerability_count(str(admin.id))
             no_assets_detail = "Upload a report first — no assets found to bill for."
         else:
             counts, _asset_source = resolve_management_testing_asset_type_counts(str(admin.id))
@@ -296,7 +301,7 @@ class PremiumCheckoutView(APIView):
 
         try:
             result = stripe_service.create_premium_checkout_session(
-                admin, mode=mode, asset_count=asset_count,
+                admin, mode=mode, asset_count=asset_count, vuln_count=vuln_count,
                 ip_count=ip_count, web_app_count=web_app_count, mobile_app_count=mobile_app_count,
                 source=serializer.validated_data.get("source"),
             )
