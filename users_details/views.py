@@ -1110,7 +1110,7 @@ class UserDetailCreateView(generics.CreateAPIView):
                 _existing_admin = get_user_model().objects.filter(email=email).first()
                 if _existing_admin and _existing_admin.is_staff:
                     return Response(
-                        {"error": f"'{email}' is already registered as an admin account and cannot be added as a team user."},
+                        {"error": "This email is already registered as an admin account and cannot be added as a team user."},
                         status=status.HTTP_409_CONFLICT
                     )
 
