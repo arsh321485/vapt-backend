@@ -10,7 +10,10 @@ from rest_framework.exceptions import APIException
 from rest_framework import status
 
 from .models import Subscription
-from .plans import PLAN_FREEMIUM, FREEMIUM_LIMITS
+from .plans import (
+    PLAN_FREEMIUM, PLAN_PREMIUM, MODE_MANAGEMENT, FREEMIUM_LIMITS,
+    MANAGEMENT_ONLY_ASSET_CAP, MANAGEMENT_ONLY_VULN_CAP,
+)
 
 
 class PlanLimitExceeded(APIException):
@@ -32,6 +35,20 @@ def get_active_plan(admin):
 def is_freemium(admin) -> bool:
     sub = get_active_plan(admin)
     return sub is None or sub.plan == PLAN_FREEMIUM
+
+
+def _is_management_only_admin(admin) -> bool:
+    """
+    True for an admin on an active Premium "Management Only" subscription
+    (plan=premium, mode=management) — the only plan the 100-asset/1,000-
+    vulnerability cap (see billing.plans.MANAGEMENT_ONLY_ASSET_CAP/
+    MANAGEMENT_ONLY_VULN_CAP) applies to. An unlimited admin is never
+    capped, same exemption as every other limit in this file.
+    """
+    if _is_unlimited_admin(admin):
+        return False
+    sub = get_active_plan(admin)
+    return bool(sub) and sub.plan == PLAN_PREMIUM and sub.mode == MODE_MANAGEMENT
 
 
 def _is_unlimited_admin(admin) -> bool:
@@ -133,52 +150,20 @@ def assert_team_member_within_limit(admin):
 _SEVERITY_RANK = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "informational": 1}
 
 
-def select_freemium_active_hosts(vulnerabilities_by_host, admin):
+def _select_active_hosts(vulnerabilities_by_host, max_hosts, max_vulns):
     """
-    Freemium gets at most FREEMIUM_LIMITS['max_internal_ips'] hosts, and at
-    most FREEMIUM_LIMITS['max_vulnerabilities'] total findings across them.
+    Caps a report down to at most `max_hosts` hosts and `max_vulns` total
+    findings across them — the plan-agnostic algorithm shared by
+    select_freemium_active_hosts (5 hosts/10 vulns) and
+    select_management_only_active_hosts (100 hosts/1,000 vulns); see
+    select_freemium_active_hosts's own docstring for the full step-1/step-2
+    explanation (host selection, then per-host fair-share + global-overflow
+    finding trim). Pure function — no admin/plan gating, callers decide
+    whether capping applies at all before calling this.
 
-    Step 1 — `max_internal_ips` hosts become the candidate "active" set
-    (whole hosts — every other host, in full, becomes `locked`), preferring
-    hosts that individually have at least `max_vulnerabilities //
-    max_internal_ips` findings (their own "fair share") — lightest of
-    those first — so the visible set can actually use close to the full
-    vuln budget instead of being stuck with a handful of near-empty hosts.
-    Only falls back to hosts below that threshold when there aren't enough
-    qualifying ones to fill every slot.
-
-    Step 2 — if those active hosts' vulnerabilities combined still exceed
-    `max_vulnerabilities`, findings are trimmed down to the cap in two
-    passes so every visible host still shows *something*, instead of a
-    handful of hosts hogging the whole budget and others going to 0:
-
-      2a. Fair share — each active host is guaranteed to keep its own
-          highest-severity findings, up to `max_vulnerabilities //
-          len(active_hosts)` (e.g. 10 // 5 = 2 per host at the default
-          limits). A host with fewer than the fair share just keeps what
-          it has. Real bug report: with the old single global sort, a host
-          could easily end up with 0 visible findings while another kept
-          most of the 10-vuln budget, even though both were shown as one
-          of the 5 "active" assets.
-      2b. Remaining budget — whatever's left of the cap after every host's
-          fair share is filled goes to the highest-severity findings still
-          left over (globally), regardless of which host they're on.
-
-    Trimmed findings are never discarded — they move into `locked` as an
-    extra entry for their same host_name, so an upgrade can restore them
-    exactly (see billing/views.py's StripeWebhookView, which merges
-    `locked` back into vulnerabilities_by_host by host_name on a
-    successful upgrade — no re-upload needed).
-
-    Returns (active_hosts, locked_hosts). For a Premium/unlimited admin, or
-    a report already within both caps, this is a no-op: `active` is
-    everything and `locked` is empty.
+    Returns (active_hosts, locked_hosts). Already-within-both-caps input is
+    a no-op: `active` is everything and `locked` is empty.
     """
-    if _is_unlimited_admin(admin) or not is_freemium(admin):
-        return list(vulnerabilities_by_host or []), []
-
-    max_hosts = FREEMIUM_LIMITS["max_internal_ips"]
-    max_vulns = FREEMIUM_LIMITS["max_vulnerabilities"]
     fair_share = max_vulns // max_hosts if max_hosts else 0
 
     hosts = list(vulnerabilities_by_host or [])
@@ -273,6 +258,56 @@ def select_freemium_active_hosts(vulnerabilities_by_host, admin):
         active_hosts = new_active_hosts
 
     return active_hosts, locked_hosts
+
+
+def select_freemium_active_hosts(vulnerabilities_by_host, admin):
+    """
+    Freemium gets at most FREEMIUM_LIMITS['max_internal_ips'] hosts, and at
+    most FREEMIUM_LIMITS['max_vulnerabilities'] total findings across them
+    — see _select_active_hosts's own docstring for exactly how hosts/
+    findings are chosen (fair-share-first host selection, then a two-pass
+    per-host-guarantee + global-overflow finding trim).
+
+    Trimmed findings are never discarded — they move into `locked` as an
+    extra entry for their same host_name, so an upgrade can restore them
+    exactly (see upload_report.views.unlock_freemium_hosts_for_admin,
+    called on a successful Premium/Custom checkout).
+
+    Returns (active_hosts, locked_hosts). For a Premium/unlimited admin, or
+    a report already within both caps, this is a no-op: `active` is
+    everything and `locked` is empty.
+    """
+    if _is_unlimited_admin(admin) or not is_freemium(admin):
+        return list(vulnerabilities_by_host or []), []
+    return _select_active_hosts(
+        vulnerabilities_by_host, FREEMIUM_LIMITS["max_internal_ips"], FREEMIUM_LIMITS["max_vulnerabilities"]
+    )
+
+
+def select_management_only_active_hosts(vulnerabilities_by_host, admin):
+    """
+    Same mechanism as select_freemium_active_hosts, applied to Premium
+    "Management Only" admins instead — capped at
+    MANAGEMENT_ONLY_ASSET_CAP hosts / MANAGEMENT_ONLY_VULN_CAP
+    vulnerabilities (the $300/3-months plan's included allowance — see
+    billing.plans). A report over either cap keeps the overflow in
+    `locked_hosts` exactly like Freemium does; it's restored automatically
+    by the SAME upload_report.views.unlock_freemium_hosts_for_admin used
+    for Freemium upgrades — that function already unlocks every
+    locked_hosts entry for an admin on ANY successful Premium/Custom
+    checkout completion (billing/stripe_service.py's
+    _on_checkout_completed), which already covers "pay $300 again for the
+    next period" since that's still plan=premium. No separate unlock path
+    needed for this cap.
+
+    Returns (active_hosts, locked_hosts). No-op (everything active) for
+    any admin who isn't currently on an active Management Only
+    subscription — including Freemium (that's select_freemium_active_hosts's
+    job, with its own much smaller caps) and every other Premium/Custom mode.
+    """
+    if not _is_management_only_admin(admin):
+        return list(vulnerabilities_by_host or []), []
+    return _select_active_hosts(vulnerabilities_by_host, MANAGEMENT_ONLY_ASSET_CAP, MANAGEMENT_ONLY_VULN_CAP)
 
 
 def assert_can_use_automation_scripts(admin):

@@ -925,11 +925,29 @@ class UploadReportAdmin(admin.ModelAdmin):
                     # pricing-handoff JWT claim already gives uploads made
                     # through that flow.
                     locked_hosts = []
+                    locked_hosts_reason = None
                     if admin_user and not self._MAGIC_LINK_NO_PLAN_LIMITS:
-                        from billing.enforcement import select_freemium_active_hosts
+                        from billing.enforcement import select_freemium_active_hosts, select_management_only_active_hosts
                         active_hosts, locked_hosts = select_freemium_active_hosts(
                             parsed_data.get("vulnerabilities_by_host") or [], admin_user
                         )
+                        if locked_hosts:
+                            locked_hosts_reason = "freemium_trimmed"
+                        else:
+                            # Same mechanism, Premium "Management Only"
+                            # admins instead — capped at 100 assets/1,000
+                            # vulnerabilities per the $300/3-months plan
+                            # (see billing.plans). Mutually exclusive with
+                            # the Freemium trim above (an admin is never
+                            # both) — select_freemium_active_hosts already
+                            # no-ops and returns locked_hosts=[] for a
+                            # non-Freemium admin, so this only ever runs
+                            # when that one genuinely found nothing to trim.
+                            active_hosts, locked_hosts = select_management_only_active_hosts(
+                                parsed_data.get("vulnerabilities_by_host") or [], admin_user
+                            )
+                            if locked_hosts:
+                                locked_hosts_reason = "management_only_trimmed"
                         if locked_hosts:
                             parsed_data = dict(parsed_data)
                             parsed_data["vulnerabilities_by_host"] = active_hosts
@@ -1006,7 +1024,7 @@ class UploadReportAdmin(admin.ModelAdmin):
                     })
                     if locked_hosts:
                         document["locked_hosts"] = self._prepare_hosts_for_storage(locked_hosts)
-                        document["freemium_trimmed"] = True
+                        document[locked_hosts_reason or "freemium_trimmed"] = True
                     if merge_into_report_id:
                         from .merge_service import merge_hosts_into_report
                         merge_hosts_into_report(db, merge_into_report_id, hosts_payload)

@@ -688,7 +688,7 @@ class UploadReportView(APIView):
             # numbers. The single-file limit is a real Freemium plan rule,
             # not an onboarding rule — only enforce it once the admin has
             # actually picked Freemium (a real Subscription row exists).
-            from billing.enforcement import is_freemium, _is_unlimited_admin, get_active_plan
+            from billing.enforcement import is_freemium, _is_unlimited_admin, get_active_plan, _is_management_only_admin
             plan_already_chosen = get_active_plan(target_admin) is not None
             if (
                 not via_magic_link
@@ -1194,6 +1194,49 @@ class UploadReportView(APIView):
                                     report_locked_count = sum(1 for h in _locked if not h.get("_vuln_overflow"))
                             except Exception as _trim_err:
                                 logger.error(f"[FreemiumTrim] Could not reapply trim for report_id={report_id}: {_trim_err}")
+
+                        # Same mechanism, Premium "Management Only" admins
+                        # instead of Freemium — capped at 100 assets/1,000
+                        # vulnerabilities per the $300/3-months plan (see
+                        # billing.plans / billing.enforcement.
+                        # select_management_only_active_hosts). Mutually
+                        # exclusive with the Freemium block above — an
+                        # admin is never both. Restored automatically by
+                        # the SAME unlock_freemium_hosts_for_admin on any
+                        # successful Premium checkout (including buying
+                        # another $300 period), no separate unlock path.
+                        elif (
+                            mongodb_stored
+                            and not via_magic_link
+                            and is_structured
+                            and _is_management_only_admin(target_admin)
+                        ):
+                            try:
+                                from billing.enforcement import select_management_only_active_hosts
+                                _mc4, _db4 = _get_mongo_client_and_db()
+                                _trim_doc = _db4["nessus_reports"].find_one(
+                                    {"report_id": report_id},
+                                    {"vulnerabilities_by_host": 1, "locked_hosts": 1},
+                                )
+                                if _trim_doc:
+                                    _full_report_hosts = (
+                                        list(_trim_doc.get("vulnerabilities_by_host") or [])
+                                        + list(_trim_doc.get("locked_hosts") or [])
+                                    )
+                                    _active, _locked = select_management_only_active_hosts(_full_report_hosts, target_admin)
+                                    if _locked:
+                                        _db4["nessus_reports"].update_one(
+                                            {"report_id": report_id},
+                                            {"$set": {
+                                                "vulnerabilities_by_host": _active,
+                                                "locked_hosts": _locked,
+                                                "management_only_trimmed": True,
+                                            }},
+                                        )
+                                    report_active_count = len(_active)
+                                    report_locked_count = sum(1 for h in _locked if not h.get("_vuln_overflow"))
+                            except Exception as _trim_err:
+                                logger.error(f"[ManagementOnlyTrim] Could not reapply trim for report_id={report_id}: {_trim_err}")
 
                         # Store actual upload processing time for UploadStatusView ETA
                         if mongodb_stored and parsed_data.get("type") in ("nessus", "nessus_html", "aws", "custom"):
