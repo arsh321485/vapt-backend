@@ -287,7 +287,29 @@ def _all_steps_readonly_body(steps_data, host_os_hint, value_base, nav_action_id
     return body
 
 
-def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_number=None):
+def _step_support_request_raised(member_user, fix_vuln_id, step_number):
+    """Whether THIS member already has a support request raised for this
+    exact (fix_vuln_id, step_number) — same dedup key
+    UserRaiseSupportRequestAPIView's own duplicate check uses (see its
+    "one request per step per user" comment), so the button always
+    reflects what the backend will actually allow. Re-checked fresh every
+    time the step is rendered (initial load, Previous/Next nav, and the
+    re-render right after submitting) — never cached/stale."""
+    if not fix_vuln_id or not member_user:
+        return False
+    try:
+        from vaptfix.mongo_client import MongoContext
+        with MongoContext() as db:
+            return bool(db["support_requests"].find_one(
+                {"vulnerability_id": str(fix_vuln_id), "user_id": str(member_user.id), "step_number": step_number},
+                {"_id": 1},
+            ))
+    except Exception:
+        logger.exception("[TeamsBot] step support-request check failed")
+        return False
+
+
+def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_number=None, member_user=None, fix_vuln_id=None):
     """One step at a time (not the admin side's flat view-only list) — a
     real 'Mark Step Complete' action per step, plus Previous/Next Step
     navigation, matching Slack's /manualfix + /mitigated [id] [step]."""
@@ -320,7 +342,20 @@ def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_numb
     # Complete, same row — tied to this exact step (not just a generic one
     # in the Support Status tab) so the admin sees precisely where the
     # member is stuck (see usup_step_form/submit_step_support_request).
-    nav_actions.append(cards._execute_action("🎫 Raise Support Request", {"action_id": "usup_step_form", "step": step_number, **value_base}))
+    #
+    # Real request: once this member has already raised a request for
+    # THIS step, the button must show that instead of looking identical
+    # to "not yet raised" — relabeled + isEnabled:false (greyed, matching
+    # how Teams renders a disabled Action.Submit) so re-clicking isn't
+    # even possible, in sync with the backend's own one-request-per-step-
+    # per-user rule (UserRaiseSupportRequestAPIView). Checked fresh on
+    # every render (_step_support_request_raised), not cached.
+    if _step_support_request_raised(member_user, fix_vuln_id, step_number):
+        support_action = cards._execute_action("🎫 Support Request Raised ✓", {"action_id": "usup_step_form", "step": step_number, **value_base})
+        support_action["isEnabled"] = False
+    else:
+        support_action = cards._execute_action("🎫 Raise Support Request", {"action_id": "usup_step_form", "step": step_number, **value_base})
+    nav_actions.append(support_action)
     if not done and not step.get("is_locked"):
         nav_actions.append(cards._execute_action("✅ Mark Step Complete", {"action_id": "ufix_step_complete", "step": step_number, **value_base}, style="positive"))
     if step_number < total:
@@ -471,7 +506,10 @@ def vuln_detail_body(member_user, team_id, team_name, idx, ctx="vulns", host=Non
         else:
             fix_vuln_id = _get_or_create_fix_vuln_id(member_user, r, report_id)
             steps_data = _fetch_fix_steps(member_user, fix_vuln_id) if fix_vuln_id else None
-            body.extend(_manual_fix_body_interactive(steps_data, r.get("operating_system"), value_base, step_number=step_number))
+            body.extend(_manual_fix_body_interactive(
+                steps_data, r.get("operating_system"), value_base, step_number=step_number,
+                member_user=member_user, fix_vuln_id=fix_vuln_id,
+            ))
     except Exception:
         logger.exception("[TeamsBot] user fix content fetch failed (sub=%s)", sub)
         body.append({"type": "TextBlock", "text": "Could not load this right now.", "wrap": True, "isSubtle": True, "spacing": "Medium"})
