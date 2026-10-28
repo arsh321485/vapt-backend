@@ -114,15 +114,15 @@ class PlanEstimateView(APIView):
             mobile_app_count = counts["mobile_app_count"]
             asset_count = ip_count + web_app_count + mobile_app_count
 
-            if asset_count > PREMIUM_ASSET_CEILING:
-                return Response({
-                    "plan": plan,
-                    "asset_count": asset_count,
-                    "asset_ceiling": PREMIUM_ASSET_CEILING,
-                    "over_ceiling": True,
-                    "message": "More than 250 assets — this account must use the Custom plan.",
-                })
-
+            # Real request: the website pricing page dropped the Custom
+            # tier entirely (Freemium + Premium only now) — Management +
+            # Testing's own "Over the limit: Add more assets" row already
+            # said there's no ceiling of its own, but this 250-asset
+            # PREMIUM_ASSET_CEILING check (left over from when Custom
+            # still existed) contradicted that and forced a reject here.
+            # Confirmed zero admins are on plan="custom" in production, so
+            # removing this is safe — no real subscription routes through
+            # it anymore.
             amount = calculate_management_testing_amount(ip_count, web_app_count, mobile_app_count)
 
             response_data = {
@@ -288,11 +288,8 @@ class PremiumCheckoutView(APIView):
             asset_count = ip_count + web_app_count + mobile_app_count
             no_assets_detail = "Upload a report or provide your scope first — no targets found to bill for."
 
-        if asset_count > PREMIUM_ASSET_CEILING:
-            return Response(
-                {"detail": "More than 250 assets — use the Custom plan instead.", "asset_count": asset_count},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # PREMIUM_ASSET_CEILING's 250-asset reject removed here too — see
+        # the matching removal + comment in PlanEstimateView above.
         if asset_count == 0:
             return Response(
                 {"detail": no_assets_detail},
