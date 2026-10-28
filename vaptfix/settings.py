@@ -54,7 +54,9 @@ deaf387e4d71.ngrok-free.app,
 localhost:5173,
 38.242.247.151,
 vaptbackend.secureitlab.com,
-vaptfix.ai
+vaptfix.ai,
+test.vaptfix.ai,
+testbackend.vaptfix.ai
 """.split(",")]
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 524288000  # 500MB — real bug report: a large .nessus/.xml scan
@@ -340,6 +342,8 @@ https://auth.atlassian.com,
 https://api.atlassian.com,
 https://vaptbackend.secureitlab.com,
 https://vaptfix.ai,
+https://test.vaptfix.ai,
+https://testbackend.vaptfix.ai,
 https://teams.microsoft.com,
 https://teams.live.com,
 https://res.cdn.office.net
@@ -379,6 +383,8 @@ CSRF_TRUSTED_ORIGINS = [
     "https://vaptfix.ai",
     "https://www.vaptfix.ai",
     "https://vaptbackend.secureitlab.com",
+    "https://test.vaptfix.ai",
+    "https://testbackend.vaptfix.ai",
 ]
 
 # CORS_ALLOW_ALL_ORIGINS = True  
