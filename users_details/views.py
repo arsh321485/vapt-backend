@@ -522,7 +522,22 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
 
             for role in member_roles:
                 display_name = TEAMS_CHANNEL_DISPLAY_NAMES.get(role, role)
-                matching_channel = channel_map_display.get(display_name) or channel_map_display.get(role)
+                # Real bug found via live testing: a CustomTeam's actual Teams
+                # channel display name is "vaptfix {name} team" (see
+                # users.views.ensure_custom_team_teams_channel), the same
+                # convention the 4 fixed teams use — but TEAMS_CHANNEL_
+                # DISPLAY_NAMES only knows the fixed 4, so a custom team's bare
+                # name never matched its real channel here. Confirmed live:
+                # the member still landed in the TEAM (added_to_team: success)
+                # since standard-channel access comes from team membership
+                # regardless, but this lookup silently reported
+                # channel_not_found and skipped the sub-channel welcome-card
+                # backfill for every custom-team add.
+                matching_channel = (
+                    channel_map_display.get(display_name)
+                    or channel_map_display.get(role)
+                    or channel_map_display.get(f"vaptfix {role} team")
+                )
                 if not matching_channel:
                     results.append({"channel": role, "status": "channel_not_found"})
                     continue
