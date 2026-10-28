@@ -4,14 +4,18 @@ given admin, without going through the Slack/Teams/website UI.
 
 Real request: support needs to do this directly on an admin's behalf
 (admin tells us the team name + member details, we add it from the
-backend). Calls the real CustomTeamListCreateView / UserDetailCreateView
-in-process (force_authenticate as the target admin) instead of
-re-implementing their logic — so duplicate-email checks, the Freemium
-team-member plan gate, the welcome/role emails, and the automatic
-Slack/Teams channel-creation side effects (CustomTeamListCreateView
-backgrounds ensure_custom_team_teams_channel/ensure_custom_team_slack_channel
-when the admin already has ms_team_id/slack_bot_token set) all run exactly
-as they would from the real UI.
+backend). Team creation replicates CustomTeamListCreateView's own
+validation directly (rather than calling that view in-process) so the
+Slack/Teams channel creation can be done synchronously, in the
+foreground — calling the view instead backgrounds that work on a daemon
+thread, which a standalone management command can't reliably wait on
+(confirmed live: produced an actual duplicate Teams channel once — see
+the comment in handle() for the full story). Adding a member — whether
+brand new or an existing one getting an additional role — still goes
+through the real UserDetailCreateView / UserDetailRoleUpdateView
+in-process (force_authenticate as the target admin), so duplicate-email
+checks, the Freemium team-member plan gate, and the welcome/role emails
+all run exactly as they would from the real UI.
 
 Usage:
     python manage.py add_custom_team_and_user \\
@@ -107,31 +111,33 @@ class Command(BaseCommand):
             member_domain = member_email.rsplit("@", 1)[-1].lower()
             user_type = "internal" if admin_domain == member_domain else "external"
 
-        from users_details.views import CustomTeamListCreateView, UserDetailCreateView, UserDetailRoleUpdateView
-        from users_details.models import UserDetail
+        from users_details.views import UserDetailCreateView, UserDetailRoleUpdateView, _FIXED_TEAM_NAMES
+        from users_details.models import UserDetail, CustomTeam
 
-        self.stdout.write(f"Creating custom team '{team_name}' for {admin_email}...")
-        status_code, data = self._call(CustomTeamListCreateView, admin, {"name": team_name})
-        if status_code == 400 and "already have a custom team" in str((data or {}).get("detail", "")):
-            self.stdout.write(self.style.WARNING(f"Custom team '{team_name}' already exists for {admin_email} — reusing it."))
-        elif status_code not in (200, 201):
-            raise CommandError(f"Custom team creation failed ({status_code}): {data}")
-        else:
-            self.stdout.write(self.style.SUCCESS(f"Custom team created: {data}"))
-
-        # Real bug found live: CustomTeamListCreateView.create() starts the
-        # actual Slack/Teams channel creation on a background daemon
-        # thread — fine for a real HTTP request (the gunicorn worker stays
-        # alive to serve other requests while it finishes), but THIS
-        # process exits as soon as handle() returns, killing that daemon
-        # thread mid-flight more often than not. Confirmed: the custom
-        # team record existed but ms_teams_channel_id stayed None.
-        # Re-checked here and created synchronously (foreground, so the
-        # command genuinely waits for it) whenever it's still missing —
-        # guarded on ms_teams_channel_id already being set so a lucky
-        # background thread that DID finish in time is never duplicated.
-        from users_details.models import CustomTeam
+        # Real bug found live (confirmed via a real duplicate Teams
+        # channel): going through CustomTeamListCreateView here — like the
+        # very first version of this command did — starts the actual
+        # Slack/Teams channel creation on a background daemon thread. That
+        # thread is NOT reliably killed by this process exiting (it can
+        # keep running for the few seconds the rest of this command is
+        # still doing network calls) — so the "channel still missing,
+        # create it now" fallback below could run WHILE that background
+        # thread was mid-flight, and both ended up calling the Graph API
+        # and creating two separate channels for the same team. Fixed by
+        # never going through the view's own threaded side effect at all
+        # here — doing the same validation it does, directly, then
+        # creating the channel synchronously ourselves (the only place
+        # that ever calls ensure_custom_team_teams_channel/
+        # ensure_custom_team_slack_channel for this command run).
         team = CustomTeam.objects.filter(admin=admin, name__iexact=team_name).first()
+        if team:
+            self.stdout.write(self.style.WARNING(f"Custom team '{team_name}' already exists for {admin_email} — reusing it."))
+        else:
+            if team_name in _FIXED_TEAM_NAMES:
+                raise CommandError(f'"{team_name}" is already one of the 4 standard teams — choose a different name.')
+            team = CustomTeam.objects.create(admin=admin, name=team_name)
+            self.stdout.write(self.style.SUCCESS(f"Custom team created: id={team._id} name={team.name}"))
+
         if team and not team.ms_teams_channel_id and getattr(admin, "ms_team_id", None):
             from users.views import ensure_custom_team_teams_channel
             self.stdout.write(f"Teams channel for '{team_name}' wasn't created yet — creating it now (foreground)...")
