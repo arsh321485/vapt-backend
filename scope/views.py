@@ -205,51 +205,32 @@ class ScopeCreateAPIView(APIView):
                 })
 
         # Plan routing, across ALL of this admin's scopes combined (not just
-        # what was just submitted — an admin who already has a web/mobile
-        # asset, or is already over the Premium ceiling, from an earlier
-        # scope stays routed to Custom even if this submission alone
-        # wouldn't be). Explicit instruction: "scope me freemium plan
-        # aayega hi nai" — Freemium is never offered for a scope submission,
-        # full stop (see billing/views.py's FreemiumActivateView for the
-        # matching hard-block, since this is only a recommendation an admin
-        # could otherwise bypass). Routing is:
-        #   - any web/mobile asset anywhere in the admin's scope -> Custom
-        #   - more than PREMIUM_ASSET_CEILING targets total -> Custom (this
-        #     ceiling is already enforced at the actual pricing/checkout
-        #     step — billing/views.py's PlanEstimateView and
-        #     PremiumCheckoutView both reject it — but the recommendation
-        #     here wasn't checking it, so a >250-target admin was being
-        #     told "Premium" at submit time only to get blocked later at
-        #     checkout; matching it here now so submit-time routing is
-        #     already correct)
-        #   - IPs/subnets only, at or under the ceiling -> Premium
-        #     (Management + Testing — mode B, since scope submission,
-        #     unlike a report upload, is specifically what that mode is for)
+        # what was just submitted). Explicit instruction: "scope me
+        # freemium plan aayega hi nai" — Freemium is never offered for a
+        # scope submission, full stop (see billing/views.py's
+        # FreemiumActivateView for the matching hard-block, since this is
+        # only a recommendation an admin could otherwise bypass).
+        #
+        # Real request: the website pricing page dropped the Custom tier
+        # entirely (Freemium + Premium only now) — Premium's own
+        # Management + Testing mode already prices web/mobile assets
+        # directly (per-type rates) and has no asset ceiling of its own
+        # (billing/views.py's PREMIUM_ASSET_CEILING checks were removed
+        # for the same reason), so routing a web/mobile or >250-asset
+        # scope to "Custom" here would recommend a plan the site no
+        # longer offers. Always routes to Premium / Management + Testing
+        # now, regardless of asset type or count.
         from billing.asset_service import get_admin_scope_asset_breakdown
-        from billing.plans import MODE_MANAGEMENT_TESTING, PREMIUM_ASSET_CEILING
+        from billing.plans import MODE_MANAGEMENT_TESTING
         breakdown = get_admin_scope_asset_breakdown(str(request.user.id))
         total_scope_assets = breakdown["total"]
 
-        if breakdown["has_web_asset"]:
-            recommended_plan = "custom"
-            recommended_mode = None
-            recommendation_message = (
-                "Your scope includes web/mobile assets — please continue with the Custom plan."
-            )
-        elif total_scope_assets > PREMIUM_ASSET_CEILING:
-            recommended_plan = "custom"
-            recommended_mode = None
-            recommendation_message = (
-                f"Your scope has {total_scope_assets} target(s), over the Premium ceiling of "
-                f"{PREMIUM_ASSET_CEILING} — please continue with the Custom plan."
-            )
-        else:
-            recommended_plan = "premium"
-            recommended_mode = MODE_MANAGEMENT_TESTING
-            recommendation_message = (
-                f"Your scope has {total_scope_assets} target(s). "
-                "Please continue with the Premium plan (Management + Testing)."
-            )
+        recommended_plan = "premium"
+        recommended_mode = MODE_MANAGEMENT_TESTING
+        recommendation_message = (
+            f"Your scope has {total_scope_assets} target(s). "
+            "Please continue with the Premium plan (Management + Testing)."
+        )
 
         # Super Admin needs to know a new scope is waiting — email every
         # superadmin now, and let the admin know on-screen that this isn't
