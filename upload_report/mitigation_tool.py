@@ -17,31 +17,25 @@ logger = logging.getLogger(__name__)
 
 
 def _get_crewai_llm():
-    """Return a LangChain ChatOpenAI LLM using the project's OPENAI_API_KEY."""
-    try:
-        from langchain_openai import ChatOpenAI
-    except ImportError:
-        raise ImportError(
-            "langchain-openai is not installed. Run: pip install langchain-openai>=0.2.0"
-        )
+    """
+    NVIDIA-first, OpenAI-fallback LLM — see upload_report/llm_provider.py.
+    Still used directly by scope/utils.py's plain `.invoke()` call. The
+    two Agent(llm=...) call sites in THIS file use
+    get_crewai_llm_candidates() instead, since CrewAI never calls
+    .invoke() on what it's handed (see llm_provider.py's docstring for
+    why that needs a different fallback mechanism).
+    """
+    from upload_report.llm_provider import get_fallback_chat_llm
 
-    api_key = getattr(settings, "OPENAI_API_KEY", None)
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is not configured in Django settings.")
-
-    model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
-    # Real bug report: a report's card generation got stuck at 0/N and
-    # never recovered — no timeout was set here, so a single slow/hung
-    # OpenAI call inside _auto_generate_cards_bg's per-vulnerability loop
-    # (1483 calls, sequential, one card at a time) could block that ONE
-    # background thread indefinitely. Nothing past that point ever runs
-    # again (cards_generated_count/cards_generation_complete only get
-    # written once, after the WHOLE loop finishes), and no timeout meant
-    # nothing ever forced that one stuck call to fail and move on. An
-    # explicit timeout turns "stuck forever" into "this one card errors
-    # out after 60s and the loop continues" — the per-vuln try/except
-    # already in place then does its job.
-    return ChatOpenAI(model=model, temperature=0.3, api_key=api_key, timeout=60, max_retries=1)
+    # Real bug report (original OpenAI-only version of this function): a
+    # report's card generation got stuck at 0/N and never recovered — no
+    # timeout was set, so a single slow/hung call inside
+    # _auto_generate_cards_bg's per-vulnerability loop (1483 calls,
+    # sequential, one card at a time) could block that ONE background
+    # thread indefinitely. An explicit timeout turns "stuck forever" into
+    # "this one card errors out after 60s and the loop continues" — the
+    # per-vuln try/except already in place then does its job.
+    return get_fallback_chat_llm(temperature=0.3, timeout=60, label="crewai_invoke")
 
 
 def _print_crew_token_usage(crew, plugin_name: str, run_automation: bool = False, automation_only: bool = False) -> None:
@@ -1192,8 +1186,7 @@ class MitigationGenerationTool:
             from crewai import Crew, Process
             from .crew_agent.agents import build_agents
             from .crew_agent.tasks import build_tasks
-
-            llm = _get_crewai_llm()
+            from upload_report.llm_provider import get_crewai_llm_candidates, mark_crewai_candidate_result
 
             os_str = operating_system.strip() if operating_system else "Windows"
             os_category = _detect_os(os_str)  # "windows" / "linux" / "macos" / "android" / "ios"
@@ -1214,37 +1207,64 @@ class MitigationGenerationTool:
                 ),
             }
 
-            agents = build_agents(llm)
-            tasks, automation_task = build_tasks(agents, finding, include_automation=run_automation)
+            # NVIDIA-first, OpenAI-fallback: CrewAI doesn't keep the llm
+            # object we hand Agent(llm=...) around as a live caller (see
+            # upload_report/llm_provider.py's docstring) — it extracts
+            # attributes from it once, at build time, to make its own
+            # litellm-backed crewai.LLM. So the fallback happens here, by
+            # rebuilding the crew with the next candidate and retrying
+            # crew.kickoff() if the current one raises.
+            llm_candidates = get_crewai_llm_candidates(temperature=0.3, timeout=60)
+            crew_result = None
+            crew = None
+            tasks = None
+            last_exc = None
+            for provider_label, llm in llm_candidates:
+                try:
+                    agents = build_agents(llm)
+                    tasks, automation_task = build_tasks(agents, finding, include_automation=run_automation)
 
-            crew = Crew(
-                agents=list(agents.values()),
-                tasks=tasks,
-                process=Process.sequential,
-                verbose=False,
-                # Real bug report: the SAME vulnerability_name/host showed
-                # a different assigned_team or automation_status every
-                # time this exact finding was re-processed (even across
-                # totally unrelated reports/admins, weeks apart) —
-                # confirmed live via generated_at timestamps from over a
-                # week earlier still showing up on freshly-generated
-                # cards. CrewAI's own Crew defaults to caching a tool's
-                # result by (tool name, tool input) — invisible from this
-                # file, since nothing here ever calls a cache API
-                # directly — so an identical finding+host input silently
-                # replayed whatever answer the crew happened to give the
-                # very first time it ever saw that exact input, forever,
-                # regardless of report_id or which admin triggered
-                # generation. Disabled so every card genuinely gets its
-                # own fresh run.
-                cache=False,
-            )
+                    crew = Crew(
+                        agents=list(agents.values()),
+                        tasks=tasks,
+                        process=Process.sequential,
+                        verbose=False,
+                        # Real bug report: the SAME vulnerability_name/host showed
+                        # a different assigned_team or automation_status every
+                        # time this exact finding was re-processed (even across
+                        # totally unrelated reports/admins, weeks apart) —
+                        # confirmed live via generated_at timestamps from over a
+                        # week earlier still showing up on freshly-generated
+                        # cards. CrewAI's own Crew defaults to caching a tool's
+                        # result by (tool name, tool input) — invisible from this
+                        # file, since nothing here ever calls a cache API
+                        # directly — so an identical finding+host input silently
+                        # replayed whatever answer the crew happened to give the
+                        # very first time it ever saw that exact input, forever,
+                        # regardless of report_id or which admin triggered
+                        # generation. Disabled so every card genuinely gets its
+                        # own fresh run.
+                        cache=False,
+                    )
 
-            logger.info(
-                f"[MitigationCrew] Starting {'6' if run_automation else '5'}-agent vaptcode crew "
-                f"for: {plugin_name} (automation={'on' if run_automation else 'off'})"
-            )
-            crew_result = crew.kickoff()
+                    logger.info(
+                        f"[MitigationCrew] Starting {'6' if run_automation else '5'}-agent vaptcode crew "
+                        f"for: {plugin_name} (automation={'on' if run_automation else 'off'}, provider={provider_label})"
+                    )
+                    crew_result = crew.kickoff()
+                    mark_crewai_candidate_result(provider_label, True)
+                    break
+                except Exception as candidate_exc:
+                    last_exc = candidate_exc
+                    mark_crewai_candidate_result(provider_label, False)
+                    logger.warning(
+                        f"[MitigationCrew] provider={provider_label} failed ({candidate_exc}) for {plugin_name}"
+                    )
+                    continue
+
+            if crew_result is None:
+                raise last_exc
+
             raw_text = str(crew_result)
             _print_crew_token_usage(crew, plugin_name, run_automation)
 
@@ -1330,20 +1350,48 @@ def generate_automation_for_existing_card(card: dict) -> dict:
         from crewai import Crew, Process
         from .crew_agent.agents import build_agents
         from .crew_agent.tasks import build_standalone_automation_task
+        from upload_report.llm_provider import get_crewai_llm_candidates, mark_crewai_candidate_result
 
-        llm = _get_crewai_llm()
-        agents = build_agents(llm)
-        task = build_standalone_automation_task(agents["automation_engineer"], card)
+        # NVIDIA-first, OpenAI-fallback — see the other Crew(...) call
+        # site's comment for why this is a rebuild-and-retry loop rather
+        # than a request-time try/except on the llm object itself.
+        llm_candidates = get_crewai_llm_candidates(temperature=0.3, timeout=60)
+        crew = None
+        task = None
+        kicked_off = False
+        last_exc = None
+        for provider_label, llm in llm_candidates:
+            try:
+                agents = build_agents(llm)
+                task = build_standalone_automation_task(agents["automation_engineer"], card)
 
-        crew = Crew(
-            agents=[agents["automation_engineer"]],
-            tasks=[task],
-            process=Process.sequential,
-            verbose=False,
-            cache=False,  # see the other Crew(...) construction's comment
-        )
-        logger.info(f"[AutomationBackfill] Starting standalone automation task for card_id={card.get('card_id')}")
-        crew.kickoff()
+                crew = Crew(
+                    agents=[agents["automation_engineer"]],
+                    tasks=[task],
+                    process=Process.sequential,
+                    verbose=False,
+                    cache=False,  # see the other Crew(...) construction's comment
+                )
+                logger.info(
+                    f"[AutomationBackfill] Starting standalone automation task for "
+                    f"card_id={card.get('card_id')} (provider={provider_label})"
+                )
+                crew.kickoff()
+                mark_crewai_candidate_result(provider_label, True)
+                kicked_off = True
+                break
+            except Exception as candidate_exc:
+                last_exc = candidate_exc
+                mark_crewai_candidate_result(provider_label, False)
+                logger.warning(
+                    f"[AutomationBackfill] provider={provider_label} failed ({candidate_exc}) "
+                    f"for card_id={card.get('card_id')}"
+                )
+                continue
+
+        if not kicked_off:
+            raise last_exc
+
         _print_crew_token_usage(crew, card.get("vulnerability_name") or card.get("card_id") or "unknown", automation_only=True)
         raw = _task_raw_output(task)
         return _parse_automation_card(raw)
