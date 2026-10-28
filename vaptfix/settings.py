@@ -168,7 +168,7 @@ WSGI_APPLICATION = "vaptfix.wsgi.application"
 DATABASES = {
     'default': {
         'ENGINE': 'djongo',
-        'NAME': 'vaptfix',
+        'NAME': os.getenv('MONGO_DB_NAME', 'vaptfix'),
         'CLIENT': {
             # Use resolved env with fallback (MONGO_DB_URL -> MONGO_URI)
             'host': MONGO_DB_URL,
