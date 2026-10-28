@@ -306,19 +306,10 @@ Respond with ONLY this exact JSON shape, nothing else, no markdown fences:
 
 
 def _get_classification_llm():
-    """Same construction pattern as custom_report_ai._get_validation_llm —
-    reuses the same OPENAI_API_KEY/OPENAI_MODEL settings already configured
-    for this project."""
-    from langchain_openai import ChatOpenAI
-    from django.conf import settings
+    """NVIDIA-first, OpenAI-fallback LLM — see upload_report/llm_provider.py."""
+    from upload_report.llm_provider import get_fallback_chat_llm
 
-    api_key = getattr(settings, "OPENAI_API_KEY", None)
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is not configured in Django settings.")
-    model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
-    # Same "no timeout -> can hang forever" gap found and fixed in
-    # mitigation_tool._get_crewai_llm / custom_report_ai._get_validation_llm.
-    return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=4096, timeout=60, max_retries=1)
+    return get_fallback_chat_llm(temperature=0, max_tokens=4096, timeout=60, label="classification")
 
 
 def _strip_json_fences(raw: str) -> str:

@@ -24,6 +24,16 @@ for _stream in (sys.stdout, sys.stderr):
 MONGO_DB_URL = os.getenv("MONGO_DB_URL") or os.getenv("MONGO_URI")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+# NVIDIA NIM — tried first wherever this project calls an LLM; OpenAI above
+# stays configured as the fallback (see upload_report/llm_provider.py).
+# Leaving NVIDIA_API_KEY blank makes every call site skip NVIDIA and go
+# straight to OpenAI, so this is safe to leave unset in any environment
+# that hasn't been given an NVIDIA key yet.
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
+NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
 RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 

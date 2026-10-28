@@ -1043,30 +1043,20 @@ def _apply_scope_groundtruth(vulnerabilities_by_host: list, document_text: str, 
 
 def _get_validation_llm():
     """
-    LangChain ChatOpenAI LLM — same construction pattern as
-    mitigation_tool._get_crewai_llm(), but used as a plain single-shot call
-    (no crew orchestration needed for a classify+extract task).
+    NVIDIA-first, OpenAI-fallback LLM (see upload_report/llm_provider.py)
+    — used as a plain single-shot call (no crew orchestration needed for
+    a classify+extract task).
     """
-    from langchain_openai import ChatOpenAI
+    from upload_report.llm_provider import get_fallback_chat_llm
 
-    api_key = getattr(settings, "OPENAI_API_KEY", None)
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is not configured in Django settings.")
-
-    model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
-    # max_tokens was previously unset, which leaves the response capped at
-    # whatever OpenAI's default completion length is (well under what a
-    # 13-host, multi-finding-per-host JSON extraction needs) — a report
-    # that legitimately has many hosts could have its JSON response cut off
-    # mid-generation, which then fails json.loads() and silently drops
-    # everything the model hadn't finished writing yet. gpt-4o-mini
-    # supports up to 16384 output tokens; give it the full budget.
-    # Real bug report (same gap found in mitigation_tool._get_crewai_llm):
-    # no timeout meant a hung call here could block forever — and unlike
-    # the background card-generation path, THIS one runs synchronously
-    # inside the upload HTTP request itself, so a hang ties up a gunicorn
-    # worker indefinitely instead of just delaying a background thread.
-    return ChatOpenAI(model=model, temperature=0, api_key=api_key, max_tokens=16384, timeout=90, max_retries=1)
+    # max_tokens=16384: a 13-host, multi-finding-per-host JSON extraction
+    # needs the full budget, or a report with many hosts can have its JSON
+    # response cut off mid-generation, which then fails json.loads() and
+    # silently drops everything the model hadn't finished writing yet.
+    # timeout=90, no retries: this runs synchronously inside the upload
+    # HTTP request itself, so a hang ties up a gunicorn worker indefinitely
+    # instead of just delaying a background thread.
+    return get_fallback_chat_llm(temperature=0, max_tokens=16384, timeout=90, label="validation")
 
 
 _BROKEN_HYPHEN_RE = re.compile(r"(\w) -(\w)")
