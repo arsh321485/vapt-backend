@@ -26,8 +26,46 @@ member's email domain matches the admin's (see
 users_details.serializers._enforce_user_type_email_domain) when not given.
 """
 from django.core.management.base import BaseCommand, CommandError
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, force_authenticate
+
+
+def _refresh_ms_access_token(admin):
+    """
+    A standalone command runs whenever support happens to invoke it — not
+    right after the admin's own login, like every other Graph call in
+    this codebase is — so admin.ms_access_token (short-lived, ~1hr) is
+    very likely already expired by the time this runs. Refreshes it via
+    the stored ms_refresh_token first (same grant this project's other
+    _refresh_admin_ms_token/_refresh_ms_token helpers use), so the Teams
+    channel sync below gets a token that actually works. Returns the
+    refreshed token, or the original (possibly stale) one if there's no
+    refresh_token or the refresh call itself fails — never raises.
+    """
+    refresh_token = getattr(admin, "ms_refresh_token", None)
+    if not refresh_token:
+        return getattr(admin, "ms_access_token", None)
+    try:
+        import requests
+        resp = requests.post(settings.MICROSOFT_TOKEN_URL, data={
+            "grant_type": "refresh_token",
+            "client_id": settings.MICROSOFT_CLIENT_ID,
+            "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+            "refresh_token": refresh_token,
+            "scope": "https://graph.microsoft.com/.default offline_access",
+        }, timeout=15)
+        data = resp.json() if resp is not None else {}
+        new_token = data.get("access_token")
+        if not new_token:
+            return getattr(admin, "ms_access_token", None)
+        update_kwargs = {"ms_access_token": new_token}
+        if data.get("refresh_token"):
+            update_kwargs["ms_refresh_token"] = data["refresh_token"]
+        get_user_model().objects.filter(pk=admin.pk).update(**update_kwargs)
+        return new_token
+    except Exception:
+        return getattr(admin, "ms_access_token", None)
 
 
 class Command(BaseCommand):
@@ -42,11 +80,12 @@ class Command(BaseCommand):
         parser.add_argument("--role", required=False, default=None, help="Defaults to --team-name")
         parser.add_argument("--user-type", required=False, default=None, choices=["internal", "external"])
 
-    def _call(self, view_cls, admin, data):
+    def _call(self, view_cls, admin, data, method="post", url_kwargs=None):
         factory = APIRequestFactory()
-        request = factory.post("/internal/", data, format="json")
+        factory_method = getattr(factory, method)
+        request = factory_method("/internal/", data, format="json")
         force_authenticate(request, user=admin)
-        response = view_cls.as_view()(request)
+        response = view_cls.as_view()(request, **(url_kwargs or {}))
         if hasattr(response, "render"):
             response.render()
         return response.status_code, response.data
@@ -68,13 +107,76 @@ class Command(BaseCommand):
             member_domain = member_email.rsplit("@", 1)[-1].lower()
             user_type = "internal" if admin_domain == member_domain else "external"
 
-        from users_details.views import CustomTeamListCreateView, UserDetailCreateView
+        from users_details.views import CustomTeamListCreateView, UserDetailCreateView, UserDetailRoleUpdateView
+        from users_details.models import UserDetail
 
         self.stdout.write(f"Creating custom team '{team_name}' for {admin_email}...")
         status_code, data = self._call(CustomTeamListCreateView, admin, {"name": team_name})
-        if status_code not in (200, 201):
+        if status_code == 400 and "already have a custom team" in str((data or {}).get("detail", "")):
+            self.stdout.write(self.style.WARNING(f"Custom team '{team_name}' already exists for {admin_email} — reusing it."))
+        elif status_code not in (200, 201):
             raise CommandError(f"Custom team creation failed ({status_code}): {data}")
-        self.stdout.write(self.style.SUCCESS(f"Custom team created: {data}"))
+        else:
+            self.stdout.write(self.style.SUCCESS(f"Custom team created: {data}"))
+
+        # Real bug found live: CustomTeamListCreateView.create() starts the
+        # actual Slack/Teams channel creation on a background daemon
+        # thread — fine for a real HTTP request (the gunicorn worker stays
+        # alive to serve other requests while it finishes), but THIS
+        # process exits as soon as handle() returns, killing that daemon
+        # thread mid-flight more often than not. Confirmed: the custom
+        # team record existed but ms_teams_channel_id stayed None.
+        # Re-checked here and created synchronously (foreground, so the
+        # command genuinely waits for it) whenever it's still missing —
+        # guarded on ms_teams_channel_id already being set so a lucky
+        # background thread that DID finish in time is never duplicated.
+        from users_details.models import CustomTeam
+        team = CustomTeam.objects.filter(admin=admin, name__iexact=team_name).first()
+        if team and not team.ms_teams_channel_id and getattr(admin, "ms_team_id", None):
+            from users.views import ensure_custom_team_teams_channel
+            self.stdout.write(f"Teams channel for '{team_name}' wasn't created yet — creating it now (foreground)...")
+            channel_id = ensure_custom_team_teams_channel(admin, team)
+            if channel_id:
+                self.stdout.write(self.style.SUCCESS(f"Teams channel created: {channel_id}"))
+            else:
+                self.stdout.write(self.style.WARNING("Could not create the Teams channel (non-fatal — team still works, just no dedicated channel yet)."))
+        if team and not team.slack_channel_id and getattr(admin, "slack_bot_token", None):
+            from users.views import ensure_custom_team_slack_channel
+            self.stdout.write(f"Slack channel for '{team_name}' wasn't created yet — creating it now (foreground)...")
+            try:
+                ensure_custom_team_slack_channel(admin, team)
+            except Exception as exc:
+                self.stdout.write(self.style.WARNING(f"Could not create the Slack channel (non-fatal): {exc}"))
+
+        # Real gap found live: a member who already exists under this
+        # admin (added earlier, for a different team) can't be "created"
+        # again — UserDetailCreateView correctly rejects that as a
+        # duplicate (409), so the team got created but the role silently
+        # never did. For that case, add the new team as an ADDITIONAL
+        # role on their existing record instead, via the same
+        # UserDetailRoleUpdateView the MS Teams bot's own "Add to Team"
+        # button uses (their other roles are left untouched). Passing
+        # access_token/team_id explicitly — unlike UserDetailCreateView,
+        # this view only Teams-syncs when they're in the request body, it
+        # doesn't fall back to the admin's own ms_access_token/ms_team_id
+        # on its own.
+        existing = UserDetail.objects.filter(admin=admin, email=member_email).first()
+        if existing:
+            self.stdout.write(f"'{member_email}' already exists under {admin_email} — adding '{role}' as an additional role...")
+            fresh_access_token = _refresh_ms_access_token(admin)
+            status_code, data = self._call(
+                UserDetailRoleUpdateView, admin,
+                {
+                    "new_roles": [role],
+                    "access_token": fresh_access_token,
+                    "team_id": getattr(admin, "ms_team_id", None),
+                },
+                method="patch", url_kwargs={"detail_id": str(existing._id)},
+            )
+            if status_code not in (200, 201):
+                raise CommandError(f"Adding role failed ({status_code}): {data}")
+            self.stdout.write(self.style.SUCCESS(f"Role added: {data}"))
+            return
 
         self.stdout.write(f"Adding user '{member_email}' to {admin_email} with role '{role}' (user_type={user_type})...")
         status_code, data = self._call(UserDetailCreateView, admin, {
