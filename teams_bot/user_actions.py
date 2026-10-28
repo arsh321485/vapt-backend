@@ -534,6 +534,14 @@ def _render_vuln_detail_action(member_user, admin, team_id, team_name, action_id
 
     if action_id == "usup_step_form":
         step = _as_int(value.get("step")) or 1
+        # Real request: clicking this on a step that already has a
+        # request on file should let the member READ it, not land on a
+        # blank "raise a new one" form that would just hit the backend's
+        # own one-request-per-step-per-user rejection on submit.
+        fix_vuln_id = fix._get_or_create_fix_vuln_id(member_user, r, data.get("report_id"))
+        existing = fix._get_step_support_request_doc(member_user, fix_vuln_id, step) if fix_vuln_id else None
+        if existing:
+            return fix.step_support_detail_readonly_body(step, value_base, existing)
         return fix.step_support_form_body(step, value_base)
 
     if action_id == "usup_step_submit":

@@ -287,26 +287,29 @@ def _all_steps_readonly_body(steps_data, host_os_hint, value_base, nav_action_id
     return body
 
 
-def _step_support_request_raised(member_user, fix_vuln_id, step_number):
-    """Whether THIS member already has a support request raised for this
-    exact (fix_vuln_id, step_number) — same dedup key
-    UserRaiseSupportRequestAPIView's own duplicate check uses (see its
-    "one request per step per user" comment), so the button always
-    reflects what the backend will actually allow. Re-checked fresh every
-    time the step is rendered (initial load, Previous/Next nav, and the
-    re-render right after submitting) — never cached/stale."""
+def _get_step_support_request_doc(member_user, fix_vuln_id, step_number):
+    """THIS member's support request for this exact (fix_vuln_id,
+    step_number), if any — same dedup key UserRaiseSupportRequestAPIView's
+    own duplicate check uses (see its "one request per step per user"
+    comment), so the button/detail view always agree with what the
+    backend will actually allow. Re-fetched fresh every time the step is
+    rendered (initial load, Previous/Next nav, and the re-render right
+    after submitting) — never cached/stale."""
     if not fix_vuln_id or not member_user:
-        return False
+        return None
     try:
         from vaptfix.mongo_client import MongoContext
         with MongoContext() as db:
-            return bool(db["support_requests"].find_one(
+            return db["support_requests"].find_one(
                 {"vulnerability_id": str(fix_vuln_id), "user_id": str(member_user.id), "step_number": step_number},
-                {"_id": 1},
-            ))
+            )
     except Exception:
-        logger.exception("[TeamsBot] step support-request check failed")
-        return False
+        logger.exception("[TeamsBot] step support-request fetch failed")
+        return None
+
+
+def _step_support_request_raised(member_user, fix_vuln_id, step_number):
+    return bool(_get_step_support_request_doc(member_user, fix_vuln_id, step_number))
 
 
 def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_number=None, member_user=None, fix_vuln_id=None):
@@ -345,14 +348,14 @@ def _manual_fix_body_interactive(steps_data, host_os_hint, value_base, step_numb
     #
     # Real request: once this member has already raised a request for
     # THIS step, the button must show that instead of looking identical
-    # to "not yet raised" — relabeled + isEnabled:false (greyed, matching
-    # how Teams renders a disabled Action.Submit) so re-clicking isn't
-    # even possible, in sync with the backend's own one-request-per-step-
-    # per-user rule (UserRaiseSupportRequestAPIView). Checked fresh on
-    # every render (_step_support_request_raised), not cached.
+    # to "not yet raised" — relabeled (greyed look — no "positive" style,
+    # same as it never had one) but still clickable, since clicking it now
+    # opens a READ-ONLY view of the request already on file (see
+    # usup_step_form's handler in user_actions.py) instead of the
+    # raise-a-new-one form. Checked fresh on every render
+    # (_step_support_request_raised), not cached.
     if _step_support_request_raised(member_user, fix_vuln_id, step_number):
         support_action = cards._execute_action("🎫 Support Request Raised ✓", {"action_id": "usup_step_form", "step": step_number, **value_base})
-        support_action["isEnabled"] = False
     else:
         support_action = cards._execute_action("🎫 Raise Support Request", {"action_id": "usup_step_form", "step": step_number, **value_base})
     nav_actions.append(support_action)
@@ -371,6 +374,26 @@ def step_support_form_body(step_number, value_base):
         {
             "type": "ActionSet", "spacing": "Medium",
             "actions": [cards._execute_action("✅ Submit", {"action_id": "usup_step_submit", "step": step_number, **value_base}, style="positive")],
+        },
+    ]
+
+
+def step_support_detail_readonly_body(step_number, value_base, doc):
+    """Shown instead of step_support_form_body when this member already
+    has a request on file for this step (clicking the greyed-look
+    "Support Request Raised" button) — what they asked for and its
+    current status, read-only (no form to resubmit)."""
+    status = (doc.get("status") or "open").strip().lower()
+    status_label = "✅ Closed" if status == "closed" else "⏳ Open — waiting for admin response"
+    return [
+        cards._section_title(f"🎫 Support Request — Step {step_number}"),
+        {"type": "TextBlock", "text": f"Status: {status_label}", "weight": "Bolder", "size": "Small", "wrap": True},
+        {"type": "TextBlock", "text": f"Submitted: {doc.get('requested_at') or '—'}", "isSubtle": True, "size": "Small", "wrap": True},
+        {"type": "TextBlock", "text": "What you asked for:", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"},
+        {"type": "TextBlock", "text": doc.get("description") or "—", "size": "Small", "wrap": True},
+        {
+            "type": "ActionSet", "spacing": "Medium",
+            "actions": [cards._execute_action("◀ Back to Step", {"action_id": "ufix_step_nav", "step": step_number, **value_base})],
         },
     ]
 
