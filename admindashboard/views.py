@@ -759,7 +759,17 @@ class AdminMitigationTimelineExtensionAPIView(APIView):
         try:
             admin_id = str(request.user.id)
             admin_email = request.user.email
-            team_order = TEAM_NAMES
+            # Real bug report: this stayed hardcoded to the 4 fixed teams
+            # only — every other team-scoped admin dashboard card in this
+            # file (Vulnerabilities by Severity, Common Vulnerabilities,
+            # the detail breakdown) already extends TEAM_NAMES with this
+            # admin's own custom teams (see those views' own
+            # custom_team_names), this one just never got the same fix.
+            from users_details.models import CustomTeam
+            custom_team_names = list(
+                CustomTeam.objects.filter(admin=request.user).values_list("name", flat=True)
+            )
+            team_order = TEAM_NAMES + custom_team_names
 
             with MongoContext() as db:
                 report_doc = _load_latest_report_meta_for_admin(db, admin_email, admin_id)
