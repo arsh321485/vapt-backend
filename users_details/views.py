@@ -425,7 +425,38 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
     Network Security, Architectural Flaws).
 
     For private/shared channels, members are added individually.
-    Returns: (results, ms_user_id) — ms_user_id is the Azure AD object ID or None.
+    Returns: (results, ms_user_id) — ms_user_id is the Azure AD object ID or None
+    (None whenever the app-only/RSC path below is used instead of the caller's
+    delegated token — see the comment at this function's top for why).
+
+    Real bug report, confirmed live against a real external customer tenant:
+    this used to call GET /users/{email} first (to resolve the target
+    member's Azure AD object id) using the CALLER's delegated access_token
+    — the admin's own login token. That token only ever carries User.Read
+    (read-your-own-profile) since the admin-consent-required scopes
+    (User.Read.All, TeamMember.ReadWrite.All, etc.) were deliberately
+    dropped from the login flow (see the Microsoft OAuth scope list in
+    users/views.py — removed specifically because requesting them
+    triggered a "Need admin approval" screen for every external-tenant
+    admin). For our OWN tenant (vaptfix.ai) this worked anyway, because
+    our tenant has broader Azure AD permissions pre-consented outside this
+    app's own OAuth flow — but for any real customer tenant that never
+    separately granted that, the lookup fails with a 403
+    Authorization_RequestDenied, and the member is never actually added to
+    their Teams team.
+
+    Fixed by switching to the tenant-scoped RSC app-only token (same
+    _get_graph_app_token_for_tenant mechanism users.views.
+    ensure_custom_team_teams_channel already uses successfully for channel
+    creation — no separate admin consent needed, since installing the
+    bot into a team IS what grants it) and dropping the upfront user
+    lookup entirely: Microsoft Graph's /teams/{id}/members endpoint
+    accepts a user@odata.bind built directly from the UPN/email (users()
+    accepts either the AAD object id or the UPN as its key), so there's
+    nothing left here that needs directory-wide read access — only the
+    team-scoped TeamMember.ReadWrite RSC grant, which (like
+    Channel.Create.Group) applies automatically once the app is installed
+    into that team, on any tenant.
     """
     if not access_token or not team_id:
         return [], None
@@ -434,33 +465,34 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
         'Authorization': f'Bearer {access_token}',
         'Content-Type': 'application/json'
     }
+    user_id = None
+
+    try:
+        from teams_bot.conversation_store import get_team_channel_reference
+        ref = get_team_channel_reference(team_id)
+        tenant_id = ref.get("tenant_id") if ref else None
+        if tenant_id:
+            from users.views import _get_graph_app_token_for_tenant
+            app_token = _get_graph_app_token_for_tenant(tenant_id)
+            if app_token:
+                headers = {'Authorization': f'Bearer {app_token}', 'Content-Type': 'application/json'}
+    except Exception:
+        logger.exception("[TeamsSync] Could not resolve app-only RSC token — falling back to the caller's delegated token")
 
     results = []
-    user_id = None
 
     try:
         logger.info(
             f"[TeamsSync] Start: team_id={team_id} user_email={user_email} roles={member_roles} access_token_set={bool(access_token)}"
         )
-        # Get user's Azure AD ID by email
-        user_resp = _http_get(
-            f"https://graph.microsoft.com/v1.0/users/{user_email}",
-            headers=headers, timeout=10
-        )
-        if user_resp.status_code != 200:
-            logger.warning(
-                f"[TeamsSync] Graph users lookup failed status={user_resp.status_code} user_email={user_email} body={user_resp.text}"
-            )
-            return [{"error": f"Could not find user {user_email} in Azure AD", "detail": user_resp.text}], None
 
-        user_id = user_resp.json().get('id')
-        logger.info(f"[TeamsSync] Found Azure user_id={user_id} for email={user_email}")
-
-        # Add user as team member — this gives access to ALL standard channels automatically
+        # Add user as team member (bound by UPN directly, no separate
+        # directory lookup — see this function's own docstring) — this
+        # gives access to ALL standard channels automatically.
         team_member_payload = {
             "@odata.type": "#microsoft.graph.aadUserConversationMember",
             "roles": [],
-            "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
+            "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_email}')"
         }
         team_member_resp = _http_post(
             f"https://graph.microsoft.com/v1.0/teams/{team_id}/members",
@@ -559,10 +591,12 @@ def sync_member_to_teams_channels(access_token, team_id, user_email, member_role
                     results.append({"channel": role, "status": "auto_access_via_team_membership"})
                 else:
                     # Private/shared channels: add member individually
+                    # (bound by UPN directly, same reasoning as the
+                    # team-level add above)
                     add_payload = {
                         "@odata.type": "#microsoft.graph.aadUserConversationMember",
                         "roles": [],
-                        "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
+                        "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_email}')"
                     }
                     add_resp = _http_post(
                         f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{matching_channel['id']}/members",
