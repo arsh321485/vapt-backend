@@ -431,14 +431,21 @@ class UserTotalAssetsAPIView(APIView):
                     if not has_active_vuln:
                         clean_hosts.add(h_name)
 
-                # A custom team only gets credit for what's genuinely
-                # assigned to it (via additional_teams above) — the
-                # "clean asset belongs to all of them equally" fallback
-                # stays fixed-team-only, same reasoning as userasset.
-                # views.UserAssetsAPIView's own _custom_team_only_view.
+                # A custom team only gets credit for a CLEAN host when it
+                # was genuinely, explicitly assigned to it (no
+                # vulnerability card exists to tag via additional_teams,
+                # so team_utils.custom_team_explicit_assets — the Add
+                # User picker's own saved selection — is the only place
+                # that assignment is recorded at all). Fixed teams keep
+                # the unconditional "belongs to all of them" fallback,
+                # same reasoning as userasset.views.UserAssetsAPIView's
+                # own _custom_team_only_view.
+                from upload_report.team_utils import custom_team_explicit_assets
                 for t in active_teams:
                     if is_fixed_team(t):
                         by_team[t] |= clean_hosts
+                    else:
+                        by_team[t] |= (custom_team_explicit_assets(admin_user.id, t) & clean_hosts)
 
                 by_team_count = {t: len(hosts) for t, hosts in by_team.items()}
                 # total_assets = unique hosts across all teams (host in multiple teams counted once)
@@ -614,13 +621,16 @@ class UserAvgScoreAPIView(APIView):
                     if h_name and not has_active_vuln:
                         clean_hosts.add(h_name)
 
-                # Fixed-team-only fallback — see UserTotalAssetsAPIView's
-                # own comment for why a custom team doesn't get clean
-                # hosts for free any more now that additional_teams gives
-                # it a real classification pool.
+                # Fixed teams get every clean host for free; a custom team
+                # only gets the ones genuinely checkbox-assigned to it —
+                # see UserTotalAssetsAPIView's own comment and
+                # team_utils.custom_team_explicit_assets for the full story.
+                from upload_report.team_utils import custom_team_explicit_assets
                 for t in active_teams:
                     if is_fixed_team(t):
                         by_team[t] |= clean_hosts
+                    else:
+                        by_team[t] |= (custom_team_explicit_assets(admin_user.id, t) & clean_hosts)
 
                 # "0, not null" when there's no scored vulnerability data —
                 # same fix as admindashboard's AdminAvgScoreAPIView.
