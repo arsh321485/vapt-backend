@@ -3248,7 +3248,10 @@ class UploadCardsStatusAPIView(APIView):
         if tagged_count:
             counts_doc = db[NESSUS_COLLECTION].find_one(
                 {"report_id": resolved_report_id},
-                {"cards_generation_started_at": 1, "vulnerabilities_by_host": 1, "locked_hosts": 1, "cards_expected_count": 1},
+                {
+                    "cards_generation_started_at": 1, "vulnerabilities_by_host": 1, "locked_hosts": 1,
+                    "cards_expected_count": 1, "cards_generation_complete": 1,
+                },
             ) or {}
             # Real bug report: this used report.parsed_count (the raw,
             # un-deduped vulnerability count parsed from the file — the
@@ -3272,6 +3275,25 @@ class UploadCardsStatusAPIView(APIView):
                 cards_total = int(getattr(report, "parsed_count", 0) or 0)
             cards_generated = tagged_count
             complete = cards_total == 0 or cards_generated >= cards_total
+
+            # Real bug report: a merged report where this upload's own
+            # findings only account for SOME of the merged total (e.g. 65
+            # of 71 — the other 6 came from a second file uploaded later
+            # into the same admin's report) never satisfied
+            # cards_generated >= cards_total above, even once the WHOLE
+            # merged report had genuinely finished generating — "65/71"
+            # and "This is taking longer than usual" shown forever. Same
+            # root cause as the already-handled 0-tagged-cards case below
+            # (a merged upload whose findings ALL duplicate an earlier
+            # one's), just for a partial overlap instead of a total one.
+            # Once the shared report's own cards_generation_complete flag
+            # is set, nothing is left pending for ANY of its contributing
+            # uploads — report this one as done too, and show its
+            # progress as fully caught up rather than frozen below 100%.
+            if not complete and counts_doc.get("cards_generation_complete"):
+                complete = True
+                cards_generated = cards_total
+
             started_at = counts_doc.get("cards_generation_started_at")
             automation_filter = {"source_upload_id": own_id, "report_id": resolved_report_id}
         else:
