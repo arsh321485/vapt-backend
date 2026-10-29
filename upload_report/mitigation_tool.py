@@ -1186,7 +1186,7 @@ class MitigationGenerationTool:
             from crewai import Crew, Process
             from .crew_agent.agents import build_agents
             from .crew_agent.tasks import build_tasks
-            from upload_report.llm_provider import get_crewai_llm_candidates, mark_crewai_candidate_result
+            from upload_report.llm_provider import get_crewai_llm_candidates
 
             os_str = operating_system.strip() if operating_system else "Windows"
             os_category = _detect_os(os_str)  # "windows" / "linux" / "macos" / "android" / "ios"
@@ -1252,11 +1252,9 @@ class MitigationGenerationTool:
                         f"for: {plugin_name} (automation={'on' if run_automation else 'off'}, provider={provider_label})"
                     )
                     crew_result = crew.kickoff()
-                    mark_crewai_candidate_result(provider_label, True)
                     break
                 except Exception as candidate_exc:
                     last_exc = candidate_exc
-                    mark_crewai_candidate_result(provider_label, False)
                     logger.warning(
                         f"[MitigationCrew] provider={provider_label} failed ({candidate_exc}) for {plugin_name}"
                     )
@@ -1350,7 +1348,7 @@ def generate_automation_for_existing_card(card: dict) -> dict:
         from crewai import Crew, Process
         from .crew_agent.agents import build_agents
         from .crew_agent.tasks import build_standalone_automation_task
-        from upload_report.llm_provider import get_crewai_llm_candidates, mark_crewai_candidate_result
+        from upload_report.llm_provider import get_crewai_llm_candidates
 
         # NVIDIA-first, OpenAI-fallback — see the other Crew(...) call
         # site's comment for why this is a rebuild-and-retry loop rather
@@ -1377,12 +1375,10 @@ def generate_automation_for_existing_card(card: dict) -> dict:
                     f"card_id={card.get('card_id')} (provider={provider_label})"
                 )
                 crew.kickoff()
-                mark_crewai_candidate_result(provider_label, True)
                 kicked_off = True
                 break
             except Exception as candidate_exc:
                 last_exc = candidate_exc
-                mark_crewai_candidate_result(provider_label, False)
                 logger.warning(
                     f"[AutomationBackfill] provider={provider_label} failed ({candidate_exc}) "
                     f"for card_id={card.get('card_id')}"
