@@ -55,8 +55,25 @@ class Command(BaseCommand):
         parser.add_argument("--email", required=True, help="Admin email to delete.")
         parser.add_argument("--execute", action="store_true", help="Actually delete. Without this, dry-run only.")
         parser.add_argument("--confirm-email", help="Must repeat --email exactly to execute.")
+        parser.add_argument(
+            "--db",
+            help=(
+                "Mongo database name to target (e.g. vaptfix_test) — overrides "
+                "whatever this machine's own .env/MONGO_DB_NAME resolves to. "
+                "Real gap found live: running this on a machine whose .env "
+                "still points at the default/production database silently "
+                "deleted from the WRONG one while reporting success, since "
+                "settings.py's load_dotenv(override=True) makes a plain "
+                "shell env var unable to override it either — this flag is "
+                "the only reliable way to target a specific database from "
+                "any machine."
+            ),
+        )
 
     def handle(self, *args, **opts):
+        if opts.get("db"):
+            settings.DATABASES["default"]["NAME"] = opts["db"]
+
         from users.models import User
         from users_details.models import UserDetail
 
