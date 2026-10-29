@@ -21,8 +21,10 @@ from vaptfix.mongo_client import get_shared_client, get_shared_db
 
 # A lock older than this is assumed to belong to a process that crashed
 # without releasing it (e.g. server restart mid-generation) — not a job
-# that's still genuinely running.
-STALE_LOCK_MINUTES = 15
+# that's still genuinely running. Kept in lockstep with
+# upload_report.views.STALE_LOCK_SECONDS (same heartbeat, same
+# reasoning for why 5 minutes safely distinguishes "dead" from "slow").
+STALE_LOCK_MINUTES = 5
 
 
 def run_retry(report_id=None, join=True, log=None):
