@@ -57,6 +57,39 @@ def is_fixed_team(team_name: str) -> bool:
     return (team_name or "").strip() in FIXED_TEAMS
 
 
+def custom_team_explicit_assets(admin_id, team_name) -> set:
+    """
+    Every host_name ever checkbox-assigned to this CUSTOM team via the Add
+    User picker's role_assignments["assets"] (users_details.models.
+    UserDetail) — across every member ever added with this team in their
+    Member_role, not just one viewer's own record, since the team's asset
+    pool is shared by everyone on it.
+
+    Real bug report: a custom team's "clean" (zero-vulnerability) assets
+    never showed up anywhere team-scoped (dashboard totals, asset list)
+    even when explicitly checkbox-selected for that team — assigning a
+    team to a VULNERABILITY (vulnerability_cards.additional_teams, see
+    users_details.views._apply_role_assignments_to_cards) is the only
+    classification mechanism a custom team has, and a clean host has no
+    vulnerability card at all to tag. Use this as an EXTRA source of
+    "this host belongs to this custom team", alongside whatever the
+    plugin_team_map/additional_teams route already finds.
+
+    Never needed for a fixed team — those already get every clean host
+    for free (see is_fixed_team's own callers in userdashboard/userasset).
+    """
+    if not admin_id or not team_name:
+        return set()
+    from users_details.models import UserDetail
+    hosts = set()
+    for detail in UserDetail.objects.filter(admin__id=admin_id, Member_role__contains=team_name):
+        for h in ((detail.role_assignments or {}).get("assets") or []):
+            h = (h or "").strip()
+            if h:
+                hosts.add(h)
+    return hosts
+
+
 def infer_assigned_team(vulnerability_name: str) -> str:
     """
     Best-effort, deterministic team classification from a vulnerability's

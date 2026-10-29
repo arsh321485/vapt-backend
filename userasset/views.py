@@ -374,11 +374,22 @@ class UserAssetsAPIView(APIView):
             # assigned to it, clean hosts included only if THEY were
             # assigned. True only when every active team is custom (a
             # mixed admin/member view spanning a fixed team stays as-is).
-            from upload_report.team_utils import is_fixed_team
+            from upload_report.team_utils import is_fixed_team, custom_team_explicit_assets
             _custom_team_only_view = bool(active_teams) and not any(is_fixed_team(t) for t in active_teams)
             admin_id    = str(admin_user.id)
             admin_email = getattr(admin_user, "email", None)
             search_q    = (request.query_params.get("q") or "").strip().lower()
+
+            # A custom team should still see a clean host when it was
+            # genuinely checkbox-assigned to it — see
+            # team_utils.custom_team_explicit_assets for the full story
+            # (no vulnerability card exists to tag a clean host via
+            # additional_teams, so this is the only place that assignment
+            # is recorded at all).
+            _explicit_clean_hosts = set()
+            if _custom_team_only_view:
+                for _t in active_teams:
+                    _explicit_clean_hosts |= custom_team_explicit_assets(admin_id, _t)
 
             with MongoContext() as db:
                 doc = _load_latest_report(db, admin_id, admin_email)
@@ -459,8 +470,10 @@ class UserAssetsAPIView(APIView):
                             continue
                         # A custom-team-only view skips the "show clean
                         # host to every team" fallback above — see
-                        # _custom_team_only_view's own comment.
-                        if _custom_team_only_view:
+                        # _custom_team_only_view's own comment — unless
+                        # this exact host was explicitly checkbox-assigned
+                        # to one of the active custom teams.
+                        if _custom_team_only_view and host_name not in _explicit_clean_hosts:
                             continue
 
                     if host_name not in assets:
@@ -674,9 +687,17 @@ class UserReportAssetsAPIView(APIView):
             # Same fix as UserAssetsAPIView's own _custom_team_only_view —
             # a custom-team-only view should never fall back to "show
             # every clean host", only genuinely-assigned ones.
-            from upload_report.team_utils import is_fixed_team
+            from upload_report.team_utils import is_fixed_team, custom_team_explicit_assets
             _custom_team_only_view = bool(active_teams) and not any(is_fixed_team(t) for t in active_teams)
             search_q    = (request.query_params.get("q") or "").strip().lower()
+
+            # A custom team should still see a clean host when it was
+            # genuinely checkbox-assigned to it — see
+            # team_utils.custom_team_explicit_assets for the full story.
+            _explicit_clean_hosts = set()
+            if _custom_team_only_view:
+                for _t in active_teams:
+                    _explicit_clean_hosts |= custom_team_explicit_assets(str(admin_user.id), _t)
 
             with MongoContext() as db:
                 coll = db[NESSUS_COLLECTION]
@@ -749,8 +770,10 @@ class UserReportAssetsAPIView(APIView):
                             continue
                         # A custom-team-only view skips the "show clean
                         # host to every team" fallback above — see
-                        # _custom_team_only_view's own comment.
-                        if _custom_team_only_view:
+                        # _custom_team_only_view's own comment — unless
+                        # this exact host was explicitly checkbox-assigned
+                        # to one of the active custom teams.
+                        if _custom_team_only_view and host_name not in _explicit_clean_hosts:
                             continue
 
                     if host_name not in assets:
