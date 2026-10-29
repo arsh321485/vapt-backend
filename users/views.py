@@ -5200,7 +5200,7 @@ def _build_admin_plan_prompt_blocks(admin):
     website page knows which admin is visiting instead of showing
     "$0.00 / 0 assets".
     """
-    pricing_url = "https://vaptfix.ai/pricingplan?source=slack"
+    pricing_url = f"{getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai').rstrip('/')}/pricingplan?source=slack"
     if admin:
         handoff_token = _slack_pricing_handoff_signer().sign(str(admin.id))
         pricing_url = f"{pricing_url}&admin_token={quote(handoff_token)}"
@@ -5806,7 +5806,7 @@ def _post_freemium_trim_notice(bot_token, channel_id, report_ids):
                             "type": "button",
                             "action_id": "freemium_view_pricing_plans",
                             "text": {"type": "plain_text", "text": "⭐ View Pricing Plans", "emoji": True},
-                            "url": "https://vaptfix.ai/pricingplan",
+                            "url": f"{getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai').rstrip('/')}/pricingplan",
                             "style": "primary",
                         }],
                     },
@@ -13419,7 +13419,7 @@ class SlackSlashCommandView(APIView):
         # own source=teams: admin_token alone doesn't tell the frontend which
         # platform this handoff came from (both reuse the same signer), and a
         # post-upload/plan-selection "go back to Slack" popup needs that signal.
-        upgrade_url = "https://vaptfix.ai/pricingplan?source=slack"
+        upgrade_url = f"{getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai').rstrip('/')}/pricingplan?source=slack"
         admin = self._get_admin_user(team_id, slack_user_id=slack_user_id)
         if admin:
             handoff_token = _slack_pricing_handoff_signer().sign(str(admin.id))
@@ -16042,7 +16042,7 @@ class SlackSlashCommandView(APIView):
                         "type": "button",
                         "action_id": "freemium_view_pricing_plans",
                         "text": {"type": "plain_text", "text": "⭐ Upgrade to Premium", "emoji": True},
-                        "url": prompt.get("upgrade_url", "https://vaptfix.ai/pricingplan"),
+                        "url": prompt.get("upgrade_url") or f"{getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai').rstrip('/')}/pricingplan",
                         "style": "primary",
                     }],
                 },
