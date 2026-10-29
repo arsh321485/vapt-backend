@@ -1769,7 +1769,20 @@ NESSUS_COLLECTION = "nessus_reports"
 # _auto_generate_cards_bg treats it as abandoned (a crashed/killed worker,
 # not a legitimately slow run — see its own docstring/comments for the real
 # bug this fixes) and takes it over instead of skipping forever.
-STALE_LOCK_SECONDS = 30 * 60
+#
+# Real bug report: 30 minutes left a genuinely-dead thread (worker
+# recycled/restarted mid-run) looking "stalled" to every admin watching
+# the upload page for up to that long before the scheduled 15-min auto-
+# retry (upload_report/apps.py) even had a chance to recover it — users
+# saw "This is taking longer than usual" for 10-15+ minutes on reports
+# that would otherwise finish in under a minute. The heartbeat above
+# refreshes locked_at before EVERY vulnerability (not once per report),
+# so a thread that's merely slow — even a single card stuck behind a
+# full NVIDIA-timeout-then-OpenAI-fallback round trip (up to ~3 minutes
+# worst case, see upload_report/llm_provider.py) — keeps resetting this
+# clock well under the new threshold; only an actually-dead thread ever
+# goes this long without a single heartbeat.
+STALE_LOCK_SECONDS = 5 * 60
 
 # Track running card generation jobs to prevent duplicate threads
 _running_card_jobs: set = set()
@@ -3296,6 +3309,7 @@ class UploadCardsStatusAPIView(APIView):
 
             started_at = counts_doc.get("cards_generation_started_at")
             automation_filter = {"source_upload_id": own_id, "report_id": resolved_report_id}
+            retry_report_id = resolved_report_id
         else:
             nessus_doc = db[NESSUS_COLLECTION].find_one(
                 {"report_id": own_id},
@@ -3434,6 +3448,7 @@ class UploadCardsStatusAPIView(APIView):
             counts_doc = nessus_doc
             started_at = nessus_doc.get("cards_generation_started_at")
             automation_filter = {"report_id": own_id}
+            retry_report_id = own_id
 
         if started_at and getattr(started_at, "tzinfo", None):
             started_at = started_at.replace(tzinfo=None)
@@ -3474,6 +3489,29 @@ class UploadCardsStatusAPIView(APIView):
         # spinner, without this session claiming a hard "failed" state it
         # can't actually confirm.
         stalled = (not complete) and elapsed_seconds > (estimated_total_seconds * 3)
+
+        # Real request: a stalled report only ever recovered on its own via
+        # the scheduled 15-min background sweep (upload_report/apps.py) —
+        # an admin watching this exact status page could stare at "This is
+        # taking longer than usual" for up to that long before anything
+        # tried to resume it, even though by the time `stalled` is true
+        # here the underlying card_gen_locks row is already well past
+        # STALE_LOCK_SECONDS (shortened above specifically so this is
+        # meaningful) and genuinely eligible for takeover right now.
+        # Firing the exact same retry path the moment a poll sees
+        # stalled=True — instead of waiting for the next scheduled pass —
+        # turns "up to 15 minutes" into "the next status poll". Safe to
+        # call on every stalled poll: run_retry's own stale-lock check (and
+        # _auto_generate_cards_bg's "lock already held" skip underneath it)
+        # already make this a no-op if a resume is already in flight or the
+        # lock isn't actually stale yet, so this never spawns duplicate
+        # generation work.
+        if stalled:
+            try:
+                from upload_report.management.commands.retry_incomplete_card_generation import run_retry
+                run_retry(report_id=retry_report_id, join=False, log=None)
+            except Exception:
+                logger.exception(f"[UploadCardsStatus] on-demand stalled-retry trigger failed for report_id={retry_report_id}")
 
         # Frontend contract (upload_report/host_ip_utils.py) — same 4 fields
         # as the upload response and the detail endpoint.
