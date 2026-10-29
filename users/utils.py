@@ -15,6 +15,41 @@ from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
+# Real bug report: every frontend-facing link this backend builds (Stripe
+# checkout redirects, the "Upgrade to Premium" pricing-page link, etc.)
+# used to hardcode "https://vaptfix.ai" — this ONE backend serves both the
+# live (vaptfix.ai) and test (test.vaptfix.ai) frontends (both are in
+# ALLOWED_HOSTS/CORS_ALLOWED_ORIGINS), so a request from the test site
+# still got redirected to the live one. Only these two domains are ever
+# valid to redirect a browser to — never reflect an arbitrary Origin
+# header value here (open-redirect risk).
+_FRONTEND_ORIGIN_WHITELIST = {
+    "https://vaptfix.ai",
+    "https://www.vaptfix.ai",
+    "https://test.vaptfix.ai",
+}
+
+
+def resolve_frontend_url(request) -> str:
+    """
+    For a view called DIRECTLY by the browser (has a real `request` with
+    an Origin header) — returns whichever of the two known frontend
+    domains the request actually came from, falling back to
+    settings.FRONTEND_URL when Origin is missing or isn't one of them
+    (e.g. a server-to-server call, or Postman/testing).
+
+    NOT for Slack/Teams bot-built links — those are constructed server-
+    side with no browser request in flight, so there's no Origin to read;
+    those should just use settings.FRONTEND_URL directly (set per
+    backend deployment — test backend vs live backend already have their
+    own .env values).
+    """
+    origin = (request.headers.get("Origin") or "").rstrip("/") if request else ""
+    if origin in _FRONTEND_ORIGIN_WHITELIST:
+        return origin
+    return getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+
+
 class Util:
     @staticmethod
     def send_mail(data):

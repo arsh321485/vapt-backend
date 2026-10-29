@@ -44,16 +44,19 @@ def pricing_url(admin=None):
     call site — better than a broken button, but the frontend then has no
     way to identify the visitor, same as before this fix.
     """
+    from django.conf import settings
+    base = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
+    bare_url = f"{base}/pricingplan?source=teams"
     if not admin:
-        return "https://vaptfix.ai/pricingplan?source=teams"
+        return bare_url
     try:
         from urllib.parse import quote
         from users.views import _slack_pricing_handoff_signer
         token = _slack_pricing_handoff_signer().sign(str(admin.id))
-        return f"https://vaptfix.ai/pricingplan?source=teams&admin_token={quote(token)}"
+        return f"{bare_url}&admin_token={quote(token)}"
     except Exception:
         logger.exception("[TeamsBot] pricing_url: could not build signed admin_token")
-        return "https://vaptfix.ai/pricingplan?source=teams"
+        return bare_url
 
 _SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
 # Stayed on 1.4 deliberately — a 1.5-only ActionSet "orientation" property
@@ -690,7 +693,7 @@ def freemium_upgrade_banner_items(admin, team_id):
                 "type": "ActionSet",
                 "actions": [_open_url_action(
                     "⭐ Upgrade to Premium",
-                    prompt.get("upgrade_url", "https://vaptfix.ai/pricingplan"),
+                    prompt.get("upgrade_url") or pricing_url(admin),
                     style="positive",
                 )],
             },

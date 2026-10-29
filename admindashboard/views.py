@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from django.conf import settings
 from django.core.cache import cache
 from datetime import date, timedelta, datetime, timezone
 import re
@@ -2598,7 +2599,7 @@ class AdminReportStatusAPIView(APIView):
             )
 
 
-def _freemium_upgrade_prompt(admin) -> dict:
+def _freemium_upgrade_prompt(admin, frontend_url=None) -> dict:
     """
     Surfaces the "upgrade to unlock N more assets" signal for the Freemium
     dashboard banner — eligible once an admin has closed every currently
@@ -2611,6 +2612,13 @@ def _freemium_upgrade_prompt(admin) -> dict:
     active-minus-closed set logic AdminVulnerabilitiesAPIView already uses,
     so this never disagrees with what the admin sees elsewhere on the
     dashboard about what's still open.
+
+    `frontend_url`: pass the request-resolved domain (users.utils.
+    resolve_frontend_url) when calling this from a view the browser hits
+    directly (e.g. AdminDashboardSummaryAPIView) — Slack/Teams callers
+    have no browser request to resolve from, so they leave this unset and
+    get settings.FRONTEND_URL instead (see resolve_frontend_url's own
+    docstring for why these two cases need different logic).
     """
     from billing.enforcement import is_freemium, _is_unlimited_admin
 
@@ -2676,7 +2684,7 @@ def _freemium_upgrade_prompt(admin) -> dict:
             f"You've closed every visible finding — upgrade to Premium to unlock "
             f"{total_locked_assets} more asset(s) from this file, no re-upload needed."
         ),
-        "upgrade_url": "https://vaptfix.ai/pricingplan",
+        "upgrade_url": f"{(frontend_url or getattr(settings, 'FRONTEND_URL', 'https://vaptfix.ai')).rstrip('/')}/pricingplan",
     }
 
 
@@ -2758,7 +2766,8 @@ class AdminDashboardSummaryAPIView(APIView):
                 logger.warning(f"[AdminDashboardSummary] asset breakdown counts failed: {exc}")
 
         try:
-            results["freemium_upgrade"] = _freemium_upgrade_prompt(request.user)
+            from users.utils import resolve_frontend_url
+            results["freemium_upgrade"] = _freemium_upgrade_prompt(request.user, frontend_url=resolve_frontend_url(request))
         except Exception as exc:
             logger.warning(f"[AdminDashboardSummary] freemium_upgrade check failed: {exc}")
             results["freemium_upgrade"] = {"eligible": False}
