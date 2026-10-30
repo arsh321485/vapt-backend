@@ -1248,6 +1248,20 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                 assigned_team    = vuln_card.get("assigned_team") or fix_doc.get("assigned_team", "")
                 if not assigned_team:
                     assigned_team = self._infer_assigned_team(plugin_name)
+                # Real bug report: a vulnerability ALSO genuinely owned by a
+                # custom team (checkbox/manually assigned — additional_teams,
+                # see AssignTeamAPIView / the Add User checkbox picker's
+                # write path) only ever showed its single original
+                # fixed-team classification on the Manual Fix page's
+                # "ASSIGNED TEAM" — the admin-side equivalent of this same
+                # endpoint (adminregister.FixVulnerabilityStepsAPIView)
+                # already computes/returns this; this member-side one never
+                # did.
+                additional_teams = [
+                    t for t in (vuln_card.get("additional_teams") or fix_doc.get("additional_teams") or [])
+                    if t and t != assigned_team
+                ]
+                all_assigned_teams = ([assigned_team] if assigned_team else []) + additional_teams
                 # Live lookup, not a stale snapshot — fix_doc.assigned_team_members was
                 # only ever set (if at all) when the fix-vulnerability record was first
                 # created, so it never reflected team members added afterwards.
@@ -1461,6 +1475,8 @@ class UserFixVulnerabilityStepsAPIView(APIView):
                         "description": description,
                         "operating_system": operating_system,
                         "assigned_team": assigned_team,
+                        "additional_teams": additional_teams,
+                        "all_assigned_teams": all_assigned_teams,
                         "deadline": deadline,
                         "artifacts_tools": artifacts_tools,
                         "post_mitigation_troubleshooting_guide": post_guide if isinstance(post_guide, list) else ([post_guide] if post_guide else []),
