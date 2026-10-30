@@ -20,6 +20,7 @@ from .utils import parse_days
 
 logger = logging.getLogger(__name__)
 TIMELINE_EXTENSION_COLLECTION = "timeline_extension_requests"
+VULN_CARD_COLLECTION = "vulnerability_cards"
 
 
 def _clear_admin_dashboard_cache(admin_id):
@@ -373,16 +374,65 @@ class RiskCriteriaCalendarView(APIView):
             if report_id:
                 ext_query["report_id"] = report_id
 
+            ext_docs = list(db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1))
+
+            # Real bug report: an event here only ever showed/matched the
+            # ONE team it was raised under (its own stored team_name,
+            # almost always a fixed team) — when that same vulnerability
+            # was LATER also assigned to a custom team (checkbox/manually
+            # — vulnerability_cards.additional_teams), the custom team's
+            # own calendar never showed this deadline at all (team_filter
+            # excluded it entirely), even though the custom team genuinely
+            # owns it everywhere else (Common Vulnerabilities, Fix tab,
+            # Timeline Extension dashboard card — see the matching fix in
+            # admindashboard.views.AdminMitigationTimelineExtensionAPIView).
+            # Live lookup against vulnerability_cards (not the request
+            # doc's own additional_teams snapshot, which is only captured
+            # at raise-time and can go stale) — same pattern as that fix.
+            live_extra_teams = {}
+            _ext_report_ids = {str(d.get("report_id")) for d in ext_docs if d.get("report_id")}
+            if _ext_report_ids:
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": {"$in": list(_ext_report_ids)}},
+                    {"report_id": 1, "vulnerability_name": 1, "host_name": 1, "additional_teams": 1},
+                ):
+                    extra = [t for t in (card.get("additional_teams") or []) if t]
+                    if not extra:
+                        continue
+                    key = (
+                        str(card.get("report_id") or ""),
+                        (card.get("vulnerability_name") or "").strip().lower(),
+                        (card.get("host_name") or "").strip().lower(),
+                    )
+                    live_extra_teams[key] = extra
+
             seen = set()
-            for req in db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1):
+            for req in ext_docs:
                 severity = _normalize_severity(req.get("severity"))
                 team_name = (req.get("team_name") or "").strip()
+                extra_teams = live_extra_teams.get(
+                    (
+                        str(req.get("report_id") or ""),
+                        (req.get("vulnerability_name") or "").strip().lower(),
+                        (req.get("asset") or "").strip().lower(),
+                    ),
+                    [t for t in (req.get("additional_teams") or []) if t],
+                )
+                all_teams_for_req = [team_name] + [t for t in extra_teams if t and t != team_name]
                 if not severity:
                     continue
                 if severity_filter and _normalize_severity(severity_filter) != severity:
                     continue
-                if team_filter and team_name.lower() != team_filter:
+                if team_filter and team_filter not in {t.lower() for t in all_teams_for_req}:
                     continue
+                # Which team name to show on the event — when filtering by
+                # a specific (possibly custom) team, show THAT team's own
+                # name even though the request's "home" team_name is
+                # something else; "All Teams" keeps the original primary
+                # team as before, unchanged.
+                team_name = next(
+                    (t for t in all_teams_for_req if t.lower() == team_filter), team_name
+                ) if team_filter else team_name
 
                 if severity == "critical":
                     base_days = critical_days
@@ -414,6 +464,8 @@ class RiskCriteriaCalendarView(APIView):
                     "severity": severity,
                     "title": f"{severity.title()} Level Deadline - {team_name or 'Team'}",
                     "assigned_to_team": team_name,
+                    "additional_teams": [t for t in all_teams_for_req if t != team_name],
+                    "all_assigned_teams": all_teams_for_req,
                     "asset": req.get("asset"),
                     "vulnerability_name": req.get("vulnerability_name"),
                     "status": req.get("status", "approved"),
@@ -523,16 +575,52 @@ class RiskCriteriaCalendarWeekView(APIView):
             report_id = (request.query_params.get("report_id") or "").strip()
             if report_id:
                 ext_query["report_id"] = report_id
+            ext_docs = list(db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1))
+
+            # Same fix as RiskCriteriaCalendarView's month view (see its
+            # own comment) — a custom team never saw its own deadlines
+            # here since this only ever matched/showed a request's
+            # original team_name, never a custom team it was additionally
+            # assigned to later.
+            live_extra_teams = {}
+            _ext_report_ids = {str(d.get("report_id")) for d in ext_docs if d.get("report_id")}
+            if _ext_report_ids:
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": {"$in": list(_ext_report_ids)}},
+                    {"report_id": 1, "vulnerability_name": 1, "host_name": 1, "additional_teams": 1},
+                ):
+                    extra = [t for t in (card.get("additional_teams") or []) if t]
+                    if not extra:
+                        continue
+                    key = (
+                        str(card.get("report_id") or ""),
+                        (card.get("vulnerability_name") or "").strip().lower(),
+                        (card.get("host_name") or "").strip().lower(),
+                    )
+                    live_extra_teams[key] = extra
+
             seen = set()
-            for req in db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1):
+            for req in ext_docs:
                 severity = _normalize_severity(req.get("severity"))
                 team_name = (req.get("team_name") or "").strip()
+                extra_teams = live_extra_teams.get(
+                    (
+                        str(req.get("report_id") or ""),
+                        (req.get("vulnerability_name") or "").strip().lower(),
+                        (req.get("asset") or "").strip().lower(),
+                    ),
+                    [t for t in (req.get("additional_teams") or []) if t],
+                )
+                all_teams_for_req = [team_name] + [t for t in extra_teams if t and t != team_name]
                 if not severity:
                     continue
                 if severity_filter and _normalize_severity(severity_filter) != severity:
                     continue
-                if team_filter and team_name.lower() != team_filter:
+                if team_filter and team_filter not in {t.lower() for t in all_teams_for_req}:
                     continue
+                team_name = next(
+                    (t for t in all_teams_for_req if t.lower() == team_filter), team_name
+                ) if team_filter else team_name
                 if severity == "critical":
                     base_days = critical_days
                 elif severity == "high":
@@ -561,6 +649,8 @@ class RiskCriteriaCalendarWeekView(APIView):
                     "severity": severity,
                     "title": f"{severity.title()} Level Deadline - {team_name or 'Team'}",
                     "assigned_to_team": team_name,
+                    "additional_teams": [t for t in all_teams_for_req if t != team_name],
+                    "all_assigned_teams": all_teams_for_req,
                     "asset": req.get("asset"),
                     "vulnerability_name": req.get("vulnerability_name"),
                     "status": req.get("status", "approved"),
