@@ -784,6 +784,34 @@ class AdminMitigationTimelineExtensionAPIView(APIView):
                 buckets = {t: {"team": t, "critical": 0, "high": 0, "medium": 0, "low": 0} for t in team_order}
                 team_lookup = {t.lower(): t for t in team_order}
 
+                # Real bug report: a timeline-extension request only ever
+                # counted toward the ONE team it was raised under at the
+                # time (its own stored team_name — almost always one of the
+                # 4 fixed teams, since that's the vuln's original AI
+                # classification). When that exact same vulnerability was
+                # LATER also assigned to a custom team (checkbox/manually
+                # — vulnerability_cards.additional_teams), the extension
+                # never counted toward the custom team's own bucket here,
+                # even though the custom team genuinely owns that
+                # vulnerability too everywhere else (Common Vulnerabilities,
+                # Fix tab, Team Performance). Build a (vuln, host) ->
+                # additional_teams lookup once, so the same approved
+                # extension is counted additively toward every genuinely-
+                # owning team, not just its original one.
+                card_extra_teams = {}
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": report_id},
+                    {"vulnerability_name": 1, "host_name": 1, "additional_teams": 1},
+                ):
+                    extra = [t for t in (card.get("additional_teams") or []) if t]
+                    if not extra:
+                        continue
+                    key = (
+                        (card.get("vulnerability_name") or "").strip().lower(),
+                        (card.get("host_name") or "").strip().lower(),
+                    )
+                    card_extra_teams[key] = extra
+
                 # Count only APPROVED timeline extension requests (extension time).
                 # This replaces the previous vulnerability_cards based counting.
                 coll = db[TIMELINE_EXTENSION_COLLECTION]
@@ -801,17 +829,24 @@ class AdminMitigationTimelineExtensionAPIView(APIView):
 
                     team_name = (doc.get("team_name") or "").strip()
                     team = team_lookup.get(team_name.lower()) if team_name else None
-                    if not team:
-                        continue
-
                     asset = (doc.get("asset") or "").strip().lower()
                     vuln_name = (doc.get("vulnerability_name") or "").strip().lower()
-                    dedup_key = (team_name.lower(), severity_key, asset, vuln_name)
-                    if dedup_key in seen:
-                        continue
-                    seen.add(dedup_key)
 
-                    buckets[team][severity_key] += 1
+                    if team:
+                        dedup_key = (team_name.lower(), severity_key, asset, vuln_name)
+                        if dedup_key not in seen:
+                            seen.add(dedup_key)
+                            buckets[team][severity_key] += 1
+
+                    for extra_raw in card_extra_teams.get((vuln_name, asset), []):
+                        extra_team = team_lookup.get((extra_raw or "").strip().lower())
+                        if not extra_team or extra_team == team:
+                            continue
+                        extra_key = (extra_team.lower(), severity_key, asset, vuln_name)
+                        if extra_key in seen:
+                            continue
+                        seen.add(extra_key)
+                        buckets[extra_team][severity_key] += 1
 
                 return Response(
                     {"report_id": report_id, "teams": [buckets[t] for t in team_order]},
