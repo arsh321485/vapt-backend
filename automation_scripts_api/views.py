@@ -1364,9 +1364,15 @@ def user_view_ai_automation(request, card_id):
 
     # Same team-isolation as user_download_ai_automation_script — a member
     # of a different team under the same admin must not see this card.
+    # Real bug report: only ever checked assigned_team — a custom team
+    # NEVER gets assigned_team (only the 4 fixed teams do; a custom
+    # team's cards are additive, via additional_teams), so a custom
+    # team's own member was always denied access to their own card.
+    # Confirmed live: a custom team ("New-demo") member got 403 here.
     card_team = (card.get("assigned_team") or "").strip().lower()
+    card_extra_teams = {(t or "").strip().lower() for t in (card.get("additional_teams") or [])}
     member_teams = {t.strip().lower() for t in (teams or [])}
-    if not card_team or card_team not in member_teams:
+    if card_team not in member_teams and not (card_extra_teams & member_teams):
         return Response({"error": "You do not have access to this vulnerability card."}, status=403)
 
     automation = card.get("automation_card") or {}
@@ -1431,9 +1437,18 @@ def user_download_ai_automation_script(request, card_id):
     # caller's own teams) — apply it here too. teams is None for an admin/
     # superuser caller (already blocked above), so this only ever runs for
     # a genuine member.
+    # Real bug report: only ever checked assigned_team — a custom team
+    # NEVER gets assigned_team (only the 4 fixed teams do; a custom
+    # team's cards are additive, via additional_teams), so a custom
+    # team's own member was always denied access/download for their
+    # own card. Confirmed live: a custom team ("New-demo") member got
+    # "You do not have access to this vulnerability card." (403) trying
+    # to download a script for a vulnerability genuinely owned by their
+    # own team.
     card_team = (card.get("assigned_team") or "").strip().lower()
+    card_extra_teams = {(t or "").strip().lower() for t in (card.get("additional_teams") or [])}
     member_teams = {t.strip().lower() for t in (teams or [])}
-    if not card_team or card_team not in member_teams:
+    if card_team not in member_teams and not (card_extra_teams & member_teams):
         return Response({"error": "You do not have access to this vulnerability card."}, status=403)
 
     automation = card.get("automation_card") or {}
