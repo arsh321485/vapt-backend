@@ -64,8 +64,28 @@ def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role
     """
     if not role_assignments or not team_names:
         return
-    assets = role_assignments.get("assets") or []
-    vulns = role_assignments.get("vulnerabilities") or []
+
+    # Two different shapes reach here. Slack/Teams (team_tab.submit_add_user)
+    # send the FLAT shape this function was originally written for:
+    # {"assets": [...], "vulnerabilities": [...]}. The website's own Add
+    # User picker sends a DIFFERENT, per-team-nested shape instead:
+    # {team_name: {"assets": [...], "vulns": [...]}, ...} — confirmed real
+    # live (admin ritikabhikonde.sitl@gmail.com's "New-demo" team showed 0
+    # vulnerabilities on the website despite real checkbox-selected
+    # role_assignments, because `.get("assets")`/`.get("vulnerabilities")`
+    # on a dict keyed by team name instead returns None every time, so this
+    # function always silently no-opped for website-originated additions).
+    assets = role_assignments.get("assets")
+    vulns = role_assignments.get("vulnerabilities")
+    if assets is None and vulns is None:
+        assets, vulns = [], []
+        for team in team_names:
+            entry = role_assignments.get(team)
+            if isinstance(entry, dict):
+                assets.extend(entry.get("assets") or [])
+                vulns.extend(entry.get("vulnerabilities") or entry.get("vulns") or [])
+    assets = assets or []
+    vulns = vulns or []
     if not assets and not vulns:
         return
 

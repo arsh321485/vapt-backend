@@ -83,7 +83,16 @@ def custom_team_explicit_assets(admin_id, team_name) -> set:
     from users_details.models import UserDetail
     hosts = set()
     for detail in UserDetail.objects.filter(admin__id=admin_id, Member_role__contains=team_name):
-        for h in ((detail.role_assignments or {}).get("assets") or []):
+        ra = detail.role_assignments or {}
+        # Flat shape (Slack/Teams) has "assets" at the top level; the
+        # website's Add User picker instead nests it under the team name
+        # — {team_name: {"assets": [...], ...}} — see the matching fix in
+        # users_details.views._apply_role_assignments_to_cards.
+        assets = ra.get("assets")
+        if assets is None:
+            nested = ra.get(team_name)
+            assets = (nested or {}).get("assets") if isinstance(nested, dict) else None
+        for h in (assets or []):
             h = (h or "").strip()
             if h:
                 hosts.add(h)
