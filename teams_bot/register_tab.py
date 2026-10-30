@@ -172,7 +172,13 @@ def script_list_body(admin, offset=0):
             sev = "medium"
         name = c.get("vulnerability_name") or "Unknown"
         downloads = automation.get("download_count", 0)
-        team = (c.get("assigned_team") or "—").strip() or "—"
+        # Real bug report: a vulnerability ALSO genuinely owned by a custom
+        # team (additional_teams) only ever showed its single original
+        # fixed-team classification here — same fix as the website's
+        # Register/Script list and Slack's own Script tab.
+        _team_list = [c.get("assigned_team")] + list(c.get("additional_teams") or [])
+        _team_list = [t.strip() for t in _team_list if (t or "").strip()]
+        team = ", ".join(_team_list) if _team_list else "—"
         host = (c.get("host_name") or "").strip()
         badge = "✅ Full" if automation.get("automation_status") == "full" else "🌓 Partial"
         # Real bug report: the same vulnerability name legitimately appears

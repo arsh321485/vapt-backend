@@ -22104,9 +22104,17 @@ class SlackSlashCommandView(APIView):
             s = (sev or "").strip().lower()
             return self._SEV_EMOJI_MAP.get(s, "⚪")
 
-        def team_label(team):
-            t = (team or "").strip() or "—"
-            return t
+        def team_label(s):
+            # Real bug report: a vulnerability ALSO genuinely owned by a
+            # custom team (additional_teams — see the matching website
+            # Register/Script fix, automation_scripts_api.views.
+            # _ai_automation_stats_rows) only ever showed its single
+            # original fixed-team classification here. Same pattern as
+            # the website's own team pills — primary team first, then
+            # every custom team it's additionally assigned to.
+            teams = [s.get("team")] + list(s.get("additional_teams") or [])
+            teams = [t.strip() for t in teams if (t or "").strip()]
+            return ", ".join(teams) if teams else "—"
 
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "📜 Script", "emoji": True}},
@@ -22125,7 +22133,7 @@ class SlackSlashCommandView(APIView):
                 sev = (s.get("severity") or "").strip() or "—"
                 sev_u = sev.upper() if sev != "—" else "—"
                 downloads = s.get("download_count", 0)
-                team = team_label(s.get("team"))
+                team = team_label(s)
                 # Real bug report: the same vulnerability name legitimately
                 # appears once per affected asset (a separate
                 # vulnerability_cards document each, source="ai" rows) —

@@ -4503,9 +4503,21 @@ class UserVulnerabilityCardListAPIView(APIView):
                 {"mitigation_table": 0, "contextual_analysis": 0, "raw_ai_response": 0, "_id": 0},
             ).sort("created_at", -1)
 
+            # Real bug report: this only ever matched a card's assigned_team
+            # (the AI's fixed-team classification at generation time) — a
+            # custom team NEVER gets assigned_team (only the 4 fixed teams
+            # do; a custom team's own cards are additive, via
+            # additional_teams — see users_details.views.
+            # _apply_role_assignments_to_cards), so this returned ZERO
+            # cards for every custom-team member, every time. Confirmed
+            # live: MS Teams' own member-side Script tab showed 0 scripts
+            # for a custom team ("New-demo") despite 41 genuinely owned.
             cards = [
                 c for c in cursor
-                if (c.get("assigned_team") or "").strip().lower() in teams_lower
+                if (
+                    (c.get("assigned_team") or "").strip().lower() in teams_lower
+                    or any((t or "").strip().lower() in teams_lower for t in (c.get("additional_teams") or []))
+                )
                 and (c.get("host_name") or "").strip() not in locked_host_names
                 and (c.get("host_name") or "").strip() not in hidden_host_names
                 and ((c.get("vulnerability_name") or "").strip(), (c.get("host_name") or "").strip()) not in hidden_vuln_pairs

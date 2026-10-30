@@ -626,7 +626,7 @@ def _ai_automation_stats_rows(db, report_ids, download_role=None):
     rows = []
     for card in db[VULN_CARD_COLLECTION].find(
         {"report_id": {"$in": list(report_ids)}, "automation_card.automation_status": {"$in": ["full", "partial"]}},
-        {"_id": 0, "report_id": 1, "card_id": 1, "vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "automation_card": 1, "vaptcode_analysis": 1},
+        {"_id": 0, "report_id": 1, "card_id": 1, "vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "additional_teams": 1, "automation_card": 1, "vaptcode_analysis": 1},
     ):
         card_host = (card.get("host_name") or "").strip()
         card_vuln = (card.get("vulnerability_name") or "").strip()
@@ -641,6 +641,16 @@ def _ai_automation_stats_rows(db, report_ids, download_role=None):
             or automation.get("severity")
             or ""
         )
+        primary_team = (card.get("assigned_team") or "").strip() or "Unassigned"
+        # Real bug report: a vulnerability ALSO genuinely owned by a custom
+        # team (checkbox/manually assigned — vulnerability_cards.
+        # additional_teams, see users_details.views._apply_role_assignments_
+        # to_cards / adminregister.views.AssignTeamAPIView) never showed
+        # that custom team here — "team" was always just the AI's original
+        # fixed-team classification. Same additive pattern as everywhere
+        # else that already surfaces additional_teams (admindashboard's
+        # team distribution, the downloadable HTML report's team pills).
+        extra_teams = [t for t in (card.get("additional_teams") or []) if t and t != primary_team]
         row = {
             "plugin_id": None,
             "card_id": card.get("card_id"),
@@ -657,7 +667,9 @@ def _ai_automation_stats_rows(db, report_ids, download_role=None):
             "host": (card.get("host_name") or "").strip(),
             "severity": severity,
             "download_count": automation.get("download_count", 0),
-            "team": (card.get("assigned_team") or "").strip() or "Unassigned",
+            "team": primary_team,
+            "additional_teams": extra_teams,
+            "all_teams": [primary_team] + extra_teams,
             "source": "ai",
             "automation_status": automation.get("automation_status"),
         }
@@ -1124,9 +1136,18 @@ def user_download_stats(request):
                 status=404,
             )
 
+        # Real bug report: a custom team's member only ever matched here via
+        # r["team"] (the AI's fixed-team classification) — a vulnerability
+        # genuinely owned by THEIR custom team via additional_teams (see
+        # the row-building comment in _ai_automation_stats_rows) never
+        # passed this filter, so a custom team's own Scripts tab showed
+        # nothing for it even though they could see/act on it everywhere
+        # else (Fix tab, Common Vulnerabilities, assets).
         ai_rows = [
             r for r in _ai_automation_stats_rows(db, report_ids, download_role="user")
-            if teams_lower is None or (r.get("team") or "").lower() in teams_lower
+            if teams_lower is None
+            or (r.get("team") or "").lower() in teams_lower
+            or any((t or "").lower() in teams_lower for t in (r.get("additional_teams") or []))
         ]
     stats = sorted(ai_rows, key=lambda s: s.get("download_count", 0), reverse=True)
     return Response({
