@@ -1368,6 +1368,23 @@ class UserInProcessRemediationTimelineAPIView(APIView):
                     assigned_team_raw = (card.get("assigned_team") or fix_doc.get("assigned_team") or "").strip()
                     assigned_team = teams_lower.get(assigned_team_raw.lower())
                     if not assigned_team:
+                        # Real bug report: this only ever matched a card's
+                        # assigned_team (the AI's fixed-team classification)
+                        # — a custom team NEVER gets assigned_team (only the
+                        # 4 fixed teams do; a custom team's own cards are
+                        # additive, via additional_teams — see
+                        # users_details.views._apply_role_assignments_to_
+                        # cards), so this skipped EVERY in-process item for
+                        # a custom team, every time. Confirmed live:
+                        # /api/user/dashboard/remediation-timeline/in-process/
+                        # returned total:0 for a custom team ("New-demo")
+                        # while the same admin's dashboard correctly showed
+                        # 3 in-process items.
+                        for _extra in (card.get("additional_teams") or fix_doc.get("additional_teams") or []):
+                            assigned_team = teams_lower.get((_extra or "").strip().lower())
+                            if assigned_team:
+                                break
+                    if not assigned_team:
                         continue
 
                     mitigation_table = card.get("mitigation_table") or fix_doc.get("steps_to_fix") or []
