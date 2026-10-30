@@ -137,7 +137,7 @@ def script_list_body(member_user, team_id, team_name, offset=0):
     data = fix._fetch_team_data(member_user, team_name)
     report_id = data.get("report_id") if isinstance(data, dict) else None
 
-    all_cards = fix_tab._fetch_automation_cards_for_report(member_user, report_id, as_member=True) if report_id else []
+    all_cards = fix_tab._fetch_automation_cards_for_report(member_user, report_id, as_member=True, team_name=team_name) if report_id else []
     rows = [c for c in all_cards if (c.get("automation_card") or {}).get("automation_status") in ("full", "partial")]
     # A card missing automation entirely on a Freemium admin comes back
     # from UserVulnerabilityCardListAPIView shaped like

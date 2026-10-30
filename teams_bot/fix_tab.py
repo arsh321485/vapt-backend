@@ -978,7 +978,7 @@ def card_severity(card):
 # behaviour (no run/mark-complete actions here, matching the website's
 # admin-is-read-only rule).
 
-def _fetch_automation_cards_for_report(caller, report_id, as_member=False):
+def _fetch_automation_cards_for_report(caller, report_id, as_member=False, team_name=None):
     """
     Every vulnerability_cards document for this report_id, via
     VulnerabilityCardListView (admin caller) — same source automations_tab.py
@@ -1000,8 +1000,19 @@ def _fetch_automation_cards_for_report(caller, report_id, as_member=False):
         from .actions import _call_view_in_process
         if as_member:
             from upload_report.views import UserVulnerabilityCardListAPIView
+            # Real bug report: a member belonging to more than one team
+            # (e.g. a fixed team plus a custom one) got EVERY team's cards
+            # mixed together here regardless of which team's Script tab
+            # they were actually viewing — team_name wasn't passed through
+            # at all, so UserVulnerabilityCardListAPIView's own `team`
+            # query-param scoping (same one Slack's _format_team_script_
+            # list already uses — see team_tab.submit_add_user's sibling
+            # call with params={"team": vapt_team}) never kicked in here.
+            call_data = {"report_id": report_id}
+            if team_name:
+                call_data["team"] = team_name
             status_code, data = _call_view_in_process(
-                UserVulnerabilityCardListAPIView, caller, data={"report_id": report_id}, method="get",
+                UserVulnerabilityCardListAPIView, caller, data=call_data, method="get",
             )
         else:
             from upload_report.views import VulnerabilityCardListView
@@ -1011,7 +1022,10 @@ def _fetch_automation_cards_for_report(caller, report_id, as_member=False):
         if status_code >= 300 or not isinstance(data, dict):
             return []
         return data.get("cards") or []
-    return cached_fetch(f"automation_cards:{caller.id}:{'member' if as_member else 'admin'}", 20, _fetch)
+    _cache_key = f"automation_cards:{caller.id}:{'member' if as_member else 'admin'}"
+    if team_name:
+        _cache_key += f":{team_name}"
+    return cached_fetch(_cache_key, 20, _fetch)
 
 
 def _fetch_automation_from_card(admin, r, report_id, as_member=False):
