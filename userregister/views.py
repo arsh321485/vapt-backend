@@ -2824,12 +2824,42 @@ class UserSupportRequestsByReportAPIView(APIView):
                 {"report_id": str(report_id), "admin_id": admin_id}
             ).sort("requested_at", -1)
 
+            # Real bug report: this only ever matched a request's stored
+            # assigned_team — a custom team NEVER gets assigned_team (only
+            # the 4 fixed teams do; a custom team's own requests are
+            # additive, via additional_teams — see
+            # UserRaiseSupportRequestAPIView, which already writes this
+            # correctly), so a custom team's own member could never see
+            # ANY of their team's support requests here, even though the
+            # admin-side equivalent (SupportRequestByReportAPIView)
+            # already resolves this live from the card. Same live
+            # (host_name, vulnerability_name) -> additional_teams lookup
+            # as that view, since a request's own stored additional_teams
+            # is only a snapshot from raise-time and can go stale if the
+            # card's own team assignment changes afterward.
+            live_extra_teams_by_key = {}
+            for card in db[VULN_CARD_COLLECTION].find(
+                {"report_id": str(report_id)},
+                {"host_name": 1, "vulnerability_name": 1, "additional_teams": 1, "_id": 0},
+            ):
+                hname = (card.get("host_name") or "").strip()
+                pname = (card.get("vulnerability_name") or "").strip()
+                if hname and pname:
+                    live_extra_teams_by_key[(hname, pname)] = card.get("additional_teams") or []
+
             # Collect docs that pass team filter
             raw_docs = []
             for doc in cursor:
+                doc_extra_teams = live_extra_teams_by_key.get(
+                    ((doc.get("host_name") or "").strip(), (doc.get("vul_name") or "").strip()),
+                    doc.get("additional_teams") or [],
+                )
                 doc_team = (doc.get("assigned_team") or "").strip().lower()
-                if doc_team not in teams_lower_set:
+                if doc_team not in teams_lower_set and not any(
+                    (t or "").strip().lower() in teams_lower_set for t in doc_extra_teams
+                ):
                     continue
+                doc["_live_extra_teams"] = doc_extra_teams
                 raw_docs.append(doc)
 
             # Real bug report: this only ever checked the OPEN
@@ -2921,6 +2951,11 @@ class UserSupportRequestsByReportAPIView(APIView):
                 "host_name":             doc.get("host_name"),
                 "severity":              severity,
                 "assigned_team":         doc.get("assigned_team"),
+                "additional_teams":      doc.get("_live_extra_teams", []),
+                "all_assigned_teams": (
+                    ([doc.get("assigned_team")] if doc.get("assigned_team") else [])
+                    + [t for t in doc.get("_live_extra_teams", []) if t and t != doc.get("assigned_team")]
+                ),
                 "assigned_team_members": doc.get("assigned_team_members", []),
                 # Real bug report: "step_requested" was never actually
                 # written anywhere — the create endpoint
@@ -2935,11 +2970,21 @@ class UserSupportRequestsByReportAPIView(APIView):
                 "messages":              visible_messages,
             })
 
+        # This member's own custom team(s) — so the frontend's team-filter
+        # pills can show one for a custom team even before it has any
+        # request yet, same as the admin-side equivalent
+        # (SupportRequestByReportAPIView.custom_teams), without a second
+        # call. `teams` (this member's full Member_role list) already
+        # includes custom team names alongside any of the 4 fixed ones.
+        from upload_report.team_utils import is_fixed_team
+        custom_teams = [t for t in teams if not is_fixed_team(t)]
+
         return Response(
             {
                 "message": "Support requests fetched successfully",
                 "report_id": report_id,
                 "count": len(results),
+                "custom_teams": custom_teams,
                 "results": results,
             },
             status=status.HTTP_200_OK,
