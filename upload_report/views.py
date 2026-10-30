@@ -2060,7 +2060,21 @@ def _normalize_team_and_automation_consistency(db, report_id: str):
             )
             for c in group:
                 current_status = (c.get("automation_card") or {}).get("automation_status")
-                if current_status and current_status != canonical_status:
+                # Real bug report: a card whose own Automation Engineer run
+                # left an empty/stub automation_card (e.g. {"download_count":
+                # 0, "last_downloaded_at": None}, no automation_status at
+                # all — a one-off failure that never got backfilled) was
+                # never touched here, since this used to only resolve
+                # CONFLICTING values (current_status truthy but different),
+                # never fill in a MISSING one. The frontend then showed it
+                # as "NON AUTOMATABLE" — reading no data as a negative
+                # determination — even while every sibling card for the
+                # same (vulnerability_name, os_category) genuinely says
+                # "full". Backfilling a missing status from the canonical
+                # value too (not just fixing a conflicting one) closes that
+                # gap — `!=` instead of requiring current_status truthy
+                # first covers both cases with one check.
+                if current_status != canonical_status:
                     new_ac = dict(canonical_automation_card)
                     new_ac["download_count"] = (c.get("automation_card") or {}).get("download_count", 0)
                     new_ac["last_downloaded_at"] = (c.get("automation_card") or {}).get("last_downloaded_at")
