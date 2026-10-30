@@ -3529,9 +3529,20 @@ class SupportRequestByReportAPIView(APIView):
                     # (see its own comment) — falls back to the stored
                     # value only when this (host, vuln) pair has no card
                     # at all anymore.
-                    "additional_teams": live_extra_teams_by_key.get(
-                        ((doc.get("host_name") or "").strip(), (doc.get("vul_name") or "").strip()),
-                        doc.get("additional_teams") or [],
+                    "additional_teams": (
+                        _support_extra_teams := live_extra_teams_by_key.get(
+                            ((doc.get("host_name") or "").strip(), (doc.get("vul_name") or "").strip()),
+                            doc.get("additional_teams") or [],
+                        )
+                    ),
+                    # Convenience field — same shape frontend already uses
+                    # for the Script tab / Manual Fix "ASSIGNED TEAM" box
+                    # (assigned_team + additional_teams combined), so the
+                    # Support Requests team-filter pills can read one field
+                    # instead of combining two client-side.
+                    "all_assigned_teams": (
+                        ([doc.get("assigned_team")] if doc.get("assigned_team") else [])
+                        + [t for t in _support_extra_teams if t and t != doc.get("assigned_team")]
                     ),
                     "assigned_team_members": doc.get("assigned_team_members", []),
                     # "steps": doc.get("steps", []),
@@ -3546,11 +3557,22 @@ class SupportRequestByReportAPIView(APIView):
                     "messages": messages,
                 })
 
+            # Every custom team this admin has — so the frontend's team-
+            # filter pills can show one for a custom team even before it
+            # has raised a single request yet (same as the 4 fixed teams,
+            # which always show regardless of count), instead of needing a
+            # second call to GET /api/admin/users_details/custom-teams/.
+            from users_details.models import CustomTeam
+            custom_teams = list(
+                CustomTeam.objects.filter(admin=request.user).values_list("name", flat=True)
+            )
+
             return Response(
                 {
                     "message": "Support requests fetched successfully",
                     "report_id": report_id,
                     "count": len(results),
+                    "custom_teams": custom_teams,
                     "results": results
                 },
                 status=status.HTTP_200_OK
