@@ -16,6 +16,7 @@ from users_details.models import UserDetail
 
 logger = logging.getLogger(__name__)
 TIMELINE_EXTENSION_COLLECTION = "timeline_extension_requests"
+VULN_CARD_COLLECTION = "vulnerability_cards"
 
 
 def _get_admin_for_user(request_user):
@@ -341,18 +342,58 @@ class UserRiskCriteriaCalendarView(APIView):
             if report_id:
                 ext_query["report_id"] = report_id
 
+            ext_docs = list(db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1))
+
+            # Real bug report: same gap as the admin-side equivalent
+            # (risk_criteria.views.RiskCriteriaCalendarView) — only ever
+            # matched a request's original team_name, both against the
+            # member's own allowed_teams AND the team_filter, so a custom
+            # team's own member could never see their team's deadline
+            # here at all, even when explicitly viewing their own team's
+            # calendar. Live lookup against vulnerability_cards — same
+            # pattern as that fix.
+            live_extra_teams = {}
+            _ext_report_ids = {str(d.get("report_id")) for d in ext_docs if d.get("report_id")}
+            if _ext_report_ids:
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": {"$in": list(_ext_report_ids)}},
+                    {"report_id": 1, "vulnerability_name": 1, "host_name": 1, "additional_teams": 1},
+                ):
+                    extra = [t for t in (card.get("additional_teams") or []) if t]
+                    if not extra:
+                        continue
+                    key = (
+                        str(card.get("report_id") or ""),
+                        (card.get("vulnerability_name") or "").strip().lower(),
+                        (card.get("host_name") or "").strip().lower(),
+                    )
+                    live_extra_teams[key] = extra
+
             seen = set()
-            for req in db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1):
+            for req in ext_docs:
                 severity = _normalize_severity(req.get("severity"))
                 team_name = (req.get("team_name") or "").strip()
+                extra_teams = live_extra_teams.get(
+                    (
+                        str(req.get("report_id") or ""),
+                        (req.get("vulnerability_name") or "").strip().lower(),
+                        (req.get("asset") or "").strip().lower(),
+                    ),
+                    [t for t in (req.get("additional_teams") or []) if t],
+                )
+                all_teams_for_req = [team_name] + [t for t in extra_teams if t and t != team_name]
+                all_teams_for_req_lower = {t.lower() for t in all_teams_for_req}
                 if not severity:
                     continue
-                if allowed_teams_lower and team_name.lower() not in allowed_teams_lower:
+                if allowed_teams_lower and not (all_teams_for_req_lower & allowed_teams_lower):
                     continue
-                if team_filter and team_name.lower() != team_filter:
+                if team_filter and team_filter not in all_teams_for_req_lower:
                     continue
                 if severity_filter and _normalize_severity(severity_filter) != severity:
                     continue
+                team_name = next(
+                    (t for t in all_teams_for_req if t.lower() == team_filter), team_name
+                ) if team_filter else team_name
 
                 if severity == "critical":
                     base_days = critical_days
@@ -384,6 +425,8 @@ class UserRiskCriteriaCalendarView(APIView):
                     "severity": severity,
                     "title": f"{severity.title()} Level Deadline - {team_name or 'Team'}",
                     "assigned_to_team": team_name,
+                    "additional_teams": [t for t in all_teams_for_req if t != team_name],
+                    "all_assigned_teams": all_teams_for_req,
                     "asset": req.get("asset"),
                     "vulnerability_name": req.get("vulnerability_name"),
                     "status": req.get("status", "approved"),
@@ -499,18 +542,52 @@ class UserRiskCriteriaCalendarWeekView(APIView):
             report_id = (request.query_params.get("report_id") or "").strip()
             if report_id:
                 ext_query["report_id"] = report_id
+            ext_docs = list(db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1))
+
+            # Same fix as UserRiskCriteriaCalendarView's month view (see
+            # its own comment).
+            live_extra_teams = {}
+            _ext_report_ids = {str(d.get("report_id")) for d in ext_docs if d.get("report_id")}
+            if _ext_report_ids:
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": {"$in": list(_ext_report_ids)}},
+                    {"report_id": 1, "vulnerability_name": 1, "host_name": 1, "additional_teams": 1},
+                ):
+                    extra = [t for t in (card.get("additional_teams") or []) if t]
+                    if not extra:
+                        continue
+                    key = (
+                        str(card.get("report_id") or ""),
+                        (card.get("vulnerability_name") or "").strip().lower(),
+                        (card.get("host_name") or "").strip().lower(),
+                    )
+                    live_extra_teams[key] = extra
+
             seen = set()
-            for req in db[TIMELINE_EXTENSION_COLLECTION].find(ext_query).sort("request_date", -1):
+            for req in ext_docs:
                 severity = _normalize_severity(req.get("severity"))
                 team_name = (req.get("team_name") or "").strip()
+                extra_teams = live_extra_teams.get(
+                    (
+                        str(req.get("report_id") or ""),
+                        (req.get("vulnerability_name") or "").strip().lower(),
+                        (req.get("asset") or "").strip().lower(),
+                    ),
+                    [t for t in (req.get("additional_teams") or []) if t],
+                )
+                all_teams_for_req = [team_name] + [t for t in extra_teams if t and t != team_name]
+                all_teams_for_req_lower = {t.lower() for t in all_teams_for_req}
                 if not severity:
                     continue
-                if allowed_teams_lower and team_name.lower() not in allowed_teams_lower:
+                if allowed_teams_lower and not (all_teams_for_req_lower & allowed_teams_lower):
                     continue
-                if team_filter and team_name.lower() != team_filter:
+                if team_filter and team_filter not in all_teams_for_req_lower:
                     continue
                 if severity_filter and _normalize_severity(severity_filter) != severity:
                     continue
+                team_name = next(
+                    (t for t in all_teams_for_req if t.lower() == team_filter), team_name
+                ) if team_filter else team_name
 
                 if severity == "critical":
                     base_days = critical_days
@@ -541,6 +618,8 @@ class UserRiskCriteriaCalendarWeekView(APIView):
                     "severity": severity,
                     "title": f"{severity.title()} Level Deadline - {team_name or 'Team'}",
                     "assigned_to_team": team_name,
+                    "additional_teams": [t for t in all_teams_for_req if t != team_name],
+                    "all_assigned_teams": all_teams_for_req,
                     "asset": req.get("asset"),
                     "vulnerability_name": req.get("vulnerability_name"),
                     "status": req.get("status", "approved"),
