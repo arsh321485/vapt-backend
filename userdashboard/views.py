@@ -1467,6 +1467,26 @@ class UserMitigationTimelineExtensionAPIView(APIView):
 
                 buckets = {t: {"team": t, "critical": 0, "high": 0, "medium": 0, "low": 0} for t in active_teams}
 
+                # Real bug report: same gap as the admin-side equivalent
+                # (AdminMitigationTimelineExtensionAPIView) — an extension
+                # request only ever counted toward the ONE team it was
+                # raised under (its own stored team_name), never toward a
+                # custom team that vuln was ALSO later assigned to via
+                # additional_teams. See the matching fix/comment there.
+                card_extra_teams = {}
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": report_id},
+                    {"vulnerability_name": 1, "host_name": 1, "additional_teams": 1},
+                ):
+                    extra = [t for t in (card.get("additional_teams") or []) if t]
+                    if not extra:
+                        continue
+                    key = (
+                        (card.get("vulnerability_name") or "").strip().lower(),
+                        (card.get("host_name") or "").strip().lower(),
+                    )
+                    card_extra_teams[key] = extra
+
                 # Count only APPROVED timeline extension requests (extension time).
                 coll = db[TIMELINE_EXTENSION_COLLECTION]
                 current_user_id = str(request.user.id)
@@ -1485,17 +1505,24 @@ class UserMitigationTimelineExtensionAPIView(APIView):
 
                     team_name = (doc.get("team_name") or "").strip()
                     team = team_lookup.get(team_name.lower()) if team_name else None
-                    if not team:
-                        continue
-
                     asset = (doc.get("asset") or "").strip().lower()
                     vuln_name = (doc.get("vulnerability_name") or "").strip().lower()
-                    dedup_key = (team_name.lower(), severity_key, asset, vuln_name)
-                    if dedup_key in seen:
-                        continue
-                    seen.add(dedup_key)
 
-                    buckets[team][severity_key] += 1
+                    if team:
+                        dedup_key = (team_name.lower(), severity_key, asset, vuln_name)
+                        if dedup_key not in seen:
+                            seen.add(dedup_key)
+                            buckets[team][severity_key] += 1
+
+                    for extra_raw in card_extra_teams.get((vuln_name, asset), []):
+                        extra_team = team_lookup.get((extra_raw or "").strip().lower())
+                        if not extra_team or extra_team == team:
+                            continue
+                        extra_key = (extra_team.lower(), severity_key, asset, vuln_name)
+                        if extra_key in seen:
+                            continue
+                        seen.add(extra_key)
+                        buckets[extra_team][severity_key] += 1
 
                 return Response({"report_id": report_id, "teams": [buckets[t] for t in active_teams]})
 
