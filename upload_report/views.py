@@ -3513,6 +3513,28 @@ class UploadCardsStatusAPIView(APIView):
             except Exception:
                 logger.exception(f"[UploadCardsStatus] on-demand stalled-retry trigger failed for report_id={retry_report_id}")
 
+        # Real bug report: the same vulnerability_name (e.g. "SSL
+        # Self-Signed Certificate") showed a DIFFERENT automation_status
+        # on different hosts — confirmed live (some "full", some
+        # "not_possible", same os_category throughout). The majority-vote
+        # sweep that fixes this (_normalize_team_and_automation_
+        # consistency) already exists and already runs at the end of
+        # _auto_generate_cards_bg's own happy path — but that's the ONLY
+        # place it ran from, so a report that reached completion through
+        # any other path (an interrupted/retried run whose own pass
+        # errored out before reaching that point, a status-endpoint-
+        # triggered resume, etc.) could finish "complete" without the
+        # sweep ever having run against its final, full set of cards.
+        # Cheap and idempotent (a no-op once everything already agrees),
+        # so running it here too — the first status poll to observe
+        # complete=True for this report — closes that gap regardless of
+        # which code path actually finished the generation.
+        if complete:
+            try:
+                _normalize_team_and_automation_consistency(db, retry_report_id)
+            except Exception:
+                logger.exception(f"[UploadCardsStatus] on-demand consistency sweep failed for report_id={retry_report_id}")
+
         # Frontend contract (upload_report/host_ip_utils.py) — same 4 fields
         # as the upload response and the detail endpoint.
         from upload_report.host_ip_utils import counts_from_report_doc
