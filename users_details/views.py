@@ -819,7 +819,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             # whenever the Teams channel itself can't be resolved yet —
             # e.g. the admin hasn't connected Teams, or this specific
             # sub-channel hasn't been welcomed/recorded yet.
-            dashboard_link = f"https://vaptfix.ai/home?signin=user&tab=signIn&team={quote(role)}"
+            dashboard_link = f"{frontend_url.rstrip('/')}/home?signin=user&tab=signIn&team={quote(role)}"
             dashboard_link_label = "Go to Dashboard"
             if admin_ms_team_id:
                 try:
@@ -993,7 +993,7 @@ class UserDetailCreateView(generics.CreateAPIView):
             </div>
             <!-- Go to Dashboard -->
             <div style="text-align:center;margin:0 0 8px 0;">
-              <a href="https://vaptfix.ai/home?signin=user&tab=signIn"
+              <a href="{frontend_url.rstrip('/')}/home?signin=user&tab=signIn"
                  style="background-color:#1e1b4b;color:#ffffff;padding:13px 34px;
                         text-decoration:none;border-radius:30px;font-size:15px;
                         font-weight:bold;display:inline-block;">
@@ -1238,8 +1238,16 @@ class UserDetailCreateView(generics.CreateAPIView):
 
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = PasswordResetTokenGenerator().make_token(user)
-            # set_password_url = f"https://vaptfix.ai/auth?mode=set-password&uid={uid}&token={token}"
-            set_password_url = f"https://vaptfix.ai/home?signin=user&tab=setPassword&uid={uid}&token={token}"
+            # Real bug report: hardcoded to vaptfix.ai — a member added
+            # from test.vaptfix.ai still got a "Set Your Password" email
+            # pointing at the live site. resolve_frontend_url reads the
+            # real Origin header when this came from a genuine browser
+            # request (the website's own Add User form); falls back to
+            # settings.FRONTEND_URL (per-backend-deployment) for the
+            # Slack/Teams bot's in-process calls, which have no Origin.
+            from users.utils import resolve_frontend_url
+            frontend_url = resolve_frontend_url(request)
+            set_password_url = f"{frontend_url}/home?signin=user&tab=setPassword&uid={uid}&token={token}"
 
             # Send emails in background so the API response is not blocked
             admin_email = getattr(admin_user, "email", "")
