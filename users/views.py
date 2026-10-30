@@ -640,7 +640,8 @@ class SendPasswordResetEmailView(generics.GenericAPIView):
             uid = urlsafe_base64_encode(force_bytes(user.pk))  # This will use the UUID id
             token = PasswordResetTokenGenerator().make_token(user)
 
-            reset_link = f"https://vaptfix.ai/reset-password/{uid}/{token}/"
+            from users.utils import resolve_frontend_url
+            reset_link = f"{resolve_frontend_url(request)}/reset-password/{uid}/{token}/"
 
             data = {
                 "to_email": user_email,
@@ -861,7 +862,8 @@ class UserForgotPasswordView(generics.GenericAPIView):
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = PasswordResetTokenGenerator().make_token(user)
 
-        reset_link = f"https://vaptfix.ai/auth?mode=set-password&uid={uid}&token={token}"
+        from users.utils import resolve_frontend_url
+        reset_link = f"{resolve_frontend_url(request)}/auth?mode=set-password&uid={uid}&token={token}"
 
         # Load logo
         import os, base64
@@ -10992,8 +10994,9 @@ class TeamsWebhookView(APIView):
 
             uid = urlsafe_base64_encode(force_bytes(django_user.pk))
             token = PasswordResetTokenGenerator().make_token(django_user)
+            _frontend_base = getattr(settings, "FRONTEND_URL", "https://vaptfix.ai").rstrip("/")
             set_password_url = (
-                f"https://vaptfix.ai/auth"
+                f"{_frontend_base}/auth"
                 f"?mode=set-password&uid={uid}&token={token}"
             )
 
