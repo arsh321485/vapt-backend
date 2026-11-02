@@ -67,26 +67,40 @@ def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role
 
     # Two different shapes reach here. Slack/Teams (team_tab.submit_add_user)
     # send the FLAT shape this function was originally written for:
-    # {"assets": [...], "vulnerabilities": [...]}. The website's own Add
-    # User picker sends a DIFFERENT, per-team-nested shape instead:
-    # {team_name: {"assets": [...], "vulns": [...]}, ...} — confirmed real
-    # live (admin ritikabhikonde.sitl@gmail.com's "New-demo" team showed 0
-    # vulnerabilities on the website despite real checkbox-selected
-    # role_assignments, because `.get("assets")`/`.get("vulnerabilities")`
-    # on a dict keyed by team name instead returns None every time, so this
-    # function always silently no-opped for website-originated additions).
-    assets = role_assignments.get("assets")
-    vulns = role_assignments.get("vulnerabilities")
-    if assets is None and vulns is None:
-        assets, vulns = [], []
+    # {"assets": [...], "vulnerabilities": [...]} — one shared picker with
+    # no concept of "which team" a selection belongs to, so (unchanged,
+    # original behavior) every team in team_names gets the full flat list.
+    # The website's own Add User picker sends a DIFFERENT, per-team-nested
+    # shape instead: {team_name: {"assets": [...], "vulns": [...]}, ...} —
+    # each team's own tab keeps its own separate selection.
+    #
+    # Real bug report: for the nested shape, this used to flatten every
+    # team's selections into ONE combined list and then tag the resulting
+    # (host, vuln) pairs with EVERY team in team_names — so granting a
+    # member 4 roles at once (e.g. all 4 fixed teams), with DIFFERENT
+    # vulnerabilities checkbox-selected under each role's own tab (6 under
+    # Configuration Management, 1 under Architectural Flaws, 0 under the
+    # other two), tagged ALL 7 vulnerabilities with ALL 4 teams — even the
+    # two teams with zero selections of their own. Confirmed live: a
+    # single host's vulnerabilities all showed every one of the member's
+    # roles as "ASSIGNED TEAM" on the Fix page and in Team Performance.
+    # Each team's selections now stay scoped to just that team.
+    flat_assets = role_assignments.get("assets")
+    flat_vulns = role_assignments.get("vulnerabilities")
+    per_team_selection = {}
+    if flat_assets is not None or flat_vulns is not None:
+        for team in team_names:
+            per_team_selection[team] = (flat_assets or [], flat_vulns or [])
+    else:
         for team in team_names:
             entry = role_assignments.get(team)
             if isinstance(entry, dict):
-                assets.extend(entry.get("assets") or [])
-                vulns.extend(entry.get("vulnerabilities") or entry.get("vulns") or [])
-    assets = assets or []
-    vulns = vulns or []
-    if not assets and not vulns:
+                per_team_selection[team] = (
+                    entry.get("assets") or [],
+                    entry.get("vulnerabilities") or entry.get("vulns") or [],
+                )
+
+    if not any(a or v for a, v in per_team_selection.values()):
         return
 
     try:
@@ -112,64 +126,74 @@ def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role
             return
         report_id = str(doc.get("report_id") or doc.get("_id", ""))
 
-        pairs = set()
-        if assets:
-            host_set = set(assets)
-            for host in doc.get("vulnerabilities_by_host") or []:
-                host_name = host.get("host_name")
-                if host_name in host_set:
-                    for v in host.get("vulnerabilities") or []:
-                        plugin_name = v.get("plugin_name")
-                        if plugin_name:
-                            pairs.add((host_name, plugin_name))
-        for vid in vulns:
-            if not isinstance(vid, str) or "||" not in vid:
+        host_vulns_lookup = {}
+        for host in doc.get("vulnerabilities_by_host") or []:
+            host_name = host.get("host_name")
+            if not host_name:
                 continue
-            host_name, plugin_name = vid.split("||", 1)
-            if host_name and plugin_name:
-                pairs.add((host_name, plugin_name))
-
-        if not pairs:
-            return
+            host_vulns_lookup[host_name] = [
+                v.get("plugin_name") for v in (host.get("vulnerabilities") or []) if v.get("plugin_name")
+            ]
 
         cards_coll = db["vulnerability_cards"]
-        team_list = list(dict.fromkeys(team_names))
-        for host_name, plugin_name in pairs:
-            cards_coll.update_many(
-                {
-                    "admin_id": admin_id,
-                    "report_id": report_id,
-                    "host_name": host_name,
-                    "vulnerability_name": plugin_name,
-                },
-                {"$addToSet": {"additional_teams": {"$each": team_list}}},
-            )
+        all_pairs = set()
+        total_updates = 0
 
-        # Real bug report: a support request raised for a vulnerability
-        # that's ALSO (via additional_teams, from this exact picker)
-        # genuinely assigned to a custom team only ever notified the
-        # vulnerability's original 4-fixed-team channel — the custom
-        # team's own channel never heard about it. Root cause: a support
-        # request's team routing (userregister.views.
-        # UserRaiseSupportRequestAPIView) reads additional_teams off the
-        # fix_vulnerabilities(_closed) DOCUMENT itself, not off this
-        # vulnerability_cards update above — and this function only ever
-        # touched the card. adminregister.views.AssignTeamAPIView (the
-        # manual "Assign Team" button) already mirrors onto that doc too;
-        # doing the same here so a checkbox-driven assignment and a
-        # manual one leave the fix_vuln doc in the same state.
-        pair_conditions = [
-            {"host_name": h, "plugin_name": p} for h, p in pairs
-        ]
-        for coll_name in ("fix_vulnerabilities", "fix_vulnerabilities_closed"):
-            db[coll_name].update_many(
-                {"report_id": report_id, "$or": pair_conditions},
-                {"$addToSet": {"additional_teams": {"$each": team_list}}},
-            )
+        for team, (assets, vulns) in per_team_selection.items():
+            if not assets and not vulns:
+                continue
+            pairs = set()
+            for host_name in assets:
+                for plugin_name in host_vulns_lookup.get(host_name, []):
+                    pairs.add((host_name, plugin_name))
+            for vid in vulns:
+                if not isinstance(vid, str) or "||" not in vid:
+                    continue
+                host_name, plugin_name = vid.split("||", 1)
+                if host_name and plugin_name:
+                    pairs.add((host_name, plugin_name))
+            if not pairs:
+                continue
+            all_pairs |= pairs
+            total_updates += len(pairs)
+
+            for host_name, plugin_name in pairs:
+                cards_coll.update_many(
+                    {
+                        "admin_id": admin_id,
+                        "report_id": report_id,
+                        "host_name": host_name,
+                        "vulnerability_name": plugin_name,
+                    },
+                    {"$addToSet": {"additional_teams": team}},
+                )
+
+            # Real bug report: a support request raised for a vulnerability
+            # that's ALSO (via additional_teams, from this exact picker)
+            # genuinely assigned to a custom team only ever notified the
+            # vulnerability's original 4-fixed-team channel — the custom
+            # team's own channel never heard about it. Root cause: a support
+            # request's team routing (userregister.views.
+            # UserRaiseSupportRequestAPIView) reads additional_teams off the
+            # fix_vulnerabilities(_closed) DOCUMENT itself, not off this
+            # vulnerability_cards update above — and this function only ever
+            # touched the card. adminregister.views.AssignTeamAPIView (the
+            # manual "Assign Team" button) already mirrors onto that doc too;
+            # doing the same here so a checkbox-driven assignment and a
+            # manual one leave the fix_vuln doc in the same state.
+            pair_conditions = [{"host_name": h, "plugin_name": p} for h, p in pairs]
+            for coll_name in ("fix_vulnerabilities", "fix_vulnerabilities_closed"):
+                db[coll_name].update_many(
+                    {"report_id": report_id, "$or": pair_conditions},
+                    {"$addToSet": {"additional_teams": team}},
+                )
+
+        if not all_pairs:
+            return
 
         logger.info(
-            f"[UserDetailCreateView] role_assignments applied: {len(pairs)} finding(s) "
-            f"layered onto team(s) {team_list} for admin_id={admin_id}"
+            f"[UserDetailCreateView] role_assignments applied: {total_updates} finding-team pairing(s) "
+            f"across {len(per_team_selection)} team(s) for admin_id={admin_id}"
         )
     except Exception:
         logger.exception("[UserDetailCreateView] _apply_role_assignments_to_cards failed")
