@@ -166,7 +166,15 @@ class Command(BaseCommand):
         # this view only Teams-syncs when they're in the request body, it
         # doesn't fall back to the admin's own ms_access_token/ms_team_id
         # on its own.
-        existing = UserDetail.objects.filter(admin=admin, email=member_email).first()
+        # Real bug found live: this matched on exact email casing — a
+        # member stored as "mohammedb@sedco.com" wasn't found when this
+        # command was re-run with "Mohammedb@sedco.com" (capital M), so
+        # this fell through to the "create new" path below instead, which
+        # then failed with a 409 from a DIFFERENT, case-insensitive
+        # duplicate check deeper in UserDetailCreateView. Case-insensitive
+        # here too, matching how the rest of the system already treats
+        # email uniqueness.
+        existing = UserDetail.objects.filter(admin=admin, email__iexact=member_email).first()
         if existing:
             self.stdout.write(f"'{member_email}' already exists under {admin_email} — adding '{role}' as an additional role...")
             fresh_access_token = _refresh_ms_access_token(admin)
