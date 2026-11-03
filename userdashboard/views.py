@@ -722,68 +722,57 @@ class UserVulnerabilitiesAPIView(APIView):
                 from upload_report.team_utils import infer_assigned_team
 
                 counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-                # (vulnerability_name, host_name) pairs already covered by a
-                # card, regardless of that card's team — used below to find
-                # pairs with NO card at all yet.
-                card_covered_pairs = set()
 
+                # Team lookup built from cards, keyed by (vulnerability_name,
+                # host_name) — used below to decide team membership, but
+                # actual counting happens over the RAW per-port entries
+                # (see the loop below), not once per card.
+                card_team_map = {}
                 for card in db[VULN_CARD_COLLECTION].find(
                     {"report_id": str(report_id)},
                     {"vulnerability_name": 1, "assigned_team": 1, "additional_teams": 1, "host_name": 1, "_id": 0},
                 ):
                     pname     = (card.get("vulnerability_name") or "").strip()
                     card_host = (card.get("host_name") or "").strip()
-                    card_covered_pairs.add((pname, card_host))
-                    raw_team = (card.get("assigned_team") or "").strip()
-                    # Real bug report: a custom team's dashboard "Vulnerabilities
-                    # by Severity" always counted zero — raw_team/infer_assigned_
-                    # team only ever resolve to one of the 4 fixed teams, so a
-                    # custom team never matched a single card here. additional_
-                    # teams (see UserTotalAssetsAPIView's own comment) is a
-                    # custom team's real classification pool.
-                    matched = (
-                        teams_lower.get(raw_team.lower())
-                        or teams_lower.get(infer_assigned_team(pname).lower())
-                        or next(
-                            (teams_lower[t.lower()] for t in (card.get("additional_teams") or []) if t and t.lower() in teams_lower),
-                            None,
-                        )
+                    card_team_map[(pname, card_host)] = (
+                        (card.get("assigned_team") or "").strip(),
+                        card.get("additional_teams") or [],
                     )
-                    if not matched:
-                        continue
-                    if card_host and card_host not in active_host_names:
-                        continue
-                    # Skip if this (plugin, host) pair is closed/held/deleted
-                    if (pname, card_host) in excluded_plugins:
-                        continue
-                    # Also skip if plugin is closed/held/deleted on any host
-                    # (when card has no host_name)
-                    if not card_host and any(p == pname for p, _ in excluded_plugins):
-                        continue
-                    risk = plugin_risk.get(pname)
-                    if risk in counts:
-                        counts[risk] += 1
 
-                # Real bug report: same "no card yet" gap as every other
-                # team-scoped view — a vulnerability whose card hasn't been
-                # generated yet was completely absent from the loop above
-                # (it only ever iterates vulnerability_cards), so it never
-                # counted toward any team's severity totals until AI
-                # generation caught up. Scan the raw report directly for
-                # (vuln, host) pairs with no card at all and count them too,
-                # using the same keyword-based team inference as everywhere
-                # else in this fallback.
+                # Real bug report: this used to count ONE per vulnerability_
+                # cards document — but a card is deduplicated across every
+                # port/instance of the same (host, plugin_name) pair (one
+                # card covers "SSL Certificate Cannot Be Trusted" on a host
+                # regardless of whether it showed up on 1 port or 3), while
+                # the admin dashboard's own severity count
+                # (AdminVulnerabilitiesAPIView) counts every RAW port-level
+                # entry in vulnerabilities_by_host. For a report with any
+                # multi-port duplicate finding, that made a team's (or a
+                # single-team admin's "Own Team") user-side total
+                # permanently lower than the admin-side total shown for the
+                # exact same data — confirmed live, medium 73/low 19 (admin,
+                # raw) vs. medium 48/low 16 (user, deduped-by-card) for the
+                # same report. Count raw entries here too, same as admin,
+                # using the card lookup only to resolve team membership.
                 for host in nessus_doc.get("vulnerabilities_by_host", []):
                     host_name = (host.get("host_name") or host.get("host") or "").strip()
                     if host_name and host_name not in active_host_names:
                         continue
                     for v in host.get("vulnerabilities", []):
                         pname = (v.get("plugin_name") or v.get("pluginname") or v.get("name") or "").strip()
-                        if not pname or (pname, host_name) in card_covered_pairs:
+                        if not pname:
                             continue
                         if (pname, host_name) in excluded_plugins:
                             continue
-                        matched = teams_lower.get(infer_assigned_team(pname).lower())
+                        raw_team, extra_teams = card_team_map.get((pname, host_name), ("", []))
+                        matched = (
+                            teams_lower.get(raw_team.lower())
+                            or teams_lower.get(infer_assigned_team(pname).lower())
+                            or next(
+                                (teams_lower[t.lower()] for t in extra_teams if t and t.lower() in teams_lower),
+                                None,
+                            )
+                        )
                         if not matched:
                             continue
                         risk = plugin_risk.get(pname)
