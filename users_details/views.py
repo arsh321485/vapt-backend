@@ -136,6 +136,33 @@ def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role
             ]
 
         cards_coll = db["vulnerability_cards"]
+
+        # Real bug report: a host checkbox-selected (whole "assets" entry,
+        # not an individual vuln) under one FIXED team's own tab used to
+        # tag EVERY vulnerability on that host with that team — including
+        # findings natively classified under a totally different fixed
+        # team, which the admin never even saw while picking (the picker's
+        # own role-filtered tab only shows that team's own vulns for a
+        # host). Confirmed live: selecting a host under Patch Management
+        # also tagged its Configuration-Management-owned SSL findings with
+        # Patch Management, showing two fixed teams as "ASSIGNED TEAM" on
+        # one vuln. A custom team has no native classification of its own,
+        # so a whole-host selection there is left exactly as before
+        # (every vuln on the host, by design — that's the point of a
+        # custom team covering a client's host across categories).
+        from upload_report.team_utils import infer_assigned_team
+
+        plugin_team_lookup = {}
+        for card in cards_coll.find(
+            {"report_id": report_id},
+            {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1},
+        ):
+            pname = (card.get("vulnerability_name") or "").strip()
+            host  = (card.get("host_name") or "").strip()
+            team  = (card.get("assigned_team") or "").strip()
+            if pname and team:
+                plugin_team_lookup[(host, pname.lower())] = team
+
         all_pairs = set()
         total_updates = 0
 
@@ -145,6 +172,12 @@ def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role
             pairs = set()
             for host_name in assets:
                 for plugin_name in host_vulns_lookup.get(host_name, []):
+                    if team in _FIXED_TEAM_NAMES:
+                        native_team = plugin_team_lookup.get((host_name, plugin_name.lower()))
+                        if not native_team:
+                            native_team = infer_assigned_team(plugin_name)
+                        if native_team.lower() != team.lower():
+                            continue
                     pairs.add((host_name, plugin_name))
             for vid in vulns:
                 if not isinstance(vid, str) or "||" not in vid:
@@ -2367,7 +2400,24 @@ class ReportAssetsVulnsAPIView(APIView):
                             if key in covered:
                                 continue
                             covered.add(key)
-                            if infer_assigned_team(pname).lower() == role_filter.lower():
+                            inferred_team = infer_assigned_team(pname)
+                            # Real bug report: an uncarded finding's inferred
+                            # team was only ever recorded in assigned_team_map
+                            # when it happened to match role_filter — every
+                            # OTHER role's query never learned this host was
+                            # already claimed, so it leaked into THEIR
+                            # "vulnerability_free_assets" too. A host with an
+                            # uncarded finding ended up double-booked: a real
+                            # asset under its one inferred team, AND still
+                            # "free" from every other team's view. Confirmed
+                            # live: 19 such hosts inflated the Add Team
+                            # Member modal's combined total (153 assets + 186
+                            # free = 339) past the report's real 320 hosts.
+                            # Recording it here for every uncarded pair, not
+                            # just role_filter matches, keeps every role's
+                            # view of this host consistent.
+                            assigned_team_map[key] = inferred_team
+                            if inferred_team.lower() == role_filter.lower():
                                 role_plugins.add(key)
 
                 # Real bug report (corrected): this endpoint is the Add
