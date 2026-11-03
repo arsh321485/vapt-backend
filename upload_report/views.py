@@ -2411,6 +2411,20 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 "vulnerability_name": vuln_plugin_name,
                 "os_category": vuln_os_category,
             }
+            # Real bug report: unlike automation_card below, mitigation_table
+            # had no equivalent completeness guard at all — a card whose
+            # mitigation_table came back empty on its very first-ever
+            # generation (a one-off LLM/parsing glitch) was still eligible
+            # as a cache source, and the newest-first sort kept re-picking
+            # that same broken card for every later report with the same
+            # vulnerability_name + os_category, forever. Confirmed live: 3
+            # Chrome vulnerabilities where every existing copy in the whole
+            # database had mitigation_table length 0, propagated across
+            # multiple reports before being manually force-regenerated.
+            # Requiring at least one real step makes a broken source
+            # ineligible — falls through to a fresh generation instead,
+            # same fix shape as the automation_card guard just below.
+            cache_query["mitigation_table.0"] = {"$exists": True}
             if run_automation:
                 cache_query["automation_card"] = {"$exists": True, "$nin": [{}, None]}
                 # Real bug report: {"$nin": [{}, None]} above only rejects a
@@ -2428,6 +2442,22 @@ def _auto_generate_cards_bg(report_id: str, admin_email: str, admin_id: str):
                 # non-empty dict, so a stubbed source is treated as no
                 # cache and a fresh GPT generation runs instead.
                 cache_query["automation_card.automation_status"] = {"$exists": True}
+                # Real bug report: the check above only confirms a status
+                # EXISTS — it doesn't confirm a "full"/"partial" status
+                # actually carries a script. _parse_automation_card only
+                # clears fix_script when the LLM's own output fails
+                # ast.parse() (invalid syntax); if the LLM instead just
+                # left fix_script blank while still reporting
+                # automation_possible "Yes"/"Partial", status lands on
+                # "full"/"partial" with an empty script — same shape of
+                # bug as the mitigation_table gap above, just for
+                # automation. A "not_possible" card legitimately has no
+                # script by design, so this only guards the two statuses
+                # that are supposed to carry one.
+                cache_query["$or"] = [
+                    {"automation_card.automation_status": "not_possible"},
+                    {"automation_card.fix_script": {"$nin": [None, ""]}},
+                ]
             cached_card = None
             for candidate in db[VULN_CARD_COLLECTION].find(cache_query).sort("created_at", -1).limit(20):
                 if _descriptions_similar(candidate.get("description", ""), vuln.get("description", "")):
