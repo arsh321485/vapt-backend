@@ -1151,56 +1151,41 @@ class UserPatchManagementAPIView(APIView):
                     for t in active_teams
                 }
 
-                # Build plugin_name -> matched_team map from cards. Falls
-                # back to team_utils.infer_assigned_team() for any plugin
-                # with no card yet (or a card with no/invalid team) — same
-                # "no card yet" gap as every other team-scoped view in this
-                # app; see UserTotalAssetsAPIView's comment for full context.
+                # Build (vulnerability_name, host_name) -> (assigned_team,
+                # additional_teams) lookup from cards. Falls back to
+                # team_utils.infer_assigned_team() for any pair with no
+                # card yet — same "no card yet" gap as every other
+                # team-scoped view in this app; see UserTotalAssetsAPIView's
+                # comment for full context.
                 from upload_report.team_utils import infer_assigned_team
 
-                plugin_team_map = {}
-                _card_covered = set()
-                for card in db[VULN_CARD_COLLECTION].find({"report_id": str(report_id)}):
+                card_team_map = {}
+                for card in db[VULN_CARD_COLLECTION].find(
+                    {"report_id": str(report_id)},
+                    {"vulnerability_name": 1, "host_name": 1, "assigned_team": 1, "additional_teams": 1},
+                ):
                     pname = (card.get("vulnerability_name") or "").strip()
+                    hname = (card.get("host_name") or "").strip()
                     if not pname:
                         continue
-                    _card_covered.add(pname)
-                    raw_team = (card.get("assigned_team") or "").strip()
-                    # Real bug report: same additional_teams gap as
-                    # UserTotalAssetsAPIView — a custom team never matched
-                    # a card here either.
-                    matched = (
-                        teams_lower.get(raw_team.lower())
-                        or teams_lower.get(infer_assigned_team(pname).lower())
-                        or next(
-                            (teams_lower[t.lower()] for t in (card.get("additional_teams") or []) if t and t.lower() in teams_lower),
-                            None,
-                        )
+                    card_team_map[(pname, hname)] = (
+                        (card.get("assigned_team") or "").strip(),
+                        card.get("additional_teams") or [],
                     )
-                    if not matched:
-                        continue
-                    plugin_team_map[pname] = matched
-                    risk = plugin_risk.get(pname)
-                    if risk in team_data[matched]["vulnerabilities"]:
-                        team_data[matched]["vulnerabilities"][risk] += 1
 
-                for _host in (nessus_doc.get("vulnerabilities_by_host") or []):
-                    for _v in (_host.get("vulnerabilities") or []):
-                        _pname = (
-                            _v.get("plugin_name") or _v.get("pluginname") or _v.get("name") or ""
-                        ).strip()
-                        if not _pname or _pname in _card_covered:
-                            continue
-                        _card_covered.add(_pname)
-                        _matched = teams_lower.get(infer_assigned_team(_pname).lower())
-                        if not _matched:
-                            continue
-                        plugin_team_map[_pname] = _matched
-                        _risk = plugin_risk.get(_pname)
-                        if _risk in team_data[_matched]["vulnerabilities"]:
-                            team_data[_matched]["vulnerabilities"][_risk] += 1
-
-                # Count assets from nessus doc using host-ip fallback
+                # Real bug report: this used to increment once per CARD
+                # document — a card is deduplicated across every
+                # port/instance of the same (host, plugin_name) pair, so
+                # a multi-port duplicate finding (e.g. the same finding on
+                # 3 ports of one host) undercounted here versus the admin
+                # dashboard's own team distribution
+                # (AdminDistributionByTeamAPIView), which counts every raw
+                # entry in vulnerabilities_by_host. Confirmed live: Network
+                # Security raw count 128 vs this view's old card-deduped
+                # count 83 for the same report. Now counts raw entries
+                # here too, using the card lookup only to resolve team
+                # membership — assets are tracked from the same pass, no
+                # separate second loop needed.
                 for host in (nessus_doc.get("vulnerabilities_by_host") or []):
                     host_info = host.get("host_information") or {}
                     h_name = (
@@ -1215,9 +1200,23 @@ class UserPatchManagementAPIView(APIView):
                         pname = (
                             v.get("plugin_name") or v.get("pluginname") or v.get("name") or ""
                         ).strip()
-                        matched = plugin_team_map.get(pname)
-                        if matched:
-                            team_data[matched]["assets"].add(h_name)
+                        if not pname:
+                            continue
+                        raw_team, extra_teams = card_team_map.get((pname, h_name), ("", []))
+                        matched = (
+                            teams_lower.get(raw_team.lower())
+                            or teams_lower.get(infer_assigned_team(pname).lower())
+                            or next(
+                                (teams_lower[t.lower()] for t in extra_teams if t and t.lower() in teams_lower),
+                                None,
+                            )
+                        )
+                        if not matched:
+                            continue
+                        risk = plugin_risk.get(pname)
+                        if risk in team_data[matched]["vulnerabilities"]:
+                            team_data[matched]["vulnerabilities"][risk] += 1
+                        team_data[matched]["assets"].add(h_name)
 
                 # Build SLA and convert assets set to count
                 sla = {}
