@@ -12,6 +12,7 @@ role) — each destructive one goes through an explicit Confirm/Cancel step
 first, same as everywhere else hard-to-reverse in this app.
 """
 import logging
+import re
 
 from . import cards
 from . import fix_tab
@@ -19,6 +20,21 @@ from . import fix_tab
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
+
+
+def _search_terms(raw):
+    """Real feature request: searching Assets/Vulnerabilities needs to find
+    several specific ones in one go (e.g. a handful of IPs picked off a
+    report), not just whatever matches one single substring. Splits on
+    comma AND newline so either "a, b, c" or one-per-line both work, each
+    term trimmed/lowercased; a bare empty string yields no terms (treated
+    the same as "no search" by every caller)."""
+    return [t.strip().lower() for t in re.split(r"[,\n]+", raw or "") if t.strip()]
+
+
+def _matches_any_term(text, terms):
+    text = (text or "").lower()
+    return any(t in text for t in terms)
 
 
 # Real follow-up request: back to one row, full text still visible — see
@@ -271,12 +287,12 @@ def normalize_adduser_form_data(value, admin=None):
     # below reflects what the admin actually saw/clicked on this specific
     # render — not the full unfiltered list a search term had narrowed
     # away from.
-    a_search = (normalized.get("au_assets_search") or "").strip().lower()
-    v_search = (normalized.get("au_vulns_search") or "").strip().lower()
-    if a_search:
-        assets = [a for a in assets if a_search in (a.get("label") or "").lower()]
-    if v_search:
-        vulns = [v for v in vulns if v_search in (v.get("label") or "").lower() or v_search in (v.get("host") or "").lower()]
+    a_terms = _search_terms(normalized.get("au_assets_search") or "")
+    v_terms = _search_terms(normalized.get("au_vulns_search") or "")
+    if a_terms:
+        assets = [a for a in assets if _matches_any_term(a.get("label"), a_terms)]
+    if v_terms:
+        vulns = [v for v in vulns if _matches_any_term(v.get("label"), v_terms) or _matches_any_term(v.get("host"), v_terms)]
 
     for which, field, items in (("assets", "au_assets", assets), ("vulns", "au_vulns", vulns)):
         prev_full = {x.strip() for x in (value.get(f"_au_{which}_sel") or "").split(",") if x.strip()}
@@ -567,12 +583,14 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
     # — search only narrows which items page_size then applies to.
     any_assets_before_search = bool(assets)
     any_vulns_before_search = bool(vulns)
-    a_search = (form_data.get("au_assets_search") or "").strip().lower()
-    v_search = (form_data.get("au_vulns_search") or "").strip().lower()
-    if a_search:
-        assets = [a for a in assets if a_search in (a.get("label") or "").lower()]
-    if v_search:
-        vulns = [v for v in vulns if v_search in (v.get("label") or "").lower() or v_search in (v.get("host") or "").lower()]
+    a_search = (form_data.get("au_assets_search") or "").strip()
+    v_search = (form_data.get("au_vulns_search") or "").strip()
+    a_terms = _search_terms(a_search)
+    v_terms = _search_terms(v_search)
+    if a_terms:
+        assets = [a for a in assets if _matches_any_term(a.get("label"), a_terms)]
+    if v_terms:
+        vulns = [v for v in vulns if _matches_any_term(v.get("label"), v_terms) or _matches_any_term(v.get("host"), v_terms)]
 
     def _int_offset(key):
         try:
@@ -598,7 +616,7 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
     if any_assets_before_search:
         body.append({
             "type": "Input.Text", "id": f"au_assets_search_{rev}", "label": "Search assets",
-            "placeholder": "Type to filter, then tap 🔍 Search Assets", "value": form_data.get("au_assets_search") or "",
+            "placeholder": "e.g. 172.17.1.192, 172.17.1.236 — then tap 🔍 Search Assets", "value": form_data.get("au_assets_search") or "",
         })
         body.append({
             "type": "ActionSet", "spacing": "Small",
@@ -631,7 +649,7 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
     if any_vulns_before_search:
         body.append({
             "type": "Input.Text", "id": f"au_vulns_search_{rev}", "label": "Search vulnerabilities",
-            "placeholder": "Type to filter, then tap 🔍 Search Vulnerabilities", "value": form_data.get("au_vulns_search") or "",
+            "placeholder": "Comma-separate to match several — then tap 🔍 Search Vulnerabilities", "value": form_data.get("au_vulns_search") or "",
         })
         body.append({
             "type": "ActionSet", "spacing": "Small",
