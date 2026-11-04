@@ -111,6 +111,39 @@ def run_retry(report_id=None, join=True, log=None):
         for t in threads:
             t.join()
 
+        # Real bug report: _auto_generate_cards_bg wraps its whole body in
+        # one try/except/finally — an exception ANYWHERE after the main
+        # generation loop finishes but before its own flag write
+        # (_normalize_team_and_automation_consistency, right before it, is
+        # the likeliest spot) gets caught, logged, and swallowed, so the
+        # thread exits cleanly (join() returns normally) without
+        # cards_generation_complete ever flipping to True — even though
+        # every card that was supposed to get generated, genuinely did.
+        # Confirmed live: two reports stuck at cards_generated_count ==
+        # cards_expected_count (471/471 and 426/426) with the flag still
+        # False, both retried through this exact command. The Django
+        # Admin "Cards" column (get_cards_status/_cards_progress) and
+        # generate_claim_link's readiness gate both read this flag
+        # directly, so a report can be 100% done and still show
+        # "⚠️ Incomplete" / fail the claim-link gate forever. Independently
+        # re-verify and backfill the flag here, after every join, as a
+        # safety net that doesn't depend on _auto_generate_cards_bg's own
+        # internal path reaching its flag write.
+        for doc in candidates:
+            rid = doc.get("report_id")
+            try:
+                actual = db["vulnerability_cards"].count_documents({"report_id": rid})
+                rdoc = db[NESSUS_COLLECTION].find_one({"report_id": rid}, {"cards_expected_count": 1, "cards_generation_complete": 1})
+                expected = (rdoc or {}).get("cards_expected_count", 0)
+                if expected > 0 and actual >= expected and not (rdoc or {}).get("cards_generation_complete"):
+                    db[NESSUS_COLLECTION].update_one(
+                        {"report_id": rid},
+                        {"$set": {"cards_generation_complete": True, "cards_generated_count": actual}},
+                    )
+                    log(f"  - report_id={rid}: backfilled cards_generation_complete (was stuck False at {actual}/{expected})")
+            except Exception as e:
+                log(f"  - report_id={rid}: completion-flag backfill check failed: {e}")
+
     log(f"Done — retried {len(candidates)} report(s).")
     return len(candidates)
 
