@@ -18503,6 +18503,30 @@ class SlackSlashCommandView(APIView):
         rev = state.get("rev", 0)
         blocks = [{"type": "divider"}]
 
+        # Real feature request: let the admin search/filter Assets and
+        # Vulnerabilities instead of only paging through _PICKER_PAGE_SIZE
+        # at a time — Slack's checkboxes element has no built-in search, so
+        # this is a plain_text_input that fires on Enter (see the
+        # assets_search_input/vulns_search_input handling in
+        # _handle_adduser_modal_live, which filters assets_list/vulns_list
+        # by substring BEFORE it ever reaches this function — everything
+        # below (counts, Select All, pagination) already operates on
+        # whatever list it's handed, so it's automatically scoped to the
+        # current search term with no further change needed here).
+        blocks.append({
+            "type": "input",
+            "block_id": f"assets_search_block_{rev}",
+            "label": {"type": "plain_text", "text": "Search assets"},
+            "optional": True,
+            "dispatch_action": True,
+            "element": {
+                "type": "plain_text_input", "action_id": "assets_search_input",
+                "placeholder": {"type": "plain_text", "text": "Type to filter assets…"},
+                "initial_value": state.get("asset_search") or "",
+                "dispatch_action_config": {"trigger_actions_on": ["on_enter_pressed"]},
+            },
+        })
+
         a_page = state.get("asset_page", 0)
         a_total = len(assets_list)
         a_items = assets_list[a_page * PAGE_SIZE: a_page * PAGE_SIZE + PAGE_SIZE]
@@ -18548,6 +18572,20 @@ class SlackSlashCommandView(APIView):
             blocks.append(self._text_block("_No assets for the selected team(s)._")[0])
 
         blocks.append({"type": "divider"})
+
+        blocks.append({
+            "type": "input",
+            "block_id": f"vulns_search_block_{rev}",
+            "label": {"type": "plain_text", "text": "Search vulnerabilities"},
+            "optional": True,
+            "dispatch_action": True,
+            "element": {
+                "type": "plain_text_input", "action_id": "vulns_search_input",
+                "placeholder": {"type": "plain_text", "text": "Type to filter vulnerabilities…"},
+                "initial_value": state.get("vuln_search") or "",
+                "dispatch_action_config": {"trigger_actions_on": ["on_enter_pressed"]},
+            },
+        })
 
         v_page = state.get("vuln_page", 0)
         v_total = len(vulns_list)
@@ -23687,6 +23725,7 @@ class SlackInteractivityView(APIView):
                 "team_checks", "assets_checks", "vulns_checks",
                 "assets_pg_prev", "assets_pg_next", "vulns_pg_prev", "vulns_pg_next",
                 "assets_select_all", "assets_clear_all", "vulns_select_all", "vulns_clear_all",
+                "assets_search_input", "vulns_search_input",
                 "adduser_create_team",
             ):
                 threading.Thread(target=self._handle_adduser_modal_live, args=(payload,), daemon=True).start()
@@ -26879,6 +26918,8 @@ class SlackInteractivityView(APIView):
         state.setdefault("vuln_page", 0)
         state.setdefault("sel_assets", [])
         state.setdefault("sel_vulns", [])
+        state.setdefault("asset_search", "")
+        state.setdefault("vuln_search", "")
         # Bumped on every live update so the re-rendered checkboxes blocks
         # get a fresh block_id — see the comment in _build_adduser_picker_blocks.
         state["rev"] = state.get("rev", 0) + 1
@@ -26890,6 +26931,23 @@ class SlackInteractivityView(APIView):
 
         def team_names():
             return [team_code_map.get(c) for c in state["teams"] if team_code_map.get(c)]
+
+        def get_lists():
+            # Real feature request: scope assets_list/vulns_list to the
+            # active search term (if any) before anything else — counts,
+            # Select All, pagination and checkbox-page reconciliation all
+            # read these two lists, so filtering here once is enough to
+            # make every one of them already respect the search term with
+            # no separate change at each call site.
+            raw_assets, raw_vulns = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+            a_term = (state.get("asset_search") or "").strip().lower()
+            v_term = (state.get("vuln_search") or "").strip().lower()
+            f_assets = [a for a in raw_assets if not a_term or a_term in (a.get("label") or "").lower()]
+            f_vulns = [
+                v for v in raw_vulns
+                if not v_term or v_term in (v.get("label") or "").lower() or v_term in (v.get("host") or "").lower()
+            ]
+            return f_assets, f_vulns
 
         self._debug_write(f"_handle_adduser_modal_live: start action={action_id} teams={state['teams']}")
 
@@ -26921,7 +26979,7 @@ class SlackInteractivityView(APIView):
                         if new_code not in state["teams"]:
                             state["teams"].append(new_code)
                         team_code_map[new_code] = resp.get("name") or new_name
-                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                assets_list, vulns_list = get_lists()
 
             elif action_id == "team_checks":
                 selected = live_action.get("selected_options") or []
@@ -26932,10 +26990,10 @@ class SlackInteractivityView(APIView):
                 state["vuln_page"] = 0
                 state["sel_assets"] = []
                 state["sel_vulns"] = []
-                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                assets_list, vulns_list = get_lists()
 
             elif action_id in ("assets_checks", "assets_pg_prev", "assets_pg_next"):
-                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                assets_list, vulns_list = get_lists()
                 page_ids = {it["id"] for it in assets_list[state["asset_page"] * PAGE_SIZE: state["asset_page"] * PAGE_SIZE + PAGE_SIZE]}
                 if action_id == "assets_checks":
                     checked = live_action.get("selected_options") or []
@@ -26950,7 +27008,7 @@ class SlackInteractivityView(APIView):
                     state["asset_page"] = int(live_action.get("value") or 0)
 
             elif action_id in ("vulns_checks", "vulns_pg_prev", "vulns_pg_next"):
-                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                assets_list, vulns_list = get_lists()
                 page_ids = {it["id"] for it in vulns_list[state["vuln_page"] * PAGE_SIZE: state["vuln_page"] * PAGE_SIZE + PAGE_SIZE]}
                 if action_id == "vulns_checks":
                     checked = live_action.get("selected_options") or []
@@ -26965,12 +27023,22 @@ class SlackInteractivityView(APIView):
                     state["vuln_page"] = int(live_action.get("value") or 0)
 
             elif action_id in ("assets_select_all", "assets_clear_all"):
-                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                assets_list, vulns_list = get_lists()
                 state["sel_assets"] = [it["id"] for it in assets_list] if action_id == "assets_select_all" else []
 
             elif action_id in ("vulns_select_all", "vulns_clear_all"):
-                assets_list, vulns_list = slash._get_team_assets_vulns_combined(team_id, slack_user_id, team_names())
+                assets_list, vulns_list = get_lists()
                 state["sel_vulns"] = [it["id"] for it in vulns_list] if action_id == "vulns_select_all" else []
+
+            elif action_id == "assets_search_input":
+                state["asset_search"] = (live_action.get("value") or "").strip()
+                state["asset_page"] = 0
+                assets_list, vulns_list = get_lists()
+
+            elif action_id == "vulns_search_input":
+                state["vuln_search"] = (live_action.get("value") or "").strip()
+                state["vuln_page"] = 0
+                assets_list, vulns_list = get_lists()
 
             else:
                 return
