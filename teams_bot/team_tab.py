@@ -719,6 +719,21 @@ def _apply_select_all(admin, form_data, which, select):
     team_code_to_name = _team_code_to_name_map(admin)
     team_names = [team_code_to_name[c] for c in team_codes if c in team_code_to_name]
     assets, vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
+    # Real bug report: "Select All Assets" ignored an active search term
+    # entirely — the button's own label shows the SEARCH-FILTERED count
+    # ("Select All Assets (2)" after searching for 2 specific IPs), but
+    # clicking it selected EVERY asset for the team regardless, which
+    # then pulled in every one of THEIR vulnerabilities too (not just the
+    # searched asset's) the moment Vulnerabilities re-scoped off that
+    # bloated au_assets. Same search filter as _assets_vulns_picker_blocks
+    # now applied here too, so Select All only ever selects what's
+    # actually shown/matching right now.
+    a_terms = _search_terms(form_data.get("au_assets_search") or "")
+    if a_terms:
+        assets = [a for a in assets if _matches_any_term(a.get("label"), a_terms)]
+    v_terms = _search_terms(form_data.get("au_vulns_search") or "")
+    if v_terms:
+        vulns = [v for v in vulns if _matches_any_term(v.get("label"), v_terms) or _matches_any_term(v.get("host"), v_terms)]
     updated = dict(form_data)
     if which == "assets":
         updated["au_assets"] = ",".join(a["id"] for a in assets) if select else ""
