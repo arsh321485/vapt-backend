@@ -908,7 +908,11 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
     # current click's own `value` (Adaptive Cards auto-includes every
     # Input already on the card), optionally overriding au_assets/
     # au_vulns first for the Select All/Clear buttons.
-    if action_id in ("team_adduser_refresh", "team_adduser_assets_all", "team_adduser_assets_none", "team_adduser_vulns_all", "team_adduser_vulns_none"):
+    if action_id in (
+        "team_adduser_refresh", "team_adduser_assets_all", "team_adduser_assets_none",
+        "team_adduser_vulns_all", "team_adduser_vulns_none",
+        "team_adduser_assets_search", "team_adduser_vulns_search",
+    ):
         try:
             form_data = team_tab.normalize_adduser_form_data(value, admin)
             if action_id == "team_adduser_assets_all":
