@@ -235,26 +235,15 @@ def normalize_adduser_form_data(value, admin=None):
     only ever have to deal with the plain, unsuffixed keys — this is the
     one place that knows about the suffix scheme.
 
-    Real bug report: "Select All Vulnerabilities" correctly selected all
-    10, and page 1 showed all 5 of its own rows checked — but clicking
-    Next to page 2 showed NONE of ITS 5 checked, even though they were
-    part of the same "select all". Root cause: a paginated Input.
-    ChoiceSet's "choices" only ever lists the CURRENT page's ids, so
-    when Teams echoes the ChoiceSet's value back on the next click, it
-    silently drops any selected id that isn't one of THIS page's own
-    choices — i.e. every other page's selections. Blindly overwriting
-    au_assets/au_vulns with that echo (the old behavior) meant every
-    Next/Prev click quietly truncated the "full" selection down to just
-    whatever page happened to be on screen at that moment.
-
-    Fixed by tracking the TRUE full selection in a separate, always-
-    present hidden field (_au_assets_sel/_au_vulns_sel — see
-    _assets_vulns_picker_blocks) that every render carries forward
-    untouched, and reconciling it against just the CURRENT page's own
-    echoed choices: drop only the ids that were actually options on this
-    page (an id from a DIFFERENT page can't have been touched by this
-    page's checkboxes at all, so it's left alone), then add back
-    whichever of this page's own ids are checked right now."""
+    Real feature request: Assets/Vulnerabilities switched from a paginated
+    checkbox list to a single filtered (type-to-search) ChoiceSet that
+    always lists every choice at once (see _assets_vulns_picker_blocks) —
+    so the echoed value IS the complete true selection now, no more
+    reconciling a page-local echo against a separately-tracked full
+    selection the way an older, paginated version of this screen needed
+    to. _au_assets_sel/_au_vulns_sel still carry the selection forward
+    unchanged on a render where the ChoiceSet isn't on the card at all
+    (e.g. no team picked yet)."""
     value = value or {}
     rev = value.get("_rev") or "0"
     normalized = dict(value)
@@ -263,31 +252,14 @@ def normalize_adduser_form_data(value, admin=None):
         if suffixed is not None:
             normalized[field] = suffixed
 
-    team_codes = [c.strip() for c in (normalized.get("au_team") or "").split(",") if c.strip()]
-    team_code_to_name = _team_code_to_name_map(admin) if admin else TEAM_CODE_TO_NAME
-    team_names = [team_code_to_name[c] for c in team_codes if c in team_code_to_name]
-    assets, vulns = _fetch_team_assets_vulns(admin, team_names) if (admin and team_names) else ([], [])
-
-    for which, field, items in (("assets", "au_assets", assets), ("vulns", "au_vulns", vulns)):
-        prev_full = {x.strip() for x in (value.get(f"_au_{which}_sel") or "").split(",") if x.strip()}
+    for which, field in (("assets", "au_assets"), ("vulns", "au_vulns")):
         echoed = value.get(f"{field}_{rev}")
         if echoed is None:
-            # This ChoiceSet wasn't even on the card for this click (e.g.
-            # no team picked yet, or the click came from a button that
-            # doesn't include it) — nothing to reconcile, carry the
-            # previously-accumulated selection forward unchanged.
+            prev_full = {x.strip() for x in (value.get(f"_au_{which}_sel") or "").split(",") if x.strip()}
             normalized[field] = ",".join(sorted(prev_full))
             continue
-        offset_key = f"_au_{which}_offset_shown"
-        prev_offset = 0
-        try:
-            prev_offset = max(0, int(value.get(offset_key) or 0))
-        except (TypeError, ValueError):
-            pass  # nosec B110 - best-effort, intentionally non-fatal
-        page_ids = {it["id"] for it in items[prev_offset:prev_offset + PAGE_SIZE]}
         echoed_ids = {x.strip() for x in echoed.split(",") if x.strip()}
-        new_full = (prev_full - page_ids) | (echoed_ids & page_ids)
-        normalized[field] = ",".join(sorted(new_full))
+        normalized[field] = ",".join(sorted(echoed_ids))
     return normalized
 
 
@@ -518,16 +490,12 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
     these two ChoiceSets' ids fresh every render too — see
     add_user_form_body's own docstring for why that's needed.
 
-    Real follow-up request: this used to just show the first 40 of each
-    list with no way to see the rest. Paginated properly instead, same
-    PAGE_SIZE=5 + Prev/Next convention as every other list in this bot —
-    see _asset_vuln_pagination_row. The two lists page independently
-    (au_assets_offset / au_vulns_offset), and — deliberately — these are
-    NOT hidden Input.Text fields the way _rev is; they're carried purely
-    through each Prev/Next click's own action data (see that function),
-    so any OTHER click on this card (changing the team, Select All, the
-    final Add User submit) naturally resets both back to page 1 instead
-    of a stale offset accumulating forever across unrelated clicks.
+    Real feature request: let the admin search for a specific asset or
+    vulnerability instead of only paging through a handful at a time.
+    Both ChoiceSets use style="filtered" (same native type-to-search
+    Teams already gives the "Pick someone already in this Teams team"
+    member picker above) and list every choice at once — no more
+    PAGE_SIZE/Prev-Next pagination for these two lists.
     """
     body = [{"type": "TextBlock", "text": f"Assets & Vulnerabilities for {', '.join(team_names)}:", "size": "Small", "weight": "Bolder", "spacing": "Medium", "wrap": True}]
 
@@ -545,30 +513,23 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
     # every other value on this card already needs to take effect.
     vulns = [v for v in all_vulns if v.get("host") in sel_assets] if sel_assets else []
 
-    def _int_offset(key):
-        try:
-            return max(0, int(form_data.get(key) or 0))
-        except (TypeError, ValueError):
-            return 0
-    a_offset = _int_offset("au_assets_offset")
-    v_offset = _int_offset("au_vulns_offset")
-
-    # Real bug report — see normalize_adduser_form_data's own docstring:
-    # these 2 pairs are what let the NEXT click reconcile a paginated
-    # ChoiceSet's own (necessarily page-local) echoed value against the
-    # TRUE full selection instead of one silently truncating the other.
-    # _au_*_sel always carries the complete, accumulated selection
-    # forward; _au_*_offset_shown records which page THIS render's
-    # ChoiceSet (if any) is showing, so normalize_ knows which ids it
-    # could possibly have just changed.
+    # _au_*_sel carries the accumulated true selection forward across
+    # renders where this particular ChoiceSet isn't on the card at all
+    # (e.g. no team picked yet) — see normalize_adduser_form_data.
     body.append({"type": "Input.Text", "id": "_au_assets_sel", "value": ",".join(sel_assets), "isVisible": False})
     body.append({"type": "Input.Text", "id": "_au_vulns_sel", "value": ",".join(sel_vulns), "isVisible": False})
-    body.append({"type": "Input.Text", "id": "_au_assets_offset_shown", "value": str(a_offset), "isVisible": False})
-    body.append({"type": "Input.Text", "id": "_au_vulns_offset_shown", "value": str(v_offset), "isVisible": False})
 
+    # Real feature request: let the admin search/filter Assets and
+    # Vulnerabilities instead of only paging through 5 at a time — Teams'
+    # own filtered ChoiceSet (same style already used for the "Pick
+    # someone already in this Teams team" member picker above) gives a
+    # native type-to-search box and shows every match at once, so the old
+    # PAGE_SIZE=5 Prev/Next pagination (and its page_ids reconciliation in
+    # normalize_adduser_form_data) is no longer needed for these two lists
+    # — every choice is always on the card, so Teams echoes back the
+    # complete true selection on every click, not just one page's worth.
     if assets:
         a_total = len(assets)
-        shown = assets[a_offset:a_offset + PAGE_SIZE]
         body.append({
             "type": "ActionSet", "spacing": "Small",
             "actions": [
@@ -576,8 +537,11 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
                 cards._execute_action("☐ Clear Assets", {"action_id": "team_adduser_assets_none"}),
             ],
         })
-        a_options = [{"title": f"{a['label']} [{a['severity']}]"[:75], "value": a["id"]} for a in shown]
-        a_element = {"type": "Input.ChoiceSet", "id": f"au_assets_{rev}", "label": f"Assets ({a_total})", "style": "expanded", "isMultiSelect": True, "choices": a_options}
+        a_options = [{"title": f"{a['label']} [{a['severity']}]"[:75], "value": a["id"]} for a in assets]
+        a_element = {
+            "type": "Input.ChoiceSet", "id": f"au_assets_{rev}", "label": f"Assets ({a_total})",
+            "style": "filtered", "placeholder": "Search assets…", "isMultiSelect": True, "choices": a_options,
+        }
         # Real bug report — see add_user_form_body's team_element comment:
         # "initial_options" isn't a real Adaptive Cards property, use
         # "value" (comma-separated string) instead.
@@ -585,12 +549,10 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
         if a_initial:
             a_element["value"] = ",".join(o["value"] for o in a_initial)
         body.append(a_element)
-        body.extend(_asset_vuln_pagination_row(a_offset, a_total, "assets", v_offset))
         if not sel_assets and all_vulns:
             body.append({"type": "TextBlock", "text": "_Check asset(s) above, then tap 🔄 Show Assets & Vulnerabilities for selected Team(s) again to see just their vulnerabilities here._", "size": "Small", "isSubtle": True, "spacing": "Small", "wrap": True})
     if vulns:
         v_total = len(vulns)
-        shown = vulns[v_offset:v_offset + PAGE_SIZE]
         body.append({
             "type": "ActionSet", "spacing": "Small",
             "actions": [
@@ -598,8 +560,11 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
                 cards._execute_action("☐ Clear Vulnerabilities", {"action_id": "team_adduser_vulns_none"}),
             ],
         })
-        v_options = [{"title": f"{v['label']} ({v['host']}) [{v['severity']}]"[:75], "value": v["id"]} for v in shown]
-        v_element = {"type": "Input.ChoiceSet", "id": f"au_vulns_{rev}", "label": f"Vulnerabilities ({v_total})", "style": "expanded", "isMultiSelect": True, "choices": v_options}
+        v_options = [{"title": f"{v['label']} ({v['host']}) [{v['severity']}]"[:75], "value": v["id"]} for v in vulns]
+        v_element = {
+            "type": "Input.ChoiceSet", "id": f"au_vulns_{rev}", "label": f"Vulnerabilities ({v_total})",
+            "style": "filtered", "placeholder": "Search vulnerabilities…", "isMultiSelect": True, "choices": v_options,
+        }
         # Real bug report — see add_user_form_body's team_element comment:
         # "initial_options" isn't a real Adaptive Cards property, use
         # "value" (comma-separated string) instead.
@@ -607,38 +572,8 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
         if v_initial:
             v_element["value"] = ",".join(o["value"] for o in v_initial)
         body.append(v_element)
-        body.extend(_asset_vuln_pagination_row(v_offset, v_total, "vulns", a_offset))
     if not assets and not all_vulns:
         body.append({"type": "TextBlock", "text": "_No assets/vulnerabilities found for the selected team(s) yet — you can still add the user with team-level access._", "size": "Small", "isSubtle": True, "spacing": "Medium", "wrap": True})
-    return body
-
-
-def _asset_vuln_pagination_row(offset, total, which, other_offset):
-    """Prev/Next for one of the two lists in _assets_vulns_picker_blocks.
-    Both offsets are always sent explicitly on a click (this list's new
-    one, plus the OTHER list's current one, unchanged) — action-data-
-    driven rather than a hidden Input.Text, see that function's own
-    docstring for why."""
-    start = offset + 1 if total else 0
-    end = min(offset + PAGE_SIZE, total)
-    this_key = "au_assets_offset" if which == "assets" else "au_vulns_offset"
-    other_key = "au_vulns_offset" if which == "assets" else "au_assets_offset"
-    body = [{"type": "TextBlock", "text": f"Showing {start}-{end} of {total}", "size": "Small", "isSubtle": True, "spacing": "Small"}]
-    actions = []
-    if offset > 0:
-        actions.append(cards._execute_action("‹ Prev", {
-            "action_id": "team_adduser_refresh",
-            this_key: max(0, offset - PAGE_SIZE),
-            other_key: other_offset,
-        }))
-    if offset + PAGE_SIZE < total:
-        actions.append(cards._execute_action("Next ›", {
-            "action_id": "team_adduser_refresh",
-            this_key: offset + PAGE_SIZE,
-            other_key: other_offset,
-        }))
-    if actions:
-        body.append({"type": "ActionSet", "spacing": "Small", "actions": actions})
     return body
 
 
