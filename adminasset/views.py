@@ -222,22 +222,23 @@ class ReportAssetsAPIView(APIView):
                 category_overrides = get_category_overrides_for_report(db, doc.get("admin_id") or str(request.user.id))
 
                 # Real bug report: a host with a mix of both natures (e.g.
-                # producers-demo.fgeninsurance.com — genuinely a web
-                # application, but its scan also turns up its underlying
-                # OpenSSH/Apache/nginx/TLS-config issues) only ever showed
-                # under ONE tab here (its single host-level asset_type,
-                # "web_app") even though "Outdated Apache HTTP Server
-                # Version" — a finding ON this exact host — correctly
-                # shows under "Server" on the All Vulnerabilities tab
-                # (see classify_finding_type). Same inconsistency already
-                # fixed there: a vulnerability affecting more than one
-                # category counts toward each; a host should too. asset
-                # ["categories"] lists every category this host actually
-                # qualifies for (its own findings' individual nature, via
-                # classify_finding_type, falling back to the host's own
-                # asset_type for a finding with no signal of its own) —
-                # "asset_type" is kept unchanged as the host's own single
-                # primary badge.
+                # Real request: a host used to count toward EVERY Assets-
+                # tab category any of its individual findings matched (e.g.
+                # producers-demo.fgeninsurance.com, host-classified
+                # "web_app", also counted under "Server" because of its
+                # underlying OpenSSH/Apache/nginx findings) — so the pill
+                # totals (Server + Web App + ...) could add up to more than
+                # the "All" count for the same report. Confirmed live on a
+                # real 3-asset report where Server showed 3 and Web App
+                # showed 1 but All was still 3. Each asset now counts
+                # toward exactly one category — its own host-level
+                # asset_type (or the admin's explicit override) — so the
+                # pills always sum to "All". The "All Vulnerabilities" tab
+                # keeps labelling each individual FINDING with its own
+                # type via classify_finding_type (that's a different,
+                # still-correct use — see userregister/adminregister
+                # views.py) — only the Assets tab's host-level category
+                # membership changes here.
                 asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
                 final = []
                 for a in assets.values():
@@ -246,13 +247,7 @@ class ReportAssetsAPIView(APIView):
                         categories = category_overrides[a["asset"]]
                         host_asset_type = categories[0]
                     else:
-                        categories = sorted({
-                            classify_finding_type(
-                                v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
-                                host_asset_type,
-                            )
-                            for v in a["_vulns_for_classification"]
-                        }) or [host_asset_type]
+                        categories = [host_asset_type]
                     for cat in categories:
                         asset_type_totals[cat] = asset_type_totals.get(cat, 0) + 1
 
@@ -1094,6 +1089,9 @@ class AdminAssetsAPIView(APIView):
                 # explanation — same "a mixed-nature host only ever showed
                 # under one tab" gap, same fix, in this endpoint's separate
                 # (non-report_id-scoped, "latest report") implementation.
+                # Each asset counts toward exactly one Assets-tab category
+                # now — see the earlier occurrence of this same block
+                # above for the real bug report this fixes.
                 asset_type_totals = {"other": 0, "web_app": 0, "firewall": 0, "server": 0}
                 final = []
                 for a in assets.values():
@@ -1102,13 +1100,7 @@ class AdminAssetsAPIView(APIView):
                         categories = category_overrides[a["asset"]]
                         host_asset_type = categories[0]
                     else:
-                        categories = sorted({
-                            classify_finding_type(
-                                v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
-                                host_asset_type,
-                            )
-                            for v in a["_vulns_for_classification"]
-                        }) or [host_asset_type]
+                        categories = [host_asset_type]
                     for cat in categories:
                         asset_type_totals[cat] = asset_type_totals.get(cat, 0) + 1
 
