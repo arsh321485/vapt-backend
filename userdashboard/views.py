@@ -358,7 +358,22 @@ class UserTotalAssetsAPIView(APIView):
                     card_host = (card.get("host_name") or "").strip()
                     _card_covered.add((card_host, pname.lower()))
                     raw_team = (card.get("assigned_team") or "").strip()
-                    matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+                    # Real bug report: infer_assigned_team(pname) used to be
+                    # OR'd in unconditionally, even when the card already
+                    # had a real, different assigned_team — so a finding
+                    # correctly card-classified "Patch Management" (e.g.
+                    # nginx, which infer_assigned_team's generic keyword
+                    # fallback happens to call "Configuration Management")
+                    # still leaked into Configuration Management's own
+                    # asset/vuln totals, purely because the two classifiers
+                    # disagreed. Confirmed live: 3 Patch-Management-native
+                    # findings (nginx, VMware ESXi x2) kept counting toward
+                    # Configuration Management's dashboard numbers even
+                    # after their cards' additional_teams was already
+                    # cleaned up. The keyword fallback now only applies
+                    # when the card has NO assigned_team at all — never to
+                    # override/second-guess a card that already has one.
+                    matched = teams_lower.get(raw_team.lower()) if raw_team else teams_lower.get(infer_assigned_team(pname).lower())
                     if matched:
                         plugin_team_map.setdefault((card_host, pname.lower()), set()).add(matched)
                     for extra_team in (card.get("additional_teams") or []):
@@ -539,7 +554,10 @@ class UserAvgScoreAPIView(APIView):
                     card_host = (card.get("host_name") or "").strip()
                     _card_covered.add((card_host, pname.lower()))
                     raw_team = (card.get("assigned_team") or "").strip()
-                    matched = teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower())
+                    # Same fix as UserTotalAssetsAPIView's identical block —
+                    # infer_assigned_team only steps in when the card has no
+                    # assigned_team of its own, never to override one.
+                    matched = teams_lower.get(raw_team.lower()) if raw_team else teams_lower.get(infer_assigned_team(pname).lower())
                     if matched:
                         plugin_team_map.setdefault((card_host, pname.lower()), set()).add(matched)
                     for extra_team in (card.get("additional_teams") or []):
@@ -765,14 +783,21 @@ class UserVulnerabilitiesAPIView(APIView):
                         if (pname, host_name) in excluded_plugins:
                             continue
                         raw_team, extra_teams = card_team_map.get((pname, host_name), ("", []))
-                        matched = (
-                            teams_lower.get(raw_team.lower())
-                            or teams_lower.get(infer_assigned_team(pname).lower())
-                            or next(
-                                (teams_lower[t.lower()] for t in extra_teams if t and t.lower() in teams_lower),
-                                None,
+                        # Same fix as UserTotalAssetsAPIView — only fall
+                        # back to the generic keyword classifier when this
+                        # pair has no card (and so no real assigned_team)
+                        # at all; never let it second-guess a card that
+                        # already names a different, valid team.
+                        if raw_team:
+                            matched = (
+                                teams_lower.get(raw_team.lower())
+                                or next(
+                                    (teams_lower[t.lower()] for t in extra_teams if t and t.lower() in teams_lower),
+                                    None,
+                                )
                             )
-                        )
+                        else:
+                            matched = teams_lower.get(infer_assigned_team(pname).lower())
                         if not matched:
                             continue
                         risk = plugin_risk.get(pname)
@@ -847,7 +872,11 @@ class UserVulnerabilitiesFixedAPIView(APIView):
                     # UserVulnerabilitiesAPIView — a custom team never
                     # matched a card here either.
                     has_extra = any((t or "").lower() in teams_lower for t in (card.get("additional_teams") or []))
-                    if teams_lower.get(raw_team.lower()) or teams_lower.get(infer_assigned_team(pname).lower()) or has_extra:
+                    # Same fix as UserVulnerabilitiesAPIView — infer_
+                    # assigned_team only applies when this card has no
+                    # assigned_team of its own.
+                    matched_own = teams_lower.get(raw_team.lower()) if raw_team else teams_lower.get(infer_assigned_team(pname).lower())
+                    if matched_own or has_extra:
                         team_pairs.add((hname, pname))
 
                 for _host in nessus_doc.get("vulnerabilities_by_host", []):
@@ -1203,14 +1232,21 @@ class UserPatchManagementAPIView(APIView):
                         if not pname:
                             continue
                         raw_team, extra_teams = card_team_map.get((pname, h_name), ("", []))
-                        matched = (
-                            teams_lower.get(raw_team.lower())
-                            or teams_lower.get(infer_assigned_team(pname).lower())
-                            or next(
-                                (teams_lower[t.lower()] for t in extra_teams if t and t.lower() in teams_lower),
-                                None,
+                        # Same fix as UserVulnerabilitiesAPIView — infer_
+                        # assigned_team only applies when this pair has no
+                        # card/assigned_team at all; never to override a
+                        # card that already names a (possibly different)
+                        # real team.
+                        if raw_team:
+                            matched = (
+                                teams_lower.get(raw_team.lower())
+                                or next(
+                                    (teams_lower[t.lower()] for t in extra_teams if t and t.lower() in teams_lower),
+                                    None,
+                                )
                             )
-                        )
+                        else:
+                            matched = teams_lower.get(infer_assigned_team(pname).lower())
                         if not matched:
                             continue
                         risk = plugin_risk.get(pname)
