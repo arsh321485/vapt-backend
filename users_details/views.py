@@ -87,6 +87,16 @@ def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role
     # Each team's selections now stay scoped to just that team.
     flat_assets = role_assignments.get("assets")
     flat_vulns = role_assignments.get("vulnerabilities")
+    # True only for the specific ambiguous case the native-team guard below
+    # exists for: ONE shared flat picker's selections applied to SEVERAL
+    # fixed teams in the same submission, where there's no way to tell
+    # which team a given pick was "for". A single team (flat, len==1) or
+    # the website's own nested per-team shape already carries unambiguous,
+    # explicit intent — an admin individually picking a specific
+    # vulnerability under one team's own selection, even one that isn't
+    # that team's native classification, is a deliberate cross-team
+    # assignment and must still be honored, not silently dropped.
+    _ambiguous_multi_team_flat = (flat_assets is not None or flat_vulns is not None) and len(team_names) > 1
     per_team_selection = {}
     if flat_assets is not None or flat_vulns is not None:
         for team in team_names:
@@ -183,8 +193,36 @@ def _apply_role_assignments_to_cards(db, admin_id, admin_email, team_names, role
                 if not isinstance(vid, str) or "||" not in vid:
                     continue
                 host_name, plugin_name = vid.split("||", 1)
-                if host_name and plugin_name:
-                    pairs.add((host_name, plugin_name))
+                if not host_name or not plugin_name:
+                    continue
+                # Same native-team guard as the "assets" loop above, but
+                # ONLY for the ambiguous multi-team-flat case (see
+                # _ambiguous_multi_team_flat above) — never for a single
+                # team or the website's nested per-team picker, where an
+                # individually-checked vulnerability is explicit, deliberate
+                # admin intent and must still go through even cross-team.
+                #
+                # Real bug report: granting a member several FIXED teams
+                # in one Add User submission (Slack/Teams only ever have
+                # ONE shared assets/vulnerabilities picker, no per-team
+                # tab — see the flat-shape comment above) with "Select All
+                # Vulnerabilities" checked tagged EVERY vulnerability in
+                # the combined picker with EVERY team being granted, since
+                # this loop (unlike the "assets" one) had no native-team
+                # check at all. Confirmed live: a member granted all 4
+                # fixed teams at once ended up with every one of that
+                # report's 65 cards' additional_teams holding all 4 team
+                # names, so Patch Management/Configuration Management/
+                # Network Security/Architectural Flaws all showed the
+                # exact same 15 assets and 93 vulnerabilities instead of
+                # each team's own subset.
+                if _ambiguous_multi_team_flat and team in _FIXED_TEAM_NAMES:
+                    native_team = plugin_team_lookup.get((host_name, plugin_name.lower()))
+                    if not native_team:
+                        native_team = infer_assigned_team(plugin_name)
+                    if native_team.lower() != team.lower():
+                        continue
+                pairs.add((host_name, plugin_name))
             if not pairs:
                 continue
             all_pairs |= pairs
