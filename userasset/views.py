@@ -478,23 +478,23 @@ class UserAssetsAPIView(APIView):
 
                     if host_name not in assets:
                         _host_asset_type = asset_type_map.get(host_name, "other")
-                        # See adminasset.views.ReportAssetsAPIView's own
-                        # comment — a mixed-nature host only ever showed
-                        # under one tab; "categories" lists every category
-                        # this host qualifies for, from ALL of its
-                        # vulnerabilities (same ALL-not-just-team scope
-                        # asset_type itself already uses below).
+                        # Real request: a host used to count toward EVERY
+                        # Assets-tab category any of its individual findings
+                        # matched (e.g. a Web App host with an nginx finding
+                        # also counted under Server), so the category pill
+                        # totals (Server + Web App + ...) could add up to
+                        # more than the "All" count for the same report —
+                        # confirmed live on a real 3-asset report where
+                        # Server showed 3 and Web App showed 1 but All was
+                        # still 3. Each asset now counts toward exactly one
+                        # category — its own host-level asset_type (or the
+                        # admin's explicit override) — so the pills always
+                        # sum to "All".
                         if host_name in category_overrides:
                             _categories = category_overrides[host_name]
                             _host_asset_type = _categories[0]
                         else:
-                            _categories = sorted({
-                                classify_finding_type(
-                                    v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
-                                    _host_asset_type,
-                                )
-                                for v in host.get("vulnerabilities", [])
-                            }) or [_host_asset_type]
+                            _categories = [_host_asset_type]
                         assets[host_name] = {
                             "asset": host_name,
                             "first_seen": uploaded_at,
@@ -778,25 +778,15 @@ class UserReportAssetsAPIView(APIView):
 
                     if host_name not in assets:
                         _host_asset_type = asset_type_map.get(host_name, "other")
-                        # Real bug report: see adminasset.views.ReportAssetsAPIView's
-                        # own comment — a host with a mix of natures (e.g. a
-                        # web app whose scan also found underlying OpenSSH/
-                        # Apache/nginx issues) only ever showed under its
-                        # single host-level asset_type. "categories" lists
-                        # every category this host qualifies for, from ALL
-                        # of its vulnerabilities (not just this team's,
-                        # same scope asset_type itself already uses above).
+                        # Each asset counts toward exactly one Assets-tab
+                        # category now — see the earlier occurrence of this
+                        # same block above for the real bug report this
+                        # fixes (category pill totals exceeding "All").
                         if host_name in category_overrides:
                             _categories = category_overrides[host_name]
                             _host_asset_type = _categories[0]
                         else:
-                            _categories = sorted({
-                                classify_finding_type(
-                                    v.get("plugin_name") or v.get("pluginname") or v.get("name") or "",
-                                    _host_asset_type,
-                                )
-                                for v in host.get("vulnerabilities", [])
-                            }) or [_host_asset_type]
+                            _categories = [_host_asset_type]
                         assets[host_name] = {
                             "asset": host_name,
                             "first_seen": uploaded_at,
