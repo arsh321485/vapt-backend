@@ -489,13 +489,9 @@ def two_row_pill_columnset(options, active_key, build_data, split=None):
 
 
 def _nav_button_columnset(active_action_id):
-    """The persistent top tab bar, split across two rows — real-Teams-
-    mobile testing (a channel post viewed on a phone) showed the earlier
-    single-row-of-8 experiment truncating every label down to one letter
-    ("A", "T", "I", "D...") instead of the real button text, so this
-    reverts to two_row_pill_columnset per NAV_ITEMS' own documented
-    fallback plan."""
-    return two_row_pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id})
+    """The persistent top tab bar — one row of all 8, see NAV_ITEMS'
+    own comment for the real-Teams-testing status of this."""
+    return pill_columnset(NAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id})
 
 
 def nav_buttons_card(active_action_id="nav_home", extra_body=None):
