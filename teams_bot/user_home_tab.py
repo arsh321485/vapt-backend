@@ -63,12 +63,12 @@ def nav_buttons_card(team_name, active_action_id="unav_home", extra_body=None):
     """
     body = [
         {"type": "TextBlock", "text": f"👥 {team_name}", "weight": "Bolder", "size": "Small", "isSubtle": True, "spacing": "None", "wrap": True},
-        # One row of all 7 — see UNAV_ITEMS' own comment for the real-
-        # Teams-testing status of this. Revert to
-        # cards.two_row_pill_columnset(UNAV_ITEMS, active_action_id,
-        # lambda action_id: {"action_id": action_id}, split=4) if this
-        # renders broken/truncated in real Teams.
-        cards.pill_columnset(UNAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}),
+        # Split across two rows — real-Teams-mobile testing showed the
+        # earlier single-row-of-7 experiment (see UNAV_ITEMS' own comment)
+        # truncating every label down to one letter instead of the real
+        # button text, same symptom confirmed on the admin-side nav (see
+        # cards._nav_button_columnset).
+        cards.two_row_pill_columnset(UNAV_ITEMS, active_action_id, lambda action_id: {"action_id": action_id}, split=4),
     ]
     body.extend(extra_body or [])
     return cards._card(body=body)
