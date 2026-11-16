@@ -39,6 +39,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('microsoft_teams', 'Microsoft Teams'),
         ('slack', 'Slack'),
         ('jira', 'Jira'),
+        ('google_chat', 'Google Chat'),
     ]
 
     id = models.CharField(
@@ -75,6 +76,16 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     jira_access_token = models.TextField(blank=True, null=True)
     jira_refresh_token = models.TextField(blank=True, null=True)
+
+    # The admin's Google account email/id, captured via the "Connect
+    # Google Chat" OAuth popup (GoogleChatOAuthCallbackView) — distinct
+    # from login_provider == 'google' (the plain "Sign in with Google"
+    # website login via GoogleOAuthView). Used to match this admin
+    # against the email Google Chat's own ADDED_TO_SPACE event reports
+    # for whoever added the bot to a space (see google_chat_bot.views),
+    # the same role slack_user_id/ms_teams_object_id play for Slack/Teams.
+    google_chat_email = models.CharField(max_length=255, blank=True, null=True)
+    google_chat_user_id = models.CharField(max_length=255, blank=True, null=True)
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)

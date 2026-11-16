@@ -6634,8 +6634,199 @@ class SlackOAuthCallbackView(APIView):
         </html>
         """
         return HttpResponse(html)
-                        
-     
+
+
+class GoogleChatOAuthUrlView(APIView):
+    """
+    Generates the Google OAuth authorization URL for the "Connect Google
+    Chat" button — same role as SlackOAuthUrlView, but for a plain
+    Google OAuth 2.0 client (NOT the Chat API's own service account —
+    see settings.GOOGLE_CHAT_LOGIN_CLIENT_ID's comment for why these are
+    two separate credentials).
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        # Unlike Slack/Teams, this popup can only ever LINK an existing
+        # account (see GoogleChatOAuthCallbackView's docstring for why
+        # it's not also a signup flow) — admin_id is required, not optional.
+        admin_id = request.data.get("admin_id")
+        if not admin_id:
+            return Response(
+                {"success": False, "error": "admin_id is required to connect Google Chat"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        state_data = {"admin_id": admin_id, "nonce": str(uuid.uuid4())}
+        state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+
+        redirect_uri = getattr(settings, "GOOGLE_CHAT_LOGIN_REDIRECT_URI", "")
+        if not redirect_uri:
+            base_url = request.data.get("base_url", "") or request.build_absolute_uri("/").rstrip("/")
+            redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/google-chat/callback/"
+        client_id = settings.GOOGLE_CHAT_LOGIN_CLIENT_ID
+
+        google_url = (
+            f"https://accounts.google.com/o/oauth2/v2/auth?"
+            f"client_id={client_id}"
+            f"&response_type=code"
+            f"&scope=openid%20email%20profile"
+            f"&redirect_uri={redirect_uri}"
+            f"&state={state}"
+            f"&access_type=online"
+            f"&prompt=select_account"
+        )
+
+        return Response({
+            "success": True,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "auth_url": google_url,
+        }, status=status.HTTP_200_OK)
+
+
+class GoogleChatOAuthCallbackView(APIView):
+    """
+    Handles the "Connect Google Chat" OAuth callback (GET). Exchanges
+    the code for an identity token, saves the admin's Google email/id
+    onto their EXISTING VaptFix account, and returns an HTML page that
+    postMessages the result back to the opener window before closing —
+    same pattern as SlackOAuthCallbackView/MicrosoftTeamsCallbackView.
+
+    Unlike Slack/Teams, this does NOT install anything — a Google Chat
+    app is always added to a space manually from inside Chat itself
+    (see google_chat_bot/views.py's ADDED_TO_SPACE handler, which
+    matches whoever added the bot against the google_chat_email saved
+    here). So this is NOT also a signup flow the way Slack/Teams' own
+    callbacks are: there's no bot-install step here that would make a
+    brand-new signup meaningful on its own, so admin_id must already
+    resolve to a real, logged-in-elsewhere VaptFix account.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            code = request.GET.get("code")
+            state = request.GET.get("state", "")
+            oauth_error = request.GET.get("error")
+
+            if oauth_error:
+                return self._html_response(success=False, error=f"Google denied the request: {oauth_error}")
+            if not code:
+                return self._html_response(success=False, error="Missing code from Google")
+
+            redirect_uri = getattr(settings, "GOOGLE_CHAT_LOGIN_REDIRECT_URI", "")
+            if not redirect_uri:
+                redirect_uri = f"{request.build_absolute_uri('/').rstrip('/')}/api/admin/users/google-chat/callback/"
+
+            try:
+                decoded_state = json.loads(base64.urlsafe_b64decode(state + "==").decode())
+            except Exception:
+                decoded_state = {}
+            admin_id_from_state = decoded_state.get("admin_id")
+            if not admin_id_from_state:
+                return self._html_response(success=False, error="Missing admin_id — connect Google Chat from your account settings.")
+
+            token_data = {
+                "client_id": settings.GOOGLE_CHAT_LOGIN_CLIENT_ID,
+                "client_secret": settings.GOOGLE_CHAT_LOGIN_CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            }
+            try:
+                token_res = _http_post("https://oauth2.googleapis.com/token", data=token_data, timeout=15)
+                token_json = token_res.json()
+            except Exception as e:
+                logger.error(f"[GoogleChatOAuth] Token exchange failed: {e}")
+                return self._html_response(success=False, error="Google token exchange failed")
+
+            access_token = token_json.get("access_token")
+            if not access_token:
+                logger.error(f"[GoogleChatOAuth] No access_token in response: {token_json}")
+                return self._html_response(success=False, error=token_json.get("error_description", "Google OAuth failed"))
+
+            try:
+                userinfo_res = _http_get(
+                    "https://openidconnect.googleapis.com/v1/userinfo",
+                    headers={"Authorization": f"Bearer {access_token}"}, timeout=15,
+                )
+                userinfo = userinfo_res.json()
+            except Exception as e:
+                logger.error(f"[GoogleChatOAuth] userinfo fetch failed: {e}")
+                return self._html_response(success=False, error="Failed to fetch Google account info")
+
+            google_email = userinfo.get("email")
+            google_user_id = userinfo.get("sub")
+            if not google_email:
+                return self._html_response(success=False, error="Google did not return an email address")
+
+            user = User.objects.filter(id=admin_id_from_state).first()
+            if not user:
+                return self._html_response(success=False, error="Could not find your VaptFix account — please log in again.")
+
+            # Platform enforcement: block if this account's primary login
+            # is already a different chat platform — same pairwise rule
+            # SlackOAuthCallbackView/MicrosoftTeamsCallbackView enforce
+            # against each other. This view only ever ADDITIVELY links a
+            # Google identity onto an existing account (never flips
+            # login_provider itself), so there's no symmetric check
+            # needed on the Slack/Teams side for "google_chat".
+            if user.login_provider == "slack" and user.slack_bot_token:
+                return self._html_response(success=False, error="Your account is connected to Slack. Please sign in using Slack.")
+            if user.login_provider == "microsoft_teams" and user.ms_access_token:
+                return self._html_response(success=False, error="Your account is connected to Microsoft Teams. Please sign in using Microsoft Teams.")
+
+            user.google_chat_email = google_email
+            user.google_chat_user_id = google_user_id
+            user.save(update_fields=["google_chat_email", "google_chat_user_id"])
+            logger.info(f"[GoogleChatOAuth] Linked Google Chat email for admin id={user.id} email={user.email} google_chat_email={google_email}")
+
+            return self._html_response(success=True, data={"google_chat_email": google_email})
+
+        except Exception as e:
+            logger.exception("Google Chat OAuth callback exception")
+            return self._html_response(success=False, error=str(e))
+
+    def _html_response(self, success=True, data=None, error=None):
+        """Same postMessage-then-close pattern as SlackOAuthCallbackView's
+        own _html_response — kept as a separate copy (not shared) since
+        the two already diverge in the message `type` they send and may
+        keep diverging as each platform's own flow grows."""
+        payload = {"success": success}
+        if success:
+            payload.update(data or {})
+        else:
+            payload.update({"error": error})
+        payload_json = json.dumps(payload)
+        result_text = "successful \U0001f389" if success else "failed"
+        html = f"""
+        <html>
+        <head>
+            <title>Google Chat OAuth</title>
+            <script>
+                (function() {{
+                    var payload = {payload_json};
+                    console.log("Google Chat OAuth finished:", payload);
+                    if (window.opener) {{
+                        window.opener.postMessage({{
+                            type: "GOOGLE_CHAT_CONNECTED",
+                            payload: payload
+                        }}, "*");
+                    }}
+                    window.close();
+                }})();
+            </script>
+        </head>
+        <body style="font-family:sans-serif; text-align:center; margin-top:40px;">
+            <h2>Google Chat connection {result_text}</h2>
+            <p>You can close this window now.</p>
+        </body>
+        </html>
+        """
+        return HttpResponse(html)
+
+
 class SlackLoginView(APIView):
     """
     Slack Login API - Tracks login source + identifies existing users

@@ -306,6 +306,16 @@ SLACK_SCOPES = [
 GOOGLE_CHAT_PROJECT_NUMBER = os.getenv("GOOGLE_CHAT_PROJECT_NUMBER", "")
 GOOGLE_CHAT_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_CHAT_SERVICE_ACCOUNT_FILE", "")
 
+# "Connect Google Chat" OAuth popup (GoogleChatOAuthUrlView/
+# GoogleChatOAuthCallbackView, users/views.py) — a separate OAuth client
+# from the above (that's the Chat API's own service account; this is a
+# normal "Sign in with Google" OAuth 2.0 client, same shape as
+# SLACK_CLIENT_ID/SLACK_CLIENT_SECRET/SLACK_REDIRECT_URI above), used
+# only to identify the admin's Google email, never to call the Chat API.
+GOOGLE_CHAT_LOGIN_CLIENT_ID = os.getenv("GOOGLE_CHAT_LOGIN_CLIENT_ID", "")
+GOOGLE_CHAT_LOGIN_CLIENT_SECRET = os.getenv("GOOGLE_CHAT_LOGIN_CLIENT_SECRET", "")
+GOOGLE_CHAT_LOGIN_REDIRECT_URI = os.getenv("GOOGLE_CHAT_LOGIN_REDIRECT_URI", "")
+
 JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "")
 JIRA_CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET", "")
 JIRA_REDIRECT_URI = os.getenv("JIRA_REDIRECT_URI", "http://localhost:8000/api/admin/users/jira/callback/")

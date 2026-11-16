@@ -38,6 +38,8 @@ from .views import (
     
     SlackOAuthUrlView,
     SlackOAuthCallbackView,
+    GoogleChatOAuthUrlView,
+    GoogleChatOAuthCallbackView,
     SlackValidateTokenView,
     SlackOAuthView,
     SlackLoginView,
@@ -163,6 +165,10 @@ urlpatterns = [
     path('slack/callback/', SlackOAuthCallbackView.as_view(), name='slack-callback'),
     path('slack/validate-token/', SlackValidateTokenView.as_view(), name='slack-validate-token'),
     path('slack/login/', SlackLoginView.as_view(), name='slack-login'),
+
+    # Google Chat login/connect APIs
+    path('google-chat/oauth-url/', GoogleChatOAuthUrlView.as_view(), name='google-chat-oauth-url'),
+    path('google-chat/callback/', GoogleChatOAuthCallbackView.as_view(), name='google-chat-callback'),
     path('slack-oauth/', SlackOAuthView.as_view(), name='slack-oauth'),   
     # Slack Channel Management
     path('slack/channels/list/', ListSlackChannelsView.as_view(), name='slack-list-channels'),
