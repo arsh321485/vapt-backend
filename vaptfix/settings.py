@@ -143,6 +143,7 @@ INSTALLED_APPS = [
     "webinar",
     "billing",
     "teams_bot",
+    "google_chat_bot",
 ]
 
 MIDDLEWARE = [
@@ -292,6 +293,18 @@ SLACK_SCOPES = [
     'pins:write',  # used when pinning the automation report message (pins.add)
     'app_mentions:read',  # used by the @vaptfix mention event handler
 ]
+
+# Google Chat app config (Google Cloud Console -> APIs & Services ->
+# Google Chat API -> Configuration). GOOGLE_CHAT_PROJECT_NUMBER is the
+# Cloud project's numeric project number (not the project ID string) —
+# it's what Chat puts in the bearer token's `aud` claim on every event
+# POST (see google_chat_bot/auth.py). GOOGLE_CHAT_SERVICE_ACCOUNT_FILE
+# is the path to the downloaded service-account JSON key used to call
+# the Chat API back (google_chat_bot/bot_api.py) — mirrors how
+# VAPTFIX_TEAMS_ICON_PATH above points at a file on disk rather than
+# storing file content directly in an env var.
+GOOGLE_CHAT_PROJECT_NUMBER = os.getenv("GOOGLE_CHAT_PROJECT_NUMBER", "")
+GOOGLE_CHAT_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_CHAT_SERVICE_ACCOUNT_FILE", "")
 
 JIRA_CLIENT_ID = os.getenv("JIRA_CLIENT_ID", "")
 JIRA_CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET", "")

@@ -26,6 +26,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path("api/admin/users/", include("users.urls")),
     path("api/admin/users/teams/", include("teams_bot.urls")),
+    path("api/admin/users/google-chat/", include("google_chat_bot.urls")),
     path("api/admin/location/", include("location.urls")),
     path("api/admin/users_details/", include("users_details.urls")),
     path("api/admin/risk_criteria/", include("risk_criteria.urls")),

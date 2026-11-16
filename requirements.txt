@@ -61,6 +61,11 @@ Pillow>=10.0.0
 # Slack official SDK (marketplace requirement)
 slack-sdk>=3.27.0
 
+# Google Chat bot auth (verifying incoming events + service-account
+# token for outbound Chat API calls) — no google-api-python-client,
+# same hand-rolled-HTTP approach as the Slack/Teams integrations.
+google-auth>=2.23.0
+
 # PDF report generation (optional — needed for download-report?format=pdf)
 weasyprint>=60.0
 
