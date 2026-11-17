@@ -53,7 +53,7 @@ crewai>=0.80.0
 crewai-tools>=0.17.0
 langchain-openai>=0.2.0
 rich>=13.7.0
-pydantic>=2.6.0
+pydantic>=2.14.3
 
 # Image processing (Teams icon upload)
 Pillow>=10.0.0
