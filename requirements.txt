@@ -48,7 +48,7 @@ lxml==6.0.2
 stripe==15.5.0
 
 # AI / LLM integration
-openai>=1.0.0
+openai>=3.51.0
 crewai>=0.80.0
 crewai-tools>=0.17.0
 langchain-openai>=0.2.0
