@@ -17,7 +17,7 @@ django-cors-headers==4.5.0
 sendgrid==6.10.0
 
 # Password validation and security
-django-extensions==3.2.3
+django-extensions==4.1
 
 # Environment variables
 python-decouple==3.8
