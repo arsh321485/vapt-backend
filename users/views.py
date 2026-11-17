@@ -17,16 +17,43 @@ from django.contrib.auth.hashers import make_password
 from django.shortcuts import redirect
 from django.utils import timezone
 import requests
+import time
 
 REQUEST_TIMEOUT_SECONDS = 15
 
-def _http_get(url, **kwargs):
+# TM-52 (Throttling and retry handling): Microsoft Graph and most of the
+# other third-party APIs called through _http_get/_http_post (Slack,
+# Jira, Google) can return 429/503 under load, with a Retry-After header
+# saying how long to wait. Neither was honored anywhere before this —
+# a single throttled call surfaced straight to the caller as a hard
+# failure. Capped at 2 retries and a 5s wait so a webhook handler never
+# blocks for an unreasonable time even if the Retry-After header asks
+# for longer.
+_MAX_RETRIES = 2
+_MAX_RETRY_WAIT_SECONDS = 5
+
+
+def _request_with_retry(method, url, **kwargs):
     timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.get(url, timeout=timeout, **kwargs)
+    attempt = 0
+    while True:
+        resp = method(url, timeout=timeout, **kwargs)
+        if resp.status_code not in (429, 503) or attempt >= _MAX_RETRIES:
+            return resp
+        wait = resp.headers.get("Retry-After")
+        try:
+            wait = min(float(wait), _MAX_RETRY_WAIT_SECONDS) if wait else 0.5 * (attempt + 1)
+        except (TypeError, ValueError):
+            wait = 0.5 * (attempt + 1)
+        logger.warning(f"[HTTP Retry] {resp.status_code} from {url}, retrying in {wait}s (attempt {attempt + 1}/{_MAX_RETRIES})")
+        time.sleep(wait)
+        attempt += 1
+
+def _http_get(url, **kwargs):
+    return _request_with_retry(requests.get, url, **kwargs)
 
 def _http_post(url, **kwargs):
-    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
-    return requests.post(url, timeout=timeout, **kwargs)
+    return _request_with_retry(requests.post, url, **kwargs)
 
 def _picker_cache_key(view_id):
     return f"slack_adduser_picker:{view_id}"
@@ -1020,6 +1047,25 @@ class UserSetPasswordView(APIView):
 @api_view(["POST"])
 @permission_classes([permissions.IsAuthenticated])
 def logout_view(request):
+    """
+    TM-2.6 (Sign-out behaviour): this used to return success without
+    actually revoking anything -- the refresh token stayed fully valid
+    after "logout", so anyone still holding it could keep minting new
+    access tokens. Now blacklists the refresh token the client sends,
+    so /api/admin/users/token/refresh/ rejects it afterward (handled by
+    SimpleJWT's own token_blacklist app -- RefreshToken.verify() checks
+    the blacklist automatically once that app is installed, no change
+    needed to TokenRefreshView itself). The current access token is
+    unaffected (stateless JWTs aren't blacklist-checked per request) --
+    it simply expires on its own ACCESS_TOKEN_LIFETIME as before.
+    """
+    refresh_token = request.data.get("refresh")
+    if refresh_token:
+        try:
+            from rest_framework_simplejwt.tokens import RefreshToken
+            RefreshToken(refresh_token).blacklist()
+        except Exception:
+            logger.warning("[Logout] Could not blacklist refresh token (missing/invalid/already blacklisted)")
     return Response({"message": "Logout successful"}, status=200)
     
     
