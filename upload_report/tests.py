@@ -13,6 +13,7 @@ Covers:
     safety net.
 """
 import json
+import os
 import unittest
 
 from upload_report.mitigation_tool import (
@@ -287,3 +288,66 @@ class CrewAgentWiringTests(unittest.TestCase):
         self.assertEqual(tasks[-1].agent.role, "Mitigation Card Formatter and QA Reviewer")
         roles = [t.agent.role for t in tasks]
         self.assertNotIn("Automation Feasibility Analyst and Script Engineer", roles)
+
+
+class CrossTenantIsolationTests(unittest.TestCase):
+    """
+    TM-7.3 (Tenant isolation enforced and tested): a REAL test against
+    the real database (not a mock) — confirms admin A's own token
+    cannot read admin B's UploadReport via GET /upload/<report_id>/
+    (UploadReportDetailAPIView, upload_report/views.py), which is
+    supposed to be refused by its own `.filter(_id=obj_id,
+    admin=request.user)` scoping.
+
+    Deliberately NOT a django.test.TestCase, so `manage.py test` never
+    auto-collects/runs it — this project's djongo (MongoDB) backend has
+    no confirmed, isolated test-database setup, and this test performs
+    real reads against whatever DATABASES['default'] points at (no
+    writes). Run it on purpose:
+        RUN_LIVE_DB_TESTS=1 python manage.py test upload_report.tests.CrossTenantIsolationTests
+    only once you know what database that is. Already verified live,
+    manually, against production as read-only: own report -> 200,
+    cross-tenant report -> 404.
+
+    Uses two already-existing real admin/report records (no fixtures
+    exist for this yet) — if either is ever deleted, swap in a
+    different real admin pair that still has an UploadReport each.
+    """
+
+    ADMIN_A_ID = "a439e929-77f5-48dc-ae4a-d1fdc52ddbe6"
+    ADMIN_A_OWN_REPORT_ID = "6aef1e0a5793705afb9aba5c"
+    ADMIN_B_REPORT_ID = "6aed8656c769034a75d2f432"  # belongs to a DIFFERENT admin
+
+    @unittest.skipUnless(
+        os.getenv("RUN_LIVE_DB_TESTS") == "1",
+        "Set RUN_LIVE_DB_TESTS=1 to run this — it reads real data from whatever "
+        "database is configured. See class docstring.",
+    )
+    def test_admin_cannot_read_another_admins_report(self):
+        from django.contrib.auth import get_user_model
+        from django.test import Client
+        from django.test.utils import override_settings
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        User = get_user_model()
+        admin_a = User.objects.filter(id=self.ADMIN_A_ID).first()
+        self.assertIsNotNone(admin_a, "Admin A fixture record no longer exists — swap in a different real admin pair")
+
+        access = str(RefreshToken.for_user(admin_a).access_token)
+        with override_settings(ALLOWED_HOSTS=["testserver"]):
+            client = Client()
+
+            own = client.get(
+                f"/api/admin/upload_report/upload/{self.ADMIN_A_OWN_REPORT_ID}/",
+                HTTP_AUTHORIZATION=f"Bearer {access}",
+            )
+            self.assertEqual(own.status_code, 200, "Admin A should be able to read their own report")
+
+            cross = client.get(
+                f"/api/admin/upload_report/upload/{self.ADMIN_B_REPORT_ID}/",
+                HTTP_AUTHORIZATION=f"Bearer {access}",
+            )
+            self.assertEqual(
+                cross.status_code, 404,
+                "Admin A's token must NOT be able to read a report belonging to a different admin",
+            )

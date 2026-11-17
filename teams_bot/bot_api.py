@@ -11,6 +11,31 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+# TM-52 (Throttling and retry handling): the Connector API can return
+# 429/503 under load, with a Retry-After header saying how long to
+# wait — never honored anywhere below before this, so a single
+# throttled call surfaced straight to the caller as a hard failure.
+# Capped at 2 retries and a 5s wait so a card click never blocks for
+# an unreasonable time even if Retry-After asks for longer.
+_MAX_RETRIES = 2
+_MAX_RETRY_WAIT_SECONDS = 5
+
+
+def _request_with_retry(method, url, **kwargs):
+    attempt = 0
+    while True:
+        resp = method(url, **kwargs)
+        if resp.status_code not in (429, 503) or attempt >= _MAX_RETRIES:
+            return resp
+        wait = resp.headers.get("Retry-After")
+        try:
+            wait = min(float(wait), _MAX_RETRY_WAIT_SECONDS) if wait else 0.5 * (attempt + 1)
+        except (TypeError, ValueError):
+            wait = 0.5 * (attempt + 1)
+        logger.warning(f"[TeamsBot] {resp.status_code} from {url}, retrying in {wait}s (attempt {attempt + 1}/{_MAX_RETRIES})")
+        time.sleep(wait)
+        attempt += 1
+
 # Confirmed via a real failing call (Connector API returned 401
 # "Authorization has been denied for this request" with a token that
 # otherwise decoded fine — correct aud/appid): the Azure Bot resource here
@@ -43,7 +68,8 @@ def _get_bot_access_token() -> str:
     if _cached_token and time.time() < _cached_token_expires_at - 60:
         return _cached_token
 
-    resp = requests.post(
+    resp = _request_with_retry(
+        requests.post,
         settings.MICROSOFT_APP_TOKEN_URL,
         data={
             "grant_type": "client_credentials",
@@ -75,7 +101,7 @@ def reply_to_activity(service_url: str, conversation_id: str, activity_id: str, 
     for a card: {"type": "message", "attachments": [adaptive_card_attachment(...)]}.
     """
     url = f"{service_url.rstrip('/')}/v3/conversations/{conversation_id}/activities/{activity_id}"
-    resp = requests.post(url, json=activity, headers=_connector_headers(), timeout=15)
+    resp = _request_with_retry(requests.post, url, json=activity, headers=_connector_headers(), timeout=15)
     if resp.status_code >= 300:
         logger.warning(f"[TeamsBot] reply_to_activity failed ({resp.status_code}): {resp.text[:500]}")
     return resp
@@ -92,7 +118,7 @@ def update_activity(service_url: str, conversation_id: str, activity_id: str, ac
     still showing" / "history" piling up.
     """
     url = f"{service_url.rstrip('/')}/v3/conversations/{conversation_id}/activities/{activity_id}"
-    resp = requests.put(url, json=activity, headers=_connector_headers(), timeout=15)
+    resp = _request_with_retry(requests.put, url, json=activity, headers=_connector_headers(), timeout=15)
     if resp.status_code >= 300:
         logger.warning(f"[TeamsBot] update_activity failed ({resp.status_code}): {resp.text[:500]}")
     return resp
@@ -126,7 +152,7 @@ def create_personal_conversation(service_url: str, bot_id: str, tenant_id: str, 
         "channelData": {"tenant": {"id": tenant_id}} if tenant_id else {},
     }
     try:
-        resp = requests.post(url, json=payload, headers=_connector_headers(), timeout=15)
+        resp = _request_with_retry(requests.post, url, json=payload, headers=_connector_headers(), timeout=15)
     except Exception:
         logger.exception("[TeamsBot] create_personal_conversation request failed")
         return None
@@ -164,7 +190,7 @@ def get_conversation_member(service_url: str, conversation_id: str, member_id: s
         return None
     url = f"{service_url.rstrip('/')}/v3/conversations/{conversation_id}/members/{member_id}"
     try:
-        resp = requests.get(url, headers=_connector_headers(), timeout=15)
+        resp = _request_with_retry(requests.get, url, headers=_connector_headers(), timeout=15)
     except Exception:
         logger.exception("[TeamsBot] get_conversation_member request failed")
         return None
@@ -184,7 +210,7 @@ def send_activity(service_url: str, conversation_id: str, activity: dict):
     admin) outside the turn that created the conversation.
     """
     url = f"{service_url.rstrip('/')}/v3/conversations/{conversation_id}/activities"
-    resp = requests.post(url, json=activity, headers=_connector_headers(), timeout=15)
+    resp = _request_with_retry(requests.post, url, json=activity, headers=_connector_headers(), timeout=15)
     if resp.status_code >= 300:
         logger.warning(f"[TeamsBot] send_activity failed ({resp.status_code}): {resp.text[:500]}")
     return resp
@@ -202,7 +228,7 @@ def delete_activity(service_url: str, conversation_id: str, activity_id: str):
         return None
     url = f"{service_url.rstrip('/')}/v3/conversations/{conversation_id}/activities/{activity_id}"
     try:
-        resp = requests.delete(url, headers=_connector_headers(), timeout=15)
+        resp = _request_with_retry(requests.delete, url, headers=_connector_headers(), timeout=15)
         if resp.status_code >= 300:
             logger.info(f"[TeamsBot] delete_activity ({activity_id}) -> {resp.status_code} (likely already gone/too old, harmless)")
         return resp
