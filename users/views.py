@@ -3307,6 +3307,14 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
 
                 login(request, user)
                 refresh = RefreshToken.for_user(user)
+                # TEMP (2.11 manual test only — remove after testing): see
+                # matching comment on MicrosoftTeamsCallbackView. This is the
+                # actual endpoint the "Sign in with Microsoft Teams" button
+                # hits, confirmed by decoding the issued token — so the
+                # 2-minute override belongs here too.
+                if user.email == "yash@vaptfix.ai":
+                    from datetime import timedelta as _td
+                    refresh.access_token.set_exp(lifetime=_td(minutes=2))
 
                 # Real bug report (frontend spec): teams_tab_url never had
                 # &tenantId= on it — the Graph access_token itself is a JWT
