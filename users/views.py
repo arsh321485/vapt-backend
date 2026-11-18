@@ -3145,6 +3145,14 @@ class MicrosoftTeamsCallbackView(APIView):
 
                 # Generate Django JWT so frontend can call IsAuthenticated APIs
                 refresh = RefreshToken.for_user(user)
+                # TEMP (2.11 manual test only — remove after testing): shortens
+                # the access token lifetime to 2 minutes for this one test
+                # admin's Teams login, so session-expiry can be verified
+                # without waiting out the normal 1-day SIMPLE_JWT lifetime.
+                # Every other user/admin keeps the default lifetime untouched.
+                if user.email == "yash@vaptfix.ai":
+                    from datetime import timedelta as _td
+                    refresh.access_token.set_exp(lifetime=_td(minutes=2))
                 django_access_token = str(refresh.access_token)
                 django_refresh_token = str(refresh)
 
