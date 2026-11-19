@@ -3145,22 +3145,7 @@ class MicrosoftTeamsCallbackView(APIView):
 
                 # Generate Django JWT so frontend can call IsAuthenticated APIs
                 refresh = RefreshToken.for_user(user)
-                # access_token is a SimpleJWT @property — every access builds
-                # a BRAND NEW AccessToken with the default lifetime. Must
-                # compute it once and reuse that same object, or a set_exp()
-                # call lands on a throwaway instance with zero real effect
-                # (this was exactly why the first two attempts at this TEMP
-                # override never actually shortened the issued token).
-                access_token_obj = refresh.access_token
-                # TEMP (2.11 manual test only — remove after testing): shortens
-                # the access token lifetime to 2 minutes for this one test
-                # admin's Teams login, so session-expiry can be verified
-                # without waiting out the normal 1-day SIMPLE_JWT lifetime.
-                # Every other user/admin keeps the default lifetime untouched.
-                if user.email == "yash@vaptfix.ai":
-                    from datetime import timedelta as _td
-                    access_token_obj.set_exp(lifetime=_td(minutes=2))
-                django_access_token = str(access_token_obj)
+                django_access_token = str(refresh.access_token)
                 django_refresh_token = str(refresh)
 
                 user_data = {
@@ -3314,17 +3299,6 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
 
                 login(request, user)
                 refresh = RefreshToken.for_user(user)
-                # access_token is a SimpleJWT @property — every access to it
-                # builds a BRAND NEW AccessToken with the default lifetime.
-                # Must compute it once into a variable and reuse that same
-                # object everywhere below, or any set_exp() call lands on a
-                # throwaway instance and has zero effect on what's returned.
-                access_token_obj = refresh.access_token
-                # TEMP (2.11 manual test only — remove after testing): see
-                # matching comment on MicrosoftTeamsCallbackView.
-                if user.email == "yash@vaptfix.ai":
-                    from datetime import timedelta as _td
-                    access_token_obj.set_exp(lifetime=_td(minutes=2))
 
                 # Real bug report (frontend spec): teams_tab_url never had
                 # &tenantId= on it — the Graph access_token itself is a JWT
@@ -3358,13 +3332,13 @@ class MicrosoftTeamsOAuthView(generics.GenericAPIView):
                     "user": UserProfileSerializer(user).data,
                     "tokens": {
                         "refresh": str(refresh),
-                        "access": str(access_token_obj),
+                        "access": str(refresh.access_token),
                         "tenant_id": tenant_id,
                     },
                     # Duplicate flat keys — same convention as the Slack/Teams
                     # OAuth-popup postMessage payloads (see AdminSignupVerifyOTPView
                     # comment on the frontend-facing shape mismatch).
-                    "django_access_token": str(access_token_obj),
+                    "django_access_token": str(refresh.access_token),
                     "django_refresh_token": str(refresh),
                     "access_token": str(access_token),
                     "is_new_user": is_new_user,
