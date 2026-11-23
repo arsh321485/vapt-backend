@@ -112,6 +112,17 @@ def _body_text(text):
     return {"type": "TextBlock", "text": text, "wrap": True, "spacing": "Medium"}
 
 
+def ai_disclosure_block():
+    """TM-8.16: any screen that shows model-drafted remediation/automation
+    content (fix_tab.py's manual-fix steps and automation-script bodies)
+    must disclose that before the content, not hide it."""
+    return {
+        "type": "TextBlock",
+        "text": "🤖 This remediation text was drafted by a model. Review it before you act.",
+        "wrap": True, "size": "Small", "isSubtle": True, "spacing": "Medium",
+    }
+
+
 def _open_url_action(title, url, style=None):
     action = {"type": "Action.OpenUrl", "title": title, "url": url}
     if style:

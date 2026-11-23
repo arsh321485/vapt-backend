@@ -1189,6 +1189,7 @@ def _automation_fix_body(automation, admin=None):
     # nothing was said about it", not "this can't be automated").
     if automation.get("automation_possible") == "No":
         body = [
+            cards.ai_disclosure_block(),
             {
                 "type": "FactSet",
                 "facts": [
@@ -1207,15 +1208,18 @@ def _automation_fix_body(automation, admin=None):
             body.append({"type": "TextBlock", "text": str(reason)[:800], "wrap": True, "size": "Small", "isSubtle": True})
         return body
 
-    body = [{
-        "type": "FactSet",
-        "facts": [
-            {"title": "Severity", "value": str(automation.get("severity") or "—")},
-            {"title": "OS", "value": str(automation.get("os") or "—")},
-            {"title": "Language", "value": str(automation.get("language") or "—")},
-            {"title": "Automation Possible", "value": str(automation.get("automation_possible") or "—")},
-        ],
-    }]
+    body = [
+        cards.ai_disclosure_block(),
+        {
+            "type": "FactSet",
+            "facts": [
+                {"title": "Severity", "value": str(automation.get("severity") or "—")},
+                {"title": "OS", "value": str(automation.get("os") or "—")},
+                {"title": "Language", "value": str(automation.get("language") or "—")},
+                {"title": "Automation Possible", "value": str(automation.get("automation_possible") or "—")},
+            ],
+        },
+    ]
 
     def add(label, key):
         val = automation.get(key)
@@ -1404,6 +1408,7 @@ def _manual_fix_body(steps_data, host_os_hint, value_base, step_number=None):
     step = by_number[step_number]
 
     body = [{"type": "TextBlock", "text": f"📋 Step {step_number} of {total} (view only) — {completed}/{total} done · OS: {os_v}", "weight": "Bolder", "size": "Small", "wrap": True, "spacing": "Medium"}]
+    body.append(cards.ai_disclosure_block())
     items, _done = step_content_items(step, os_key)
     body.append({"type": "Container", "items": items, "spacing": "Medium", "separator": True})
 
