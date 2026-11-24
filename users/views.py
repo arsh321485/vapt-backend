@@ -6684,26 +6684,26 @@ class SlackOAuthCallbackView(APIView):
 
 class GoogleChatOAuthUrlView(APIView):
     """
-    Generates the Google OAuth authorization URL for the "Connect Google
-    Chat" button — same role as SlackOAuthUrlView, but for a plain
+    Generates the Google OAuth authorization URL for the "Sign up / Connect
+    Google Chat" button — same role as SlackOAuthUrlView, but for a plain
     Google OAuth 2.0 client (NOT the Chat API's own service account —
     see settings.GOOGLE_CHAT_LOGIN_CLIENT_ID's comment for why these are
     two separate credentials).
+
+    admin_id is optional, same as Slack: present when an already-logged-in
+    admin is linking Google Chat from account settings, absent when this is
+    the "Sign up with Google Chat" button on the signup page (see
+    GoogleChatOAuthCallbackView, which creates a new account in that case).
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        # Unlike Slack/Teams, this popup can only ever LINK an existing
-        # account (see GoogleChatOAuthCallbackView's docstring for why
-        # it's not also a signup flow) — admin_id is required, not optional.
         admin_id = request.data.get("admin_id")
-        if not admin_id:
-            return Response(
-                {"success": False, "error": "admin_id is required to connect Google Chat"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        state_data = {"admin_id": admin_id, "nonce": str(uuid.uuid4())}
+        state_data = {
+            "admin_id": admin_id,
+            "nonce": str(uuid.uuid4()),
+            "invite_token": request.data.get("invite_token"),
+        }
         state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
 
         redirect_uri = getattr(settings, "GOOGLE_CHAT_LOGIN_REDIRECT_URI", "")
@@ -6733,20 +6733,20 @@ class GoogleChatOAuthUrlView(APIView):
 
 class GoogleChatOAuthCallbackView(APIView):
     """
-    Handles the "Connect Google Chat" OAuth callback (GET). Exchanges
-    the code for an identity token, saves the admin's Google email/id
-    onto their EXISTING VaptFix account, and returns an HTML page that
-    postMessages the result back to the opener window before closing —
-    same pattern as SlackOAuthCallbackView/MicrosoftTeamsCallbackView.
+    Handles the "Sign up / Connect Google Chat" OAuth callback (GET).
+    Exchanges the code for an identity token, then either links the
+    Google identity onto an EXISTING VaptFix account (admin_id present
+    in state — account-settings "Connect Google Chat") or creates a new
+    account (admin_id absent — signup page's "Sign up with Google Chat"),
+    same two-branch pattern as SlackOAuthCallbackView. Returns an HTML
+    page that postMessages the result back to the opener window before
+    closing.
 
-    Unlike Slack/Teams, this does NOT install anything — a Google Chat
-    app is always added to a space manually from inside Chat itself
-    (see google_chat_bot/views.py's ADDED_TO_SPACE handler, which
-    matches whoever added the bot against the google_chat_email saved
-    here). So this is NOT also a signup flow the way Slack/Teams' own
-    callbacks are: there's no bot-install step here that would make a
-    brand-new signup meaningful on its own, so admin_id must already
-    resolve to a real, logged-in-elsewhere VaptFix account.
+    Note: a Google Chat app is still added to a space manually from
+    inside Chat itself (see google_chat_bot/views.py's ADDED_TO_SPACE
+    handler, which matches whoever added the bot against the
+    google_chat_email saved here) — signing up here only creates the
+    VaptFix account and logs it in, same as Slack/Teams signup.
     """
     permission_classes = [AllowAny]
 
@@ -6770,8 +6770,7 @@ class GoogleChatOAuthCallbackView(APIView):
             except Exception:
                 decoded_state = {}
             admin_id_from_state = decoded_state.get("admin_id")
-            if not admin_id_from_state:
-                return self._html_response(success=False, error="Missing admin_id — connect Google Chat from your account settings.")
+            invite_token_from_state = decoded_state.get("invite_token")
 
             token_data = {
                 "client_id": settings.GOOGLE_CHAT_LOGIN_CLIENT_ID,
@@ -6807,28 +6806,67 @@ class GoogleChatOAuthCallbackView(APIView):
             if not google_email:
                 return self._html_response(success=False, error="Google did not return an email address")
 
-            user = User.objects.filter(id=admin_id_from_state).first()
-            if not user:
-                return self._html_response(success=False, error="Could not find your VaptFix account — please log in again.")
+            newly_created = False
+            if admin_id_from_state:
+                # Link branch: account-settings "Connect Google Chat" —
+                # admin_id must resolve to a real, already-logged-in-
+                # elsewhere account.
+                user = User.objects.filter(id=admin_id_from_state).first()
+                if not user:
+                    return self._html_response(success=False, error="Could not find your VaptFix account — please log in again.")
+            else:
+                # Signup branch: "Sign up with Google Chat" on the signup
+                # page — same pattern as SlackOAuthCallbackView's own
+                # get_or_create-by-email signup branch.
+                from users_details.models import UserDetail
+                if UserDetail.objects.filter(email=google_email).exists():
+                    return self._html_response(
+                        success=False,
+                        error="This email is already registered as a team member and cannot sign up for its own admin account.",
+                    )
+                user, newly_created = User.objects.get_or_create(
+                    email=google_email,
+                    defaults={"login_provider": "google_chat", "password": make_password(None)},
+                )
 
             # Platform enforcement: block if this account's primary login
             # is already a different chat platform — same pairwise rule
             # SlackOAuthCallbackView/MicrosoftTeamsCallbackView enforce
-            # against each other. This view only ever ADDITIVELY links a
-            # Google identity onto an existing account (never flips
-            # login_provider itself), so there's no symmetric check
-            # needed on the Slack/Teams side for "google_chat".
+            # against each other.
             if user.login_provider == "slack" and user.slack_bot_token:
                 return self._html_response(success=False, error="Your account is connected to Slack. Please sign in using Slack.")
             if user.login_provider == "microsoft_teams" and user.ms_access_token:
                 return self._html_response(success=False, error="Your account is connected to Microsoft Teams. Please sign in using Microsoft Teams.")
 
+            if invite_token_from_state:
+                from .invite_utils import claim_invite
+                try:
+                    claimed = claim_invite(invite_token_from_state, user)
+                    if claimed:
+                        logger.info(f"[ReportInvite] Google Chat {'signup' if newly_created else 'login'} claimed {claimed} report(s) for {user.email}")
+                except Exception as e:
+                    logger.warning(f"[ReportInvite] Claim failed for {user.email}: {e}")
+
             user.google_chat_email = google_email
             user.google_chat_user_id = google_user_id
-            user.save(update_fields=["google_chat_email", "google_chat_user_id"])
-            logger.info(f"[GoogleChatOAuth] Linked Google Chat email for admin id={user.id} email={user.email} google_chat_email={google_email}")
+            if not admin_id_from_state:
+                # Signup branch only — the link branch never flips
+                # login_provider on an existing, already-primary-elsewhere
+                # account.
+                user.login_provider = "google_chat"
+            user.save(update_fields=["google_chat_email", "google_chat_user_id", "login_provider"])
+            logger.info(f"[GoogleChatOAuth] {'Signed up' if newly_created else 'Linked'} Google Chat for admin id={user.id} email={user.email} google_chat_email={google_email}")
 
-            return self._html_response(success=True, data={"google_chat_email": google_email})
+            response_data = {"google_chat_email": google_email, "is_new_user": newly_created}
+            if not admin_id_from_state:
+                # Signup branch only — the opener has no session yet, so
+                # hand back fresh Django JWTs the same way Slack's signup
+                # branch does.
+                refresh = RefreshToken.for_user(user)
+                response_data["django_access_token"] = str(refresh.access_token)
+                response_data["django_refresh_token"] = str(refresh)
+
+            return self._html_response(success=True, data=response_data)
 
         except Exception as e:
             logger.exception("Google Chat OAuth callback exception")
