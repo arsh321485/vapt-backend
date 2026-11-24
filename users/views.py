@@ -6866,17 +6866,28 @@ class GoogleChatOAuthCallbackView(APIView):
                 response_data["django_access_token"] = str(refresh.access_token)
                 response_data["django_refresh_token"] = str(refresh)
 
-            return self._html_response(success=True, data=response_data)
+            # Same final step as SlackOAuthCallbackView: postMessage the
+            # result to the opener, then send THIS popup into the actual
+            # chat app — there's no space/room to deep-link into yet (the
+            # bot is still added to a space manually, see this class'
+            # docstring), so the generic Chat home is the equivalent
+            # destination to Slack's workspace redirect.
+            return self._html_response(success=True, data=response_data, redirect_to="https://mail.google.com/chat/u/0/")
 
         except Exception as e:
             logger.exception("Google Chat OAuth callback exception")
             return self._html_response(success=False, error=str(e))
 
-    def _html_response(self, success=True, data=None, error=None):
-        """Same postMessage-then-close pattern as SlackOAuthCallbackView's
-        own _html_response — kept as a separate copy (not shared) since
-        the two already diverge in the message `type` they send and may
-        keep diverging as each platform's own flow grows."""
+    def _html_response(self, success=True, data=None, error=None, redirect_to=None):
+        """Same postMessage pattern as SlackOAuthCallbackView's own
+        _html_response — kept as a separate copy (not shared) since the
+        two already diverge in the message `type` they send and may keep
+        diverging as each platform's own flow grows.
+
+        redirect_to (success only): send this popup into the chat app
+        itself afterward, same as Slack's own popup navigating to
+        app.slack.com — instead of just closing. Omitted on error, where
+        the popup stays open so the message is readable."""
         payload = {"success": success}
         if success:
             payload.update(data or {})
@@ -6884,6 +6895,10 @@ class GoogleChatOAuthCallbackView(APIView):
             payload.update({"error": error})
         payload_json = json.dumps(payload)
         result_text = "successful \U0001f389" if success else "failed"
+        close_or_redirect = (
+            f'window.location.href = {json.dumps(redirect_to)};' if (success and redirect_to)
+            else 'window.close();'
+        )
         html = f"""
         <html>
         <head>
@@ -6898,7 +6913,7 @@ class GoogleChatOAuthCallbackView(APIView):
                             payload: payload
                         }}, "*");
                     }}
-                    window.close();
+                    {close_or_redirect}
                 }})();
             </script>
         </head>
