@@ -75,6 +75,16 @@ def get_team_for_space(space_name: str):
     return (doc.get("team_id"), doc.get("team_name"))
 
 
+def get_spaces_for_team(team_id: str):
+    """All spaces already mapped to this admin — lets
+    space_provisioning.ensure_vaptfix_spaces skip re-creating spaces on a
+    repeat login instead of relying on Chat's own duplicate-name rules."""
+    if not team_id:
+        return []
+    with MongoContext() as db:
+        return list(db[COLLECTION].find({"team_id": team_id}))
+
+
 def set_active_message_name(space_name: str, message_name: str):
     """Tracks the resource name of the single "live" card currently
     posted in this space, so the next proactive post can delete this one

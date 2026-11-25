@@ -6712,11 +6712,21 @@ class GoogleChatOAuthUrlView(APIView):
             redirect_uri = f"{base_url.rstrip('/')}/api/admin/users/google-chat/callback/"
         client_id = settings.GOOGLE_CHAT_LOGIN_CLIENT_ID
 
+        # chat.spaces.create / chat.memberships.app let GoogleChatOAuthCallbackView
+        # auto-create the admin's spaces (space_provisioning.ensure_vaptfix_spaces),
+        # same role as ensure_vaptfix_channels (Slack) / auto_create_vaptfix_team
+        # (Teams) — using the ADMIN'S OWN consent, not the bot's service account,
+        # so no Workspace-admin approval is needed (unlike the app-authentication
+        # route). Both are Google "Sensitive" scopes though: until this OAuth
+        # client passes Google's verification review, only accounts added as
+        # Test users on the OAuth consent screen can grant them.
         google_url = (
             f"https://accounts.google.com/o/oauth2/v2/auth?"
             f"client_id={client_id}"
             f"&response_type=code"
             f"&scope=openid%20email%20profile"
+            f"%20https://www.googleapis.com/auth/chat.spaces.create"
+            f"%20https://www.googleapis.com/auth/chat.memberships.app"
             f"&redirect_uri={redirect_uri}"
             f"&state={state}"
             f"&access_type=online"
@@ -6856,6 +6866,18 @@ class GoogleChatOAuthCallbackView(APIView):
                 user.login_provider = "google_chat"
             user.save(update_fields=["google_chat_email", "google_chat_user_id", "login_provider"])
             logger.info(f"[GoogleChatOAuth] {'Signed up' if newly_created else 'Linked'} Google Chat for admin id={user.id} email={user.email} google_chat_email={google_email}")
+
+            # Auto-create this admin's spaces using their own just-granted
+            # access_token — same role as ensure_vaptfix_channels (Slack) /
+            # auto_create_vaptfix_team (Teams). Idempotent, best-effort: a
+            # failure here (e.g. token missing the sensitive scopes because
+            # this isn't a Google-verified/test-user account yet) must not
+            # block signup/login itself.
+            try:
+                from google_chat_bot.space_provisioning import ensure_vaptfix_spaces
+                ensure_vaptfix_spaces(access_token, str(user.id))
+            except Exception:
+                logger.exception(f"[GoogleChatOAuth] ensure_vaptfix_spaces failed for admin id={user.id}")
 
             response_data = {"google_chat_email": google_email, "is_new_user": newly_created}
             if not admin_id_from_state:
