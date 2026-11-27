@@ -66,6 +66,20 @@ class CustomTeam(models.Model):
     slack_channel_name = models.CharField(max_length=255, blank=True, null=True)
     ms_teams_channel_id = models.CharField(max_length=255, blank=True, null=True)
 
+    # Real feature request: an admin was re-picking the same assets/
+    # vulnerabilities by hand for every new member added to one of their
+    # own custom teams — no way to set them once at the team level the way
+    # the 4 fixed teams already get a pool for free. These two fields let
+    # an admin save their current Add User picks (teams_bot/team_tab.py's
+    # "💾 Save as Team Defaults") as this team's defaults, then load them
+    # back with one click ("📋 Use Team Defaults") for the next member
+    # instead of rechecking everything. Empty by default — a team with no
+    # defaults set behaves exactly as before (admin picks from scratch).
+    # Values are asset host_name strings / "<host>||<plugin_name>" vuln
+    # ids, same shape _fetch_team_assets_vulns already returns.
+    default_assets = models.JSONField(default=list, blank=True)
+    default_vulnerabilities = models.JSONField(default=list, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

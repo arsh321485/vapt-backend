@@ -557,6 +557,20 @@ def _assets_vulns_picker_blocks(admin, team_names, form_data, rev):
     """
     body = [{"type": "TextBlock", "text": f"Assets & Vulnerabilities for {', '.join(team_names)}:", "size": "Small", "weight": "Bolder", "spacing": "Medium", "wrap": True}]
 
+    # Real feature request: let a custom team's picks be saved once and
+    # reused for every future member instead of rechecking them by hand
+    # each time — see CustomTeam.default_assets/default_vulnerabilities'
+    # own docstring. Only offered for exactly one of the admin's own
+    # custom teams, matching how defaults are stored (per-team, not
+    # per-team-combination) — multi-team or one of the 4 fixed teams
+    # selected shows neither button.
+    defaults_team = _get_single_custom_team(admin, form_data)
+    if defaults_team:
+        default_actions = [cards._execute_action("💾 Save as Team Defaults", {"action_id": "team_adduser_save_defaults"})]
+        if defaults_team.default_assets or defaults_team.default_vulnerabilities:
+            default_actions.insert(0, cards._execute_action("📋 Use Team Defaults", {"action_id": "team_adduser_apply_defaults"}, style="positive"))
+        body.append({"type": "ActionSet", "spacing": "Small", "actions": default_actions})
+
     assets, all_vulns = _fetch_team_assets_vulns(admin, team_names) if team_names else ([], [])
     sel_assets = [a.strip() for a in (form_data.get("au_assets") or "").split(",") if a.strip()]
     sel_vulns = [v.strip() for v in (form_data.get("au_vulns") or "").split(",") if v.strip()]
@@ -750,6 +764,57 @@ def _apply_select_all(admin, form_data, which, select):
             vulns = []
         updated["au_vulns"] = ",".join(v["id"] for v in vulns) if select else ""
     return updated
+
+
+def _get_single_custom_team(admin, form_data):
+    """The one CustomTeam selected in au_team, or None if zero/more than one
+    team is selected, or the single selection is one of the 4 fixed teams —
+    those have no defaults of their own (see CustomTeam's own docstring).
+    Backs the Save/Use Team Defaults buttons below."""
+    from bson import ObjectId
+    from users_details.models import CustomTeam
+    team_codes = [c.strip() for c in (form_data.get("au_team") or "").split(",") if c.strip()]
+    if len(team_codes) != 1 or not team_codes[0].startswith("custom:"):
+        return None
+    team_id = team_codes[0].split(":", 1)[1]
+    try:
+        return CustomTeam.objects.filter(admin=admin, _id=ObjectId(team_id)).first()
+    except Exception:
+        return None
+
+
+def _apply_team_defaults(admin, form_data):
+    """Handles team_adduser_apply_defaults — pre-fills au_assets/au_vulns
+    from the single selected CustomTeam's saved default_assets/
+    default_vulnerabilities, same "override au_assets/au_vulns then
+    re-render" pattern _apply_select_all already uses. No-op if more than
+    one team is selected, the selection isn't a CustomTeam, or it has no
+    defaults saved yet."""
+    team = _get_single_custom_team(admin, form_data)
+    if not team:
+        return form_data
+    updated = dict(form_data)
+    updated["au_assets"] = ",".join(team.default_assets or [])
+    updated["au_vulns"] = ",".join(team.default_vulnerabilities or [])
+    return updated
+
+
+def _save_team_defaults(admin, form_data):
+    """Handles team_adduser_save_defaults — persists whatever is CURRENTLY
+    checked in au_assets/au_vulns as the single selected CustomTeam's new
+    defaults, so the next Add User for this team can start from "📋 Use
+    Team Defaults" instead of rechecking everything by hand. Returns
+    (form_data, message) — form_data is returned unchanged, the caller
+    just re-renders the same screen with the message shown."""
+    team = _get_single_custom_team(admin, form_data)
+    if not team:
+        return form_data, "Pick exactly one of your own custom teams above first — defaults aren't available for the 4 standard teams."
+    sel_assets = [a.strip() for a in (form_data.get("au_assets") or "").split(",") if a.strip()]
+    sel_vulns = [v.strip() for v in (form_data.get("au_vulns") or "").split(",") if v.strip()]
+    team.default_assets = sel_assets
+    team.default_vulnerabilities = sel_vulns
+    team.save(update_fields=["default_assets", "default_vulnerabilities"])
+    return form_data, f'Saved {len(sel_assets)} asset(s) and {len(sel_vulns)} vulnerability(ies) as the default for "{team.name}".'
 
 
 def submit_add_user(admin, form_data):

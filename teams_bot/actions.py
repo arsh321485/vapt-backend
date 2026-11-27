@@ -912,6 +912,7 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
         "team_adduser_refresh", "team_adduser_assets_all", "team_adduser_assets_none",
         "team_adduser_vulns_all", "team_adduser_vulns_none",
         "team_adduser_assets_search", "team_adduser_vulns_search",
+        "team_adduser_apply_defaults",
     ):
         try:
             form_data = team_tab.normalize_adduser_form_data(value, admin)
@@ -923,9 +924,27 @@ def handle_card_action(admin, team_id, channel_id, value: dict):
                 form_data = team_tab._apply_select_all(admin, form_data, "vulns", select=True)
             elif action_id == "team_adduser_vulns_none":
                 form_data = team_tab._apply_select_all(admin, form_data, "vulns", select=False)
+            elif action_id == "team_adduser_apply_defaults":
+                form_data = team_tab._apply_team_defaults(admin, form_data)
             body = [team_tab.team_subnav_columnset("team_sub_adduser")] + team_tab.add_user_form_body(admin, form_data=form_data)
         except Exception:
             logger.exception(f"[TeamsBot] {action_id} failed")
+            body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
+        return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
+
+    if action_id == "team_adduser_save_defaults":
+        # Real feature request: let a custom team's Assets/Vulnerabilities
+        # picks be saved once and reused for every future member — see
+        # CustomTeam.default_assets' own docstring and team_tab.
+        # _save_team_defaults. Same "re-render the same screen" pattern as
+        # every other button on this card.
+        try:
+            form_data = team_tab.normalize_adduser_form_data(value, admin)
+            form_data, message = team_tab._save_team_defaults(admin, form_data)
+            body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._body_text(message)]
+            body.extend(team_tab.add_user_form_body(admin, form_data=form_data))
+        except Exception:
+            logger.exception("[TeamsBot] team_adduser_save_defaults failed")
             body = [team_tab.team_subnav_columnset("team_sub_adduser"), cards._header("❌ Something went wrong"), cards._body_text("Please try again.")]
         return cards.nav_buttons_card(active_action_id="nav_team", extra_body=body)
 
