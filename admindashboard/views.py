@@ -2524,7 +2524,17 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                             "assets":             h_name,
                             "port":               port,
                             "assigned_team":      assigned_team,
-                            "additional_teams":   info.get("additional_teams") or [],
+                            # Real bug report: "Team" badges on the downloadable
+                            # report showed the same team twice (e.g.
+                            # "Configuration Management" appearing as both the
+                            # assigned_team badge AND again inside
+                            # additional_teams, when that finding was ALSO
+                            # explicitly assigned to its own already-classified
+                            # team via AssignTeamAPIView). Every other
+                            # all_assigned_teams-building call site in this app
+                            # already excludes assigned_team's own name from
+                            # additional_teams — this one didn't.
+                            "additional_teams":   [t for t in (info.get("additional_teams") or []) if t and t.strip().lower() != assigned_team.lower()],
                             "risk_factor":        risk_factor or "",
                             "found_date":         found_date.isoformat() if hasattr(found_date, "isoformat") else str(found_date) if found_date else None,
                             "status":             vuln_status,
@@ -2551,7 +2561,8 @@ class AdminDetailedVulnerabilitiesAPIView(APIView):
                         "assets":             hname,
                         "port":               doc_c.get("port", ""),
                         "assigned_team":      assigned_team,
-                        "additional_teams":   info.get("additional_teams") or [],
+                        # Same dedup fix as the main loop above — see its own comment.
+                        "additional_teams":   [t for t in (info.get("additional_teams") or []) if t and t.strip().lower() != assigned_team.lower()],
                         "risk_factor":        risk_factor,
                         "found_date":         found_date.isoformat() if hasattr(found_date, "isoformat") else str(found_date) if found_date else None,
                         "status":             "closed",
